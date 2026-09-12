@@ -78,9 +78,9 @@ class RoleSimulatorService {
                     _buildRoleOption(ctx, 'dispenser', '💊 Dispensary / Pharmacist', 'Medicine stock, dispensing & serial status', Colors.green),
                     _buildRoleOption(ctx, 'donations', '🤝 Donations Officer', 'Receipt issuing, donors & Zakat book', Colors.orange),
                     _buildRoleOption(ctx, 'finance', '💼 Finance & Payroll Officer', 'Double-entry ledger, salaries & loan repayments', Colors.purpleAccent),
-                    _buildRoleOption(ctx, 'office boy', '🍲 Dasterkhwaan (Office Boy)', 'Food distribution tokens & ration vouchers', Colors.deepOrange),
+                    _buildRoleOption(ctx, 'office boy', '🍲 Office Boy (Food Tokens)', 'Food distribution tokens & ration vouchers', Colors.deepOrange),
                     _buildRoleOption(ctx, 'kitchen', '🍳 Dasterkhwaan (Kitchen)', 'Meal cooking queues & daily headcount', Colors.amber),
-                    _buildRoleOption(ctx, 'madrassa admin', '📖 Madrassa Administrator', 'Quranic education, student records & attendance', Colors.indigoAccent),
+                    _buildRoleOption(ctx, 'madrassa admin', '📖 Madrassa Principal / Admin', 'Madrassa Management Hub, student records, daily logs & attendance', Colors.indigoAccent),
                     _buildRoleOption(ctx, 'madrassa teacher', '📖 Madrassa Teacher', 'Teacher attendance, student grading & Quranic classes', Colors.indigo),
                     _buildRoleOption(ctx, 'madrassa parent', '👪 Madrassa Guardian / Parent', 'Parent portal for student progress & attendance', Colors.deepPurpleAccent),
                     _buildRoleOption(ctx, 'school admin', '🏫 School Admin / Principal', 'GMWF Model School principal dashboard', Colors.pink),
@@ -119,7 +119,7 @@ class RoleSimulatorService {
         leading: Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: accent.withOpacity(0.15),
+            color: accent.withValues(alpha: 0.15),
             shape: BoxShape.circle,
           ),
           child: Icon(Icons.verified_user_rounded, color: accent, size: 20),

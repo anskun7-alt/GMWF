@@ -9,9 +9,20 @@ class Holiday {
 
   factory Holiday.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
+    final rawDate = data['date'];
+    DateTime parsedDate;
+    if (rawDate is Timestamp) {
+      parsedDate = rawDate.toDate();
+    } else if (rawDate is String) {
+      parsedDate = DateTime.tryParse(rawDate) ?? DateTime.now();
+    } else if (rawDate is DateTime) {
+      parsedDate = rawDate;
+    } else {
+      parsedDate = DateTime.now();
+    }
     return Holiday(
       id: doc.id,
-      date: (data['date'] as Timestamp).toDate(),
+      date: parsedDate,
       name: data['name'] ?? '',
     );
   }

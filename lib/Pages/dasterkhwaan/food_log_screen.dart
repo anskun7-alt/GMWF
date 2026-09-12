@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/local_storage_service.dart';
+import '../../services/sync_service.dart';
 
 class DasterkhwaanFoodLogScreen extends StatefulWidget {
   final String branchId;
@@ -22,6 +25,19 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
   final DateFormat _dateFmt = DateFormat('yyyy-MM-dd');
   final DateFormat _displayDateFmt = DateFormat('EEE, dd MMM yyyy');
   final DateFormat _timeFmt = DateFormat('hh:mm a');
+
+  @override
+  void initState() {
+    super.initState();
+    _ensureBox();
+  }
+
+  Future<void> _ensureBox() async {
+    if (!Hive.isBoxOpen(LocalStorageService.dasterkhwaanFoodLogsBox)) {
+      await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanFoodLogsBox);
+      if (mounted) setState(() {});
+    }
+  }
 
   bool get _isDark => Theme.of(context).brightness == Brightness.dark;
 
@@ -79,56 +95,49 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
         children: [
           _buildFilterBar(isDark),
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('branches')
-                  .doc(widget.branchId.toLowerCase())
-                  .collection('dasterkhwaan_food_logs')
-                  .where('dateKey', isEqualTo: dateKey)
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return Center(
-                    child: Text('Error loading food logs: ${snapshot.error}',
-                        style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
-                  );
-                }
+            child: !Hive.isBoxOpen(LocalStorageService.dasterkhwaanFoodLogsBox)
+                ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D9488)))
+                : ValueListenableBuilder<Box>(
+                    valueListenable: Hive.box(LocalStorageService.dasterkhwaanFoodLogsBox).listenable(),
+                    builder: (context, box, _) {
+                      final allItems = <Map<String, dynamic>>[];
+                      for (final entry in box.toMap().entries) {
+                        if (entry.value is Map) {
+                          final data = Map<String, dynamic>.from(entry.value as Map);
+                          data['id'] ??= entry.key.toString();
+                          if ((data['dateKey']?.toString() ?? '') == dateKey &&
+                              (data['branchId']?.toString().toLowerCase() ?? '') == widget.branchId.toLowerCase()) {
+                            allItems.add(data);
+                          }
+                        }
+                      }
 
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator(color: Color(0xFF0D9488)));
-                }
+                      var items = allItems;
+                      if (_filterSource == 'Cooked') {
+                        items = items.where((i) => i['sourceType'] == 'cooked').toList();
+                      } else if (_filterSource == 'Outside') {
+                        items = items.where((i) => i['sourceType'] == 'outside').toList();
+                      }
 
-                final docs = snapshot.data?.docs ?? [];
-                var items = docs.map((d) {
-                  final data = d.data() as Map<String, dynamic>;
-                  data['id'] = d.id;
-                  return data;
-                }).toList();
+                      items.sort((a, b) {
+                        final rawA = a['createdAt'] ?? a['timestamp'];
+                        final rawB = b['createdAt'] ?? b['timestamp'];
+                        final DateTime dtA = rawA is Timestamp ? rawA.toDate() : (rawA is String ? (DateTime.tryParse(rawA) ?? DateTime(1970)) : (rawA is DateTime ? rawA : DateTime(1970)));
+                        final DateTime dtB = rawB is Timestamp ? rawB.toDate() : (rawB is String ? (DateTime.tryParse(rawB) ?? DateTime(1970)) : (rawB is DateTime ? rawB : DateTime(1970)));
+                        return dtB.compareTo(dtA);
+                      });
 
-                if (_filterSource == 'Cooked') {
-                  items = items.where((i) => i['sourceType'] == 'cooked').toList();
-                } else if (_filterSource == 'Outside') {
-                  items = items.where((i) => i['sourceType'] == 'outside').toList();
-                }
+                      if (items.isEmpty) {
+                        return _buildEmptyState(isDark);
+                      }
 
-                items.sort((a, b) {
-                  final tsA = a['createdAt'] as Timestamp?;
-                  final tsB = b['createdAt'] as Timestamp?;
-                  if (tsA == null || tsB == null) return 0;
-                  return tsB.compareTo(tsA);
-                });
-
-                if (items.isEmpty) {
-                  return _buildEmptyState(isDark);
-                }
-
-                return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
-                  itemCount: items.length,
-                  itemBuilder: (context, index) => _buildFoodLogCard(items[index], isDark),
-                );
-              },
-            ),
+                      return ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
+                        itemCount: items.length,
+                        itemBuilder: (context, index) => _buildFoodLogCard(items[index], isDark),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -229,8 +238,13 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
         ? (item['cookName'] != null && item['cookName'].toString().isNotEmpty ? 'Cook: ${item['cookName']}' : 'Cooked In-House')
         : (item['vendorName'] != null && item['vendorName'].toString().isNotEmpty ? 'Hotel/Vendor: ${item['vendorName']}' : 'Outside Sourced');
 
-    final timestamp = item['createdAt'] as Timestamp?;
-    final timeStr = timestamp != null ? _timeFmt.format(timestamp.toDate()) : '';
+    final rawTs = item['createdAt'] ?? item['timestamp'];
+    final DateTime? ts = rawTs is Timestamp
+        ? rawTs.toDate()
+        : (rawTs is String
+            ? DateTime.tryParse(rawTs)
+            : (rawTs is DateTime ? rawTs : null));
+    final timeStr = ts != null ? _timeFmt.format(ts) : '';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -255,7 +269,6 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
             decoration: BoxDecoration(
               color: themeColor.withValues(alpha: isDark ? 0.2 : 0.08),
               borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
-              border: Border(bottom: BorderSide(color: themeColor.withValues(alpha: 0.2))),
             ),
             child: Row(
               children: [
@@ -485,7 +498,9 @@ class _AddFoodLogSheetState extends State<_AddFoodLogSheet> {
     setState(() => _isSaving = true);
     try {
       final dateKey = _dateFmt.format(widget.defaultDate);
+      final logId = 'food_log_${DateTime.now().millisecondsSinceEpoch}';
       final logData = <String, dynamic>{
+        'id': logId,
         'branchId': widget.branchId.toLowerCase(),
         'dateKey': dateKey,
         'sourceType': _sourceType == 0 ? 'cooked' : 'outside',
@@ -494,7 +509,8 @@ class _AddFoodLogSheetState extends State<_AddFoodLogSheet> {
         'mealType': _mealType,
         'remarks': _remarksCtrl.text.trim(),
         'loggedBy': widget.userName ?? 'Staff',
-        'createdAt': FieldValue.serverTimestamp(),
+        'createdAt': DateTime.now().toIso8601String(),
+        'synced': false,
       };
 
       if (_sourceType == 0) {
@@ -507,11 +523,11 @@ class _AddFoodLogSheetState extends State<_AddFoodLogSheet> {
         }
       }
 
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId.toLowerCase())
-          .collection('dasterkhwaan_food_logs')
-          .add(logData);
+      final box = await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanFoodLogsBox);
+      await box.put(logId, logData);
+
+      // Trigger delta sync / server broadcast
+      SyncService().triggerUpload();
 
       if (mounted) {
         Navigator.pop(context);

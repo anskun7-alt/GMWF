@@ -60,6 +60,8 @@ class _LoginPageState extends State<LoginPage> {
 
     _connectivitySub = Connectivity().onConnectivityChanged.listen((_) {
       _checkConnectivityFast();
+    }, onError: (e) {
+      debugPrint('[LoginPage] Connectivity listener ignored Windows platform error: $e');
     });
 
     _usernameFocus.addListener(_handleFocusChange);
@@ -681,7 +683,9 @@ class _LoginPageState extends State<LoginPage> {
 
     // 4. Fallback: Search in Hive local_users
     try {
-      final box = Hive.box('local_users');
+      final box = Hive.isBoxOpen('local_users')
+          ? Hive.box('local_users')
+          : await Hive.openBox('local_users');
       final inputLower = inputUsername.trim().toLowerCase();
       for (final val in box.values) {
         if (val is Map) {
@@ -706,7 +710,9 @@ class _LoginPageState extends State<LoginPage> {
   Future<Map<String, dynamic>?> _findUserByUsername(String username) async {
     final lower = username.trim().toLowerCase();
     try {
-      final box = Hive.box('local_users');
+      final box = Hive.isBoxOpen('local_users')
+          ? Hive.box('local_users')
+          : await Hive.openBox('local_users');
       for (final val in box.values) {
         if (val is Map) {
           final uName = (val['username']?.toString() ?? '').toLowerCase();
@@ -1014,7 +1020,7 @@ class _LoginPageState extends State<LoginPage> {
                     style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold, height: 1.2, fontFamily: 'Roboto'),
                     children: [
                       TextSpan(text: "One Platform.\n", style: TextStyle(color: titleMain)),
-                      TextSpan(text: "Every Operation.", style: TextStyle(color: titleAccent)),
+                      TextSpan(text: "All Operation.", style: TextStyle(color: titleAccent)),
                     ],
                   ),
                 ),

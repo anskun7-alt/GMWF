@@ -12,8 +12,12 @@ import '../utils/madrassa_report_helper.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../utils/madrassa_local_storage.dart';
+import '../utils/islamic_calendar_helper.dart';
 import '../../../services/image_upload_service.dart';
 import '../../../services/sync_service.dart';
+import '../../../services/local_storage_service.dart';
+import '../../../realtime/realtime_manager.dart';
+import '../../../realtime/realtime_events.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/madrassa_providers.dart';
 import 'dart:async';
@@ -243,6 +247,15 @@ class _DailyLogViewState extends ConsumerState<DailyLogView> {
         editorName: widget.editorName,
         editorRole: widget.editorRole,
       );
+
+      // Write audit log entry in background
+      unawaited(MadrassaAuditService.logAction(
+        branchId: widget.branchId,
+        editor: widget.editorName.isNotEmpty && widget.editorName != 'Unknown' ? widget.editorName : 'Teacher',
+        role: widget.editorRole,
+        type: 'daily_log_edit',
+        message: 'Updated daily log attendance & lesson records for $dateKey (${_localChanges.length} students)',
+      ));
 
       // Trigger background upload if online
       SyncService().triggerUpload();
@@ -480,6 +493,11 @@ _changeNotifier.value++;
             break;
           }
         }
+        final islamicEvent = IslamicCalendarHelper.getIslamicEvent(_selectedDate);
+        final isIslamicHoliday = islamicEvent != null && islamicEvent.isOfficialHoliday;
+        if (holidayName == null && isIslamicHoliday) {
+          holidayName = context.isUrdu ? islamicEvent.titleUr : islamicEvent.titleEn;
+        }
         final isHoliday = holidayName != null;
         final isSunday = _selectedDate.weekday == DateTime.sunday;
         final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
@@ -509,10 +527,20 @@ _changeNotifier.value++;
                   ),
                 ),
               ),
-              CustomScrollView(
-                key: const PageStorageKey('daily_log_scroll'),
-                controller: _verticalScrollController,
-                slivers: [
+              RefreshIndicator(
+                onRefresh: () async {
+                  final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
+                  await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, _selectedDate.year, _selectedDate.month);
+                  await MadrassaLocalStorage.downloadStudents(widget.branchId, force: true);
+                  ref.invalidate(madrassaDailyLogProvider((branchId: widget.branchId, dateKey: dateStr)));
+                  ref.invalidate(madrassaFilteredStudentsProvider((branchId: widget.branchId, selectedDate: _selectedDate)));
+                  if (mounted) setState(() {});
+                },
+                child: CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  key: const PageStorageKey('daily_log_scroll'),
+                  controller: _verticalScrollController,
+                  slivers: [
               SliverToBoxAdapter(
                 child: _buildHeader(config),
               ),
@@ -639,30 +667,49 @@ _changeNotifier.value++;
                           Container(
                             padding: const EdgeInsets.all(24),
                             decoration: BoxDecoration(
-                              color: Colors.green.shade50,
+                              color: islamicEvent != null
+                                  ? const Color(0xFFD4AF37).withValues(alpha: 0.15)
+                                  : Colors.green.shade50,
                               shape: BoxShape.circle,
-                              border: Border.all(color: Colors.green.shade200, width: 2),
+                              border: Border.all(
+                                color: islamicEvent != null
+                                    ? const Color(0xFFD4AF37).withValues(alpha: 0.4)
+                                    : Colors.green.shade200,
+                                width: 2,
+                              ),
                             ),
-                            child: Icon(Icons.flag_rounded, size: 64, color: Colors.green.shade700),
+                            child: islamicEvent != null
+                                ? Text(islamicEvent.emoji, style: const TextStyle(fontSize: 52))
+                                : Icon(Icons.flag_rounded, size: 64, color: Colors.green.shade700),
                           ),
                           const SizedBox(height: 24),
                           Text(
                             holidayName!,
+                            textAlign: TextAlign.center,
                             style: context.urduStyle(
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 24,
                                 fontWeight: FontWeight.bold,
-                                color: Color(0xFF1B5E20),
+                                color: islamicEvent != null
+                                    ? (isDark ? const Color(0xFFFDE047) : const Color(0xFF92400E))
+                                    : const Color(0xFF1B5E20),
                               ),
                             ),
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate),
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: Colors.grey,
+                            islamicEvent != null
+                                ? (context.isUrdu
+                                    ? '${islamicEvent.descriptionUr} - مبارک ہو!'
+                                    : '${islamicEvent.descriptionEn} - Mubarak!')
+                                : DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: islamicEvent != null
+                                  ? (isDark ? const Color(0xFFFBBF24) : const Color(0xFFB45309))
+                                  : Colors.grey,
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -884,6 +931,7 @@ _changeNotifier.value++;
               ),
             ],
           ),
+        ),
         ],
       ),
     );
@@ -1237,14 +1285,24 @@ _changeNotifier.value++;
                       break;
                     }
                   }
+                  final cellIslamicEvent = IslamicCalendarHelper.getIslamicEvent(date);
+                  final isIslamicHoliday = cellIslamicEvent != null && cellIslamicEvent.isOfficialHoliday;
+                  final isSpecialEvent = cellIslamicEvent != null && !cellIslamicEvent.isOfficialHoliday;
+                  if (holidayName == null && (isIslamicHoliday || isSpecialEvent)) {
+                    holidayName = context.isUrdu ? cellIslamicEvent!.titleUr : cellIslamicEvent!.titleEn;
+                  }
                   final isHoliday = holidayName != null;
 
                   final isDarkCalendar = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
                   Color cardColor = isDarkCalendar ? const Color(0xFF1E293B) : Colors.white;
                   if (isSelected) {
-                    cardColor = isHoliday ? const Color(0xFF2E7D32) : const Color(0xFF4C4DDC);
+                    cardColor = isHoliday
+                        ? (cellIslamicEvent != null ? const Color(0xFFD4AF37) : const Color(0xFF2E7D32))
+                        : const Color(0xFF4C4DDC);
                   } else if (isHoliday) {
-                    cardColor = isDarkCalendar ? const Color(0xFF1B3D2F) : const Color(0xFFE8F5E9);
+                    cardColor = cellIslamicEvent != null
+                        ? (isDarkCalendar ? const Color(0xFF3B2E10) : const Color(0xFFFEF3C7))
+                        : (isDarkCalendar ? const Color(0xFF1B3D2F) : const Color(0xFFE8F5E9));
                   }
 
                   Border border;
@@ -1253,7 +1311,10 @@ _changeNotifier.value++;
                   } else if (isToday) {
                     border = Border.all(color: const Color(0xFF008080), width: 2.0);
                   } else if (isHoliday) {
-                    border = Border.all(color: const Color(0xFF81C784), width: 1.0);
+                    border = Border.all(
+                      color: cellIslamicEvent != null ? const Color(0xFFD4AF37) : const Color(0xFF81C784),
+                      width: 1.0,
+                    );
                   } else {
                     border = Border.all(color: isDarkCalendar ? const Color(0xFF334155) : const Color(0xFFE0E2E7), width: 1.0);
                   }
@@ -1261,12 +1322,16 @@ _changeNotifier.value++;
                   Color dayAbbrevColor = isSelected
                       ? Colors.white70
                       : (isHoliday
-                          ? (isDarkCalendar ? const Color(0xFF81C784) : const Color(0xFF2E7D32))
+                          ? (cellIslamicEvent != null
+                              ? (isDarkCalendar ? const Color(0xFFFBBF24) : const Color(0xFFB45309))
+                              : (isDarkCalendar ? const Color(0xFF81C784) : const Color(0xFF2E7D32)))
                           : (isDarkCalendar ? const Color(0xFF94A3B8) : Colors.grey));
                   Color dayNumColor = isSelected
                       ? Colors.white
                       : (isHoliday
-                          ? (isDarkCalendar ? const Color(0xFFA7F3D0) : const Color(0xFF1B5E20))
+                          ? (cellIslamicEvent != null
+                              ? (isDarkCalendar ? const Color(0xFFFDE047) : const Color(0xFF92400E))
+                              : (isDarkCalendar ? const Color(0xFFA7F3D0) : const Color(0xFF1B5E20)))
                           : (isDarkCalendar ? Colors.white : const Color(0xFF1A1C1E)));
 
                   return GestureDetector(
@@ -1311,14 +1376,18 @@ _changeNotifier.value++;
                               Padding(
                                 padding: const EdgeInsets.only(top: 2, left: 2, right: 2),
                                 child: Text(
-                                  holidayName,
+                                  cellIslamicEvent != null ? '${cellIslamicEvent.emoji} $holidayName' : holidayName,
                                   textAlign: TextAlign.center,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 8,
                                     fontWeight: FontWeight.w900,
-                                    color: isSelected ? Colors.white : const Color(0xFF2E7D32),
+                                    color: isSelected
+                                        ? Colors.white
+                                        : (cellIslamicEvent != null
+                                            ? (isDarkCalendar ? const Color(0xFFFBBF24) : const Color(0xFFB45309))
+                                            : const Color(0xFF2E7D32)),
                                   ),
                                 ),
                               )
@@ -1391,6 +1460,9 @@ _changeNotifier.value++;
     }
 
     final dateText = DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate);
+    final hijriDate = IslamicCalendarHelper.fromGregorian(_selectedDate);
+    final hijriText = hijriDate.format(isUrdu: context.isUrdu);
+    final fullDateHeading = '$dateText  •  🌙 $hijriText';
 
     final isDarkStats = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
     final dateTextColor = isDarkStats ? Colors.white : const Color(0xFF1A1C1E);
@@ -1402,7 +1474,7 @@ _changeNotifier.value++;
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            dateText,
+            fullDateHeading,
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
           ),
           const SizedBox(height: 8),
@@ -1423,7 +1495,7 @@ _changeNotifier.value++;
         children: [
           Expanded(
             child: Text(
-              dateText,
+              fullDateHeading,
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
             ),
           ),
@@ -1788,18 +1860,29 @@ _changeNotifier.value++;
         return;
       }
 
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .doc(studentId)
-          .update({'photoUrl': b64});
+      final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId) ?? <String, dynamic>{'id': studentId};
+      studentCache['photoUrl'] = b64;
+      studentCache['photoBase64'] = b64;
+      studentCache['studentPhotoBase64'] = b64;
+      await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
 
-      final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId);
-      if (studentCache != null) {
-        studentCache['photoUrl'] = b64;
-        await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
-      }
+      // Broadcast via LAN
+      try {
+        RealtimeManager().sendMessage(RealtimeEvents.payload(
+          type: RealtimeEvents.saveMadrassaStudent,
+          data: studentCache,
+          branchId: widget.branchId,
+        ));
+      } catch (_) {}
+
+      // Always enqueue sync
+      await LocalStorageService.enqueueSync({
+        'type': 'save_madrassa_student',
+        'branchId': widget.branchId,
+        'studentId': studentId,
+        'data': studentCache,
+      });
+      unawaited(SyncService().triggerUpload());
 
       if (mounted) {
         setState(() {

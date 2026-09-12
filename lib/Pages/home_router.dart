@@ -7,7 +7,9 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:rxdart/rxdart.dart';
 import '../realtime/connection_manager.dart';
+import '../realtime/realtime_manager.dart';
 import '../services/local_storage_service.dart';
 import '../services/firestore_service.dart';
 import '../services/device_info_service.dart';
@@ -16,6 +18,7 @@ import '../widgets/update_dialog_widget.dart';
 
 import '../utils/formatters.dart';
 import '../services/auth_service.dart';
+import '../services/cloud_messaging_service.dart';
 import '../services/offline_auth_service.dart' as offline_auth;
 import '../models/patient.dart';
 import '../models/token.dart';
@@ -44,7 +47,6 @@ import 'school/school_dashboard.dart';
 import '../theme/app_theme.dart';
 import '../theme/role_theme_provider.dart';
 
-import '../constants/navigator_key.dart';
 
 class HomeRouter extends StatefulWidget {
   final User? user;
@@ -62,7 +64,7 @@ class HomeRouter extends StatefulWidget {
 
 class _HomeRouterState extends State<HomeRouter> {
   late Future<Map<String, dynamic>?> _userDataFuture;
-  StreamSubscription<DocumentSnapshot>? _revokeListener;
+  StreamSubscription? _revokeListener;
   Timer? _periodicUpdateTimer;
   Map<String, dynamic>? _accessRevokedData;
 
@@ -78,13 +80,39 @@ class _HomeRouterState extends State<HomeRouter> {
         UpdateDialogWidget.showUpdateDialogIfNeeded(context, isServerMode: isServerMode);
 
         if (!isServerMode) {
-          final branchId = (userData['branchId'] ?? 'all').toString();
+          final rawBranchId = (userData['branchId'] ?? '').toString().trim();
+          // Executive roles (chairman, CEO) have branchId='all' — resolve to the
+          // first known real branch so ConnectionManager can find the server IP.
+          String branchId = rawBranchId;
+          if (branchId.isEmpty || branchId == 'all' || branchId == 'global') {
+            try {
+              if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+                final box = Hive.box(LocalStorageService.branchesBox);
+                for (final val in box.values) {
+                  if (val is Map) {
+                    final id = (val['id'] ?? '').toString().trim().toLowerCase();
+                    final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+                    if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+                      branchId = id;
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
           final username = (userData['username'] ?? userData['name'] ?? userData['email'] ?? '').toString();
+          final uid = (userData['uid'] ?? userData['id'] ?? username).toString();
           ConnectionManager().start(
             role: role,
             branchId: branchId,
             username: username,
           );
+          unawaited(CloudMessagingService().registerTokenForUser(
+            userId: uid,
+            role: role,
+            branchId: rawBranchId.isEmpty ? 'all' : rawBranchId,
+          ));
         }
 
         // Periodically check for updates every 2 hours so users who never log out stay updated
@@ -117,31 +145,66 @@ class _HomeRouterState extends State<HomeRouter> {
         (data != null && data['isActive'] == false);
   }
 
-  /// Start listening to the user's Firestore document for real-time revocation.
+  /// Start listening to local Hive storage and LAN RealtimeManager for revocation events (zero Firestore snapshots).
   void _startRevokeListener(String uid, String? branchId) {
     _revokeListener?.cancel();
 
-    // Listen on the top-level /users/{uid} document
-    _revokeListener = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .listen((snapshot) {
-      if (!snapshot.exists || !mounted) return;
-      final data = snapshot.data()!;
-      final status = (data['status'] ?? data['accountStatus'] ?? 'active')
-          .toString()
-          .toLowerCase()
-          .trim();
-      if (_isStatusRevoked(status, data)) {
-        debugPrint('[HomeRouter] Real-time revoke detected for UID: $uid');
-        setState(() {
-          _accessRevokedData = {...data, 'uid': uid};
-        });
+    final streams = <Stream<dynamic>>[];
+    try {
+      if (Hive.isBoxOpen('local_users')) {
+        streams.add(Hive.box('local_users').watch());
       }
-    }, onError: (e) {
-      debugPrint('[HomeRouter] Revoke listener error (top-level): $e');
-    });
+    } catch (_) {}
+    try {
+      streams.add(RealtimeManager().messageStream);
+    } catch (_) {}
+
+    void checkRevokeStatus() {
+      if (!mounted) return;
+      try {
+        if (Hive.isBoxOpen('local_users')) {
+          final box = Hive.box('local_users');
+          for (final val in box.values) {
+            if (val is Map) {
+              final id = (val['uid'] ?? val['id'] ?? '').toString();
+              if (id == uid) {
+                final status = (val['status'] ?? val['accountStatus'] ?? 'active')
+                    .toString()
+                    .toLowerCase()
+                    .trim();
+                final data = Map<String, dynamic>.from(val);
+                if (_isStatusRevoked(status, data)) {
+                  debugPrint('[HomeRouter] Local revoke detected for UID: $uid');
+                  setState(() {
+                    _accessRevokedData = {...data, 'uid': uid};
+                  });
+                }
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (streams.isNotEmpty) {
+      _revokeListener = Rx.merge(streams).listen((event) {
+        if (event is Map) {
+          final type = (event['type'] ?? event['action'] ?? '').toString().toLowerCase();
+          final targetUid = (event['uid'] ?? event['userId'] ?? '').toString();
+          if (targetUid == uid && (type == 'user_revoked' || type == 'revoke_user' || type == 'account_status_changed')) {
+            debugPrint('[HomeRouter] LAN real-time revoke message received for UID: $uid');
+            setState(() {
+              _accessRevokedData = {'uid': uid, 'status': 'revoked', ...event};
+            });
+            return;
+          }
+        }
+        checkRevokeStatus();
+      }, onError: (e) {
+        debugPrint('[HomeRouter] Local revoke listener notice: $e');
+      });
+    }
   }
 
   @override
@@ -409,19 +472,15 @@ class _HomeRouterState extends State<HomeRouter> {
 
     final firestoreService = FirestoreService();
     try {
-      final existingPatientIds = LocalStorageService.getAllLocalPatients(
-              branchId: branchId)
-          .map((m) => m['patientId'] as String?)
-          .whereType<String>()
-          .toSet();
-
-      final List<Patient> patients =
-          await firestoreService.getAllPatientsForBranch(branchId);
-      for (final patient in patients) {
-        final map = patient.toMap();
-        final patientId = map['patientId'] as String?;
-        if (patientId != null && !existingPatientIds.contains(patientId)) {
-          await LocalStorageService.saveLocalPatient(map);
+      // Only do a bulk patient download if local storage is fresh/empty (< 5 patients)
+      final localCount = LocalStorageService.getAllLocalPatients(branchId: branchId).length;
+      if (localCount < 5) {
+        final List<Patient> patients = await firestoreService
+            .getAllPatientsForBranch(branchId)
+            .timeout(const Duration(seconds: 3), onTimeout: () => []);
+        if (patients.isNotEmpty) {
+          final patientsList = patients.map((p) => p.toMap()).toList();
+          await LocalStorageService.saveAllLocalPatients(patientsList);
         }
       }
 
@@ -430,8 +489,9 @@ class _HomeRouterState extends State<HomeRouter> {
           .whereType<String>()
           .toSet();
 
-      final List<Token> tokens =
-          await firestoreService.getTodayTokensForBranch(branchId);
+      final List<Token> tokens = await firestoreService
+          .getTodayTokensForBranch(branchId)
+          .timeout(const Duration(seconds: 3), onTimeout: () => []);
       for (final token in tokens) {
         final map = token.toMap();
         final serial = map['serial'] as String?;
@@ -467,6 +527,7 @@ class _HomeRouterState extends State<HomeRouter> {
         r.contains('doctor+receptionist') ||
         r.contains('doctor + receptionist')) {
       debugPrint("HomeRouter: Routing Hybrid Role '$role' to HybridDispensaryScreen");
+      LocalStorageService.ensureDoctorBoxesOpen();
       return HybridDispensaryScreen(
         branchId: branchId,
         userId: uid,
@@ -475,8 +536,19 @@ class _HomeRouterState extends State<HomeRouter> {
       );
     }
 
+    final normRole = r.replaceAll('_', ' ').replaceAll('-', ' ').trim();
+
     // 2. SPECIFIC SINGLE CLINIC & DISPENSARY ROLES
-    switch (r) {
+    if (normRole == 'doctor' ||
+        normRole == 'receptionist' ||
+        normRole == 'dispenser' ||
+        normRole == 'dispensar' ||
+        normRole == 'pharmacist' ||
+        normRole == 'inventory') {
+      LocalStorageService.ensureDoctorBoxesOpen();
+    }
+
+    switch (normRole) {
       case 'server':
         return ServerDashboardWithSync(branchId: branchId);
 
@@ -516,9 +588,12 @@ class _HomeRouterState extends State<HomeRouter> {
         return DasterkhwaanKitchen(branchId: branchId, username: userName, role: r);
 
       case 'donations':
+      case 'donation':
+      case 'donations officer':
         return DonationsScreen.embedded(
-          branchId:   branchId,
+          branchId:   branchId.isNotEmpty ? branchId : 'all',
           username:   userName,
+          userId:     uid,
           role:       UserRole.staff,
         );
 
@@ -529,6 +604,7 @@ class _HomeRouterState extends State<HomeRouter> {
       case 'libaas':
         return RamadanWelfareScreen(branchId: branchId);
 
+      case 'madrassa':
       case 'madrassa admin':
       case 'madrassa principal':
       case 'madrassa teacher':
@@ -536,28 +612,53 @@ class _HomeRouterState extends State<HomeRouter> {
           branchId: branchId,
           username: userName,
           role: role,
-          isAdmin: r == 'madrassa admin' || r == 'madrassa principal',
+          isAdmin: normRole == 'madrassa' || normRole == 'madrassa admin' || normRole == 'madrassa principal',
         );
 
       case 'madrassa parent':
       case 'madrassa guardian':
         return MadrassaGuardianScreen(userData: userData);
 
+      case 'supervisor':
+      case 'branch supervisor':
+      case 'dispensary supervisor':
+        return GlobalModularDashboard(userData: {
+          ...userData,
+          'role': 'supervisor',
+          'branchId': branchId.isNotEmpty && branchId != 'all' ? branchId : (userData['branchId'] ?? 'all'),
+          'uid': uid,
+          'name': userName.isNotEmpty ? userName : 'Supervisor',
+        });
+
       case 'school':
       case 'school admin':
       case 'school teacher':
       case 'school principal':
+      case 'principal':
         return SchoolDashboard(branchId: branchId);
+    }
+
+    if (normRole.contains('madrassa') && !normRole.contains('parent') && !normRole.contains('guardian')) {
+      return MadrassaDashboard(
+        branchId: branchId,
+        username: userName,
+        role: role,
+        isAdmin: normRole.contains('admin') || normRole.contains('principal'),
+      );
+    }
+
+    if (normRole.contains('school')) {
+      return SchoolDashboard(branchId: branchId);
     }
 
     // 3. DEFAULT ALL OTHER AUTHENTICATED ROLES TO GLOBAL MODULAR DASHBOARD
     debugPrint("HomeRouter: Routing role '$role' directly to GlobalModularDashboard");
     return GlobalModularDashboard(userData: {
+      ...userData,
       'role': r.isNotEmpty ? r : 'admin',
-      'branchId': branchId.isNotEmpty ? branchId : 'all',
+      'branchId': branchId.isNotEmpty ? branchId : (userData['branchId'] ?? 'all'),
       'uid': uid,
       'name': userName.isNotEmpty ? userName : 'User',
-      ...userData,
     });
   }
 
@@ -646,12 +747,20 @@ class _HomeRouterState extends State<HomeRouter> {
                           ),
                         ),
                       ],
-                    )
+                    ),
                   ],
                 ),
               ),
             ),
           );
+        }
+
+        // ── Auth validation ──────────────────────────────────────────────────
+        // Only kick to login if there is definitely NO user (snapshot null AND
+        // Firebase currentUser null AND no offline creds).
+        if (!snapshot.hasData || snapshot.data == null) {
+          debugPrint("HomeRouter: No user data found — redirecting to LoginPage");
+          return const LoginPage();
         }
 
         final data = snapshot.data!;
@@ -722,7 +831,7 @@ class _HomeRouterState extends State<HomeRouter> {
           } catch (_) {}
         }
 
-                rawRole = rawRole.toLowerCase().trim();
+        rawRole = rawRole.toLowerCase().trim();
         if (rawRole == 'dispensar' || rawRole == 'pharmacist' || rawRole == 'chemist') {
           rawRole = 'dispenser';
         } else if (rawRole == 'reception' || rawRole == 'front desk') {
@@ -733,7 +842,9 @@ class _HomeRouterState extends State<HomeRouter> {
           rawRole = 'rec+dis';
         } else if (rawRole == 'hqmanager' || rawRole == 'hq_manager' || rawRole == 'hq') {
           rawRole = 'hq manager';
-        } else if (rawRole == 'principal') {
+        } else if (rawRole == 'madrassa principal' || rawRole == 'madrassa admin' || rawRole == 'madrassa_principal' || rawRole == 'madrassa_admin') {
+          rawRole = 'madrassa admin';
+        } else if (rawRole == 'principal' || rawRole == 'school principal' || rawRole == 'school_principal') {
           rawRole = 'school principal';
         }
 
@@ -788,8 +899,10 @@ class _HomeRouterState extends State<HomeRouter> {
               'hq manager',
               'global',
               'global admin',
-              'supervisor',
               'branch manager',
+              'supervisor',
+              'branch supervisor',
+              'dispensary supervisor',
             ];
 
             const dispensaryRoles = [
@@ -820,8 +933,13 @@ class _HomeRouterState extends State<HomeRouter> {
             }
 
             Widget screenWidget;
-            if (globalRoles.contains(activeRole)) {
-              screenWidget = GlobalModularDashboard(userData: {...data, 'role': activeRole});
+            final normActiveRole = activeRole.replaceAll('_', ' ').replaceAll('-', ' ').trim();
+            if ((globalRoles.contains(normActiveRole) || normActiveRole.contains('supervisor')) && !normActiveRole.contains('madrassa') && !normActiveRole.contains('school')) {
+              screenWidget = GlobalModularDashboard(userData: {
+                ...data,
+                'role': activeRole,
+                'branchId': branchId.isNotEmpty && branchId != 'all' ? branchId : (data['branchId'] ?? 'all'),
+              });
             } else {
               screenWidget = _getScreenByRole(activeRole, branchId, uid, userName, data);
             }
@@ -873,9 +991,9 @@ class _HomeRouterState extends State<HomeRouter> {
                                     DropdownMenuItem(value: 'receptionist', child: Text('📋 Receptionist')),
                                     DropdownMenuItem(value: 'dispenser', child: Text('💊 Dispensary / Pharmacist')),
                                     DropdownMenuItem(value: 'donations', child: Text('🤝 Donations Officer')),
-                                    DropdownMenuItem(value: 'office boy', child: Text('🍲 Dasterkhwaan (Office Boy)')),
+                                    DropdownMenuItem(value: 'office boy', child: Text('🍲 Dasterkhwaan (Food Tokens)')),
                                     DropdownMenuItem(value: 'kitchen', child: Text('🍳 Dasterkhwaan (Kitchen)')),
-                                    DropdownMenuItem(value: 'madrassa admin', child: Text('📖 Madrassa Admin')),
+                                    DropdownMenuItem(value: 'madrassa admin', child: Text('📖 Madrassa Principal / Admin')),
                                     DropdownMenuItem(value: 'madrassa teacher', child: Text('📖 Madrassa Teacher')),
                                     DropdownMenuItem(value: 'madrassa parent', child: Text('👪 Madrassa Guardian')),
                                     DropdownMenuItem(value: 'school admin', child: Text('🏫 School Principal')),
@@ -939,39 +1057,27 @@ class ReceptionistBootstrapWrapper extends StatefulWidget {
 }
 
 class _ReceptionistBootstrapWrapperState extends State<ReceptionistBootstrapWrapper> {
-  late Future<void> _bootstrapFuture;
-
   @override
   void initState() {
     super.initState();
-    if (RoleSimulatorService.isSimulating) {
-      _bootstrapFuture = Future.value();
-    } else {
-      _bootstrapFuture = widget.bootstrapFunction(widget.branchId);
+    if (!RoleSimulatorService.isSimulating) {
+      unawaited(
+        widget.bootstrapFunction(widget.branchId).timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {},
+        ).catchError((e) {
+          debugPrint('[ReceptionistBootstrap] Background bootstrap notice: $e');
+        }),
+      );
     }
   }
 
-
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<void>(
-      future: _bootstrapFuture,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(
-              child: CircularProgressIndicator(
-                color: Color(0xFF4CAF50),
-              ),
-            ),
-          );
-        }
-        return ReceptionistScreen(
-          branchId: widget.branchId,
-          receptionistId: widget.receptionistId,
-          receptionistName: widget.receptionistName,
-        );
-      },
+    return ReceptionistScreen(
+      branchId: widget.branchId,
+      receptionistId: widget.receptionistId,
+      receptionistName: widget.receptionistName,
     );
   }
 }

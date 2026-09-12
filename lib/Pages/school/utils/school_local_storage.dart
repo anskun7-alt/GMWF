@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:collection/collection.dart';
 import '../../../services/local_storage_service.dart';
+import '../../../services/sync_service.dart';
 
 class SchoolLocalStorage {
   static const String studentsBox  = LocalStorageService.schoolStudentsBox;
@@ -37,11 +38,11 @@ class SchoolLocalStorage {
     }
   }
 
-  static Box _getStudentsBox()  => Hive.isBoxOpen(studentsBox)  ? Hive.box(studentsBox)  : Hive.box(studentsBox);
-  static Box _getLogsBox()      => Hive.isBoxOpen(logsBox)      ? Hive.box(logsBox)      : Hive.box(logsBox);
-  static Box _getTeachersBox()  => Hive.isBoxOpen(teachersBox)  ? Hive.box(teachersBox)  : Hive.box(teachersBox);
-  static Box _getBooksBox()     => Hive.isBoxOpen(booksBox)     ? Hive.box(booksBox)     : Hive.box(booksBox);
-  static Box _getBookLoansBox() => Hive.isBoxOpen(bookLoansBox) ? Hive.box(bookLoansBox) : Hive.box(bookLoansBox);
+  static Box _getStudentsBox()  => Hive.box(studentsBox);
+  static Box _getLogsBox()      => Hive.box(logsBox);
+  static Box _getTeachersBox()  => Hive.box(teachersBox);
+  static Box _getBooksBox()     => Hive.box(booksBox);
+  static Box _getBookLoansBox() => Hive.box(bookLoansBox);
 
   static const DeepCollectionEquality _deepEq = DeepCollectionEquality();
 
@@ -303,6 +304,7 @@ class SchoolLocalStorage {
         'docId': studentId,
         'data': cleanData,
       });
+      SyncService().triggerUpload();
     }
   }
 
@@ -338,6 +340,7 @@ class SchoolLocalStorage {
         'docId': teacherId,
         'data': cleanData,
       });
+      SyncService().triggerUpload();
     }
   }
 
@@ -373,6 +376,7 @@ class SchoolLocalStorage {
         'docId': bookId,
         'data': cleanData,
       });
+      SyncService().triggerUpload();
     }
   }
 
@@ -408,6 +412,7 @@ class SchoolLocalStorage {
         'docId': loanId,
         'data': cleanData,
       });
+      SyncService().triggerUpload();
     }
   }
 
@@ -449,6 +454,7 @@ class SchoolLocalStorage {
         'docId': dateKey,
         'data': logData,
       });
+      SyncService().triggerUpload();
     }
 
     await logAudit(
@@ -500,6 +506,7 @@ class SchoolLocalStorage {
         'docId': dateKey,
         'data': logData,
       });
+      SyncService().triggerUpload();
     }
 
     await logAudit(
@@ -634,6 +641,7 @@ class SchoolLocalStorage {
         'docId': gradeId,
         'data': dataToSave,
       });
+      SyncService().triggerUpload();
     }
   }
 
@@ -688,6 +696,7 @@ class SchoolLocalStorage {
         'docId': feeId,
         'data': dataToSave,
       });
+      SyncService().triggerUpload();
     }
 
     await logAudit(

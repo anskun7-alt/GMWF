@@ -10,6 +10,7 @@ import '../models/madrassa_config.dart';
 import '../models/madrassa_fee_logic.dart';
 import '../widgets/madrassa_common_widgets.dart';
 import '../utils/madrassa_report_helper.dart';
+import '../utils/madrassa_local_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../../services/offline_auth_service.dart';
 import '../../../services/local_storage_service.dart';
@@ -18,6 +19,7 @@ import '../../../widgets/read_only_document_tile.dart';
 import 'package:lottie/lottie.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../../services/user_theme_service.dart';
+import '../../../services/sync_service.dart';
 import '../utils/islamic_calendar_helper.dart';
 
 
@@ -45,7 +47,7 @@ class ParentReportCard extends StatefulWidget {
   final int? year;
   final int? month;
   final VoidCallback? onLogout;
-  final List<DocumentSnapshot> allDocs;
+  final List<dynamic> allDocs;
   final int selectedIndex;
   final ValueChanged<int> onStudentChanged;
   final VoidCallback? onBackToSummary;
@@ -84,6 +86,55 @@ class _ParentReportCardState extends State<ParentReportCard> {
   late int _selectedMonth;
   late DateTime _selectedDate;
   int _selectedTab = 0;
+
+  String _attendanceFilter = 'all'; // 'all', 'present', 'absent', 'leave', 'ptm', 'holiday'
+  String _quranProgressFilter = 'all'; // 'all', 'sabak', 'sabki', 'manzil'
+  String _feeFilter = 'all'; // 'all', 'unpaid', 'paid'
+
+  void _changeTab(int tabIndex) {
+    setState(() {
+      _selectedTab = tabIndex;
+      _selectedDate = DateTime.now();
+      _selectedMonth = DateTime.now().month;
+      _selectedYear = DateTime.now().year;
+    });
+  }
+
+  bool _isSyncing = false;
+  Future<void> _syncLatestData(BuildContext context) async {
+    if (_isSyncing) return;
+    setState(() => _isSyncing = true);
+    try {
+      if (widget.branchId.isNotEmpty) {
+        if (widget.studentId.isNotEmpty) {
+          await MadrassaLocalStorage.downloadStudentsForGuardian(widget.branchId, [widget.studentId]);
+        }
+        final now = DateTime.now();
+        await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month);
+        await MadrassaLocalStorage.downloadHolidays(widget.branchId);
+        await MadrassaLocalStorage.downloadConfig(widget.branchId);
+      }
+      await SyncService().triggerUpload();
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() => _isSyncing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.cloud_done_rounded, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(context.isUrdu ? 'کلاؤڈ سے تازہ ترین معلومات حاصل کر لی گئیں' : 'Latest records downloaded from Cloud'),
+            ],
+          ),
+          backgroundColor: const Color(0xFF0F766E),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
 
   final Set<String> _dismissedCongratsMonths = {};
 
@@ -144,9 +195,9 @@ class _ParentReportCardState extends State<ParentReportCard> {
   Map<String, dynamic>? _liveStudentData;
   Map<String, dynamic> get studentData => _liveStudentData ?? widget.studentData;
 
-  late Stream<QuerySnapshot> _logsStream;
+  late Stream<List<Map<String, dynamic>>> _logsStream;
   late Stream<MadrassaConfig> _configStream;
-  late Stream<QuerySnapshot> _holidaysStream;
+  late Stream<List<Map<String, dynamic>>> _holidaysStream;
 
   @override
   void initState() {
@@ -159,24 +210,9 @@ class _ParentReportCardState extends State<ParentReportCard> {
   }
 
   void _initStreams() {
-    _logsStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('madrassa_daily_logs')
-        .where('studentId', isEqualTo: widget.studentId)
-        .snapshots();
-    _configStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('madrassa_config')
-        .doc('current')
-        .snapshots()
-        .map((s) => MadrassaConfig.fromFirestore(s));
-    _holidaysStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('madrassa_holidays')
-        .snapshots();
+    _logsStream = MadrassaLocalStorage.streamLogsForMonthCached(widget.branchId, _selectedYear, _selectedMonth);
+    _configStream = MadrassaLocalStorage.streamConfigCached(widget.branchId);
+    _holidaysStream = MadrassaLocalStorage.streamHolidaysCached(widget.branchId);
   }
 
   @override
@@ -189,10 +225,10 @@ class _ParentReportCardState extends State<ParentReportCard> {
       shouldReinit = true;
     }
     if (widget.year != oldWidget.year || widget.month != oldWidget.month) {
-      setState(() {
-        _selectedYear = widget.year ?? DateTime.now().year;
-        _selectedMonth = widget.month ?? DateTime.now().month;
-      });
+      _selectedYear = widget.year ?? DateTime.now().year;
+      _selectedMonth = widget.month ?? DateTime.now().month;
+      _initStreams();
+      shouldReinit = true;
     }
     if (widget.branchId != oldWidget.branchId) {
       _initStreams();
@@ -920,20 +956,49 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                         if (text.isEmpty) return;
                         setDs(() => isSaving = true);
                         try {
-                          await FirebaseFirestore.instance
-                              .collection('branches')
-                              .doc(widget.branchId)
-                              .collection('madrassa_daily_logs')
-                              .doc(dateStr)
-                              .set({
+                          final replyData = {
                             widget.studentId: {
                               'parentReplied': true,
                               'parentRepliedRequested': true,
                               'parentReplyText': text,
                               'parentReplyMessage': text,
-                              'parentReplyTime': FieldValue.serverTimestamp(),
+                              'parentReplyTime': DateTime.now().toIso8601String(),
                             }
-                          }, SetOptions(merge: true));
+                          };
+
+                          // 1. Immediately save to Local Hive & broadcast/enqueue sync
+                          await MadrassaLocalStorage.saveLogRecordLocal(
+                            branchId: widget.branchId,
+                            dateKey: dateStr,
+                            logData: replyData,
+                            editorName: 'Parent/Guardian',
+                            editorRole: 'guardian',
+                          );
+
+                          // 2. Direct Firestore update for cloud instant reflection
+                          try {
+                            await FirebaseFirestore.instance
+                                .collection('branches')
+                                .doc(widget.branchId)
+                                .collection('madrassa_daily_logs')
+                                .doc(dateStr)
+                                .set({
+                              widget.studentId: {
+                                'parentReplied': true,
+                                'parentRepliedRequested': true,
+                                'parentReplyText': text,
+                                'parentReplyMessage': text,
+                                'parentReplyTime': FieldValue.serverTimestamp(),
+                              }
+                            }, SetOptions(merge: true));
+                          } catch (err) {
+                            debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
+                          }
+
+                          if (mounted) {
+                            setState(() {});
+                          }
+
                           if (ctx.mounted) {
                             Navigator.pop(ctx);
                             ScaffoldMessenger.of(context).showSnackBar(
@@ -964,6 +1029,82 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           );
         },
       ),
+    );
+  }
+
+  Widget _buildParentReplyStatusRow(BuildContext context, String dateStr, Map<String, dynamic>? statusData) {
+    final hasReplied = statusData?['parentReplied'] == true;
+    final replyText = statusData?['parentReplyText']?.toString() ?? statusData?['parentReplyMessage']?.toString();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cardBg = isDark ? const Color(0xFF1E293B) : Colors.white;
+    final textPrimary = isDark ? Colors.white : const Color(0xFF1E293B);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  hasReplied ? Icons.check_circle_rounded : Icons.pending_actions_rounded,
+                  size: 16,
+                  color: hasReplied ? Colors.green : const Color(0xFFDC2626),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  hasReplied
+                      ? (context.isUrdu ? 'جواب: بھیج دیا گیا' : 'Parent Reply: Sent')
+                      : (context.isUrdu ? 'جواب: زیر التواء (Pending)' : 'Parent Reply: Pending'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: hasReplied ? Colors.green : const Color(0xFFDC2626),
+                    fontFamily: context.isUrdu ? 'Noori' : null,
+                  ),
+                ),
+              ],
+            ),
+            if (widget.isParentView && !hasReplied && (studentData['status']?.toString() ?? 'active') == 'active')
+              ElevatedButton.icon(
+                onPressed: () => _showSendReplyDialog(context, dateStr),
+                icon: const Icon(Icons.reply_rounded, size: 14),
+                label: Text(
+                  context.isUrdu ? 'جواب دیں' : 'Reply to Teacher',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: ParentReportCard.primaryColor,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+          ],
+        ),
+        if (hasReplied && replyText != null && replyText.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.green.withValues(alpha: 0.4)),
+            ),
+            child: Text(
+              '"$replyText"',
+              style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -1566,7 +1707,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       );
     }
 
-    if (!isReadOnly && widget.isParentView && needsReply && !selectedDateReplied) {
+    if (!isReadOnly && widget.isParentView && !selectedDateReplied) {
       primaryActions.add(
         _quickActionButton(
           label: context.isUrdu ? 'استاد کو جواب دیں' : 'Reply to Teacher',
@@ -2170,7 +2311,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
   }
 
-  Widget _buildRejoinUI(String status, String? rejoinRequestStatus, String? rejoinReason, Timestamp? rejoinDate) {
+  Widget _buildRejoinUI(String status, String? rejoinRequestStatus, String? rejoinReason, DateTime? rejoinDate) {
     // ── Archived students: show unarchive request ──
     if (status == 'archived') {
       if (rejoinRequestStatus == 'pending') {
@@ -2208,8 +2349,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 const SizedBox(height: 4),
                 Text(
                   context.isUrdu
-                      ? 'درخواست کی تاریخ: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate.toDate())}'
-                      : 'Requested on: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate.toDate())}',
+                      ? 'درخواست کی تاریخ: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate)}'
+                      : 'Requested on: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate)}',
                   style: TextStyle(fontSize: 10, color: isDarkMode ? const Color(0xFFFCD34D) : Colors.amber.shade700, fontFamily: context.isUrdu ? 'Noori' : null),
                 ),
               ],
@@ -2270,8 +2411,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               const SizedBox(height: 4),
               Text(
                 context.isUrdu
-                    ? 'درخواست کی تاریخ: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate.toDate())}'
-                    : 'Requested on: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate.toDate())}',
+                    ? 'درخواست کی تاریخ: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate)}'
+                    : 'Requested on: ${DateFormat('yyyy-MM-dd HH:mm').format(rejoinDate)}',
                 style: TextStyle(fontSize: 10, color: isDarkMode ? const Color(0xFFFCD34D) : Colors.amber.shade700, fontFamily: context.isUrdu ? 'Noori' : null),
               ),
             ],
@@ -2325,8 +2466,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             final log = auditList[idx];
             final logStatus = log['status'] ?? 'unknown';
             final logType = log['type'] ?? 'info';
-            final logDateTs = log['date'] as Timestamp?;
-            final logDate = logDateTs?.toDate() ?? DateTime.now();
+            final logDate = _parseDateTime(log['date']);
             final logReason = log['reason'] ?? '';
 
             Color dotColor = Colors.grey;
@@ -2481,14 +2621,26 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
 
 
-  int getLinesCompletedOnDate(DateTime targetDate, List<QueryDocumentSnapshot> allLogs, String studentId) {
+  String _logDocId(dynamic l) {
+    if (l is Map) return (l['id'] ?? l['dateKey'] ?? l['date'] ?? '').toString();
+    if (l is QueryDocumentSnapshot) return l.id;
+    return '';
+  }
+
+  Map<String, dynamic>? _logDocData(dynamic l) {
+    if (l is Map) return Map<String, dynamic>.from(l);
+    if (l is QueryDocumentSnapshot) return l.data() as Map<String, dynamic>?;
+    return null;
+  }
+
+  int getLinesCompletedOnDate(DateTime targetDate, List<dynamic> allLogs, String studentId) {
     final targetStr = DateFormat('yyyy-MM-dd').format(targetDate);
-    final sorted = [...allLogs]..sort((a, b) => a.id.compareTo(b.id)); // oldest first
+    final sorted = [...allLogs]..sort((a, b) => _logDocId(a).compareTo(_logDocId(b))); // oldest first
     
-    int targetIndex = sorted.indexWhere((l) => l.id == targetStr);
+    int targetIndex = sorted.indexWhere((l) => _logDocId(l) == targetStr);
     if (targetIndex == -1) return 0;
     
-    final targetLog = sorted[targetIndex].data() as Map<String, dynamic>?;
+    final targetLog = _logDocData(sorted[targetIndex]);
     final sLog = targetLog?[studentId] as Map<String, dynamic>?;
     if (sLog == null) return 0;
 
@@ -2506,7 +2658,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     
     int prevLines = -1;
     for (int i = targetIndex - 1; i >= 0; i--) {
-      final log = sorted[i].data() as Map<String, dynamic>?;
+      final log = _logDocData(sorted[i]);
       final lines = (log?[studentId]?['currentLines'] as num?)?.toInt() ?? int.tryParse(log?[studentId]?['currentLines']?.toString() ?? '');
       if (lines != null) {
         prevLines = lines;
@@ -2521,7 +2673,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     return (targetLines - prevLines).clamp(0, 9999);
   }
 
-  Widget _buildDailyDetailsCard(List<QueryDocumentSnapshot> allLogs, List<Map<String, dynamic>> holidaysData, MadrassaConfig config) {
+  Widget _buildDailyDetailsCard(List<dynamic> allLogs, List<Map<String, dynamic>> holidaysData, MadrassaConfig config) {
     final joinDate = _studentJoinDate;
     
     final selectedZero = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
@@ -2537,13 +2689,26 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
     Map<String, dynamic>? statusData;
+    final cached = MadrassaLocalStorage.getDailyLogCached(widget.branchId, dateStr);
+    final cachedLog = (cached != null && cached[widget.studentId] is Map)
+        ? Map<String, dynamic>.from(cached[widget.studentId] as Map)
+        : <String, dynamic>{};
+
+    Map<String, dynamic> firestoreLog = {};
     try {
-      final doc = allLogs.firstWhere((l) => l.id == dateStr);
-      final rawData = doc.data();
-      if (rawData is Map && rawData[widget.studentId] is Map) {
-        statusData = Map<String, dynamic>.from(rawData[widget.studentId] as Map);
+      final doc = allLogs.firstWhere((l) => _logDocId(l) == dateStr, orElse: () => <String, dynamic>{});
+      final rawData = _logDocData(doc);
+      if (rawData != null && rawData[widget.studentId] is Map) {
+        firestoreLog = Map<String, dynamic>.from(rawData[widget.studentId] as Map);
       }
     } catch (_) {}
+
+    if (firestoreLog.isNotEmpty || cachedLog.isNotEmpty) {
+      statusData = {
+        ...firestoreLog,
+        ...cachedLog,
+      };
+    }
 
     final ptmDate = config.getPtmDate();
     final isSelectedPtm = _selectedDate.year == ptmDate.year &&
@@ -2851,6 +3016,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                               context.isUrdu ? "مجموعی: لائن $currentLines" : "Cumulative: Line $currentLines",
                               style: TextStyle(fontSize: 11, color: ParentReportCard.textMutedColor, fontFamily: context.isUrdu ? 'Noori' : null),
                             ),
+                            const SizedBox(height: 12),
+                            Divider(color: ParentReportCard.primaryColor.withValues(alpha: 0.15)),
+                            const SizedBox(height: 8),
+                            _buildParentReplyStatusRow(context, dateStr, statusData),
                           ],
                         ),
                       ),
@@ -2936,6 +3105,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             ),
                         ],
                       ),
+                      const SizedBox(height: 12),
+                      Divider(color: Colors.orange.shade200),
+                      const SizedBox(height: 8),
+                      _buildParentReplyStatusRow(context, dateStr, statusData),
                     ],
                   ),
                 ),
@@ -2970,65 +3143,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                       const SizedBox(height: 12),
                       Divider(color: const Color(0xFFDC2626).withValues(alpha: 0.3)),
                       const SizedBox(height: 8),
-                      // Parent Reply Info for Absent Date
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                statusData?['parentReplied'] == true ? Icons.check_circle_rounded : Icons.pending_actions_rounded,
-                                size: 16,
-                                color: statusData?['parentReplied'] == true ? Colors.green : const Color(0xFFDC2626),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                statusData?['parentReplied'] == true
-                                    ? (context.isUrdu ? 'جواب: بھیج دیا گیا' : 'Parent Reply: Sent')
-                                    : (context.isUrdu ? 'جواب: زیر التواء (Pending)' : 'Parent Reply: Pending'),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: statusData?['parentReplied'] == true ? Colors.green : const Color(0xFFDC2626),
-                                  fontFamily: context.isUrdu ? 'Noori' : null,
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (widget.isParentView && statusData?['parentReplied'] != true && (studentData['status']?.toString() ?? 'active') == 'active')
-                            ElevatedButton.icon(
-                              onPressed: () => _showSendReplyDialog(context, dateStr),
-                              icon: const Icon(Icons.reply_rounded, size: 14),
-                              label: Text(
-                                context.isUrdu ? 'جواب دیں' : 'Reply to Teacher',
-                                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: ParentReportCard.primaryColor,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                elevation: 0,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                              ),
-                            ),
-                        ],
-                      ),
-                      if (statusData?['parentReplied'] == true && statusData?['parentReplyText'] != null) ...[
-                        const SizedBox(height: 6),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: cardBg,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.green.withValues(alpha: 0.4)),
-                          ),
-                          child: Text(
-                            '"${statusData!['parentReplyText']}"',
-                            style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null),
-                          ),
-                        ),
-                      ],
+                      _buildParentReplyStatusRow(context, dateStr, statusData),
                     ],
                   ),
                 ),
@@ -3059,11 +3174,21 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null),
               ),
               const Spacer(),
-              Text(
-                context.isUrdu
-                    ? '${_selectedDate.day} ${_formatMonth(_selectedDate)}'
-                    : DateFormat('MMM d').format(_selectedDate),
-                style: TextStyle(fontSize: 13, color: textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    context.isUrdu
+                        ? '${_selectedDate.day} ${_formatMonth(_selectedDate)}'
+                        : DateFormat('MMM d').format(_selectedDate),
+                    style: TextStyle(fontSize: 13, color: textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '🌙 ${IslamicCalendarHelper.fromGregorian(_selectedDate).format(isUrdu: context.isUrdu)}',
+                    style: const TextStyle(fontSize: 10.5, color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
+                  ),
+                ],
               ),
             ],
           ),
@@ -3099,39 +3224,221 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
   }
 
-  Widget _buildReminders(bool isPtm, bool needsReply, String leaveStatus) {
+  Widget _buildReminders({
+    required bool isPtm,
+    required bool needsReply,
+    required String leaveStatus,
+    required List<Map<String, dynamic>> holidaysData,
+    String? dateStr,
+  }) {
+    final now = DateTime.now();
+    final todayZero = DateTime(now.year, now.month, now.day);
+    final tomorrowZero = todayZero.add(const Duration(days: 1));
+
+    // 1. Holiday detection for today, tomorrow, or upcoming 7 days
+    Map<String, dynamic>? todayHoliday;
+    Map<String, dynamic>? tomorrowHoliday;
+    final upcomingHolidays = <Map<String, dynamic>>[];
+
+    for (final h in holidaysData) {
+      final rawDate = h['date'];
+      final hDate = rawDate is DateTime ? rawDate : _parseDateTime(rawDate);
+      final hZero = DateTime(hDate.year, hDate.month, hDate.day);
+      if (hZero == todayZero) {
+        todayHoliday = h;
+      } else if (hZero == tomorrowZero) {
+        tomorrowHoliday = h;
+      } else if (hZero.isAfter(tomorrowZero) && hZero.isBefore(todayZero.add(const Duration(days: 7)))) {
+        upcomingHolidays.add({...h, 'dateTime': hDate});
+      }
+    }
+
+    final reminders = <Widget>[];
+
+    // Today's Holiday Announcement
+    if (todayHoliday != null) {
+      final holidayName = todayHoliday['name']?.toString() ?? 'Holiday';
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'آج مدرسہ بند ہے (تعطیل)' : 'Madrassa Closed Today',
+        body: context.isUrdu
+            ? 'مدرسہ آج "$holidayName" کے باعث بند رہے گا۔'
+            : 'Madrassa is closed today due to "$holidayName".',
+        icon: Icons.beach_access_rounded,
+        color: const Color(0xFF0D9488),
+        isUrgent: true,
+      ));
+    }
+
+    // Tomorrow's Holiday Notice
+    if (tomorrowHoliday != null) {
+      final holidayName = tomorrowHoliday['name']?.toString() ?? 'Holiday';
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'کل تعطیل کا پیشگی نوٹس' : 'Holiday Notice (Tomorrow)',
+        body: context.isUrdu
+            ? 'مدرسہ کل "$holidayName" کے باعث بند رہے گا۔'
+            : 'Madrassa will remain closed tomorrow due to "$holidayName".',
+        icon: Icons.event_busy_rounded,
+        color: const Color(0xFFD97706),
+        isUrgent: true,
+      ));
+    }
+
+    // Upcoming Holidays in next 7 days
+    for (final h in upcomingHolidays) {
+      final holidayName = h['name']?.toString() ?? 'Holiday';
+      final hDate = h['dateTime'] as DateTime;
+      final dateFormatted = context.isUrdu
+          ? '${hDate.day} ${_formatMonth(hDate)}'
+          : DateFormat('EEEE, d MMM').format(hDate);
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'تعطیل کا پیشگی نوٹس' : 'Upcoming Holiday Notice',
+        body: context.isUrdu
+            ? 'مدرسہ $dateFormatted کو "$holidayName" کے باعث بند رہے گا۔'
+            : 'Madrassa will be closed on $dateFormatted due to "$holidayName".',
+        icon: Icons.campaign_rounded,
+        color: const Color(0xFF0284C7),
+      ));
+    }
+
+    // PTM Meeting Reminder
+    if (isPtm) {
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'آج سرپرست اساتذہ میٹنگ (PTM)' : 'Parent-Teacher Meeting Today',
+        body: context.isUrdu
+            ? 'آج پی ٹی ایم ہے۔ اپنے بچے کی حفظ و تعلیم کی پیشرفت کے لیے مدرسہ ضرور تشریف لائیں۔'
+            : 'Today is PTM day. Please visit the Madrassa to discuss your child\'s Quranic progress.',
+        icon: Icons.groups_rounded,
+        color: const Color(0xFFEA580C),
+        isUrgent: true,
+      ));
+    }
+
+    // Parent Reply Needed
+    if (needsReply) {
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'استاد کے پیغام کا جواب درکار ہے' : 'Teacher Message Reply Needed',
+        body: context.isUrdu
+            ? 'بچے کی روزانہ کی پڑھائی اور حاضری پر استاد کو جوابی تاثرات بھیجیں۔'
+            : 'Please send your reply/feedback to the teacher\'s daily report message.',
+        icon: Icons.mark_chat_unread_rounded,
+        color: const Color(0xFF7C3AED),
+        actionLabel: context.isUrdu ? 'جواب دیں' : 'Reply Now',
+        onAction: dateStr != null ? () => _showSendReplyDialog(context, dateStr) : null,
+      ));
+    }
+
+    // Leave Denied
+    if (leaveStatus == 'denied') {
+      reminders.add(_reminderCard(
+        title: context.isUrdu ? 'درخواست رخصت مسترد' : 'Leave Request Denied',
+        body: context.isUrdu
+            ? '${studentData['name'] ?? 'طالب علم'} کی رخصت کی درخواست منظور نہیں ہو سکی۔ وہ غائب شمار ہوں گے۔'
+            : 'Your leave request for ${studentData['name'] ?? 'the student'} was not approved. Marked absent.',
+        icon: Icons.error_outline_rounded,
+        color: const Color(0xFFDC2626),
+      ));
+    }
+
+    if (reminders.isEmpty) return const SizedBox.shrink();
+
     return Column(
-      children: [
-        if (isPtm) _reminderItem('PTM Today', 'Today is the Parent Teacher Meeting. Please visit the Madrassa.', Icons.people, Colors.orange),
-        if (needsReply) _reminderItem('Reply Needed', 'Please reply to the teacher\'s message regarding today\'s status.', Icons.message, Colors.purple),
-        if (leaveStatus == 'denied') _reminderItem('Leave Denied', 'Your leave request for ${studentData['name'] ?? 'the student'} was denied. They are marked absent.', Icons.error_outline, Colors.red),
-        const SizedBox(height: 12),
-      ],
+      children: reminders,
     );
   }
 
-  Widget _reminderItem(String en, String body, IconData icon, Color color) {
+  Widget _reminderCard({
+    required String title,
+    required String body,
+    required IconData icon,
+    required Color color,
+    bool isUrgent = false,
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
+        color: isDarkMode ? color.withValues(alpha: 0.12) : color.withValues(alpha: 0.07),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
+        border: Border.all(
+          color: color.withValues(alpha: isUrgent ? 0.45 : 0.25),
+          width: isUrgent ? 1.8 : 1.0,
+        ),
+        boxShadow: isUrgent
+            ? [
+                BoxShadow(
+                  color: color.withValues(alpha: isDarkMode ? 0.2 : 0.08),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
+                ),
+              ]
+            : null,
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: color),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(en, style: TextStyle(fontWeight: FontWeight.bold, color: color)),
-                Text(body, style: TextStyle(fontSize: 13, color: color, fontWeight: FontWeight.bold)),
-              ],
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.18),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: color, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: color,
+                        fontFamily: context.isUrdu ? 'Noori' : null,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      body,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: isDarkMode ? Colors.white.withValues(alpha: 0.9) : const Color(0xFF334155),
+                        height: 1.35,
+                        fontFamily: context.isUrdu ? 'Noori' : null,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
+          if (actionLabel != null && onAction != null) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: ElevatedButton.icon(
+                onPressed: onAction,
+                icon: const Icon(Icons.reply_rounded, size: 14),
+                label: Text(
+                  actionLabel,
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: color,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  elevation: 0,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -3191,7 +3498,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     BuildContext context,
     MadrassaConfig displayConfig,
     Map<String, dynamic> studentData,
-    List<QueryDocumentSnapshot> monthLogs,
+    List<dynamic> monthLogs,
     List<DateTime> holidays,
   ) {
     int selectedYear = _selectedYear;
@@ -3285,11 +3592,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
   }
 
-  Map<String, dynamic> _calculateEstimationData(List<QueryDocumentSnapshot> allLogs) {
+  Map<String, dynamic> _calculateEstimationData(List<dynamic> allLogs) {
     int sumOfSabakLines = 0;
     int maxLogCurrentLines = 0;
     for (final doc in allLogs) {
-      final rawData = doc.data() as Map<String, dynamic>?;
+      final rawData = _logDocData(doc);
       final studentLog = rawData?[widget.studentId] as Map<String, dynamic>?;
       if (studentLog != null) {
         final sLines = (studentLog['sabakLines'] as num?)?.toInt() ?? int.tryParse(studentLog['sabakLines']?.toString() ?? '');
@@ -3332,9 +3639,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     try {
       final logsList = <MapEntry<DateTime, int>>[];
       for (final doc in allLogs) {
-        final date = DateTime.tryParse(doc.id);
+        final date = DateTime.tryParse(_logDocId(doc));
         if (date == null) continue;
-        final rawData = doc.data() as Map<String, dynamic>?;
+        final rawData = _logDocData(doc);
         final studentLog = rawData?[widget.studentId] as Map<String, dynamic>?;
         if (studentLog != null) {
           final lines = (studentLog['currentLines'] as num?)?.toInt();
@@ -3472,7 +3779,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     separatorBuilder: (_, __) => const SizedBox(width: 8),
                     itemBuilder: (ctx, i) {
                       final doc = widget.allDocs[i];
-                      final d = doc.data() as Map<String, dynamic>? ?? {};
+                      final d = doc is Map ? Map<String, dynamic>.from(doc) : (doc is DocumentSnapshot ? (doc.data() as Map<String, dynamic>?) ?? {} : <String, dynamic>{});
                       final selected = i == widget.selectedIndex;
                       return ChoiceChip(
                         selected: selected,
@@ -3544,7 +3851,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required bool isDesktop,
     bool isAccountView = false,
     MadrassaConfig? displayConfig,
-    List<QueryDocumentSnapshot>? monthLogs,
+    List<dynamic>? monthLogs,
     List<DateTime>? holidays,
   }) {
     final name = studentData['name'] ?? studentData['fullName'] ?? 'Student';
@@ -3870,61 +4177,86 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required bool hasPtmStatus,
     bool isBeforeJoin = false,
     bool forceSquare = false,
+    bool isToday = false,
+    bool isHoliday = false,
+    bool isPast = false,
   }) {
     final neutralColor = isDarkMode ? const Color(0xFF64748B) : Colors.grey.shade400;
 
-    final attCard = isBeforeJoin
-        ? _statusPill(
-            icon: Icons.remove_circle_outline_rounded,
-            label: context.t('Attendance'),
-            value: '—',
-            color: neutralColor,
-            onTap: () => setState(() => _selectedTab = 1),
-          )
-        : _statusPill(
-            icon: Icons.check_circle_outline_rounded,
-            label: context.t('Attendance'),
-            value: currentStatus == 'present' ? context.t('Present') : (currentStatus == 'leave' || currentStatus == 'leave_requested' ? context.t('Leave') : context.t('Absent')),
-            color: currentStatus == 'present' ? ParentReportCard.successColor : (currentStatus == 'leave' || currentStatus == 'leave_requested' ? Colors.orange : ParentReportCard.errorColor),
-            onTap: () => setState(() => _selectedTab = 1),
-          );
-    final uniformCard = isBeforeJoin
-        ? _statusPill(
-            icon: Icons.remove_circle_outline_rounded,
-            label: context.t('Cleanliness'),
-            value: '—',
-            color: neutralColor,
-            onTap: () => setState(() => _selectedTab = 1),
-          )
-        : _statusPill(
-            icon: Icons.checkroom_rounded,
-            label: context.t('Cleanliness'),
-            value: (currentStatus == 'leave' || currentStatus == 'leave_requested')
-                ? context.t('Leave')
-                : (currentStatus != 'present'
-                    ? context.t('Absent')
-                    : (uniformOk ? context.t('Clean') : context.t('Unclean'))),
-            color: (currentStatus == 'leave' || currentStatus == 'leave_requested')
-                ? Colors.orange
-                : (currentStatus != 'present'
-                    ? ParentReportCard.errorColor
-                    : (uniformOk ? Colors.blue : ParentReportCard.errorColor)),
-            onTap: () => setState(() => _selectedTab = 1),
-          );
+    String attValue;
+    Color attColor;
+    if (isBeforeJoin) {
+      attValue = '—';
+      attColor = neutralColor;
+    } else if (isHoliday) {
+      attValue = context.isUrdu ? 'تعطیل' : 'Holiday';
+      attColor = const Color(0xFF0D9488); // Teal
+    } else if (currentStatus == 'present') {
+      attValue = context.t('Present');
+      attColor = ParentReportCard.successColor;
+    } else if (currentStatus == 'leave' || currentStatus == 'leave_requested') {
+      attValue = context.t('Leave');
+      attColor = Colors.orange;
+    } else if (currentStatus == 'absent') {
+      attValue = context.t('Absent');
+      attColor = ParentReportCard.errorColor;
+    } else if (isToday || !isPast) {
+      attValue = context.isUrdu ? 'زیر انتظار' : 'Pending';
+      attColor = isDarkMode ? const Color(0xFFFBBF24) : Colors.amber.shade700;
+    } else {
+      attValue = context.t('Absent');
+      attColor = ParentReportCard.errorColor;
+    }
+
+    final attCard = _statusPill(
+      icon: Icons.check_circle_outline_rounded,
+      label: context.t('Attendance'),
+      value: attValue,
+      color: attColor,
+      onTap: () => _changeTab(1),
+    );
+
+    String uniformValue;
+    Color uniformColor;
+    if (isBeforeJoin || isHoliday) {
+      uniformValue = '—';
+      uniformColor = neutralColor;
+    } else if (currentStatus == 'leave' || currentStatus == 'leave_requested') {
+      uniformValue = context.t('Leave');
+      uniformColor = Colors.orange;
+    } else if (currentStatus == 'present') {
+      uniformValue = uniformOk ? context.t('Clean') : context.t('Unclean');
+      uniformColor = uniformOk ? Colors.blue : ParentReportCard.errorColor;
+    } else if (isToday || !isPast) {
+      uniformValue = context.isUrdu ? 'زیر انتظار' : 'Pending';
+      uniformColor = isDarkMode ? const Color(0xFFFBBF24) : Colors.amber.shade700;
+    } else {
+      uniformValue = context.t('Absent');
+      uniformColor = ParentReportCard.errorColor;
+    }
+
+    final uniformCard = _statusPill(
+      icon: Icons.checkroom_rounded,
+      label: context.t('Cleanliness'),
+      value: uniformValue,
+      color: uniformColor,
+      onTap: () => _changeTab(1),
+    );
+
     final replyCard = isBeforeJoin
         ? _statusPill(
             icon: Icons.remove_circle_outline_rounded,
             label: context.t('Reply'),
             value: '—',
             color: neutralColor,
-            onTap: () => setState(() => _selectedTab = 1),
+            onTap: () => _changeTab(1),
           )
         : _statusPill(
             icon: Icons.mail_rounded,
             label: context.t('Reply'),
             value: replied ? context.t('Sent') : context.t('Pending'),
             color: replied ? Colors.green : ParentReportCard.errorColor,
-            onTap: () => setState(() => _selectedTab = 1),
+            onTap: () => _changeTab(1),
           );
 
     final String ptmValue;
@@ -3954,7 +4286,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       label: 'PTM',
       value: ptmValue,
       color: ptmColor,
-      onTap: () => setState(() => _selectedTab = 1),
+      onTap: () => _changeTab(1),
     );
 
     final bool isMobile = MediaQuery.of(context).size.width < 600;
@@ -4169,6 +4501,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required double ptmSavings,
     required String monthYearStr,
   }) {
+    final paymentRecord = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, _selectedYear, _selectedMonth, widget.studentId);
+    final status = paymentRecord?['status']?.toString() ?? (due <= 0 ? 'paid' : 'unpaid');
+    final amountPaid = (paymentRecord?['amountPaid'] as num?)?.toDouble() ?? (status == 'paid' ? due : 0.0);
+    final isPaid = status == 'paid';
+
     return Container(
       decoration: BoxDecoration(
         color: cardBg,
@@ -4229,29 +4566,78 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: due <= 0 ? (isDarkMode ? const Color(0xFF0F3E32) : const Color(0xFFDDF4EA)) : (isDarkMode ? const Color(0xFF3B1219) : const Color(0xFFFFF1F1)),
+              color: isPaid || due <= 0
+                  ? (isDarkMode ? const Color(0xFF0F3E32) : const Color(0xFFDDF4EA))
+                  : (isDarkMode ? const Color(0xFF3B1219) : const Color(0xFFFFF1F1)),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: due <= 0 ? const Color(0xFF22A861) : const Color(0xFFE84B4B)),
+              border: Border.all(color: isPaid || due <= 0 ? const Color(0xFF22A861) : const Color(0xFFE84B4B)),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: Column(
               children: [
-                Text(
-                  context.isUrdu ? 'قابل ادا رقم (NET AMOUNT DUE)' : 'NET PAYABLE AMOUNT DUE',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: due <= 0 ? (isDarkMode ? const Color(0xFF4ADE80) : const Color(0xFF1E5B48)) : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFE84B4B)),
-                    fontFamily: context.isUrdu ? 'Noori' : null,
-                  ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      context.isUrdu ? 'قابل ادا رقم (NET AMOUNT DUE)' : 'NET PAYABLE AMOUNT DUE',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: isPaid || due <= 0
+                            ? (isDarkMode ? const Color(0xFF4ADE80) : const Color(0xFF1E5B48))
+                            : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFE84B4B)),
+                        fontFamily: context.isUrdu ? 'Noori' : null,
+                      ),
+                    ),
+                    Text(
+                      context.isUrdu ? 'روپے ${due.toStringAsFixed(0)}' : 'Rs. ${due.toStringAsFixed(0)}',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: isPaid || due <= 0
+                            ? (isDarkMode ? const Color(0xFF4ADE80) : const Color(0xFF1E5B48))
+                            : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFE84B4B)),
+                      ),
+                    ),
+                  ],
                 ),
-                Text(
-                  context.isUrdu ? 'روپے ${due.toStringAsFixed(0)}' : 'Rs. ${due.toStringAsFixed(0)}',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: due <= 0 ? (isDarkMode ? const Color(0xFF4ADE80) : const Color(0xFF1E5B48)) : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFE84B4B)),
-                  ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      context.isUrdu ? 'ادائیگی کی صورتحال (Payment Status)' : 'Payment Status',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: isDarkMode ? Colors.white70 : Colors.black87,
+                        fontFamily: context.isUrdu ? 'Noori' : null,
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: isPaid || due <= 0
+                            ? (isDarkMode ? const Color(0xFF065F46) : const Color(0xFFD1FAE5))
+                            : (isDarkMode ? const Color(0xFF7F1D1D) : const Color(0xFFFEE2E2)),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        isPaid
+                            ? (context.isUrdu ? 'ادا شدہ (روپے ${amountPaid.toStringAsFixed(0)})' : 'PAID (Rs. ${amountPaid.toStringAsFixed(0)})')
+                            : (due <= 0
+                                ? (context.isUrdu ? 'معاف شدہ (روپے 0)' : 'WAIVED (Rs. 0)')
+                                : (context.isUrdu ? 'غیر ادا شدہ (بقایا روپے ${due.toStringAsFixed(0)})' : 'UNPAID (Pending Rs. ${due.toStringAsFixed(0)})')),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: isPaid || due <= 0
+                              ? (isDarkMode ? const Color(0xFF34D399) : const Color(0xFF047857))
+                              : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFB91C1C)),
+                          fontFamily: context.isUrdu ? 'Noori' : null,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -4578,8 +4964,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required String leaveStatus,
     required bool isPtmToday,
     required bool needsReply,
-    required List<QueryDocumentSnapshot> allLogs,
-    required List<QueryDocumentSnapshot> monthLogs,
+    required List<dynamic> allLogs,
+    required List<dynamic> monthLogs,
     required List<Map<String, dynamic>> holidaysData,
     required MadrassaConfig config,
     required double due,
@@ -4602,7 +4988,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     
     // Check if PTM joined or claimed in selected date or anywhere in allLogs for the month
     final monthPtmJoined = allLogs.any((l) {
-      final map = l.data() as Map<String, dynamic>?;
+      final map = _logDocData(l);
       final studentLog = map?[widget.studentId] as Map<String, dynamic>?;
       if (studentLog == null) return false;
       final p = studentLog['ptm'];
@@ -4630,7 +5016,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final rawFeeSummary = _buildFeeSummaryCompact(due: due, totalSavings: totalSavings, baseFee: proRatedBaseFee, fee: fee);
     final feeSummary = InkWell(
-      onTap: () => setState(() => _selectedTab = 3),
+      onTap: () => _changeTab(3),
       borderRadius: BorderRadius.circular(20),
       child: Column(
         children: [
@@ -4656,6 +5042,15 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     final joinDateVal = _studentJoinDate;
     final isSelectedBeforeJoin = joinDateVal != null && DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day).isBefore(DateTime(joinDateVal.year, joinDateVal.month, joinDateVal.day));
 
+    final selectedDateIsHoliday = holidaysData.any((h) {
+      final rawDate = h['date'];
+      final hDate = rawDate is DateTime ? rawDate : _parseDateTime(rawDate);
+      return hDate.year == _selectedDate.year && hDate.month == _selectedDate.month && hDate.day == _selectedDate.day;
+    });
+    final nowZero = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final selectedZero = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+    final isSelectedPast = selectedZero.isBefore(nowZero);
+
     final statusPills = _buildStatusPills(
       currentStatus: selectedDateStatus,
       uniformOk: selectedDateUniform,
@@ -4665,15 +5060,18 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       isPtmToday: isPtmForSelectedDate,
       hasPtmStatus: selectedDatePtmRecorded,
       isBeforeJoin: isSelectedBeforeJoin,
+      isToday: isSelectedToday,
+      isHoliday: selectedDateIsHoliday,
+      isPast: isSelectedPast,
     );
 
     final rawMonthGainWidget = Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: ParentReportCard.accentColor.withOpacity(0.08),
+        color: ParentReportCard.accentColor.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: ParentReportCard.accentColor.withOpacity(0.2)),
+        border: Border.all(color: ParentReportCard.accentColor.withValues(alpha: 0.2)),
       ),
       child: Row(
         children: [
@@ -4721,90 +5119,87 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
 
     final noticesList = config.auditLog.where((l) => l['type'] == 'ptm_reschedule' && l['month'] == config.month && l['year'] == config.year).toList();
-    final hasRemindersOrNotices = isPtmForSelectedDate || selectedDateNeedsReply || (selectedDateStatus == 'absent' && selectedDateLeaveStatus == 'denied') || noticesList.isNotEmpty;
 
-    final newsWidget = Container(
-      width: double.infinity,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (isPtmForSelectedDate || selectedDateNeedsReply || (selectedDateStatus == 'absent' && selectedDateLeaveStatus == 'denied')) ...[
-            _SectionTitle(label: context.t('Reminders'), icon: Icons.warning_amber_rounded),
-            const SizedBox(height: 12),
-            _buildReminders(isPtmForSelectedDate, selectedDateNeedsReply, selectedDateLeaveStatus),
-            const SizedBox(height: 16),
-          ],
-          if (noticesList.isNotEmpty) ...[
-            _SectionTitle(label: context.t('Recent Notices'), icon: Icons.campaign_rounded),
-            const SizedBox(height: 12),
-            ...noticesList.map((log) {
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade50,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.amber.shade200),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.event_repeat_rounded, color: Colors.amber),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+    final remindersWidget = _buildReminders(
+      isPtm: isPtmForSelectedDate,
+      needsReply: selectedDateNeedsReply && !selectedDateReplied,
+      leaveStatus: selectedDateLeaveStatus,
+      holidaysData: holidaysData,
+      dateStr: selectedDateStr,
+    );
+
+    final bool hasActiveReminders = isPtmForSelectedDate ||
+        (selectedDateNeedsReply && !selectedDateReplied) ||
+        selectedDateLeaveStatus == 'denied' ||
+        holidaysData.any((h) {
+          final rawDate = h['date'];
+          final hDate = rawDate is DateTime ? rawDate : _parseDateTime(rawDate);
+          final nowZ = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+          final hZero = DateTime(hDate.year, hDate.month, hDate.day);
+          return hZero.isAtSameMomentAs(nowZ) ||
+              hZero.isAtSameMomentAs(nowZ.add(const Duration(days: 1))) ||
+              (hZero.isAfter(nowZ) && hZero.isBefore(nowZ.add(const Duration(days: 7))));
+        });
+
+    final newsWidget = (hasActiveReminders || noticesList.isNotEmpty)
+        ? Container(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (hasActiveReminders) ...[
+                  _SectionTitle(label: context.t('Reminders & Announcements'), icon: Icons.campaign_rounded),
+                  const SizedBox(height: 12),
+                  remindersWidget,
+                ],
+                if (noticesList.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _SectionTitle(label: context.t('Recent Notices'), icon: Icons.campaign_rounded),
+                  const SizedBox(height: 12),
+                  ...noticesList.map((log) {
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.shade50,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.amber.shade200),
+                      ),
+                      child: Row(
                         children: [
-                          Text(
-                            context.isUrdu ? 'پی ٹی ایم دوبارہ شیڈول: ${log['oldValue']} → ${log['newValue']}' : 'PTM Rescheduled: ${log['oldValue']} → ${log['newValue']}',
-                            style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900, fontFamily: context.isUrdu ? 'Noori' : null),
-                          ),
-                          Text(
-                            context.t('Parent Teacher Meeting date has been updated.'),
-                            style: TextStyle(fontSize: 12, color: Colors.amber.shade700, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                          const Icon(Icons.event_repeat_rounded, color: Colors.amber),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  context.isUrdu ? 'پی ٹی ایم دوبارہ شیڈول: ${log['oldValue']} → ${log['newValue']}' : 'PTM Rescheduled: ${log['oldValue']} → ${log['newValue']}',
+                                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amber.shade900, fontFamily: context.isUrdu ? 'Noori' : null),
+                                ),
+                                Text(
+                                  context.t('Parent Teacher Meeting date has been updated.'),
+                                  style: TextStyle(fontSize: 12, color: Colors.amber.shade700, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                ),
+                              ],
+                            ),
                           ),
                         ],
                       ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ],
-          if (!hasRemindersOrNotices)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: ParentReportCard.primaryColor.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: ParentReportCard.primaryColor.withOpacity(0.1)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.notifications_none_rounded, color: ParentReportCard.primaryColor, size: 20),
-                  const SizedBox(width: 12),
-                  Text(
-                    context.t("No announcements today."),
-                    style: TextStyle(
-                      color: ParentReportCard.primaryColor,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      fontFamily: context.isUrdu ? 'Noori' : null,
-                    ),
-                  ),
+                    );
+                  }),
                 ],
-              ),
+              ],
             ),
-        ],
-      ),
-    );
+          )
+        : const SizedBox.shrink();
 
     final quickActions = _buildQuickActions(
       context: context,
       selectedDateLog: selectedDateLog,
       currentStatus: selectedDateStatus,
       isPtmToday: isPtmForSelectedDate,
-      needsReply: selectedDateNeedsReply,
+      needsReply: selectedDateNeedsReply && !selectedDateReplied,
     );
 
     final embeddedQuranCard = _buildQuranProgressCard(
@@ -4818,19 +5213,19 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
 
     final embeddedCalendarCard = Container(
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: cardBg,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: borderColor),
         boxShadow: [
           BoxShadow(
-            color: isDarkMode ? Colors.black26 : Colors.black.withValues(alpha: 0.04),
+            color: Colors.black.withValues(alpha: isDarkMode ? 0.2 : 0.04),
             blurRadius: 16,
-            offset: const Offset(0, 6),
+            offset: const Offset(0, 4),
           ),
         ],
       ),
-      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -4839,7 +5234,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             children: [
               _SectionTitle(label: context.t('Attendance Calendar'), icon: Icons.calendar_month),
               TextButton.icon(
-                onPressed: () => setState(() => _selectedTab = 1),
+                onPressed: () => _changeTab(1),
                 icon: Icon(Icons.arrow_forward_rounded, size: 16, color: isDarkMode ? const Color(0xFF2DD4BF) : null),
                 label: Text(context.isUrdu ? 'تفصیل' : 'Details', style: TextStyle(color: isDarkMode ? const Color(0xFF2DD4BF) : null, fontFamily: context.isUrdu ? 'Noori' : null)),
               ),
@@ -4858,19 +5253,20 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             onDateSelected: (d) => setState(() => _selectedDate = d),
             holidaysData: holidaysData,
             joinDate: _studentJoinDate,
+            branchId: widget.branchId,
           ),
         ],
       ),
     );
 
     final clickableQuranCard = InkWell(
-      onTap: () => setState(() => _selectedTab = 2),
+      onTap: () => _changeTab(2),
       borderRadius: BorderRadius.circular(24),
       child: embeddedQuranCard,
     );
 
     final clickableFeeSummary = InkWell(
-      onTap: () => setState(() => _selectedTab = 3),
+      onTap: () => _changeTab(3),
       borderRadius: BorderRadius.circular(20),
       child: feeSummary,
     );
@@ -4886,6 +5282,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         hasPtmStatus: selectedDatePtmRecorded,
         isBeforeJoin: isSelectedBeforeJoin,
         forceSquare: true,
+        isToday: isSelectedToday,
+        isHoliday: selectedDateIsHoliday,
+        isPast: isSelectedPast,
       );
 
       final dailyDetailsWidget = _buildDailyDetailsCard(allLogs, holidaysData, config);
@@ -4894,10 +5293,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           heroBanner,
-          if (hasRemindersOrNotices) ...[
-            const SizedBox(height: 16),
-            newsWidget,
-          ],
+          const SizedBox(height: 16),
+          newsWidget,
           const SizedBox(height: 20),
           nearingBanner,
           if (congratsCard != null) congratsCard,
@@ -4991,6 +5388,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         hasPtmStatus: selectedDatePtmRecorded,
         isBeforeJoin: isSelectedBeforeJoin,
         forceSquare: true,
+        isToday: isSelectedToday,
+        isHoliday: selectedDateIsHoliday,
+        isPast: isSelectedPast,
       );
 
       final dailyDetailsWidget = _buildDailyDetailsCard(allLogs, holidaysData, config);
@@ -4999,10 +5399,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           heroBanner,
-          if (hasRemindersOrNotices) ...[
-            const SizedBox(height: 16),
-            newsWidget,
-          ],
+          const SizedBox(height: 16),
+          newsWidget,
           const SizedBox(height: 20),
           nearingBanner,
           if (congratsCard != null) congratsCard,
@@ -5045,7 +5443,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         children: [
           heroBanner,
           const SizedBox(height: 16),
-          if (hasRemindersOrNotices) newsWidget,
+          newsWidget,
           const SizedBox(height: 12),
           statusPills,
           const SizedBox(height: 16),
@@ -5069,7 +5467,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   Widget _buildCombinedProgressTab({
     required bool isDesktop,
     required bool isTablet,
-    required List<QueryDocumentSnapshot> allLogs,
+    required List<dynamic> allLogs,
     required List<Map<String, dynamic>> holidaysData,
     required MadrassaConfig config,
     required MadrassaConfig displayConfig,
@@ -5329,6 +5727,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           selectedDate: _selectedDate,
           holidaysData: holidaysData,
           joinDate: _studentJoinDate,
+          branchId: widget.branchId,
           onDateSelected: (date) {
             setState(() {
               _selectedDate = date;
@@ -5478,7 +5877,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required Widget savingsGrid,
     required Widget visualFlowCard,
     required Map<String, dynamic> fee,
-    required List<QueryDocumentSnapshot> monthLogs,
+    required List<dynamic> monthLogs,
     required List<DateTime> holidays,
     required MadrassaConfig displayConfig,
   }) {
@@ -5589,7 +5988,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   }
 
   Widget _buildDailySavingsLedger({
-    required List<QueryDocumentSnapshot> monthLogs,
+    required List<dynamic> monthLogs,
     required List<DateTime> holidays,
     required MadrassaConfig displayConfig,
   }) {
@@ -5604,7 +6003,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       final isHoliday = holidays.any((h) => h.year == date.year && h.month == date.month && h.day == date.day);
       if (isHoliday) continue;
 
-      final joinDateVal = studentData['joinDate'] != null ? _parseDateTime(studentData['joinDate']) : null;
+      final joinDateVal = MadrassaFeeLogic.parseStudentJoinDate(studentData);
       if (joinDateVal != null) {
         final dateOnly = DateTime(date.year, date.month, date.day);
         final joinOnly = DateTime(joinDateVal.year, joinDateVal.month, joinDateVal.day);
@@ -5615,16 +6014,26 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
       final dateStr = DateFormat('yyyy-MM-dd').format(date);
       
-      QueryDocumentSnapshot? doc;
+      dynamic doc;
       for (final l in monthLogs) {
-        if (l.id == dateStr) {
+        if (_logDocId(l) == dateStr) {
           doc = l;
           break;
         }
       }
 
-      final logData = doc?.data() as Map<String, dynamic>?;
-      final sLog = logData?[widget.studentId] as Map<String, dynamic>?;
+      final logData = _logDocData(doc);
+      final cached = MadrassaLocalStorage.getDailyLogCached(widget.branchId, dateStr);
+      final cachedLog = (cached != null && cached[widget.studentId] is Map)
+          ? Map<String, dynamic>.from(cached[widget.studentId] as Map)
+          : <String, dynamic>{};
+      final firestoreLog = (logData != null && logData[widget.studentId] is Map)
+          ? Map<String, dynamic>.from(logData[widget.studentId] as Map)
+          : <String, dynamic>{};
+
+      final sLog = (firestoreLog.isNotEmpty || cachedLog.isNotEmpty)
+          ? <String, dynamic>{...firestoreLog, ...cachedLog}
+          : null;
 
       final now = DateTime.now();
       final todayOnly = DateTime(now.year, now.month, now.day);
@@ -5873,7 +6282,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required String status,
     required String? rejoinRequestStatus,
     required String? rejoinReason,
-    required Timestamp? rejoinDate,
+    required DateTime? rejoinDate,
     required List<Map<String, dynamic>> auditList,
   }) {
     final identityHero = _buildHeroBanner(
@@ -6295,11 +6704,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required String leaveStatus,
     required bool isPtmToday,
     required bool needsReply,
-    required List<QueryDocumentSnapshot> allLogs,
+    required List<dynamic> allLogs,
     required List<Map<String, dynamic>> holidaysData,
     required MadrassaConfig config,
     required MadrassaConfig displayConfig,
-    required List<QueryDocumentSnapshot> monthLogs,
+    required List<dynamic> monthLogs,
     required List<DateTime> holidays,
     required Map<String, dynamic> fee,
     required int currentTotalLines,
@@ -6310,7 +6719,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required String status,
     required String? rejoinRequestStatus,
     required String? rejoinReason,
-    required Timestamp? rejoinDate,
+    required DateTime? rejoinDate,
     required List<Map<String, dynamic>> auditList,
   }) {
     // ── Shared computed data (Student Management Estimation Logic) ──
@@ -6325,14 +6734,14 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     // Month gain calculation
     final selectedMonthStart = DateTime(_selectedYear, _selectedMonth, 1);
     final monthKeyStr = DateFormat('yyyy-MM').format(DateTime(_selectedYear, _selectedMonth));
-    final monthLogsFiltered = allLogs.where((l) => l.id.startsWith(monthKeyStr)).toList();
+    final monthLogsFiltered = allLogs.where((l) => _logDocId(l).startsWith(monthKeyStr)).toList();
 
     int prevMonthLines = -1;
-    final sortedAllDescLogs = [...allLogs]..sort((a, b) => b.id.compareTo(a.id));
+    final sortedAllDescLogs = [...allLogs]..sort((a, b) => _logDocId(b).compareTo(_logDocId(a)));
     for (var logDoc in sortedAllDescLogs) {
-      final logDate = DateTime.tryParse(logDoc.id);
+      final logDate = DateTime.tryParse(_logDocId(logDoc));
       if (logDate != null && logDate.isBefore(selectedMonthStart)) {
-        final logMap = logDoc.data() as Map<String, dynamic>?;
+        final logMap = _logDocData(logDoc);
         final lines = (logMap?[widget.studentId]?['currentLines'] as num?)?.toInt() ?? int.tryParse(logMap?[widget.studentId]?['currentLines']?.toString() ?? '');
         if (lines != null && lines > 0) {
           prevMonthLines = lines;
@@ -6345,7 +6754,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     if (monthLogsFiltered.isNotEmpty) {
       int monthSabakSum = 0;
       for (final doc in monthLogsFiltered) {
-        final logMap = doc.data() as Map<String, dynamic>?;
+        final logMap = _logDocData(doc);
         final sLog = logMap?[widget.studentId] as Map<String, dynamic>?;
         if (sLog != null) {
           final sLines = (sLog['sabakLines'] as num?)?.toInt() ?? int.tryParse(sLog['sabakLines']?.toString() ?? '');
@@ -6360,12 +6769,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         }
       }
 
-      final sortedMonthAsc = [...monthLogsFiltered]..sort((a, b) => a.id.compareTo(b.id));
+      final sortedMonthAsc = [...monthLogsFiltered]..sort((a, b) => _logDocId(a).compareTo(_logDocId(b)));
 
-      final firstMap = sortedMonthAsc.first.data() as Map<String, dynamic>?;
+      final firstMap = _logDocData(sortedMonthAsc.first);
       final firstLogLines = (firstMap?[widget.studentId]?['currentLines'] as num?)?.toInt() ?? int.tryParse(firstMap?[widget.studentId]?['currentLines']?.toString() ?? '');
 
-      final lastMap = sortedMonthAsc.last.data() as Map<String, dynamic>?;
+      final lastMap = _logDocData(sortedMonthAsc.last);
       final lastLogLines = (lastMap?[widget.studentId]?['currentLines'] as num?)?.toInt() ?? int.tryParse(lastMap?[widget.studentId]?['currentLines']?.toString() ?? '');
 
       final int studentCurrentLines = (studentData['currentLines'] as num?)?.toInt() ?? (int.tryParse(studentData['currentLines']?.toString() ?? '') ?? 0);
@@ -6391,13 +6800,13 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     if (isHifzCompleted && !_isCongratsDismissedForCurrentMonth()) {
       DateTime completionDate = DateTime.now();
       if (studentData['hifzCompletionDate'] != null) {
-        completionDate = (studentData['hifzCompletionDate'] as Timestamp).toDate();
+        completionDate = _parseDateTime(studentData['hifzCompletionDate']);
       } else {
         DateTime? earliest;
         for (var logDoc in allLogs) {
-          final d = DateTime.tryParse(logDoc.id);
+          final d = DateTime.tryParse(_logDocId(logDoc));
           if (d != null) {
-            final log = logDoc.data() as Map<String, dynamic>?;
+            final log = _logDocData(logDoc);
             final lines = (log?[widget.studentId]?['currentLines'] as num?)?.toInt() ?? int.tryParse(log?[widget.studentId]?['currentLines']?.toString() ?? '');
             if (lines != null && lines >= 8640 && (earliest == null || d.isBefore(earliest))) { earliest = d; }
           }
@@ -6422,34 +6831,202 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     final proRatedBaseFee = (fee['proRatedBaseFee'] as num?)?.toDouble() ?? 0.0;
     final totalSavings = (fee['totalSavings'] as num?)?.toDouble() ?? 0.0;
     final activeWorkingDays = (fee['activeWorkingDays'] as num?)?.toInt() ?? 0;
-    final joinDateVal = studentData['joinDate'] != null ? _parseDateTime(studentData['joinDate']) : null;
+    final joinDateVal = MadrassaFeeLogic.parseStudentJoinDate(studentData);
     final isProRated = proRatedBaseFee < displayConfig.baseFee;
     final joinDateStr = joinDateVal != null
         ? (context.isUrdu ? DateFormat('dd-MM-yyyy').format(joinDateVal) : DateFormat('dd MMMM yyyy').format(joinDateVal))
         : '';
 
+    // Payment status for this month
+    final currentMonthPayment = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, _selectedYear, _selectedMonth, widget.studentId);
+    final currentPaymentStatus = currentMonthPayment?['status']?.toString() ?? (due <= 0 ? 'paid' : 'unpaid');
+    final currentAmountPaid = (currentMonthPayment?['amountPaid'] as num?)?.toDouble() ?? (currentPaymentStatus == 'paid' ? due : 0.0);
+    final isCurrentMonthPaid = currentPaymentStatus == 'paid';
+
+    // Calculate total historical pending unpaid dues from student join date
+    double totalHistoricalPendingDues = 0.0;
+    int unpaidMonthsCount = 0;
+    if (joinDateVal != null && displayConfig.enableFees) {
+      final startMonth = DateTime(joinDateVal.year, joinDateVal.month, 1);
+      final endMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+      DateTime iter = DateTime(endMonth.year, endMonth.month, 1);
+      while (!iter.isBefore(startMonth)) {
+        final y = iter.year;
+        final m = iter.month;
+        final pRec = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, y, m, widget.studentId);
+        final mConf = displayConfig.copyWith(year: y, month: m);
+        final mWorkingDays = MadrassaFeeLogic.getWorkingDaysCount(y, m, holidays);
+        final mLogs = MadrassaLocalStorage.getLogsForMonthCached(widget.branchId, y, m);
+        final mFee = MadrassaFeeLogic.calculateStudentFee(
+          studentId: widget.studentId,
+          studentData: studentData,
+          logs: mLogs,
+          config: mConf,
+          totalWorkingDays: mWorkingDays,
+          holidays: holidays,
+        );
+        final mDue = ((mFee['amountDue'] as num?) ?? 0.0).toDouble();
+        final mStatus = pRec?['status']?.toString() ?? (mDue <= 0 ? 'paid' : 'unpaid');
+        final activeDays = (mFee['activeWorkingDays'] as num?)?.toInt() ?? 0;
+        if (activeDays > 0 && mStatus != 'paid' && mDue > 0) {
+          totalHistoricalPendingDues += mDue;
+          unpaidMonthsCount++;
+        }
+        if (iter.month == 1) {
+          iter = DateTime(iter.year - 1, 12, 1);
+        } else {
+          iter = DateTime(iter.year, iter.month - 1, 1);
+        }
+      }
+    }
+
     // Fee widgets (for tabs 0 and 3)
     Widget buildFeeMonthSelector() => _buildMonthSelector();
 
-    Widget buildAmountDueCard() => Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: due > 0 ? (isDarkMode ? const Color(0xFF3B1219) : ParentReportCard.errorColor.withOpacity(0.08)) : (isDarkMode ? const Color(0xFF0F3E2E) : ParentReportCard.successColor.withOpacity(0.08)),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: due > 0 ? (isDarkMode ? const Color(0xFFF87171).withOpacity(0.3) : ParentReportCard.errorColor.withOpacity(0.2)) : (isDarkMode ? const Color(0xFF4ADE80).withOpacity(0.3) : ParentReportCard.successColor.withOpacity(0.2))),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(context.t('Amount Due'), style: TextStyle(color: due > 0 ? (isDarkMode ? const Color(0xFFF87171) : ParentReportCard.errorColor) : (isDarkMode ? const Color(0xFF4ADE80) : ParentReportCard.successColor), fontWeight: FontWeight.bold, fontSize: 13, fontFamily: context.isUrdu ? 'Noori' : null)),
-            const SizedBox(height: 4),
-            Text(_formatMonthYear(DateTime(_selectedYear, _selectedMonth)), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null)),
-          ]),
-          Text(context.isUrdu ? 'روپے ${due.toStringAsFixed(0)}' : 'Rs. ${due.toStringAsFixed(0)}', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: due > 0 ? (isDarkMode ? const Color(0xFFF87171) : ParentReportCard.errorColor) : (isDarkMode ? const Color(0xFF4ADE80) : ParentReportCard.successColor), fontFamily: context.isUrdu ? 'Noori' : null)),
+    Widget buildAmountDueCard() => Column(
+      children: [
+        if (totalHistoricalPendingDues > 0) ...[
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: isDarkMode ? const Color(0xFF451A03).withValues(alpha: 0.6) : Colors.amber.shade50,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: isDarkMode ? const Color(0xFFB45309) : Colors.amber.shade400, width: 1.2),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: isDarkMode ? const Color(0xFFFBBF24) : Colors.amber.shade900, size: 22),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        context.isUrdu ? 'کل بقایا واجب الادا فیس' : 'Total Outstanding Pending Dues',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                          color: isDarkMode ? const Color(0xFFFBBF24) : Colors.amber.shade900,
+                          fontFamily: context.isUrdu ? 'Noori' : null,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        context.isUrdu
+                            ? 'روپے ${totalHistoricalPendingDues.toStringAsFixed(0)} ($unpaidMonthsCount غیر ادا شدہ ماہ)'
+                            : 'Rs. ${totalHistoricalPendingDues.toStringAsFixed(0)} ($unpaidMonthsCount Unpaid Month(s))',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: isDarkMode ? Colors.amber.shade200 : Colors.amber.shade900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
-      ),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(22),
+          decoration: BoxDecoration(
+            color: isCurrentMonthPaid
+                ? (isDarkMode ? const Color(0xFF0F3E2E) : ParentReportCard.successColor.withValues(alpha: 0.08))
+                : (due > 0
+                    ? (isDarkMode ? const Color(0xFF3B1219) : ParentReportCard.errorColor.withValues(alpha: 0.08))
+                    : (isDarkMode ? const Color(0xFF0F3E2E) : ParentReportCard.successColor.withValues(alpha: 0.08))),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: isCurrentMonthPaid
+                  ? (isDarkMode ? const Color(0xFF4ADE80).withValues(alpha: 0.4) : ParentReportCard.successColor.withValues(alpha: 0.3))
+                  : (due > 0
+                      ? (isDarkMode ? const Color(0xFFF87171).withValues(alpha: 0.3) : ParentReportCard.errorColor.withValues(alpha: 0.2))
+                      : (isDarkMode ? const Color(0xFF4ADE80).withValues(alpha: 0.3) : ParentReportCard.successColor.withValues(alpha: 0.2))),
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                  context.t('Amount Due'),
+                  style: TextStyle(
+                    color: isCurrentMonthPaid
+                        ? (isDarkMode ? const Color(0xFF4ADE80) : ParentReportCard.successColor)
+                        : (due > 0 ? (isDarkMode ? const Color(0xFFF87171) : ParentReportCard.errorColor) : (isDarkMode ? const Color(0xFF4ADE80) : ParentReportCard.successColor)),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                    fontFamily: context.isUrdu ? 'Noori' : null,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(_formatMonthYear(DateTime(_selectedYear, _selectedMonth)), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null)),
+              ]),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: isCurrentMonthPaid
+                          ? (isDarkMode ? const Color(0xFF065F46) : const Color(0xFFD1FAE5))
+                          : (due <= 0
+                              ? (isDarkMode ? const Color(0xFF065F46) : const Color(0xFFD1FAE5))
+                              : (isDarkMode ? const Color(0xFF7F1D1D) : const Color(0xFFFEE2E2))),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isCurrentMonthPaid || due <= 0 ? Icons.check_circle_rounded : Icons.pending_actions_rounded,
+                          size: 13,
+                          color: isCurrentMonthPaid || due <= 0
+                              ? (isDarkMode ? const Color(0xFF34D399) : const Color(0xFF047857))
+                              : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFB91C1C)),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          isCurrentMonthPaid
+                              ? (context.isUrdu ? 'ادا شدہ (PAID)' : 'PAID')
+                              : (due <= 0 ? (context.isUrdu ? 'معاف شدہ' : 'WAIVED') : (context.isUrdu ? 'غیر ادا شدہ (UNPAID)' : 'UNPAID')),
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: isCurrentMonthPaid || due <= 0
+                                ? (isDarkMode ? const Color(0xFF34D399) : const Color(0xFF047857))
+                                : (isDarkMode ? const Color(0xFFF87171) : const Color(0xFFB91C1C)),
+                            fontFamily: context.isUrdu ? 'Noori' : null,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    isCurrentMonthPaid
+                        ? (context.isUrdu ? 'روپے ${currentAmountPaid.toStringAsFixed(0)}' : 'Rs. ${currentAmountPaid.toStringAsFixed(0)}')
+                        : (context.isUrdu ? 'روپے ${due.toStringAsFixed(0)}' : 'Rs. ${due.toStringAsFixed(0)}'),
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: isCurrentMonthPaid || due <= 0
+                          ? (isDarkMode ? const Color(0xFF4ADE80) : ParentReportCard.successColor)
+                          : (isDarkMode ? const Color(0xFFF87171) : ParentReportCard.errorColor),
+                      fontFamily: context.isUrdu ? 'Noori' : null,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
     );
 
     Widget buildSavingsTile(String label, double amount, Color color, IconData icon) {
@@ -6609,6 +7186,89 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           nearingBanner: nearingBanner,
         );
       case 1:
+        // Tab 1: Attendance with Per-Tab Data Filter
+        final ptmDate1 = displayConfig.getPtmDate();
+        final daysInMonth1 = DateTime(_selectedYear, _selectedMonth + 1, 0).day;
+        int presentCount1 = 0;
+        int absentCount1 = 0;
+        int leaveCount1 = 0;
+        int holidayCount1 = 0;
+        final List<Map<String, dynamic>> monthDaysList1 = [];
+
+        for (int d = 1; d <= daysInMonth1; d++) {
+          final date = DateTime(_selectedYear, _selectedMonth, d);
+          final dateStr = DateFormat('yyyy-MM-dd').format(date);
+          final isPtm = date.year == ptmDate1.year && date.month == ptmDate1.month && date.day == ptmDate1.day;
+          final isPast = date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day));
+          final isToday = d == DateTime.now().day && _selectedMonth == DateTime.now().month && _selectedYear == DateTime.now().year;
+          final isSunday = date.weekday == DateTime.sunday;
+          final isBeforeJoin = _studentJoinDate != null && DateTime(date.year, date.month, date.day).isBefore(DateTime(_studentJoinDate!.year, _studentJoinDate!.month, _studentJoinDate!.day));
+
+          Map<String, dynamic>? holidayDoc;
+          for (final h in holidaysData) {
+            final hDate = h['date'] as DateTime?;
+            if (hDate != null && hDate.year == date.year && hDate.month == date.month && hDate.day == date.day) {
+              holidayDoc = h;
+              break;
+            }
+          }
+          final islamicEvent = IslamicCalendarHelper.getIslamicEvent(date);
+          final isIslamicHoliday = islamicEvent != null && islamicEvent.isOfficialHoliday;
+          final isHoliday = holidayDoc != null || isIslamicHoliday;
+
+          Map<String, dynamic>? statusData;
+          try {
+            final doc = allLogs.firstWhere((l) => _logDocId(l) == dateStr, orElse: () => null);
+            if (doc != null) {
+              final rawData = _logDocData(doc);
+              if (rawData != null && rawData[widget.studentId] is Map) {
+                statusData = Map<String, dynamic>.from(rawData[widget.studentId] as Map);
+              }
+            }
+          } catch (_) {}
+
+          final att = statusData?['attendance']?.toString();
+          String statusType = 'unmarked';
+          if (isBeforeJoin) {
+            statusType = 'before_join';
+          } else if (isHoliday) {
+            statusType = 'holiday';
+            holidayCount1++;
+          } else if (att == 'present') {
+            statusType = 'present';
+            presentCount1++;
+          } else if (att == 'leave' || att == 'leave_requested') {
+            statusType = 'leave';
+            leaveCount1++;
+          } else if (att == 'absent' || (isPast && !isSunday)) {
+            statusType = 'absent';
+            absentCount1++;
+          } else if (isSunday) {
+            statusType = 'sunday';
+          }
+
+          monthDaysList1.add({
+            'day': d,
+            'date': date,
+            'dateStr': dateStr,
+            'statusType': statusType,
+            'statusData': statusData,
+            'isPtm': isPtm,
+            'isToday': isToday,
+            'holidayName': holidayDoc != null ? (holidayDoc['name']?.toString() ?? 'Holiday') : (islamicEvent != null ? (context.isUrdu ? islamicEvent.titleUr : islamicEvent.titleEn) : null),
+          });
+        }
+
+        final filteredDaysList1 = monthDaysList1.where((m) {
+          if (_attendanceFilter == 'all') return true;
+          if (_attendanceFilter == 'present') return m['statusType'] == 'present';
+          if (_attendanceFilter == 'absent') return m['statusType'] == 'absent';
+          if (_attendanceFilter == 'leave') return m['statusType'] == 'leave';
+          if (_attendanceFilter == 'ptm') return m['isPtm'] == true;
+          if (_attendanceFilter == 'holidays') return m['statusType'] == 'holiday';
+          return true;
+        }).toList();
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -6630,20 +7290,160 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            _AttendanceCalendar(
-              studentId: widget.studentId,
-              logs: allLogs,
-              year: _selectedYear,
-              month: _selectedMonth,
-              config: config,
-              selectedDate: _selectedDate,
-              onDateSelected: (d) => setState(() => _selectedDate = d),
-              holidaysData: holidaysData,
-              joinDate: _studentJoinDate,
+            const SizedBox(height: 14),
+            // Filter Bar
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildTabFilterChip('all', context.isUrdu ? 'مکمل کیلنڈر' : 'All Calendar', _attendanceFilter == 'all', (val) => setState(() => _attendanceFilter = val)),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('present', context.isUrdu ? 'حاضر ($presentCount1)' : 'Present ($presentCount1)', _attendanceFilter == 'present', (val) => setState(() => _attendanceFilter = val), activeColor: ParentReportCard.successColor),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('absent', context.isUrdu ? 'غیر حاضر ($absentCount1)' : 'Absent ($absentCount1)', _attendanceFilter == 'absent', (val) => setState(() => _attendanceFilter = val), activeColor: ParentReportCard.errorColor),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('leave', context.isUrdu ? 'رخصت ($leaveCount1)' : 'Leave ($leaveCount1)', _attendanceFilter == 'leave', (val) => setState(() => _attendanceFilter = val), activeColor: Colors.orange),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('ptm', context.isUrdu ? 'پی ٹی ایم' : 'PTM', _attendanceFilter == 'ptm', (val) => setState(() => _attendanceFilter = val), activeColor: const Color(0xFF0F6C5A)),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('holidays', context.isUrdu ? 'تعطیلات ($holidayCount1)' : 'Holidays ($holidayCount1)', _attendanceFilter == 'holidays', (val) => setState(() => _attendanceFilter = val), activeColor: const Color(0xFF0D9488)),
+                ],
+              ),
             ),
             const SizedBox(height: 16),
-            _buildDailyDetailsCard(allLogs, holidaysData, config),
+            if (_attendanceFilter == 'all') ...[
+              _AttendanceCalendar(
+                studentId: widget.studentId,
+                logs: allLogs,
+                year: _selectedYear,
+                month: _selectedMonth,
+                config: config,
+                selectedDate: _selectedDate,
+                onDateSelected: (d) => setState(() => _selectedDate = d),
+                holidaysData: holidaysData,
+                joinDate: _studentJoinDate,
+              ),
+              const SizedBox(height: 16),
+              _buildDailyDetailsCard(allLogs, holidaysData, config),
+            ] else ...[
+              if (filteredDaysList1.isEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(32),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: Column(
+                    children: [
+                      Icon(Icons.filter_list_off_rounded, size: 48, color: textMuted),
+                      const SizedBox(height: 12),
+                      Text(
+                        context.isUrdu ? 'اس فلٹر کے تحت کوئی دن نہیں ملا' : 'No records match this filter for this month.',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: textMuted, fontFamily: context.isUrdu ? 'Noori' : null),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: filteredDaysList1.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
+                  itemBuilder: (ctx, i) {
+                    final item = filteredDaysList1[i];
+                    final date = item['date'] as DateTime;
+                    final isSelected = date.year == _selectedDate.year && date.month == _selectedDate.month && date.day == _selectedDate.day;
+                    final statusType = item['statusType'] as String;
+                    final isPtm = item['isPtm'] == true;
+                    final holidayName = item['holidayName'] as String?;
+
+                    Color badgeColor;
+                    String badgeText;
+                    IconData badgeIcon;
+                    if (statusType == 'present') {
+                      badgeColor = ParentReportCard.successColor;
+                      badgeText = context.isUrdu ? 'حاضر' : 'Present';
+                      badgeIcon = Icons.check_circle_rounded;
+                    } else if (statusType == 'leave') {
+                      badgeColor = Colors.orange;
+                      badgeText = context.isUrdu ? 'رخصت' : 'Leave';
+                      badgeIcon = Icons.event_busy_rounded;
+                    } else if (statusType == 'holiday') {
+                      badgeColor = const Color(0xFF0D9488);
+                      badgeText = holidayName ?? (context.isUrdu ? 'تعطیل' : 'Holiday');
+                      badgeIcon = Icons.beach_access_rounded;
+                    } else if (isPtm) {
+                      badgeColor = const Color(0xFF0F6C5A);
+                      badgeText = context.isUrdu ? 'پی ٹی ایم میٹنگ' : 'PTM Meeting';
+                      badgeIcon = Icons.people_rounded;
+                    } else {
+                      badgeColor = ParentReportCard.errorColor;
+                      badgeText = context.isUrdu ? 'غیر حاضر' : 'Absent';
+                      badgeIcon = Icons.cancel_rounded;
+                    }
+
+                    return InkWell(
+                      onTap: () {
+                        setState(() {
+                          _selectedDate = date;
+                          _attendanceFilter = 'all';
+                        });
+                      },
+                      borderRadius: BorderRadius.circular(16),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: cardBg,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: isSelected ? ParentReportCard.primaryColor : badgeColor.withValues(alpha: isDarkMode ? 0.35 : 0.25), width: isSelected ? 2 : 1),
+                          boxShadow: [BoxShadow(color: isDarkMode ? Colors.black26 : Colors.black.withValues(alpha: 0.02), blurRadius: 6, offset: const Offset(0, 2))],
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(color: badgeColor.withValues(alpha: isDarkMode ? 0.2 : 0.1), shape: BoxShape.circle),
+                              child: Icon(badgeIcon, color: badgeColor, size: 20),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    DateFormat(context.isUrdu ? 'd MMMM yyyy' : 'EEEE, d MMMM yyyy').format(date),
+                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null),
+                                  ),
+                                  Text(
+                                    '🌙 ${IslamicCalendarHelper.fromGregorian(date).format(isUrdu: context.isUrdu)}',
+                                    style: const TextStyle(fontSize: 11, color: Color(0xFFD4AF37), fontWeight: FontWeight.bold),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: badgeColor.withValues(alpha: isDarkMode ? 0.2 : 0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                badgeText,
+                                style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: badgeColor, fontFamily: context.isUrdu ? 'Noori' : null),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textMuted),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+            ],
           ],
         );
       case 2:
@@ -6651,6 +7451,21 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             buildBackBar(context.t('Quran Majeed Hifz Progress')),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildTabFilterChip('all', context.isUrdu ? 'تمام پیش رفت' : 'Overall Progress', _quranProgressFilter == 'all', (val) => setState(() => _quranProgressFilter = val)),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('sabak', context.isUrdu ? 'سبق ریکارڈز' : 'Sabak Progress', _quranProgressFilter == 'sabak', (val) => setState(() => _quranProgressFilter = val), activeColor: ParentReportCard.primaryColor),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('sabki', context.isUrdu ? 'سبقی دہرائی' : 'Sabki Revision', _quranProgressFilter == 'sabki', (val) => setState(() => _quranProgressFilter = val), activeColor: const Color(0xFFED6C02)),
+                  const SizedBox(width: 8),
+                  _buildTabFilterChip('manzil', context.isUrdu ? 'منزل دہرائی' : 'Manzil Revision', _quranProgressFilter == 'manzil', (val) => setState(() => _quranProgressFilter = val), activeColor: const Color(0xFF4C4DDC)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
             _buildQuranProgressCard(
               currentTotalLines: currentTotalLines,
               monthGain: monthGain,
@@ -6780,7 +7595,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   }
 
   Widget _buildRequestsTab({
-    required List<QueryDocumentSnapshot> allLogs,
+    required List<dynamic> allLogs,
     required bool isParentView,
     required String studentId,
     required String branchId,
@@ -6788,8 +7603,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     final List<Map<String, dynamic>> requestsList = [];
 
     for (final logDoc in allLogs) {
-      final dateStr = logDoc.id;
-      final rawData = logDoc.data() as Map<String, dynamic>?;
+      final dateStr = _logDocId(logDoc);
+      final rawData = _logDocData(logDoc);
       if (rawData == null) continue;
 
       rawData.forEach((stId, val) {
@@ -7047,40 +7862,47 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
   }
 
+  Widget _buildTabFilterChip(String filterVal, String label, bool isSelected, ValueChanged<String> onSelected, {Color? activeColor}) {
+    final effectiveColor = activeColor ?? (isDarkMode ? const Color(0xFF0F6C5A) : ParentReportCard.primaryColor);
+    return ChoiceChip(
+      selected: isSelected,
+      selectedColor: effectiveColor,
+      backgroundColor: isDarkMode ? const Color(0xFF1E293B) : Colors.white,
+      side: BorderSide(color: isSelected ? effectiveColor : (isDarkMode ? borderColor : Colors.grey.shade300)),
+      label: Text(
+        label,
+        style: TextStyle(
+          color: isSelected ? Colors.white : (isDarkMode ? const Color(0xFFE2E8F0) : textPrimary),
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+          fontFamily: context.isUrdu ? 'Noori' : null,
+        ),
+      ),
+      onSelected: (_) => onSelected(filterVal),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .doc(widget.studentId)
-          .snapshots(),
-      builder: (context, studentSnap) {
-        // Update live student data when stream emits
-        if (studentSnap.hasData && studentSnap.data != null && studentSnap.data!.exists) {
-          final data = studentSnap.data!.data() as Map<String, dynamic>?;
-          if (data != null) {
-            _liveStudentData = data;
-          }
-        }
+    // 1. Get live cached student data from local Hive
+    final cachedStudent = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId);
+    if (cachedStudent != null) {
+      _liveStudentData = cachedStudent;
+    }
 
-        return StreamBuilder<QuerySnapshot>(
+    return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _logsStream,
       builder: (context, logSnap) {
-        debugPrint("[Diagnostic] logSnap connectionState: ${logSnap.connectionState}, hasData: ${logSnap.hasData}, hasError: ${logSnap.hasError}, error: ${logSnap.error}");
         if (logSnap.hasError) return _ErrorView('Logs Error: ${logSnap.error}');
         
         return StreamBuilder<MadrassaConfig>(
           stream: _configStream,
           builder: (context, configSnap) {
-            debugPrint("[Diagnostic] configSnap connectionState: ${configSnap.connectionState}, hasData: ${configSnap.hasData}, hasError: ${configSnap.hasError}, error: ${configSnap.error}");
             if (configSnap.hasError) return _ErrorView('Config Error: ${configSnap.error}');
             
-            return StreamBuilder<QuerySnapshot>(
+            return StreamBuilder<List<Map<String, dynamic>>>(
               stream: _holidaysStream,
               builder: (context, holidaySnap) {
-                debugPrint("[Diagnostic] holidaySnap connectionState: ${holidaySnap.connectionState}, hasData: ${holidaySnap.hasData}, hasError: ${holidaySnap.hasError}, error: ${holidaySnap.error}");
                 if (holidaySnap.hasError) return _ErrorView('Holidays Error: ${holidaySnap.error}');
 
                 if (logSnap.connectionState == ConnectionState.waiting ||
@@ -7097,14 +7919,16 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 }
 
                 final now = DateTime.now();
-                final allLogs = logSnap.data?.docs ?? [];
+                final allLogs = logSnap.data ?? [];
                 final config = configSnap.data ?? MadrassaConfig(id: 'current', year: now.year, month: now.month);
                 
                 final currentYear = _selectedYear;
                 final currentMonth = _selectedMonth;
-                final monthKey = DateFormat('yyyy-MM').format(DateTime(currentYear, currentMonth));
-                final workingDays = MadrassaFeeLogic.getWorkingDaysCount(currentYear, currentMonth);
-                final monthLogs = allLogs.where((l) => l.id.startsWith(monthKey)).toList();
+                final holidays = (holidaySnap.data ?? [])
+                    .map((d) => _parseDateTime(d['date']))
+                    .toList();
+                final workingDays = MadrassaFeeLogic.getWorkingDaysCount(currentYear, currentMonth, holidays);
+                final monthLogs = allLogs;
 
                 final isFeeEnabled = (config.enableFees != false) && LocalStorageService.isMadrassaFeeEnabled(widget.branchId);
 
@@ -7121,10 +7945,6 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                   enableFees: isFeeEnabled,
                   auditLog: config.auditLog,
                 );
-
-                final holidays = (holidaySnap.data!.docs)
-                    .map((d) => (d['date'] as Timestamp).toDate())
-                    .toList();
 
                 final fee = MadrassaFeeLogic.calculateStudentFee(
                   studentId: widget.studentId,
@@ -7146,38 +7966,62 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 final status = studentData['status'] ?? 'active';
                 final rejoinRequestStatus = studentData['rejoinRequestStatus'];
                 final rejoinReason = studentData['rejoinRequestReason'];
-                final rejoinDate = studentData['rejoinRequestDate'] as Timestamp?;
+                final rejoinDate = studentData['rejoinRequestDate'] != null ? _parseDateTime(studentData['rejoinRequestDate']) : null;
 
                 final todayStr = DateFormat('yyyy-MM-dd').format(now);
-                Map<String, dynamic> todaySLog = {};
+                final cachedToday = MadrassaLocalStorage.getDailyLogCached(widget.branchId, todayStr);
+                final cachedTodayLog = (cachedToday != null && cachedToday[widget.studentId] is Map)
+                    ? Map<String, dynamic>.from(cachedToday[widget.studentId] as Map)
+                    : <String, dynamic>{};
+
+                Map<String, dynamic> firestoreTodayLog = {};
                 try {
-                  final todayDoc = allLogs.firstWhere((l) => l.id == todayStr);
-                  final tData = todayDoc.data() as Map<String, dynamic>?;
-                  todaySLog = (tData?[widget.studentId] is Map ? tData![widget.studentId] as Map<String, dynamic> : {});
+                  final todayDoc = allLogs.firstWhere((l) => _logDocId(l) == todayStr, orElse: () => <String, dynamic>{});
+                  final tData = _logDocData(todayDoc);
+                  if (tData != null && tData[widget.studentId] is Map) {
+                    firestoreTodayLog = Map<String, dynamic>.from(tData[widget.studentId] as Map);
+                  }
                 } catch (_) {}
+
+                final Map<String, dynamic> todaySLog = {
+                  ...firestoreTodayLog,
+                  ...cachedTodayLog,
+                };
                 final currentStatus = todaySLog['attendance']?.toString() ?? 'unknown';
 
                 final ptmDate = displayConfig.getPtmDate();
                 final isPtmToday = now.year == ptmDate.year && now.month == ptmDate.month && now.day == ptmDate.day;
 
                 final selectedDateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-                Map<String, dynamic> selectedDateLog = {};
+                final cachedSelected = MadrassaLocalStorage.getDailyLogCached(widget.branchId, selectedDateStr);
+                final cachedSelectedLog = (cachedSelected != null && cachedSelected[widget.studentId] is Map)
+                    ? Map<String, dynamic>.from(cachedSelected[widget.studentId] as Map)
+                    : <String, dynamic>{};
+
+                Map<String, dynamic> firestoreSelectedLog = {};
                 try {
-                  final selDoc = allLogs.firstWhere((l) => l.id == selectedDateStr);
-                  final sData = selDoc.data() as Map<String, dynamic>?;
-                  selectedDateLog = (sData?[widget.studentId] is Map ? sData![widget.studentId] as Map<String, dynamic> : {});
+                  final selDoc = allLogs.firstWhere((l) => _logDocId(l) == selectedDateStr, orElse: () => <String, dynamic>{});
+                  final sData = _logDocData(selDoc);
+                  if (sData != null && sData[widget.studentId] is Map) {
+                    firestoreSelectedLog = Map<String, dynamic>.from(sData[widget.studentId] as Map);
+                  }
                 } catch (_) {}
+
+                final Map<String, dynamic> selectedDateLog = {
+                  ...firestoreSelectedLog,
+                  ...cachedSelectedLog,
+                };
 
                 final isPtmForSelectedDate = _selectedDate.year == ptmDate.year &&
                     _selectedDate.month == ptmDate.month &&
                     _selectedDate.day == ptmDate.day;
                 final selectedDateParentReplied = selectedDateLog['parentReplied'] == true;
-                final needsReply = status == 'active' && !selectedDateParentReplied && (selectedDateLog['attendance']?.toString() ?? currentStatus) == 'present';
+                final needsReply = status == 'active' && !selectedDateParentReplied;
                 final leaveStatus = todaySLog['leaveStatus'] ?? 'pending';
 
-                final holidaysData = (holidaySnap.data!.docs).map((d) {
-                  final date = (d['date'] as Timestamp).toDate();
-                  final name = d.data() is Map && (d.data() as Map).containsKey('name') ? d['name']?.toString() ?? 'Holiday' : 'Holiday';
+                final holidaysData = (holidaySnap.data ?? []).map((d) {
+                  final date = _parseDateTime(d['date']);
+                  final name = d is Map && d.containsKey('name') ? d['name']?.toString() ?? 'Holiday' : 'Holiday';
                   return {'date': date, 'name': name};
                 }).toList();
 
@@ -7265,7 +8109,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
                                   selectedItemBuilder: (BuildContext context) {
                                     return widget.allDocs.map<Widget>((doc) {
-                                      final d = doc.data() as Map<String, dynamic>? ?? {};
+                                      final d = doc is Map ? Map<String, dynamic>.from(doc) : (doc is DocumentSnapshot ? (doc.data() as Map<String, dynamic>?) ?? {} : <String, dynamic>{});
                                       final name = d['name'] ?? 'Student';
                                       return Text(
                                         name,
@@ -7276,7 +8120,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                   },
                                   items: List.generate(widget.allDocs.length, (index) {
                                     final d = widget.allDocs[index];
-                                    final dData = d.data() as Map<String, dynamic>? ?? {};
+                                    final dData = d is Map ? Map<String, dynamic>.from(d) : (d is DocumentSnapshot ? (d.data() as Map<String, dynamic>?) ?? {} : <String, dynamic>{});
                                     final name = dData['name'] ?? 'Student';
                                     return DropdownMenuItem<int>(
                                       value: index,
@@ -7291,6 +8135,18 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 ),
                               ),
                         actions: [
+                          // Cloud Sync / Download Latest Data Button
+                          IconButton(
+                            icon: _isSyncing
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                  )
+                                : const Icon(Icons.sync_rounded, color: Colors.white, size: 20),
+                            tooltip: context.isUrdu ? 'تازہ کاری کریں (کلاؤڈ سے حاصل کریں)' : 'Sync / Refresh (Download latest from Cloud)',
+                            onPressed: _isSyncing ? null : () => _syncLatestData(context),
+                          ),
                           // Dark Mode Toggle
                           IconButton(
                             icon: Icon(
@@ -7315,7 +8171,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             ),
                             label: Text(
                               _selectedTab == 4
-                                  ? (context.isUrdu ? 'ہوم' : 'Home')
+                                   ? (context.isUrdu ? 'ہوم' : 'Home')
                                   : (context.isUrdu ? 'اکاؤنٹ' : 'Accounts'),
                               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, fontFamily: context.isUrdu ? 'Noori' : null),
                             ),
@@ -7351,14 +8207,18 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                               final isDesktop = constraints.maxWidth > 900;
                               final isTablet = constraints.maxWidth >= 600 && constraints.maxWidth <= 900;
 
-                              return SingleChildScrollView(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: isDesktop ? 32 : (isTablet ? 24 : 16),
-                                  vertical: 20,
-                                ),
-                                child: Center(
-                                  child: Container(
-                                    constraints: const BoxConstraints(maxWidth: 1200),
+                              return RefreshIndicator(
+                                onRefresh: () => _syncLatestData(context),
+                                color: ParentReportCard.primaryColor,
+                                child: SingleChildScrollView(
+                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: isDesktop ? 32 : (isTablet ? 24 : 16),
+                                    vertical: 20,
+                                  ),
+                                  child: Center(
+                                    child: Container(
+                                      constraints: const BoxConstraints(maxWidth: 1200),
                                     child: _buildTabContent(
                                       _selectedTab,
                                       isDesktop: isDesktop,
@@ -7390,8 +8250,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                     ),
                                   ),
                                 ),
-                              );
-                            },
+                              ),
+                            );
+                          },
                           ),
                         ],
                       ),
@@ -7404,8 +8265,6 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         );
       },
     );
-  },
-);
   }
 }
 
@@ -7581,7 +8440,7 @@ class _CalendarLegend extends StatelessWidget {
 
 class _AttendanceCalendar extends StatelessWidget {
   final String studentId;
-  final List<QueryDocumentSnapshot> logs;
+  final List<dynamic> logs;
   final int year;
   final int month;
   final MadrassaConfig config;
@@ -7589,6 +8448,7 @@ class _AttendanceCalendar extends StatelessWidget {
   final ValueChanged<DateTime> onDateSelected;
   final List<Map<String, dynamic>> holidaysData;
   final DateTime? joinDate;
+  final String? branchId;
 
   const _AttendanceCalendar({
     super.key,
@@ -7601,6 +8461,7 @@ class _AttendanceCalendar extends StatelessWidget {
     required this.onDateSelected,
     required this.holidaysData,
     this.joinDate,
+    this.branchId,
   });
 
   @override
@@ -7613,11 +8474,8 @@ class _AttendanceCalendar extends StatelessWidget {
     const dayHeaders = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     final ptmDate = config.getPtmDate();
 
-    final hijriStart = IslamicCalendarHelper.fromGregorian(firstDay);
-    final hijriEnd = IslamicCalendarHelper.fromGregorian(DateTime(year, month, daysInMonth));
-    final hijriMonthStr = context.isUrdu
-        ? '${hijriStart.monthName(isUrdu: true)} / ${hijriEnd.monthName(isUrdu: true)} ${hijriEnd.year}ھ'
-        : '${hijriStart.monthName(isUrdu: false)} / ${hijriEnd.monthName(isUrdu: false)} ${hijriEnd.year} AH';
+    final activeHijri = IslamicCalendarHelper.fromGregorian(selectedDate);
+    final hijriDateStr = activeHijri.format(isUrdu: context.isUrdu);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -7643,7 +8501,7 @@ class _AttendanceCalendar extends StatelessWidget {
                 const Text('🌙', style: TextStyle(fontSize: 13)),
                 const SizedBox(width: 8),
                 Text(
-                  hijriMonthStr,
+                  hijriDateStr,
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
@@ -7666,7 +8524,7 @@ class _AttendanceCalendar extends StatelessWidget {
               crossAxisCount: 7,
               mainAxisSpacing: 8,
               crossAxisSpacing: 8,
-              childAspectRatio: 0.8,
+              childAspectRatio: 0.78,
             ),
             itemCount: daysInMonth + (firstWeekday - 1),
             itemBuilder: (context, index) {
@@ -7695,10 +8553,25 @@ class _AttendanceCalendar extends StatelessWidget {
 
               Map<String, dynamic>? statusData;
               try {
-                final doc = logs.firstWhere((l) => l.id == dateStr);
-                final rawData = doc.data();
-                if (rawData is Map && rawData[studentId] is Map) {
-                  statusData = Map<String, dynamic>.from(rawData[studentId] as Map);
+                Map<String, dynamic>? doc;
+                for (final l in logs) {
+                  final lid = (l is Map ? (l['id'] ?? l['date']) : (l is QueryDocumentSnapshot ? l.id : null))?.toString();
+                  if (lid == dateStr) {
+                    doc = l is Map ? Map<String, dynamic>.from(l) : (l is QueryDocumentSnapshot ? l.data() as Map<String, dynamic>? : null);
+                    break;
+                  }
+                }
+                final logStudentMap = (doc != null && doc[studentId] is Map)
+                    ? Map<String, dynamic>.from(doc[studentId] as Map)
+                    : <String, dynamic>{};
+                final cached = (branchId != null && branchId!.isNotEmpty)
+                    ? MadrassaLocalStorage.getDailyLogCached(branchId!, dateStr)
+                    : null;
+                final cachedMap = (cached != null && cached[studentId] is Map)
+                    ? Map<String, dynamic>.from(cached[studentId] as Map)
+                    : <String, dynamic>{};
+                if (logStudentMap.isNotEmpty || cachedMap.isNotEmpty) {
+                  statusData = {...logStudentMap, ...cachedMap};
                 }
               } catch (_) {}
 
@@ -7708,7 +8581,13 @@ class _AttendanceCalendar extends StatelessWidget {
               final isSunday = date.weekday == DateTime.sunday;
               bool isAbsent = false;
 
-              final att = statusData?['attendance']?.toString();
+              final att = statusData?['attendance']?.toString().toLowerCase().trim();
+              final leaveStatus = statusData?['leaveStatus']?.toString().toLowerCase().trim();
+              final isLeave = att == 'leave' ||
+                  att == 'leave_requested' ||
+                  leaveStatus == 'approved' ||
+                  (statusData?['isParentRequested'] == true && leaveStatus != 'denied' && leaveStatus != 'declined');
+
               if (isHoliday) {
                 bg = isIslamicHoliday && holidayDoc == null
                     ? (isDark ? const Color(0xFF3B2E10) : const Color(0xFFFEF3C7))
@@ -7723,9 +8602,10 @@ class _AttendanceCalendar extends StatelessWidget {
               } else if (att == 'present') {
                 bg = isDark ? const Color(0xFF0F3E2E) : const Color(0xFFE8F5E9);
                 textCol = isDark ? const Color(0xFF4ADE80) : const Color(0xFF2E7D32);
-              } else if (att == 'leave' || att == 'leave_requested') {
+              } else if (isLeave) {
                 bg = isDark ? const Color(0xFF38230D) : const Color(0xFFFFF3E0);
                 textCol = isDark ? const Color(0xFFFBBF24) : const Color(0xFFEF6C00);
+                isAbsent = false;
               } else if (att == 'absent') {
                 bg = isDark ? const Color(0xFF3B1219) : const Color(0xFFFFEBEE);
                 textCol = isDark ? const Color(0xFFF87171) : const Color(0xFFDC2626);
@@ -7744,9 +8624,11 @@ class _AttendanceCalendar extends StatelessWidget {
                 borderRadius: BorderRadius.circular(12),
                 border: isSelectedDate
                     ? Border.all(color: isDark ? const Color(0xFF2DD4BF) : ParentReportCard.primaryColor, width: 2.5)
-                    : (isAbsent
-                        ? Border.all(color: const Color(0xFFDC2626).withValues(alpha: 0.5), width: 1.2)
-                        : (isToday ? Border.all(color: ParentReportCard.accentColor.withValues(alpha: 0.5), width: 1.5) : (isDark ? Border.all(color: const Color(0xFF334155), width: 0.8) : null))),
+                    : (isLeave
+                        ? Border.all(color: const Color(0xFFF59E0B).withValues(alpha: 0.5), width: 1.2)
+                        : (isAbsent
+                            ? Border.all(color: const Color(0xFFDC2626).withValues(alpha: 0.5), width: 1.2)
+                            : (isToday ? Border.all(color: ParentReportCard.accentColor.withValues(alpha: 0.5), width: 1.5) : (isDark ? Border.all(color: const Color(0xFF334155), width: 0.8) : null)))),
               );
               
               if (isHoliday) {
@@ -7848,26 +8730,43 @@ class _AttendanceCalendar extends StatelessWidget {
                 onTap: () => onDateSelected(date),
                 child: Container(
                   decoration: decoration,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text('$day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textCol)),
-                          if (isAbsent) ...[
-                            const SizedBox(height: 1),
-                            FittedBox(
-                              fit: BoxFit.scaleDown,
-                              child: Text(
-                                context.isUrdu ? 'غائب' : 'ABSENT',
-                                style: const TextStyle(fontSize: 6.5, fontWeight: FontWeight.w900, color: Color(0xFFDC2626)),
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('$day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textCol)),
+                            if (isLeave) ...[
+                              const SizedBox(height: 1),
+                              Text(
+                                context.isUrdu ? 'رخصت' : 'LEAVE',
+                                style: TextStyle(
+                                  fontSize: 6.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: isDark ? const Color(0xFFFBBF24) : const Color(0xFFEF6C00),
+                                  fontFamily: context.isUrdu ? 'Noori' : null,
+                                ),
                               ),
-                            ),
+                            ] else if (isAbsent) ...[
+                              const SizedBox(height: 1),
+                              Text(
+                                context.isUrdu ? 'غائب' : 'ABSENT',
+                                style: TextStyle(
+                                  fontSize: 6.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: const Color(0xFFDC2626),
+                                  fontFamily: context.isUrdu ? 'Noori' : null,
+                                ),
+                              ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
-                    ],
+                    ),
                   ),
                 ),
               );

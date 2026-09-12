@@ -6,6 +6,8 @@ import 'package:hive/hive.dart';
 
 import 'camp_session_service.dart';
 import 'local_storage_service.dart';
+import 'finance_local_storage.dart';
+import '../realtime/realtime_manager.dart';
 
 List<String> _dateStrings(DateTime start, DateTime end) {
   final df   = DateFormat('ddMMyy');
@@ -371,28 +373,43 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
 Stream<Map<String, int>> serialsCountStream(String branchId, DateTime start, DateTime end, {String? subDispensary, String? shift}) {
   final normalizedBranch = branchId.toLowerCase().trim();
   if (normalizedBranch == 'all' || normalizedBranch == 'global') {
-    return FirebaseFirestore.instance.collection('branches').snapshots().switchMap((snap) {
-      final ids = snap.docs
-          .map((doc) => doc.id.toLowerCase().trim())
-          .where((id) => id.isNotEmpty && id != 'all' && id != 'global')
-          .toSet()
-          .toList();
-      if (ids.isEmpty) return Stream.value(<String, int>{});
-      return Rx.combineLatestList(ids.map((id) => _serialsCountStreamForBranch(
-            id,
-            start,
-            end,
-            subDispensary: subDispensary,
-            shift: shift,
-          ))).map((summaries) {
-        final merged = <String, int>{};
-        for (final summary in summaries) {
-          summary.forEach((key, value) {
-            merged[key] = (merged[key] ?? 0) + value;
-          });
+    final branchMaps = FinanceLocalStorage.getAllBranches([]);
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+        final box = Hive.box(LocalStorageService.branchesBox);
+        for (final val in box.values) {
+          if (val is Map) {
+            final id = (val['id'] ?? '').toString().trim();
+            final name = (val['name'] ?? id).toString().trim();
+            if (id.isNotEmpty && id.toLowerCase() != 'all' && id.toLowerCase() != 'global') {
+              if (!branchMaps.any((b) => (b['id'] ?? '').toString().toLowerCase() == id.toLowerCase())) {
+                branchMaps.add({'id': id, 'name': name.isNotEmpty ? name : id});
+              }
+            }
+          }
         }
-        return merged;
-      });
+      }
+    } catch (_) {}
+    final ids = branchMaps
+        .map((b) => (b['id'] ?? '').toString().toLowerCase().trim())
+        .where((id) => id.isNotEmpty && id != 'all' && id != 'global')
+        .toSet()
+        .toList();
+    if (ids.isEmpty) return Stream.value(<String, int>{});
+    return Rx.combineLatestList(ids.map((id) => _serialsCountStreamForBranch(
+          id,
+          start,
+          end,
+          subDispensary: subDispensary,
+          shift: shift,
+        ))).map((summaries) {
+      final merged = <String, int>{};
+      for (final summary in summaries) {
+        summary.forEach((key, value) {
+          merged[key] = (merged[key] ?? 0) + value;
+        });
+      }
+      return merged;
     });
   }
   return _serialsCountStreamForBranch(branchId, start, end, subDispensary: subDispensary, shift: shift);
@@ -456,154 +473,34 @@ Stream<Map<String, int>> _serialsCountStreamForBranch(String branchId, DateTime 
     return stream.asBroadcastStream();
   }
 
-  // 3. Listen to today's queues in real-time
-  final queues = ['zakat', 'non-zakat', 'gmwf'];
-  final dateDocs = CampSessionService.getAllCampDateDocIds(
-    branchId: normBranchId,
-    dateKey: todayKey,
-    selectedCamp: subDispensary,
-  );
-  final todayStreams = <Stream<QuerySnapshot>>[];
-  final streamQueues = <String>[];
-  for (final docKey in dateDocs) {
-    for (final q in queues) {
-      todayStreams.add(FirebaseFirestore.instance
-          .collection('branches/$normBranchId/serials/$docKey/$q')
-          .snapshots());
-      streamQueues.add(q);
+  // 3. Pure local-first today calculation — zero Firestore snapshots:
+  final Future<Map<String, int>> Function() computeCombined = () async {
+    final pastSummary = await pastSummaryFuture;
+    final todaySummary = await _getDailySerialsSummary(normBranchId, todayKey, todayKey, subDispensary, shift);
+    final merged = Map<String, int>.from(pastSummary);
+    todaySummary.forEach((key, val) {
+      merged[key] = (merged[key] ?? 0) + val;
+    });
+    return merged;
+  };
+
+  final streams = <Stream<dynamic>>[];
+  try {
+    if (Hive.isBoxOpen('branch_data_cache')) {
+      streams.add(Hive.box('branch_data_cache').watch());
     }
+  } catch (_) {}
+  try {
+    streams.add(RealtimeManager().messageStream);
+  } catch (_) {}
+
+  Stream<Map<String, int>> liveStream = Stream.fromFuture(computeCombined());
+  if (streams.isNotEmpty) {
+    final trigger = Rx.merge(streams)
+        .debounceTime(const Duration(milliseconds: 500))
+        .switchMap((_) => Stream.fromFuture(computeCombined()));
+    liveStream = Rx.merge([liveStream, trigger]);
   }
-
-  var liveStream = Rx.combineLatest2<List<QuerySnapshot>, Map<String, int>, Map<String, int>>(
-    Rx.combineLatestList(todayStreams),
-    Stream.fromFuture(pastSummaryFuture).startWith(initialCached ?? <String, int>{}),
-    (todaySnaps, pastSummary) {
-      int pending = pastSummary['pending'] ?? 0;
-      int dispensed = pastSummary['dispensed'] ?? 0;
-      int zakatRevenue = pastSummary['v1_sub'] ?? 0;
-      int nonZakatRevenue = pastSummary['v2_sub'] ?? 0;
-
-      int prescWaiting = pastSummary['presc_waiting'] ?? 0;
-      int prescPrescribed = pastSummary['presc_prescribed'] ?? 0;
-      int dispPending = pastSummary['disp_pending'] ?? 0;
-      int dispDispensed = pastSummary['disp_dispensed'] ?? 0;
-
-      final Map<String, Map<String, dynamic>> activeTokenMap = {};
-      final Set<String> zakatSerials = {};
-      final Set<String> nonZakatSerials = {};
-      final Set<String> gmwfSerials = {};
-
-      int todayZakatRev = 0;
-      int todayNonZakatRev = 0;
-      int todayPending = 0;
-      int todayDispensed = 0;
-      int todayPrescWaiting = 0;
-      int todayPrescPrescribed = 0;
-      int todayDispPending = 0;
-      int todayDispDispensed = 0;
-
-      for (int i = 0; i < todaySnaps.length; i++) {
-        final q = streamQueues[i];
-        final snap = todaySnaps[i];
-
-        for (final doc in snap.docs) {
-          final data = doc.data() as Map<String, dynamic>;
-          final status = (data['status'] ?? '').toString().toLowerCase().trim();
-          final syncStatus = (data['syncStatus'] ?? '').toString().toLowerCase().trim();
-          final isDeleted = data['isDeleted'] == true || status == 'deleted' || syncStatus == 'deleted' || status == 'void' || status == 'cancelled';
-          if (isDeleted) continue;
-
-          if (!_matchesSubDispensary(data, subDispensary, doc.id)) continue;
-          if (!_matchesShift(data, shift)) continue;
-
-          final facilityKey = (data['campId'] ?? data['dispensaryId'] ?? data['dispensaryTag'] ?? doc.reference.parent.parent?.id ?? '').toString().toLowerCase().trim();
-          final rawSerial = (data['serial'] ?? data['tokenSerial'] ?? data['id'] ?? data['tokenNumber'] ?? doc.id).toString().trim();
-          final cleanNum = int.tryParse(rawSerial.replaceAll(RegExp(r'[^0-9]'), ''));
-          final prefix = q == 'non-zakat' ? 'NZ' : (q == 'zakat' ? 'Z' : 'G');
-          final uniqueKey = (rawSerial.isNotEmpty && rawSerial.contains('-'))
-              ? rawSerial
-              : ((cleanNum != null && cleanNum > 0) ? '$facilityKey-$prefix-${cleanNum % 1000}' : '${facilityKey}_${q}_${doc.id}');
-
-          if (activeTokenMap.containsKey(uniqueKey)) continue;
-          activeTokenMap[uniqueKey] = data;
-
-          if (q == 'zakat') zakatSerials.add(uniqueKey);
-          else if (q == 'non-zakat') nonZakatSerials.add(uniqueKey);
-          else gmwfSerials.add(uniqueKey);
-
-          final daysOfMedicine = (data['daysOfMedicine'] as num?)?.toInt() ?? 1;
-          if (q == 'zakat') {
-            todayZakatRev += 20 * daysOfMedicine;
-          } else if (q == 'non-zakat') {
-            todayNonZakatRev += 100 * daysOfMedicine;
-          }
-
-          final dispenseStatus = (data['dispenseStatus'] ?? '').toString().toLowerCase().trim();
-          final hasPrescription = data['prescription'] is Map ||
-              data['prescriptions'] is List ||
-              data['prescriptionId'] != null;
-
-          if (status == 'dispensed' || dispenseStatus == 'dispensed') {
-            todayDispensed++;
-            todayDispDispensed++;
-            if (hasPrescription || status == 'dispensed') todayPrescPrescribed++;
-          } else if (status == 'completed' || status == 'prescribed' || hasPrescription) {
-            todayPrescPrescribed++;
-            todayDispPending++;
-          } else {
-            todayPending++;
-            todayPrescWaiting++;
-          }
-        }
-      }
-
-      final todaySummaryToCache = {
-        'v1': zakatSerials.length,
-        'v1_sub': todayZakatRev,
-        'v2': nonZakatSerials.length,
-        'v2_sub': todayNonZakatRev,
-        'v3': gmwfSerials.length,
-        'v3_sub': 0,
-        'total': zakatSerials.length + nonZakatSerials.length + gmwfSerials.length,
-        'revenue': todayZakatRev + todayNonZakatRev,
-        'pending': todayPending,
-        'dispensed': todayDispensed,
-        'presc_waiting': todayPrescWaiting,
-        'presc_prescribed': todayPrescPrescribed,
-        'disp_pending': todayDispPending,
-        'disp_dispensed': todayDispDispensed,
-      };
-
-      try {
-        if (Hive.isBoxOpen('branch_data_cache')) {
-          final box = Hive.box('branch_data_cache');
-          box.put('v2|$normBranchId|$subKey|$shiftKey|$todayKey|serials_summary', todaySummaryToCache);
-        }
-      } catch (_) {}
-
-      final zakatCount = (pastSummary['v1'] ?? 0) + zakatSerials.length;
-      final nonZakatCount = (pastSummary['v2'] ?? 0) + nonZakatSerials.length;
-      final gmwfCount = (pastSummary['v3'] ?? 0) + gmwfSerials.length;
-      final total = zakatCount + nonZakatCount + gmwfCount;
-
-      return {
-        'v1': zakatCount,
-        'v1_sub': zakatRevenue + todayZakatRev,
-        'v2': nonZakatCount,
-        'v2_sub': nonZakatRevenue + todayNonZakatRev,
-        'v3': gmwfCount,
-        'v3_sub': 0,
-        'total': total,
-        'revenue': zakatRevenue + nonZakatRevenue + todayZakatRev + todayNonZakatRev,
-        'pending': pending + todayPending,
-        'dispensed': dispensed + todayDispensed,
-        'presc_waiting': prescWaiting + todayPrescWaiting,
-        'presc_prescribed': prescPrescribed + todayPrescPrescribed,
-        'disp_pending': dispPending + todayDispPending,
-        'disp_dispensed': dispDispensed + todayDispDispensed,
-      };
-    },
-  );
 
   if (initialCached != null) {
     liveStream = liveStream.startWith(initialCached);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +9,7 @@ import '../../../models/donation_models.dart';
 import '../../../models/donation_box_models.dart';
 import '../../../services/donations_local_storage.dart';
 import '../../../services/donation_box_storage.dart';
+import '../../../services/cloud_messaging_service.dart';
 import '../../../theme/app_theme.dart';
 import '../../../theme/role_theme_provider.dart';
 import '../../../utils/keyboard_focus_utils.dart';
@@ -51,6 +53,16 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
   DonorRecord? _selectedDonor;
   List<DonorRecord> _registeredDonors = [];
 
+  // Focus nodes for smooth keyboard navigation
+  final _nameFocus = FocusNode();
+  final _phoneFocus = FocusNode();
+  final _amountFocus = FocusNode();
+  final _goodsItemFocus = FocusNode();
+  final _unitFocus = FocusNode();
+  final _probableAmountFocus = FocusNode();
+  final _bookReceiptNoFocus = FocusNode();
+  final _notesFocus = FocusNode();
+
   // Donation Box fields
   List<DonationBox> _availableBoxes = [];
   DonationBox? _selectedBox;
@@ -67,12 +79,13 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
   final _probableAmountCtrl = TextEditingController();
   final _bookReceiptNoCtrl = TextEditingController();
   DateTime _selectedDate = DateTime.now();
-  String _entryType = 'cash'; // 'cash' or 'goods'
+  final String _entryType = 'cash'; // 'cash' or 'goods'
   String _paymentMethod = 'Cash';
   final _notesCtrl = TextEditingController();
 
   bool _saving = false;
   String? _error;
+  DonationRecord? _completedRecord;
 
   final List<double> _quickAmounts = [500, 1000, 2000, 5000, 10000, 25000, 50000];
 
@@ -100,6 +113,31 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
     } catch (_) {}
   }
 
+  void _resetForNewReceipt() {
+    setState(() {
+      _currentStep = 0;
+      _completedRecord = null;
+      _donorType = DonorType.walkIn;
+      _nameCtrl.text = 'Walk-in Donor';
+      _phoneCtrl.clear();
+      _donorIdCtrl.clear();
+      _selectedDonor = null;
+      _amountCtrl.clear();
+      _bookReceiptNoCtrl.clear();
+      _notesCtrl.clear();
+      _probableAmountCtrl.clear();
+      _selectedDate = DateTime.now();
+      _paymentMethod = 'Cash';
+      _category = DonationCategory.gmwf;
+      _gmwfSub = GmwfSubCategory.dasterkhwaan;
+      _subtype = DonationSubtype.sadqaAtyaat;
+      _saving = false;
+      _error = null;
+      _matchingSuggestions = [];
+      _loadData();
+    });
+  }
+
   @override
   void dispose() {
     _nameCtrl.removeListener(_onDonorInputsChanged);
@@ -107,6 +145,14 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
     _nameCtrl.dispose();
     _phoneCtrl.dispose();
     _donorIdCtrl.dispose();
+    _nameFocus.dispose();
+    _phoneFocus.dispose();
+    _amountFocus.dispose();
+    _goodsItemFocus.dispose();
+    _unitFocus.dispose();
+    _probableAmountFocus.dispose();
+    _bookReceiptNoFocus.dispose();
+    _notesFocus.dispose();
     _amountCtrl.dispose();
     _goodsItemCtrl.dispose();
     _unitCtrl.dispose();
@@ -404,6 +450,7 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
             amount: amount,
             collectedBy: widget.currentUsername,
             notes: 'Recorded via New Receipt',
+            physicalReceiptNo: _bookReceiptNoCtrl.text.trim().isNotEmpty ? _bookReceiptNoCtrl.text.trim() : null,
           );
           await DonationBoxStorage.saveOpening(opening);
         } catch (boxErr) {
@@ -416,8 +463,22 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
         data: data,
       );
 
+      // Trigger targeted verification notification to Cashiers/Finance/Admins if recorded as pending
+      if (record.status == DonationStatus.pending) {
+        unawaited(CloudMessagingService().dispatchDonationVerificationAlert(
+          branchId: widget.branchId,
+          receiptNo: record.receiptNo.isNotEmpty ? record.receiptNo : record.localId,
+          donorName: record.donorName.isNotEmpty ? record.donorName : 'Walk-in Donor',
+          amount: record.amount,
+          collectorName: widget.currentUsername,
+        ));
+      }
+
       if (mounted) {
-        Navigator.pop(context, record);
+        setState(() {
+          _saving = false;
+          _completedRecord = record;
+        });
       }
     } catch (e) {
       setState(() {
@@ -430,14 +491,18 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
   @override
   Widget build(BuildContext context) {
     final t = RoleThemeScope.dataOf(context);
+    final isMobile = MediaQuery.of(context).size.width < 600;
 
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: isMobile ? 10 : 20,
+        vertical: isMobile ? 14 : 24,
+      ),
       child: Container(
         width: 600,
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.90,
+          maxHeight: MediaQuery.of(context).size.height * 0.92,
         ),
         decoration: BoxDecoration(
           color: t.bgCard,
@@ -453,41 +518,45 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // ── Top Header Bar ──
-              _buildHeader(t),
+          child: _completedRecord != null
+              ? _buildReceiptSuccessView(t, isMobile)
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // ── Top Header Bar ──
+                    _buildHeader(t),
 
-              // ── Step Progress Indicator ──
-              _buildStepProgress(t),
+                    // ── Step Progress Indicator ──
+                    _buildStepProgress(t),
 
-              // ── Main Step Body ──
-              Flexible(
-                child: FormKeyboardNavigation(
-                  onFormSubmit: _currentStep == 2 ? (_saving ? null : _submit) : _goNext,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-                    child: Form(
-                      key: _formKey,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (_error != null) _buildErrorBanner(t),
-                          if (_currentStep == 0) _buildStep1Donor(t),
-                          if (_currentStep == 1) _buildStep2Cause(t),
-                          if (_currentStep == 2) _buildStep3AmountAndReview(t),
-                        ],
+                    // ── Main Step Body ──
+                    Flexible(
+                      child: FormKeyboardNavigation(
+                        onFormSubmit: _currentStep == 2 ? (_saving ? null : _submit) : _goNext,
+                        child: SingleChildScrollView(
+                          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                          physics: const ClampingScrollPhysics(),
+                          padding: EdgeInsets.fromLTRB(isMobile ? 14 : 20, 16, isMobile ? 14 : 20, 16),
+                          child: Form(
+                            key: _formKey,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (_error != null) _buildErrorBanner(t),
+                                if (_currentStep == 0) _buildStep1Donor(t, isMobile),
+                                if (_currentStep == 1) _buildStep2Cause(t),
+                                if (_currentStep == 2) _buildStep3AmountAndReview(t),
+                              ],
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-              ),
 
-              // ── Bottom Action Navigation Footer ──
-              _buildWizardFooter(t),
-            ],
-          ),
+                    // ── Bottom Action Navigation Footer ──
+                    _buildWizardFooter(t),
+                  ],
+                ),
         ),
       ),
     );
@@ -645,7 +714,7 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
   // Step 1: Donor Selection
   // ───────────────────────────────────────────────────────────────────────────
 
-  Widget _buildStep1Donor(RoleThemeData t) {
+  Widget _buildStep1Donor(RoleThemeData t, bool isMobile) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -655,13 +724,13 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
         ),
         const SizedBox(height: 12),
 
-        // 3 Visual Selection Cards with improved sizing so nothing is cut off
+        // 3 Visual Selection Cards with improved responsive layout
         Row(
           children: [
             _buildBigDonorCard(
               t: t,
               type: DonorType.walkIn,
-              title: 'Walk-in Donor',
+              title: 'Walk-in',
               subtitle: 'Anonymous',
               icon: Icons.directions_walk_rounded,
             ),
@@ -670,7 +739,7 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
               t: t,
               type: DonorType.registered,
               title: 'Registered',
-              subtitle: 'Saved Donor',
+              subtitle: 'Saved Profile',
               icon: Icons.badge_rounded,
             ),
             const SizedBox(width: 8),
@@ -718,7 +787,7 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              'Standard walk-in record. No new donor profile will be created in the database.',
+                              'Standard walk-in record. Fast & minimal.',
                               style: TextStyle(fontSize: 11.5, color: t.textSecondary),
                             ),
                           ],
@@ -730,6 +799,10 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
                 const SizedBox(height: 12),
                 TextFormField(
                   controller: _phoneCtrl,
+                  focusNode: _phoneFocus,
+                  scrollPadding: const EdgeInsets.only(bottom: 140),
+                  textInputAction: TextInputAction.done,
+                  onFieldSubmitted: (_) => _goNext(),
                   keyboardType: TextInputType.phone,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly,
@@ -900,6 +973,9 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
                 // ── Donor Full Name Input ──
                 TextFormField(
                   controller: _nameCtrl,
+                  focusNode: _nameFocus,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_phoneFocus),
                   style: TextStyle(color: t.textPrimary, fontSize: 13.5, fontWeight: FontWeight.bold),
                   decoration: InputDecoration(
                     labelText: 'Donor Full Name *',
@@ -923,6 +999,9 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
                 // ── Phone Number Input ──
                 TextFormField(
                   controller: _phoneCtrl,
+                  focusNode: _phoneFocus,
+                  textInputAction: TextInputAction.done,
+                  onFieldSubmitted: (_) => _goNext(),
                   keyboardType: TextInputType.phone,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly,
@@ -1093,10 +1172,11 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
                       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                     ),
                     items: _availableBoxes.map((box) {
+                      final areaStr = box.area.isNotEmpty ? ' • ${box.area}' : '';
                       return DropdownMenuItem<DonationBox>(
                         value: box,
                         child: Text(
-                          '${box.boxNumber} — ${box.holderName} (${box.holderAddress.isNotEmpty ? box.holderAddress : "Active"})',
+                          '${box.boxNumber} — ${box.holderName}$areaStr',
                           style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1335,6 +1415,9 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
         // Prominent Amount Field
         TextFormField(
           controller: _amountCtrl,
+          focusNode: _amountFocus,
+          textInputAction: TextInputAction.next,
+          onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_bookReceiptNoFocus),
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d+\.?\d{0,2}'))],
           autofocus: true,
@@ -1470,11 +1553,16 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
             Expanded(
               child: TextFormField(
                 controller: _bookReceiptNoCtrl,
+                focusNode: _bookReceiptNoFocus,
+                textInputAction: TextInputAction.next,
+                onFieldSubmitted: (_) => FocusScope.of(context).requestFocus(_notesFocus),
                 style: TextStyle(color: t.textPrimary, fontSize: 12.5),
                 decoration: InputDecoration(
-                  labelText: 'Manual Receipt # (Optional)',
+                  labelText: 'Physical / Paper Receipt # (Optional)',
+                  hintText: 'e.g. R-4820 (Paper receipt book #)',
+                  hintStyle: TextStyle(color: t.textTertiary, fontSize: 11),
                   labelStyle: TextStyle(color: t.textSecondary, fontSize: 11),
-                  prefixIcon: Icon(Icons.bookmark_border_rounded, color: t.accent, size: 16),
+                  prefixIcon: Icon(Icons.receipt_long_rounded, color: t.accent, size: 16),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
                   enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -1485,6 +1573,9 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
             Expanded(
               child: TextFormField(
                 controller: _notesCtrl,
+                focusNode: _notesFocus,
+                textInputAction: TextInputAction.done,
+                onFieldSubmitted: (_) => _submit(),
                 style: TextStyle(color: t.textPrimary, fontSize: 12.5),
                 decoration: InputDecoration(
                   labelText: 'Remarks / Notes (Optional)',
@@ -1618,6 +1709,285 @@ class _AddDonationWizardState extends State<AddDonationWizard> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Post-Save Receipt Success & Action View
+  // ───────────────────────────────────────────────────────────────────────────
+
+  Widget _buildReceiptSuccessView(RoleThemeData t, bool isMobile) {
+    final r = _completedRecord!;
+    final receiptNumberDisplay = cleanReceiptNumber(r.receiptNo);
+    final amountFormatted = NumberFormat('#,##0').format(r.amount);
+    final categoryText = r.categoryId == 'gmwf'
+        ? 'GMWF ${(r.gmwfSubCategoryId ?? "").toUpperCase()}'
+        : r.categoryId.toUpperCase();
+    final subtypeText = (r.subtypeId ?? '').replaceAllMapped(
+      RegExp(r'([A-Z])'),
+      (m) => ' ${m.group(0)}',
+    ).trim();
+
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(isMobile ? 16 : 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── Celebratory Success Icon ──
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFF10B981).withValues(alpha: 0.14),
+              border: Border.all(color: const Color(0xFF10B981), width: 2),
+            ),
+            child: const Center(
+              child: Icon(Icons.check_rounded, color: Color(0xFF10B981), size: 36),
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // ── Title ──
+          Text(
+            'Receipt Issued Successfully!',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+              color: t.textPrimary,
+              letterSpacing: -0.3,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'The donation has been recorded securely to the database.',
+            style: TextStyle(fontSize: 12, color: t.textSecondary),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+
+          // ── Receipt Card with Monospace Number & Copy ──
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: t.isDarkCanvas ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: t.bgRule, width: 1.2),
+            ),
+            child: Column(
+              children: [
+                // Receipt Number Row
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('RECEIPT NUMBER', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: t.textTertiary, letterSpacing: 0.5)),
+                        const SizedBox(height: 2),
+                        Text(
+                          receiptNumberDisplay,
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            color: t.accent,
+                          ),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.copy_rounded, size: 18),
+                      color: t.accent,
+                      tooltip: 'Copy Receipt Number',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: receiptNumberDisplay));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Receipt number copied to clipboard!'),
+                            duration: Duration(seconds: 2),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+                Divider(color: t.bgRule, height: 20),
+
+                // Amount
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Donation Amount', style: TextStyle(fontSize: 12.5, color: t.textSecondary)),
+                    Text(
+                      'PKR $amountFormatted',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF10B981),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // Donor Name
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Donor', style: TextStyle(fontSize: 12.5, color: t.textSecondary)),
+                    Flexible(
+                      child: Text(
+                        r.donorName,
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: t.textPrimary),
+                        textAlign: TextAlign.end,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // Cause / Fund
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Fund Category', style: TextStyle(fontSize: 12.5, color: t.textSecondary)),
+                    Flexible(
+                      child: Text(
+                        '$categoryText${subtypeText.isNotEmpty ? " ($subtypeText)" : ""}',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary),
+                        textAlign: TextAlign.end,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // Payment Method & Date
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Payment & Date', style: TextStyle(fontSize: 12.5, color: t.textSecondary)),
+                    Text(
+                      '${r.paymentMethod} • ${r.date}',
+                      style: TextStyle(fontSize: 12, color: t.textTertiary),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          // ── Quick Receipt Actions (Print, Share, PDF) ──
+          Row(
+            children: [
+              Expanded(
+                child: _buildSuccessActionBtn(
+                  icon: Icons.print_rounded,
+                  label: 'Print',
+                  color: t.accent,
+                  onTap: () => printReceiptPdf(r, context),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildSuccessActionBtn(
+                  icon: Icons.share_rounded,
+                  label: 'Share / WhatsApp',
+                  color: const Color(0xFF10B981),
+                  onTap: () => showReceiptShareSheet(context, r.toMap()),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildSuccessActionBtn(
+                  icon: Icons.picture_as_pdf_rounded,
+                  label: 'PDF',
+                  color: const Color(0xFFEF4444),
+                  onTap: () => downloadReceiptPdf(r, context),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // ── Navigation Footer ──
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _resetForNewReceipt,
+                  icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+                  label: const Text('Issue Another Receipt', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: t.textPrimary,
+                    side: BorderSide(color: t.bgRule, width: 1.2),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => Navigator.pop(context, r),
+                  icon: const Icon(Icons.done_all_rounded, size: 18, color: Colors.white),
+                  label: const Text('Done', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF10B981),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSuccessActionBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 20, color: color),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }

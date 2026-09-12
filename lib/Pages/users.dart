@@ -21,7 +21,6 @@ import '../widgets/device_badge_widget.dart';
 import '../utils/formatters.dart';
 import '../services/user_module_access_service.dart';
 import '../services/device_info_service.dart';
-import 'office/offboard_dialog.dart';
 import '../services/finance_local_storage.dart';
 import '../services/staff_patient_link_service.dart';
 
@@ -248,6 +247,38 @@ class _UsersScreenState extends State<UsersScreen>
     );
   }
 
+  Future<void> _refreshData([String? branchId]) async {
+    final bId = branchId ?? (_tabController != null && _branches.isNotEmpty ? _branches[_tabController!.index]['id'] as String : (widget.branchId ?? 'all'));
+    try {
+      if (widget.isPatientMode) {
+        await _syncPatientsForBranch(bId);
+      } else {
+        final snap = await _loadUsersSnapshot(bId);
+        if (Hive.isBoxOpen('local_users')) {
+          final box = Hive.box('local_users');
+          for (final doc in snap.docs) {
+            final Map<String, dynamic> u = {'id': doc.id, ...doc.data() as Map<String, dynamic>};
+            final cacheKey = u['email'] != null && (u['email'] as String).isNotEmpty
+                ? 'user:${(u['email'] as String).toLowerCase().trim()}'
+                : 'user:${doc.id}';
+            await box.put(cacheKey, u);
+          }
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Records refreshed successfully'), duration: Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Refresh failed: $e'), duration: const Duration(seconds: 2)),
+        );
+      }
+    }
+  }
+
   Widget _buildFilterBar(RoleThemeData t) {
     return Container(
       color: t.bgCard,
@@ -276,6 +307,12 @@ class _UsersScreenState extends State<UsersScreen>
                 ),
               ),
             ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: Icon(Icons.refresh_rounded, color: t.accent),
+            tooltip: 'Refresh Records',
+            onPressed: () => _refreshData(),
           ),
           if (!widget.isGuardianMode) ...[
             const SizedBox(width: 8),
@@ -430,12 +467,14 @@ class _UsersScreenState extends State<UsersScreen>
           .doc(branchId)
           .collection('patients')
           .get();
+      final List<Map<String, dynamic>> patientsToSave = [];
       for (final doc in snap.docs) {
         final d = doc.data();
         d['patientId'] = doc.id;
         d['branchId'] = branchId;
-        await LocalStorageService.saveLocalPatient(d);
+        patientsToSave.add(d);
       }
+      await LocalStorageService.saveAllLocalPatients(patientsToSave);
     } catch (e) {
       debugPrint('Sync patients failed for branch $branchId: $e');
     }
@@ -500,25 +539,40 @@ class _UsersScreenState extends State<UsersScreen>
               ]),
             ),
             Expanded(
-              child: _familyView
-                  ? _buildFamilyView(filtered, branchId, t)
-                  : ListView.builder(
-                      physics: const BouncingScrollPhysics(),
-                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 24),
-                      itemCount: filtered.length,
-                      itemBuilder: (ctx, i) => _buildCard(filtered[i], branchId, t),
-                    ),
+              child: RefreshIndicator(
+                onRefresh: () => _refreshData(branchId),
+                child: _familyView
+                    ? _buildFamilyView(filtered, branchId, t)
+                    : ListView.builder(
+                        physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                        padding: const EdgeInsets.fromLTRB(10, 8, 10, 24),
+                        itemCount: filtered.length,
+                        itemBuilder: (ctx, i) => _buildCard(filtered[i], branchId, t),
+                      ),
+              ),
             ),
           ]);
         },
       );
     }
 
-    // Staff path (Local-first + background Firestore stream)
-    final collection = 'users';
-    return StreamBuilder<QuerySnapshot>(
-      stream: _getFilteredStream(branchId, collection),
-      builder: (context, snapshot) {
+    // Staff path (Local-first + Hive reactive updates)
+    return ValueListenableBuilder<Box>(
+      valueListenable: Hive.box('local_users').listenable(),
+      builder: (context, box, _) {
+        if (box.isEmpty && !_syncedBranches.contains('users_$branchId')) {
+          _syncedBranches.add('users_$branchId');
+          _loadUsersSnapshot(branchId).then((snap) {
+            for (final doc in snap.docs) {
+              final Map<String, dynamic> u = {'id': doc.id, ...doc.data() as Map<String, dynamic>};
+              final cacheKey = u['email'] != null && (u['email'] as String).isNotEmpty
+                  ? 'user:${(u['email'] as String).toLowerCase().trim()}'
+                  : 'user:${doc.id}';
+              box.put(cacheKey, u);
+            }
+          }).catchError((_) {});
+        }
+
         final Map<String, Map<String, dynamic>> mergedMap = {};
 
         String getDedupKey(Map<String, dynamic> u, String defaultId) {
@@ -534,47 +588,14 @@ class _UsersScreenState extends State<UsersScreen>
           return 'id:$uid';
         }
 
-        // 1. Add Hive local users first (instant offline display)
-        try {
-          if (Hive.isBoxOpen('local_users')) {
-            final box = Hive.box('local_users');
-            for (final val in box.values) {
-              if (val is Map) {
-                final Map<String, dynamic> u = Map<String, dynamic>.from(val);
-                final uid = u['uid']?.toString() ?? u['id']?.toString() ?? '';
-                if (uid.isNotEmpty) {
-                  mergedMap[getDedupKey(u, uid)] = u;
-                }
-              }
+        for (final val in box.values) {
+          if (val is Map) {
+            final Map<String, dynamic> u = Map<String, dynamic>.from(val);
+            final uid = u['uid']?.toString() ?? u['id']?.toString() ?? '';
+            if (uid.isNotEmpty) {
+              mergedMap[getDedupKey(u, uid)] = u;
             }
           }
-        } catch (e) {
-          debugPrint('Error reading local users: $e');
-        }
-
-        // 2. Overlay Firestore users on top & cache to Hive
-        if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
-          for (final doc in snapshot.data!.docs) {
-            final Map<String, dynamic> u = {'id': doc.id, ...doc.data() as Map<String, dynamic>};
-            final key = getDedupKey(u, doc.id);
-            mergedMap[key] = u;
-
-            // Auto-cache to Hive for instant loading next time
-            try {
-              if (Hive.isBoxOpen('local_users')) {
-                final box = Hive.box('local_users');
-                final cacheKey = u['email'] != null && (u['email'] as String).isNotEmpty
-                    ? 'user:${(u['email'] as String).toLowerCase().trim()}'
-                    : 'user:${doc.id}';
-                box.put(cacheKey, u);
-              }
-            } catch (_) {}
-          }
-        }
-
-        // Only show spinner if we have ZERO local data AND Firestore is still loading
-        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData && mergedMap.isEmpty) {
-          return Center(child: CircularProgressIndicator(color: t.accent));
         }
 
         var list = mergedMap.values.toList();
@@ -686,6 +707,8 @@ class _UsersScreenState extends State<UsersScreen>
 
         for (final item in list) {
           final status = (item['status'] ?? item['accountStatus'] ?? item['studentStatus'] ?? 'active').toString().toLowerCase().trim();
+          final isPendingRestore = (item['restoreRequestStatus'] ?? '').toString().toLowerCase().trim() == 'pending' ||
+              item['restoreRequested'] == true;
           final isOffboardedOrArchived = (
               status == 'inactive' ||
               status == 'suspended' ||
@@ -700,7 +723,10 @@ class _UsersScreenState extends State<UsersScreen>
               status == 'left' ||
               status == 'dropped' ||
               status == 'dropped_out' ||
-              item['isActive'] == false
+              item['isActive'] == false ||
+              item['isRevoked'] == true ||
+              item['accessRevoked'] == true ||
+              isPendingRestore
           );
 
           if (isOffboardedOrArchived) {
@@ -727,11 +753,63 @@ class _UsersScreenState extends State<UsersScreen>
           }
         }
 
-        if (list.isEmpty) {
+        // Also include offboarded HR employees from local_employees box so HQ Manager sees both in User Management
+        try {
+          if (!widget.isGuardianMode && Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+            final empBox = Hive.box(LocalStorageService.employeesBox);
+            for (final val in empBox.values) {
+              if (val is! Map) continue;
+              final emp = Map<String, dynamic>.from(val);
+              final empBranch = (emp['branchId'] ?? '').toString().trim().toLowerCase();
+              if (branchId != 'all' && branchId != 'global' && empBranch.isNotEmpty && empBranch != branchId.trim().toLowerCase()) {
+                continue;
+              }
+              final isActive = emp['isActive'] as bool? ?? true;
+              final empStatus = (emp['status'] ?? emp['employeeStatus'] ?? '').toString().trim().toLowerCase();
+              final isEmpOffboarded = !isActive ||
+                  empStatus == 'inactive' ||
+                  empStatus == 'offboarded' ||
+                  empStatus == 'terminated' ||
+                  empStatus == 'resigned' ||
+                  empStatus == 'left' ||
+                  empStatus.contains('offboard');
+
+              if (isEmpOffboarded) {
+                final empId = emp['localId'] ?? emp['id'] ?? '';
+                final cleanCnic = (emp['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+                final alreadyPresent = revokedList.any((r) {
+                  final rEmpId = (r['linkedEmployeeId'] ?? '').toString();
+                  final rCnic = (r['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+                  return (empId.toString().isNotEmpty && rEmpId == empId.toString()) ||
+                      (cleanCnic.isNotEmpty && rCnic == cleanCnic);
+                });
+                if (!alreadyPresent) {
+                  final empItem = Map<String, dynamic>.from(emp);
+                  empItem['isEmployeeRecord'] = true;
+                  empItem['status'] = 'offboarded';
+                  empItem['role'] = emp['designation'] ?? emp['role'] ?? 'Employee';
+                  revokedList.add(empItem);
+                }
+              }
+            }
+          }
+        } catch (_) {}
+
+        if (list.isEmpty && revokedList.isEmpty) {
           return _emptyState(t, widget.isGuardianMode ? Icons.people_outline : Icons.manage_accounts_rounded, widget.isGuardianMode ? 'No guardians found' : 'No users found', 'Try adjusting your search query');
         }
 
         final listItems = <Widget>[];
+
+        // Check for pending restore requests
+        final pendingRestoreList = revokedList.where((u) {
+          final s = (u['restoreRequestStatus'] ?? '').toString().toLowerCase().trim();
+          return s == 'pending' || u['restoreRequested'] == true;
+        }).toList();
+
+        if (pendingRestoreList.isNotEmpty) {
+          listItems.add(_buildPendingRequestsBanner(pendingRestoreList, branchId, t));
+        }
 
         void addCategorySection(String title, int count, IconData icon, Color color, List<Map<String, dynamic>> items) {
           if (items.isEmpty) return;
@@ -758,7 +836,7 @@ class _UsersScreenState extends State<UsersScreen>
         } else if (_selectedCategoryFilter == 'school_guardian') {
           addCategorySection('School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
         } else if (_selectedCategoryFilter == 'revoked') {
-          addCategorySection('Offboarded & Inactive Accounts', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
+          addCategorySection('Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
         } else {
           addCategorySection('Currently Online', onlineList.length, Icons.fiber_manual_record, Colors.green, onlineList);
           addCategorySection('Office & Administration', officeList.length, Icons.business_center_rounded, Colors.indigo, officeList);
@@ -768,7 +846,7 @@ class _UsersScreenState extends State<UsersScreen>
           if (madrassaGuardianList.isNotEmpty) addCategorySection('Madrassa Guardians', madrassaGuardianList.length, Icons.family_restroom_rounded, Colors.orange, madrassaGuardianList);
           if (schoolFacultyList.isNotEmpty) addCategorySection('School Faculty', schoolFacultyList.length, Icons.account_balance_rounded, Colors.deepPurple, schoolFacultyList);
           if (schoolGuardianList.isNotEmpty) addCategorySection('School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
-          addCategorySection('Offboarded & Inactive Accounts', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
+          addCategorySection('Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
         }
 
         return Column(children: [
@@ -807,16 +885,19 @@ class _UsersScreenState extends State<UsersScreen>
                     _categoryChip(t, 'School Guardians (${schoolGuardianList.length})', 'school_guardian', Icons.family_restroom_rounded, Colors.purpleAccent),
                     const SizedBox(width: 6),
                   ],
-                  _categoryChip(t, 'Offboarded (${revokedList.length})', 'revoked', Icons.no_accounts_rounded, Colors.red),
+                  _categoryChip(t, 'Revoked & Offboarded (${revokedList.length})', 'revoked', Icons.no_accounts_rounded, Colors.red),
                 ],
               ),
             ),
           ),
           Expanded(
-            child: ListView(
-              physics: const BouncingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(10, 4, 10, 24),
-              children: listItems,
+            child: RefreshIndicator(
+              onRefresh: () => _refreshData(branchId),
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                padding: const EdgeInsets.fromLTRB(10, 4, 10, 24),
+                children: listItems,
+              ),
             ),
           ),
         ]);
@@ -931,6 +1012,8 @@ class _UsersScreenState extends State<UsersScreen>
     final isGuardianRole = rawRole == 'madrassa parent' || rawRole == 'madrassa guardian';
     final isOnline = _isUserOnline(data);
     final status = (data['status'] ?? data['accountStatus'] ?? 'active').toString().toLowerCase().trim();
+    final isPendingRestore = (data['restoreRequestStatus'] ?? '').toString().toLowerCase().trim() == 'pending' ||
+        data['restoreRequested'] == true;
     final isRevoked = status == 'inactive' ||
         status == 'suspended' ||
         status == 'terminated' ||
@@ -938,7 +1021,10 @@ class _UsersScreenState extends State<UsersScreen>
         status == 'retired' ||
         status == 'offboarded' ||
         status == 'revoked' ||
-        data['isActive'] == false;
+        data['isActive'] == false ||
+        data['isRevoked'] == true ||
+        data['accessRevoked'] == true ||
+        isPendingRestore;
 
     final Map<String, dynamic>? devInfo = (data['lastDeviceInfo'] is Map)
         ? Map<String, dynamic>.from(data['lastDeviceInfo'] as Map)
@@ -966,13 +1052,17 @@ class _UsersScreenState extends State<UsersScreen>
             : null,
         color: isChairmanCard
             ? null
-            : (isRevoked ? Colors.red.withValues(alpha: 0.05) : t.bgCard),
+            : (isPendingRestore
+                ? const Color(0xFFF59E0B).withValues(alpha: 0.08)
+                : (isRevoked ? Colors.red.withValues(alpha: 0.05) : t.bgCard)),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isChairmanCard
               ? const Color(0xFFFBBF24)
-              : (isRevoked ? Colors.red.withValues(alpha: 0.3) : t.bgRule),
-          width: isChairmanCard ? 2.0 : 0.8,
+              : (isPendingRestore
+                  ? const Color(0xFFF59E0B).withValues(alpha: 0.5)
+                  : (isRevoked ? Colors.red.withValues(alpha: 0.3) : t.bgRule)),
+          width: isChairmanCard ? 2.0 : (isPendingRestore ? 1.2 : 0.8),
         ),
         boxShadow: [
           BoxShadow(
@@ -1114,7 +1204,56 @@ class _UsersScreenState extends State<UsersScreen>
                             return const SizedBox.shrink();
                           }),
                         ],
-                        if (status != 'active' && status.isNotEmpty) ...[
+                        if (isPendingRestore) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF59E0B).withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFFF59E0B), width: 0.8),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.mark_email_unread_rounded, size: 10, color: Color(0xFFFBBF24)),
+                                SizedBox(width: 4),
+                                Text(
+                                  'RESTORE REQUESTED',
+                                  style: TextStyle(color: Color(0xFFFBBF24), fontSize: 9, fontWeight: FontWeight.w900),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ] else if (data['isEmployeeRecord'] == true) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.purple.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.purple.withValues(alpha: 0.4), width: 0.6),
+                            ),
+                            child: const Text(
+                              'OFFBOARDED EMPLOYEE',
+                              style: TextStyle(color: Colors.purpleAccent, fontSize: 9, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ] else if (isRevoked) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.red.withValues(alpha: 0.4), width: 0.6),
+                            ),
+                            child: const Text(
+                              'REVOKED USER',
+                              style: TextStyle(color: Colors.redAccent, fontSize: 9, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ] else if (status != 'active' && status.isNotEmpty) ...[
                           const SizedBox(width: 6),
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1174,7 +1313,7 @@ class _UsersScreenState extends State<UsersScreen>
                   ],
                 ),
               ),
-              // Action buttons: Offboard/Revoke, Edit, and Delete
+              // Action buttons: Revoke/Allow Access, Edit, and Delete
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1186,17 +1325,30 @@ class _UsersScreenState extends State<UsersScreen>
                         icon: Container(
                           padding: const EdgeInsets.all(6),
                           decoration: BoxDecoration(
-                            color: isRevoked ? Colors.grey.withValues(alpha: 0.15) : Colors.amber.shade900.withValues(alpha: 0.15),
+                            color: isPendingRestore
+                                ? const Color(0xFF10B981).withValues(alpha: 0.2)
+                                : (isRevoked ? Colors.green.withValues(alpha: 0.12) : Colors.red.withValues(alpha: 0.12)),
                             borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: isRevoked ? Colors.grey : Colors.amber.shade800, width: 0.8),
+                            border: Border.all(
+                              color: isPendingRestore
+                                  ? const Color(0xFF10B981)
+                                  : (isRevoked ? Colors.green.shade700 : Colors.red.shade700),
+                              width: 0.8,
+                            ),
                           ),
                           child: Icon(
-                            isRevoked ? Icons.lock_open_rounded : Icons.lock_person_rounded,
+                            isPendingRestore
+                                ? Icons.check_circle_rounded
+                                : (isRevoked ? Icons.lock_open_rounded : Icons.lock_person_rounded),
                             size: 16,
-                            color: isRevoked ? Colors.grey.shade300 : Colors.amber.shade400,
+                            color: isPendingRestore
+                                ? const Color(0xFF10B981)
+                                : (isRevoked ? Colors.green.shade400 : Colors.red.shade400),
                           ),
                         ),
-                        tooltip: isRevoked ? 'Update Access Status' : 'Offboard / Revoke Access',
+                        tooltip: isPendingRestore
+                            ? 'Allow Access (Restore Requested)'
+                            : (isRevoked ? 'Allow / Restore App Access' : 'Revoke App Access'),
                         onPressed: () => _showQuickRevokeDialog(data, branchId, t),
                       )
                     else
@@ -1777,20 +1929,149 @@ class _UsersScreenState extends State<UsersScreen>
     }
   }
 
+  Widget _buildPendingRequestsBanner(List<Map<String, dynamic>> pendingList, String branchId, RoleThemeData t) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFF59E0B).withValues(alpha: 0.45), width: 1.2),
+        boxShadow: [
+          BoxShadow(color: const Color(0xFFF59E0B).withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 3)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF59E0B).withValues(alpha: 0.25),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.notifications_active_rounded, color: Color(0xFFFBBF24), size: 18),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Access Restore Requests (${pendingList.length})',
+                  style: const TextStyle(
+                    color: Color(0xFFFBBF24),
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF59E0B),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'REQUIRES HQ APPROVAL',
+                  style: TextStyle(color: Colors.black, fontSize: 9, fontWeight: FontWeight.w900),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ...pendingList.map((user) {
+            final uName = (user['name'] ?? user['username'] ?? 'User').toString();
+            final uBranch = (user['branchId'] ?? branchId).toString();
+            final uReason = (user['restoreRequestReason'] ?? 'No remarks provided').toString();
+            final uRole = (user['role'] ?? 'User').toString();
+
+            return Container(
+              margin: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: t.bgCard,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFF59E0B).withValues(alpha: 0.25)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                uName,
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: t.textPrimary),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: t.accentMuted,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(uRole, style: TextStyle(fontSize: 9, color: t.accent, fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Branch: $uBranch · "$uReason"',
+                          style: TextStyle(fontSize: 11, color: t.textSecondary, fontStyle: FontStyle.italic),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: () => _allowUserAccess(user, branchId, t),
+                    icon: const Icon(Icons.check_circle_rounded, size: 14),
+                    label: const Text('Allow'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF10B981),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      elevation: 0,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showQuickRevokeDialog(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
     if (!_canManageUserAccess(data)) {
       final roleName = (data['role'] as String? ?? 'User').toUpperCase();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Access Denied: You do not have permission to revoke or alter access for $roleName accounts.'),
+          content: Text('Access Denied: You do not have permission to alter access for $roleName accounts.'),
           backgroundColor: Colors.red.shade800,
         ),
       );
       return;
     }
 
-    final itemId = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString();
+    // If this is an employee record (from local_employees)
+    if (data['isEmployeeRecord'] == true) {
+      await _showReactivateEmployeeDialog(data, branchId, t);
+      return;
+    }
+
     final status = (data['status'] ?? data['accountStatus'] ?? 'active').toString().toLowerCase().trim();
+    final isPendingRestore = (data['restoreRequestStatus'] ?? '').toString().toLowerCase().trim() == 'pending' ||
+        data['restoreRequested'] == true;
     final isRevoked = status == 'inactive' ||
         status == 'suspended' ||
         status == 'terminated' ||
@@ -1798,170 +2079,408 @@ class _UsersScreenState extends State<UsersScreen>
         status == 'retired' ||
         status == 'offboarded' ||
         status == 'revoked' ||
-        data['isActive'] == false;
+        data['isActive'] == false ||
+        data['isRevoked'] == true ||
+        data['accessRevoked'] == true ||
+        isPendingRestore;
 
-    if (!isRevoked) {
-      final offboardResult = await OffboardDialog.show(
-        context,
-        employeeData: data,
-        performedBy: widget.currentUserRole ?? 'Admin',
-      );
-      if (offboardResult == true && mounted) {
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('@${data['username'] ?? 'User'} has been offboarded.')),
-        );
-      }
-      return;
+    if (isRevoked || isPendingRestore) {
+      // Allow / Restore user access
+      await _allowUserAccess(data, branchId, t);
+    } else {
+      // Explicitly REVOKE user app access (distinct from employee offboarding)
+      await _showRevokeAccessDialog(data, branchId, t);
     }
+  }
+
+  /// Explicitly Revoke a User's App Access
+  Future<void> _showRevokeAccessDialog(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
+    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString();
+    final name = (data['name'] ?? data['username'] ?? 'User').toString();
+    final branch = (data['branchId'] ?? branchId).toString();
+    final email = (data['email'] ?? '').toString();
 
     final reasonCtrl = TextEditingController();
-    final passwordCtrl = TextEditingController();
+    String selectedPredefinedReason = 'Administrative Revocation';
+    final predefinedReasons = [
+      'Administrative Revocation',
+      'Suspicious Activity',
+      'Temporary Suspension',
+      'Role Reassignment',
+      'Disciplinary Action',
+      'Other',
+    ];
 
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) {
-          return Dialog(
-            backgroundColor: t.bgCard,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.green.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.lock_open_rounded,
-                          color: Colors.green,
-                          size: 24,
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Re-Enable App Access',
-                              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: t.textPrimary),
-                            ),
-                            Text(
-                              'Restore access for @${data['username'] ?? 'User'}',
-                              style: TextStyle(fontSize: 12, color: t.textTertiary),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  Text('Restoration Remarks (Optional)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: t.textSecondary)),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: reasonCtrl,
-                    style: TextStyle(fontSize: 13, color: t.textPrimary),
-                    decoration: InputDecoration(
-                      hintText: 'e.g. Access restored by HQ Manager',
-                      hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
-                      filled: true,
-                      fillColor: t.bg,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.bgRule)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.bgRule)),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Text('Admin Password Verification', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: t.textSecondary)),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: passwordCtrl,
-                    obscureText: true,
-                    style: TextStyle(fontSize: 13, color: t.textPrimary),
-                    decoration: InputDecoration(
-                      hintText: 'Enter admin password',
-                      hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
-                      filled: true,
-                      fillColor: t.bg,
-                      prefixIcon: Icon(Icons.lock_outline_rounded, color: t.textTertiary, size: 18),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.bgRule)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.bgRule)),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            if (passwordCtrl.text != 'admin1122') {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Wrong admin password'), backgroundColor: Colors.red),
-                              );
-                              return;
-                            }
-                            Navigator.pop(ctx, true);
-                          },
-                          icon: const Icon(Icons.lock_open_rounded, size: 16),
-                          label: const Text('Restore'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: t.bgCard,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.lock_person_rounded, color: Colors.red, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Revoke App Access',
+                  style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Are you sure you want to revoke app access for @$name?', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+              const SizedBox(height: 14),
+              Text('Reason for Revoking Access', style: TextStyle(color: t.textPrimary, fontSize: 12, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                value: selectedPredefinedReason,
+                dropdownColor: t.bgCard,
+                style: TextStyle(color: t.textPrimary, fontSize: 13),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: t.bg,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+                ),
+                items: predefinedReasons.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+                onChanged: (val) {
+                  if (val != null) setS(() => selectedPredefinedReason = val);
+                },
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: reasonCtrl,
+                style: TextStyle(color: t.textPrimary, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'Additional remarks (optional)...',
+                  hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
+                  filled: true,
+                  fillColor: t.bg,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.lock_person_rounded, size: 16),
+              label: const Text('Revoke Access'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
 
     if (confirm != true) return;
 
-    final reason = reasonCtrl.text.trim();
+    final detailedReason = reasonCtrl.text.trim();
+    final finalReason = detailedReason.isNotEmpty ? '$selectedPredefinedReason: $detailedReason' : selectedPredefinedReason;
+    final nowIso = DateTime.now().toIso8601String();
 
+    final updates = <String, dynamic>{
+      'status': 'revoked',
+      'accountStatus': 'revoked',
+      'isActive': false,
+      'isRevoked': true,
+      'accessRevoked': true,
+      'revocationReason': finalReason,
+      'revokedAt': nowIso,
+      'revokedBy': widget.currentUserRole ?? 'HQ Manager',
+      'restoreRequested': false,
+      'restoreRequestStatus': 'revoked',
+      'updatedAt': nowIso,
+    };
+
+    // Update locally
+    if (Hive.isBoxOpen('local_users')) {
+      final box = Hive.box('local_users');
+      for (final key in [uid, email]) {
+        if (key.isEmpty) continue;
+        final raw = box.get(key);
+        if (raw is Map) {
+          final u = Map<String, dynamic>.from(raw)..addAll(updates);
+          await box.put(key, u);
+        }
+      }
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map && (val['uid'] == uid || val['id'] == uid)) {
+          final u = Map<String, dynamic>.from(val)..addAll(updates);
+          await box.put(k, u);
+        }
+      }
+      await box.flush();
+    }
+
+    // Update in Firestore
+    if (uid.isNotEmpty) {
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({
+          ...updates,
+          'revokedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
+
+        if (branch.isNotEmpty && branch != 'all' && branch != 'global') {
+          await FirebaseFirestore.instance.collection('branches').doc(branch).collection('users').doc(uid).set({
+            ...updates,
+            'revokedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true)).timeout(const Duration(seconds: 3));
+        }
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('🔒 App access revoked for @$name'),
+          backgroundColor: Colors.red.shade800,
+        ),
+      );
+    }
+  }
+
+  /// HQ Manager / Admin Allows and Restores User App Access
+  Future<void> _allowUserAccess(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
+    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString();
+    final name = (data['name'] ?? data['username'] ?? 'User').toString();
+    final branch = (data['branchId'] ?? branchId).toString();
+    final email = (data['email'] ?? '').toString();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: t.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.green.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.check_circle_rounded, color: Colors.green, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Allow App Access',
+                style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Allow and restore app access for @$name?', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+            if (data['restoreRequestReason'] != null && data['restoreRequestReason'].toString().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: t.bg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('User Note: "${data['restoreRequestReason']}"', style: TextStyle(color: t.textTertiary, fontSize: 12, fontStyle: FontStyle.italic)),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.check_circle_rounded, size: 16),
+            label: const Text('Allow & Restore'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final nowIso = DateTime.now().toIso8601String();
     final updates = <String, dynamic>{
       'status': 'active',
       'accountStatus': 'active',
       'isActive': true,
+      'isRevoked': false,
+      'accessRevoked': false,
+      'restoreRequested': false,
+      'restoreRequestStatus': 'approved',
+      'restoredAt': nowIso,
+      'restoredBy': widget.currentUserRole ?? 'HQ Manager',
       'revocationReason': null,
       'revokedAt': null,
-      'restoredAt': FieldValue.serverTimestamp(),
-      if (reason.isNotEmpty) 'restorationRemarks': reason,
+      'updatedAt': nowIso,
     };
 
-    try {
-      await LocalStorageService.saveUserOffline(
-        uid: itemId,
-        branchId: branchId,
-        userData: {...data, ...updates, 'uid': itemId, 'branchId': branchId},
-      );
+    // Update in local Hive
+    if (Hive.isBoxOpen('local_users')) {
+      final box = Hive.box('local_users');
+      for (final key in [uid, email]) {
+        if (key.isEmpty) continue;
+        final raw = box.get(key);
+        if (raw is Map) {
+          final u = Map<String, dynamic>.from(raw)..addAll(updates);
+          await box.put(key, u);
+        }
+      }
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map && (val['uid'] == uid || val['id'] == uid)) {
+          final u = Map<String, dynamic>.from(val)..addAll(updates);
+          await box.put(k, u);
+        }
+      }
+      await box.flush();
+    }
 
-      if (!itemId.startsWith('local-')) {
-        await FirebaseFirestore.instance.collection('users').doc(itemId).set(updates, SetOptions(merge: true));
-        if (branchId.isNotEmpty && branchId != 'all') {
-          await FirebaseFirestore.instance.collection('branches').doc(branchId).collection('users').doc(itemId).set(updates, SetOptions(merge: true));
+    // Update in Firestore
+    if (uid.isNotEmpty) {
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({
+          ...updates,
+          'restoredAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
+
+        if (branch.isNotEmpty && branch != 'all' && branch != 'global') {
+          await FirebaseFirestore.instance.collection('branches').doc(branch).collection('users').doc(uid).set({
+            ...updates,
+            'restoredAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true)).timeout(const Duration(seconds: 3));
+        }
+      } catch (_) {}
+    }
+
+    // Send confirmation notification to user
+    try {
+      final notifId = 'restored_${uid}_${DateTime.now().millisecondsSinceEpoch}';
+      final notif = {
+        'id': notifId,
+        'title': '🎉 Access Restored',
+        'message': 'Your app access has been approved and restored by the HQ Manager. You can now log in and use the app normally.',
+        'category': 'Account Alert',
+        'type': 'access_restored',
+        'targetUserId': uid,
+        'branchId': branch,
+        'timestamp': nowIso,
+        'seen': false,
+      };
+      if (Hive.isBoxOpen(LocalStorageService.notificationsBox)) {
+        await Hive.box(LocalStorageService.notificationsBox).put(notifId, notif);
+      }
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Access allowed and restored for @$name'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  /// Dialog to reactivate an offboarded employee profile (HR/Payroll)
+  Future<void> _showReactivateEmployeeDialog(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
+    final empId = (data['localId'] ?? data['id'] ?? '').toString();
+    final name = (data['name'] ?? 'Employee').toString();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: t.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.purple.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.person_add_rounded, color: Colors.purpleAccent, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Reactivate Employee',
+                style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Text('Reactivate employee record for $name? This will rehire them in Employee Management.', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.check_circle_rounded, size: 16),
+            label: const Text('Reactivate Employee'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.purple,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final box = Hive.box(LocalStorageService.employeesBox);
+        final raw = box.get(empId);
+        if (raw is Map) {
+          final updated = Map<String, dynamic>.from(raw)
+            ..['isActive'] = true
+            ..['status'] = 'Active'
+            ..['offboardingStatus'] = null
+            ..['payrollStatus'] = 'Active'
+            ..['updatedAt'] = DateTime.now().toIso8601String();
+          await box.put(empId, updated);
+          await box.flush();
         }
       }
 
@@ -1969,15 +2488,15 @@ class _UsersScreenState extends State<UsersScreen>
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('App access restored for @${data['username'] ?? 'User'}'),
-            backgroundColor: Colors.green.shade700,
+            content: Text('✅ Employee $name has been reactivated.'),
+            backgroundColor: Colors.purple,
           ),
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to update access status: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Failed to reactivate employee: $e'), backgroundColor: Colors.red),
         );
       }
     }
@@ -2136,23 +2655,6 @@ class _UsersScreenState extends State<UsersScreen>
         .get();
   }
 
-  Stream<QuerySnapshot> _getFilteredStream(String branchId, String collection) {
-    if (collection == 'users') {
-      return Stream.fromFuture(_loadUsersSnapshot(branchId));
-    }
-    Query<Map<String, dynamic>> q = FirebaseFirestore.instance
-        .collection('branches').doc(branchId).collection(collection);
-    if (widget.isPatientMode && _filterStatus != null) q = q.where('status', isEqualTo: _filterStatus);
-    if (widget.isPatientMode && _genderFilter != null) q = q.where('gender', isEqualTo: _genderFilter);
-    if (widget.isPatientMode && _ageFilter != null) {
-      int min = 0, max = 200;
-      if (_ageFilter == 'child') { max = 18; }
-      else if (_ageFilter == 'adult') { min = 19; max = 60; }
-      else if (_ageFilter == 'senior') { min = 61; }
-      q = q.where('age', isGreaterThanOrEqualTo: min).where('age', isLessThanOrEqualTo: max);
-    }
-    return q.snapshots();
-  }
 
   void _showEnlargedPhotoDialog(
     BuildContext context,

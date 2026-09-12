@@ -64,6 +64,13 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
     return r.contains('teacher') && !r.contains('admin') && !r.contains('principal');
   }
 
+  /// True only for school-specific roles (Principal, School Admin, School Teacher)
+  /// Executive roles (Chairman, CEO, HQ Manager, Admin, etc.) get false.
+  bool get _isSchoolRole {
+    final r = widget.role.toLowerCase().trim();
+    return r.contains('school') || r.contains('principal') || _isTeacher || _isPrincipal;
+  }
+
   bool get _isPrincipal {
     final r = widget.role.toLowerCase().trim();
     return r.contains('principal');
@@ -465,8 +472,8 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
           : null,
       body: Row(
         children: [
-          // Sidebar Navigation (Desktop only)
-          if (!isMobile) _buildSidebar(effectiveCollapsed),
+          // Sidebar Navigation (Desktop only, school-specific roles only)
+          if (!isMobile && _isSchoolRole) _buildSidebar(effectiveCollapsed),
 
           // Main View Content Area
           Expanded(
@@ -542,7 +549,7 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Taleem-o-Tarbiyat School System',
+                    'Taleem-wa-Tarbiyat School System',
                     style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 17),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -560,22 +567,8 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
       ),
       actions: [
         _SchoolSyncBadge(branchId: widget.branchId),
-        // Settings Button
-        IconButton(
-          tooltip: 'System Settings',
-          icon: Icon(Icons.settings_outlined, color: t.textPrimary),
-          onPressed: () {
-            final uData = LocalStorageService.getActiveUserData();
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => SettingsPage(userData: Map<String, dynamic>.from(uData)),
-              ),
-            );
-          },
-        ),
-        // Sidebar toggle only on desktop
-        if (!isMobile)
+        // Sidebar toggle only on desktop and school roles
+        if (!isMobile && _isSchoolRole)
           IconButton(
             tooltip: _isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar',
             icon: Icon(
@@ -586,55 +579,67 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
               setState(() => _isCollapsed = !_isCollapsed);
             },
           ),
-        // User Profile Section in AppBar
+        // User Profile Section in AppBar — tapping opens Settings
         if (!isMobile)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: t.isDarkCanvas ? const Color(0xFF161B22) : const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: t.bgRule),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: t.accent.withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+            child: InkWell(
+              onTap: () {
+                final uData = LocalStorageService.getActiveUserData();
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => SettingsPage(userData: Map<String, dynamic>.from(uData)),
+                  ),
+                );
+              },
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: t.isDarkCanvas ? const Color(0xFF161B22) : const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: t.bgRule),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: t.accent.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.person_rounded, size: 16, color: t.accent),
                     ),
-                    child: Icon(Icons.person_rounded, size: 16, color: t.accent),
-                  ),
-                  const SizedBox(width: 8),
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.username,
-                        style: TextStyle(
-                          color: t.textPrimary,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
+                    const SizedBox(width: 8),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.username,
+                          style: TextStyle(
+                            color: t.textPrimary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      Text(
-                        widget.role,
-                        style: TextStyle(
-                          color: t.textTertiary,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
+                        Text(
+                          widget.role,
+                          style: TextStyle(
+                            color: t.textTertiary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(width: 8),
-                ],
+                      ],
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                ),
               ),
             ),
           ),

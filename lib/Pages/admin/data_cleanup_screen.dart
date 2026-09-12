@@ -4,7 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
-import 'package:gmwf/services/quota_service.dart';
+import 'package:gmwf/tools/firestore_structure_sanitizer.dart';
 import '../../constants/colors.dart';
 
 class DataCleanupScreen extends StatefulWidget {
@@ -12,6 +12,27 @@ class DataCleanupScreen extends StatefulWidget {
 
   @override
   State<DataCleanupScreen> createState() => _DataCleanupScreenState();
+}
+
+class _LocalDocItem {
+  final String id;
+  final String path;
+  final Map<String, dynamic> _data;
+
+  _LocalDocItem({
+    required this.id,
+    required this.path,
+    required Map<String, dynamic> data,
+  }) : _data = data;
+
+  Map<String, dynamic> data() => _data;
+  _LocalDocRef get reference => _LocalDocRef(path);
+}
+
+class _LocalDocRef {
+  final String path;
+  _LocalDocRef(this.path);
+  Future<void> delete() async {}
 }
 
 class _DataCleanupScreenState extends State<DataCleanupScreen> {
@@ -26,12 +47,20 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   final Map<String, List<String>> _dispensaryDatesCache = {};
 
   // Interactive manual cleanup state
-  int _activeTab = 0; // 0 = Manual Review, 1 = Auto Cleanup Logs
+  int _activeTab = 0; // 0 = Child & Parent Conflicts, 1 = Manual Review, 2 = Prescriptions, 3 = Auto
   bool _isScanning = false;
   bool _hasScanned = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scanChildParentConflicts();
+    });
+  }
   
   // Letter (A-Z, #) -> GroupKey (branchId_canonicalKey) -> List of duplicate documents
-  Map<String, Map<String, List<DocumentSnapshot>>> _duplicatesByLetter = {};
+  Map<String, Map<String, List<_LocalDocItem>>> _duplicatesByLetter = {};
   String? _selectedLetter;
   // Selected master document ID for each duplicate group key
   final Map<String, String> _electedMasterIds = {};
@@ -78,6 +107,210 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     }
   }
 
+  // Child-parent conflicts state
+  bool _isScanningConflicts = false;
+  bool _hasScannedConflicts = false;
+  List<Map<String, dynamic>> _childParentConflicts = [];
+  String _conflictFilter = 'all'; // 'all', 'raw_cnic', 'shared_cnic'
+  final Set<String> _processingConflictKeys = {};
+
+  Future<void> _scanChildParentConflicts() async {
+    setState(() {
+      _isScanningConflicts = true;
+      _isProcessing = true;
+      _log("🔍 Scanning local patient registry for child & parent CNIC conflicts...");
+    });
+
+    try {
+      final conflicts = await LocalStorageService.findChildParentCnicConflicts(
+        branchId: _currentBranch.isNotEmpty ? _currentBranch : null,
+      );
+      if (mounted) {
+        setState(() {
+          _childParentConflicts = conflicts;
+          _hasScannedConflicts = true;
+          _isScanningConflicts = false;
+          _isProcessing = false;
+        });
+      }
+      _log("✅ Scan complete: Found ${conflicts.length} child/parent conflict records.");
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isScanningConflicts = false;
+          _isProcessing = false;
+        });
+      }
+      _log("❌ Failed to scan child/parent conflicts: $e");
+    }
+  }
+
+  Future<void> _deleteConflictRegistration(Map<String, dynamic> item) async {
+    final hiveKey = (item['hiveKey'] ?? item['patientId']).toString();
+    final name = (item['patientName'] ?? 'Patient').toString();
+    setState(() => _processingConflictKeys.add(hiveKey));
+    _log("🗑️ Removing corrupted registration for $name ($hiveKey) — preserving medical history...");
+
+    try {
+      await LocalStorageService.deletePatientRegistrationPreservingHistory(
+        hiveKey,
+        branchId: item['branchId']?.toString(),
+        reason: 'Data Integrity: Child-parent CNIC conflict resolved',
+      );
+
+      if (mounted) {
+        setState(() {
+          _childParentConflicts.removeWhere((c) => c['hiveKey'] == hiveKey);
+          _processingConflictKeys.remove(hiveKey);
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("✅ Removed registration for $name. Medical history preserved intact."),
+          backgroundColor: const Color(0xFF0D9488),
+        ));
+      }
+      _log("✨ Registration $hiveKey deleted locally and queued for background Firestore sync.");
+    } catch (e) {
+      if (mounted) setState(() => _processingConflictKeys.remove(hiveKey));
+      _log("❌ Failed to delete registration $hiveKey: $e");
+    }
+  }
+
+  Future<void> _migrateConflictToChildId(Map<String, dynamic> item) async {
+    final hiveKey = (item['hiveKey'] ?? item['patientId']).toString();
+    final name = (item['patientName'] ?? 'Patient').toString();
+    setState(() => _processingConflictKeys.add(hiveKey));
+    _log("🔄 Migrating $name ($hiveKey) to canonical child ID...");
+
+    try {
+      final newId = await LocalStorageService.autoMigrateChildToCanonicalId(
+        hiveKey,
+        branchId: item['branchId']?.toString(),
+      );
+
+      if (mounted) {
+        setState(() {
+          _childParentConflicts.removeWhere((c) => c['hiveKey'] == hiveKey);
+          _processingConflictKeys.remove(hiveKey);
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("✅ Migrated $name to canonical ID: $newId"),
+          backgroundColor: const Color(0xFF10B981),
+        ));
+      }
+      _log("✨ Migrated $hiveKey to $newId and scheduled background sync.");
+    } catch (e) {
+      if (mounted) setState(() => _processingConflictKeys.remove(hiveKey));
+      _log("❌ Failed to migrate $hiveKey: $e");
+    }
+  }
+
+  Future<void> _batchDeleteAllConflicts() async {
+    if (_childParentConflicts.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Delete Conflicted Registrations?"),
+        content: Text(
+          "This will remove ${_childParentConflicts.length} corrupted patient registration(s) from the patient list.\n\n"
+          "✅ ALL clinical visit history, prescriptions, and dispensary logs will remain 100% intact.",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+            child: const Text("Delete Registrations"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isProcessing = true);
+    int count = 0;
+    final list = List<Map<String, dynamic>>.from(_childParentConflicts);
+
+    for (final item in list) {
+      final hiveKey = (item['hiveKey'] ?? item['patientId']).toString();
+      try {
+        await LocalStorageService.deletePatientRegistrationPreservingHistory(
+          hiveKey,
+          branchId: item['branchId']?.toString(),
+          reason: 'Batch conflict resolution',
+        );
+        count++;
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        _childParentConflicts.clear();
+        _isProcessing = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("✅ Cleaned $count patient registrations. Medical history preserved."),
+        backgroundColor: const Color(0xFF0D9488),
+      ));
+    }
+    _log("✨ Batch clean complete: Deleted $count corrupted registrations, medical history intact.");
+  }
+
+  Future<void> _batchMigrateAllConflicts() async {
+    if (_childParentConflicts.isEmpty) return;
+    setState(() => _isProcessing = true);
+    int count = 0;
+    final list = List<Map<String, dynamic>>.from(_childParentConflicts);
+
+    for (final item in list) {
+      final hiveKey = (item['hiveKey'] ?? item['patientId']).toString();
+      try {
+        await LocalStorageService.autoMigrateChildToCanonicalId(
+          hiveKey,
+          branchId: item['branchId']?.toString(),
+        );
+        count++;
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        _childParentConflicts.clear();
+        _isProcessing = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("✅ Migrated $count records to canonical child IDs."),
+        backgroundColor: const Color(0xFF10B981),
+      ));
+    }
+    _log("✨ Batch migration complete: Converted $count child records to canonical format.");
+  }
+
+  Future<void> _formatAllPatientCnics() async {
+    setState(() {
+      _isProcessing = true;
+      _log("🔄 Formatting all 13-digit raw CNICs into standard xxxxx-xxxxxxx-x format...");
+    });
+    try {
+      final count = await LocalStorageService.formatAllRawCnics(
+        branchId: _currentBranch.isNotEmpty ? _currentBranch : null,
+      );
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(count > 0
+              ? "✅ Updated $count patient(s) with formatted CNIC (xxxxx-xxxxxxx-x). Queued for background sync."
+              : "✅ All patient CNICs are already properly formatted (xxxxx-xxxxxxx-x)."),
+          backgroundColor: const Color(0xFF0D9488),
+        ));
+      }
+      _log("✨ Completed CNIC formatting: $count records updated to xxxxx-xxxxxxx-x and queued for sync.");
+    } catch (e) {
+      if (mounted) setState(() => _isProcessing = false);
+      _log("❌ Failed to format patient CNICs: $e");
+    }
+  }
+
   // ─── Logging ────────────────────────────────────────────────────────────────
 
   void _log(String msg) {
@@ -111,26 +344,40 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             final name = (pMap['patientName'] ?? pMap['name'] ?? pMap['fullName'] ?? '').toString().trim();
             final proposedIsAdult = guard.isEmpty && !resolvedId.contains('_child_');
             final currentIsAdult = pMap['isAdult'];
+            final rawCnic = (pMap['cnic'] ?? pMap['patientCnic'] ?? '').toString().trim();
+            final isRaw13Cnic = RegExp(r'^\d{13}$').hasMatch(rawCnic);
+            final isRaw13Guard = RegExp(r'^\d{13}$').hasMatch(guard);
+            final formattedCnic = isRaw13Cnic
+                ? '${rawCnic.substring(0, 5)}-${rawCnic.substring(5, 12)}-${rawCnic.substring(12, 13)}'
+                : rawCnic;
+            final formattedGuard = isRaw13Guard
+                ? '${guard.substring(0, 5)}-${guard.substring(5, 12)}-${guard.substring(12, 13)}'
+                : guard;
 
             bool needsRepair = false;
             if (resolvedId.isNotEmpty && (currentId.isEmpty || currentId != resolvedId)) needsRepair = true;
             if (currentIsAdult == null) needsRepair = true;
             if (pMap['patientName'] == null && name.isNotEmpty) needsRepair = true;
+            if (isRaw13Cnic || isRaw13Guard) needsRepair = true;
 
             if (needsRepair) {
               previewItems.add(_PatientRepairPreviewItem(
                 key: k.toString(),
                 branchId: (pMap['branchId'] ?? '').toString(),
                 patientName: name.isNotEmpty ? name : 'Unknown Patient',
-                cnic: (pMap['cnic'] ?? '').toString(),
-                guardianCnic: guard,
+                cnic: formattedCnic.isNotEmpty ? formattedCnic : rawCnic,
+                guardianCnic: formattedGuard.isNotEmpty ? formattedGuard : guard,
                 currentPatientId: currentId.isNotEmpty ? currentId : '(Missing ID)',
                 proposedPatientId: resolvedId,
                 currentIsAdult: currentIsAdult,
                 proposedIsAdult: proposedIsAdult,
-                recordType: 'Local Patient Profile',
+                recordType: isRaw13Cnic ? 'Local Patient (Raw CNIC)' : 'Local Patient Profile',
                 source: 'hive_patients',
-                rawData: pMap,
+                rawData: {
+                  ...pMap,
+                  if (isRaw13Cnic) 'cnic': formattedCnic,
+                  if (isRaw13Guard) 'guardianCnic': formattedGuard,
+                },
               ));
             }
           }
@@ -260,6 +507,19 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           updatedData['name'] = item.patientName;
         }
 
+        final rawCnic = (updatedData['cnic'] ?? updatedData['patientCnic'])?.toString().trim();
+        if (rawCnic != null && RegExp(r'^\d{13}$').hasMatch(rawCnic)) {
+          final formatted = '${rawCnic.substring(0, 5)}-${rawCnic.substring(5, 12)}-${rawCnic.substring(12, 13)}';
+          updatedData['cnic'] = formatted;
+          if (updatedData.containsKey('patientCnic')) {
+            updatedData['patientCnic'] = formatted;
+          }
+        }
+        final rawGuard = updatedData['guardianCnic']?.toString().trim();
+        if (rawGuard != null && RegExp(r'^\d{13}$').hasMatch(rawGuard)) {
+          updatedData['guardianCnic'] = '${rawGuard.substring(0, 5)}-${rawGuard.substring(5, 12)}-${rawGuard.substring(12, 13)}';
+        }
+
         final sanitized = LocalStorageService.sanitize(updatedData);
 
         if (item.source == 'hive_patients' && pBox != null) {
@@ -350,7 +610,12 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           if (raw is Map) {
             final data = Map<String, dynamic>.from(raw);
             final s = (data['serial'] ?? data['id'] ?? '').toString().trim().toUpperCase();
-            if (s.isNotEmpty) localSerialMap[s] = data;
+            final b = (data['branchId'] ?? '').toString().trim().toLowerCase();
+            if (s.isNotEmpty) {
+              final compKey = b.isNotEmpty ? '${b}_$s' : s;
+              localSerialMap[compKey] = data;
+              localSerialMap.putIfAbsent(s, () => data);
+            }
           }
         }
       }
@@ -360,7 +625,12 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           if (raw is Map) {
             final data = Map<String, dynamic>.from(raw);
             final s = (data['serial'] ?? data['id'] ?? '').toString().trim().toUpperCase();
-            if (s.isNotEmpty) localDispensaryMap[s] = data;
+            final b = (data['branchId'] ?? '').toString().trim().toLowerCase();
+            if (s.isNotEmpty) {
+              final compKey = b.isNotEmpty ? '${b}_$s' : s;
+              localDispensaryMap[compKey] = data;
+              localDispensaryMap.putIfAbsent(s, () => data);
+            }
           }
         }
       }
@@ -370,24 +640,40 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           if (raw is Map) {
             final data = Map<String, dynamic>.from(raw);
             final s = (data['serial'] ?? data['id'] ?? '').toString().trim().toUpperCase();
-            if (s.isNotEmpty) localPrescriptionMap[s] = data;
+            final b = (data['branchId'] ?? '').toString().trim().toLowerCase();
+            if (s.isNotEmpty) {
+              final compKey = b.isNotEmpty ? '${b}_$s' : s;
+              localPrescriptionMap[compKey] = data;
+              localPrescriptionMap.putIfAbsent(s, () => data);
+            }
           }
         }
       }
 
-      // Collect all unique serial keys from local Hive
-      final allLocalKeys = <String>{...localSerialMap.keys, ...localDispensaryMap.keys, ...localPrescriptionMap.keys};
+      // Collect all unique serial keys from local Hive across ALL branches
+      final allLocalKeys = <String>{
+        ...localSerialMap.keys.where((k) => k.contains('_')),
+        ...localDispensaryMap.keys.where((k) => k.contains('_')),
+        ...localPrescriptionMap.keys.where((k) => k.contains('_')),
+      };
+      for (final k in {...localSerialMap.keys, ...localDispensaryMap.keys, ...localPrescriptionMap.keys}) {
+        if (!k.contains('_') && !allLocalKeys.any((ck) => ck.endsWith('_$k'))) {
+          allLocalKeys.add(k);
+        }
+      }
 
       for (final sKey in allLocalKeys) {
-        final serData = localSerialMap[sKey];
-        final dispData = localDispensaryMap[sKey] ?? {};
-        final prescData = localPrescriptionMap[sKey] ?? {};
+        final serData = localSerialMap[sKey] ?? (sKey.contains('_') ? localSerialMap[sKey.split('_').last] : null);
+        final dispData = localDispensaryMap[sKey] ?? (sKey.contains('_') ? localDispensaryMap[sKey.split('_').last] : null) ?? {};
+        final prescData = localPrescriptionMap[sKey] ?? (sKey.contains('_') ? localPrescriptionMap[sKey.split('_').last] : null) ?? {};
+
+        final cleanSerial = sKey.contains('_') ? sKey.split('_').last : sKey;
+        final branch = (serData?['branchId'] ?? dispData['branchId'] ?? prescData['branchId'] ?? (sKey.contains('_') ? sKey.split('_').first : '')).toString();
 
         final sStatus = (serData?['dispenseStatus'] ?? serData?['status'] ?? 'waiting').toString().toLowerCase();
         final dStatus = (dispData['dispenseStatus'] ?? dispData['status'] ?? '').toString().toLowerCase();
 
         final pName = (serData?['patientName'] ?? dispData['patientName'] ?? dispData['name'] ?? prescData['patientName'] ?? 'Unknown Patient').toString();
-        final branch = (serData?['branchId'] ?? dispData['branchId'] ?? prescData['branchId'] ?? '').toString();
         final date = (dispData['dateKey'] ?? serData?['dateKey'] ?? prescData['dateKey'] ?? '').toString();
 
         final rawQT = serData?['queueType'] ?? dispData['queueType'] ?? prescData['queueType'] ?? serData?['category'] ?? dispData['category'] ?? serData?['status'] ?? dispData['status'];
@@ -398,7 +684,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
         if (sStatus != 'dispensed' || hasPrescription || dispData.isNotEmpty) {
           seenSerials.add(sKey);
           previewItems.add(_SerialsDispensaryPreviewItem(
-            serial: sKey,
+            serial: cleanSerial,
             branchId: branch,
             dateKey: date,
             patientName: pName,
@@ -500,8 +786,6 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
       for (int i = 0; i < selectedItems.length; i++) {
         final item = selectedItems[i];
-        final serialRef = item.serialRef;
-        final dispRef = item.dispensaryRef;
         final dispensaryData = Map<String, dynamic>.from(item.dispensaryData);
 
         // Also check if prescriptionsBox has additional clinical data for this serial
@@ -519,116 +803,162 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
         }
 
         // 1. UPDATE / CREATE IN LOCAL HIVE ENTRIES BOX FIRST!
+        String bId = (item.branchId.isNotEmpty && item.branchId != 'unknown')
+            ? item.branchId
+            : (dispensaryData['branchId']?.toString() ?? '');
+        final qType = SyncService().resolveQueueType(
+          dispensaryData['queueType']?.toString() ??
+          item.queueType
+        );
+
         if (eBox != null) {
           final sUpper = item.serial.toUpperCase();
           final sLower = item.serial.toLowerCase();
-          final rawEntry = eBox.get(sUpper) ?? eBox.get(sLower) ?? eBox.get(item.serial);
+          final canonicalEntryKey = bId.isNotEmpty ? '${bId.toLowerCase()}-${item.serial}' : item.serial;
+          final rawEntry = eBox.get(canonicalEntryKey) ?? eBox.get(sUpper) ?? eBox.get(sLower) ?? eBox.get(item.serial);
           final updatedEntry = rawEntry != null && rawEntry is Map ? Map<String, dynamic>.from(rawEntry) : <String, dynamic>{};
 
-          final qType = SyncService().resolveQueueType(
-            dispensaryData['queueType']?.toString() ??
-            item.queueType
-          );
+          if (bId.isEmpty && rawEntry is Map && rawEntry['branchId'] != null) {
+            bId = rawEntry['branchId'].toString();
+          }
+          if (bId.isEmpty) {
+            final localBranches = LocalStorageService.getLocalBranchesList();
+            bId = localBranches.isNotEmpty ? (localBranches.first['id'] ?? 'default').toString() : 'default';
+          }
 
           updatedEntry['serial'] = item.serial;
           updatedEntry['id'] = item.serial;
           updatedEntry['queueType'] = qType;
-          if (item.branchId.isNotEmpty) updatedEntry['branchId'] = item.branchId;
+          updatedEntry['branchId'] = bId;
           if (item.dateKey.isNotEmpty) updatedEntry['dateKey'] = item.dateKey;
           if (item.patientName.isNotEmpty && item.patientName != 'Unknown Patient') updatedEntry['patientName'] = item.patientName;
           
           updatedEntry['dispenseStatus'] = 'dispensed';
           updatedEntry['status'] = 'completed';
           
-          if (dispensaryData['prescription'] != null) updatedEntry['prescription'] = dispensaryData['prescription'];
-          if (dispensaryData['medicines'] != null) updatedEntry['medicines'] = dispensaryData['medicines'];
-          if (dispensaryData['doctorName'] != null) updatedEntry['doctorName'] = dispensaryData['doctorName'];
+          final prescObj = dispensaryData['prescription'] is Map
+              ? Map<String, dynamic>.from(dispensaryData['prescription'] as Map)
+              : null;
+
+          if (prescObj != null) {
+            updatedEntry['prescription'] = prescObj;
+            if (prescObj['diagnosis'] != null) updatedEntry['diagnosis'] = prescObj['diagnosis'];
+            if (prescObj['complaint'] != null) updatedEntry['complaint'] = prescObj['complaint'];
+            if (prescObj['condition'] != null) updatedEntry['condition'] = prescObj['condition'];
+            if (prescObj['doctorName'] != null) {
+              updatedEntry['doctorName'] = prescObj['doctorName'];
+              updatedEntry['prescribedBy'] ??= prescObj['doctorName'];
+            }
+            if (prescObj['doctorId'] != null) updatedEntry['doctorId'] = prescObj['doctorId'];
+            if (prescObj['daysOfMedicine'] != null) updatedEntry['daysOfMedicine'] = prescObj['daysOfMedicine'];
+            if (prescObj['extraCharge'] != null) updatedEntry['extraCharge'] = prescObj['extraCharge'];
+            if (prescObj['vitals'] != null) updatedEntry['vitals'] = prescObj['vitals'];
+            if (prescObj['labResults'] != null) updatedEntry['labResults'] = prescObj['labResults'];
+            final pMeds = prescObj['prescriptions'] ?? prescObj['medicines'];
+            if (pMeds != null) {
+              updatedEntry['medicines'] = pMeds;
+              updatedEntry['prescriptions'] ??= pMeds;
+            }
+          } else if (dispensaryData['prescription'] != null) {
+            updatedEntry['prescription'] = dispensaryData['prescription'];
+          }
+
+          if (dispensaryData['medicines'] != null) {
+            updatedEntry['medicines'] = dispensaryData['medicines'];
+            updatedEntry['prescriptions'] ??= dispensaryData['medicines'];
+          }
+          if (dispensaryData['doctorName'] != null) {
+            updatedEntry['doctorName'] = dispensaryData['doctorName'];
+            updatedEntry['prescribedBy'] ??= dispensaryData['doctorName'];
+          }
           if (dispensaryData['doctorId'] != null) updatedEntry['doctorId'] = dispensaryData['doctorId'];
           if (dispensaryData['daysOfMedicine'] != null) updatedEntry['daysOfMedicine'] = dispensaryData['daysOfMedicine'];
           if (dispensaryData['vitals'] != null) updatedEntry['vitals'] = dispensaryData['vitals'];
           if (dispensaryData['charges'] != null) updatedEntry['charges'] = dispensaryData['charges'];
           if (dispensaryData['receivedAmount'] != null) updatedEntry['receivedAmount'] = dispensaryData['receivedAmount'];
+          if (dispensaryData['extraCharge'] != null) updatedEntry['extraCharge'] = dispensaryData['extraCharge'];
+          if (dispensaryData['dispensedAt'] != null) updatedEntry['dispensedAt'] = dispensaryData['dispensedAt'];
+          if (dispensaryData['dispensedBy'] != null) updatedEntry['dispensedBy'] = dispensaryData['dispensedBy'];
+          if (dispensaryData['dispenserName'] != null) updatedEntry['dispenserName'] = dispensaryData['dispenserName'];
+          if (dispensaryData['diagnosis'] != null) updatedEntry['diagnosis'] = dispensaryData['diagnosis'];
+          if (dispensaryData['complaint'] != null) {
+            updatedEntry['complaint'] = dispensaryData['complaint'];
+            updatedEntry['condition'] ??= dispensaryData['complaint'];
+          }
 
           final sanitized = LocalStorageService.sanitize(updatedEntry);
+          await eBox.put(canonicalEntryKey, sanitized);
           await eBox.put(sUpper, sanitized);
           await eBox.put(sLower, sanitized);
-        }
 
-        // 2. Enqueue Sync for offline/online synchronization
-        final bId = item.branchId.isNotEmpty ? item.branchId : (widget.key?.toString() ?? '');
-        final qType = SyncService().resolveQueueType(
-          dispensaryData['queueType']?.toString() ??
-          item.queueType
-        );
-        if (bId.isNotEmpty && item.serial.isNotEmpty) {
+          // 2. Enqueue Sync for serial entry
           await LocalStorageService.enqueueSync({
             'type': 'save_entry',
             'branchId': bId,
             'serial': item.serial,
+            'dateKey': item.dateKey,
             'queueType': qType,
-            'data': {
-              'serial': item.serial,
-              'id': item.serial,
-              'patientName': item.patientName,
-              'branchId': item.branchId,
-              'dateKey': item.dateKey,
-              'queueType': qType,
-              'dispenseStatus': 'dispensed',
-              'status': 'completed',
-              if (dispensaryData['prescription'] != null) 'prescription': dispensaryData['prescription'],
-              if (dispensaryData['medicines'] != null) 'medicines': dispensaryData['medicines'],
-              if (dispensaryData['doctorName'] != null) 'doctorName': dispensaryData['doctorName'],
-              if (dispensaryData['doctorId'] != null) 'doctorId': dispensaryData['doctorId'],
-              if (dispensaryData['daysOfMedicine'] != null) 'daysOfMedicine': dispensaryData['daysOfMedicine'],
-              if (dispensaryData['vitals'] != null) 'vitals': dispensaryData['vitals'],
-              if (dispensaryData['charges'] != null) 'charges': dispensaryData['charges'],
-              if (dispensaryData['receivedAmount'] != null) 'receivedAmount': dispensaryData['receivedAmount'],
+            'data': sanitized,
+          });
+
+          mergedCount++;
+        }
+
+        // 3. DELETE FROM LOCAL DISPENSARY BOX AND ENQUEUE SYNC DELETE
+        if (dBox != null) {
+          final sUpper = item.serial.toUpperCase();
+          final keysToDelete = <dynamic>{};
+          for (final dk in dBox.keys) {
+            final kStr = dk.toString();
+            final kUpper = kStr.toUpperCase();
+            if (kUpper == sUpper || kUpper.endsWith('_$sUpper') || kUpper.contains('-$sUpper') || kUpper.contains('_$sUpper')) {
+              keysToDelete.add(dk);
+            } else {
+              final val = dBox.get(dk);
+              if (val is Map) {
+                final vs = (val['serial'] ?? val['id'] ?? '').toString().toUpperCase();
+                if (vs == sUpper) keysToDelete.add(dk);
+              }
             }
+          }
+          for (final dk in keysToDelete) {
+            await dBox.delete(dk);
+            deletedCount++;
+          }
+          await LocalStorageService.enqueueSync({
+            'type': 'delete_dispensary',
+            'branchId': bId,
+            'dateKey': item.dateKey,
+            'serial': item.serial,
           });
         }
 
-        // 3. Attempt direct cloud write if available, otherwise handled by syncQueueBox
-        DocumentReference? targetSerialRef = serialRef;
-        if (targetSerialRef == null && item.branchId.isNotEmpty && item.dateKey.isNotEmpty && item.serial.isNotEmpty) {
-          targetSerialRef = _fs.collection('branches').doc(item.branchId).collection('serials').doc(item.dateKey).collection(qType).doc(item.serial);
-        }
-
-        if (targetSerialRef != null) {
-          try {
-            final mergePayload = <String, dynamic>{
-              'serial': item.serial,
-              'id': item.serial,
-              'patientName': item.patientName,
-              'branchId': item.branchId,
-              'dateKey': item.dateKey,
-              'queueType': qType,
-              'dispenseStatus': 'dispensed',
-              'status': 'completed',
-              'updatedAt': FieldValue.serverTimestamp(),
-            };
-            if (dispensaryData['prescription'] != null) mergePayload['prescription'] = dispensaryData['prescription'];
-            if (dispensaryData['medicines'] != null) mergePayload['medicines'] = dispensaryData['medicines'];
-            if (dispensaryData['doctorName'] != null) mergePayload['doctorName'] = dispensaryData['doctorName'];
-            if (dispensaryData['doctorId'] != null) mergePayload['doctorId'] = dispensaryData['doctorId'];
-            if (dispensaryData['daysOfMedicine'] != null) mergePayload['daysOfMedicine'] = dispensaryData['daysOfMedicine'];
-            if (dispensaryData['vitals'] != null) mergePayload['vitals'] = dispensaryData['vitals'];
-            if (dispensaryData['charges'] != null) mergePayload['charges'] = dispensaryData['charges'];
-            if (dispensaryData['receivedAmount'] != null) mergePayload['receivedAmount'] = dispensaryData['receivedAmount'];
-
-            await targetSerialRef.set(mergePayload, SetOptions(merge: true));
-            mergedCount++;
-          } catch (cloudWriteErr) {
-            if (QuotaService.isQuotaError(cloudWriteErr)) {
-              QuotaService.recordQuotaExceeded(error: cloudWriteErr);
+        // 4. DELETE FROM LOCAL PRESCRIPTIONS BOX AND ENQUEUE SYNC DELETE
+        if (prBox != null) {
+          final sUpper = item.serial.toUpperCase();
+          final keysToDelete = <dynamic>{};
+          for (final pk in prBox.keys) {
+            final kStr = pk.toString();
+            final kUpper = kStr.toUpperCase();
+            if (kUpper == sUpper || kUpper.endsWith('_$sUpper') || kUpper.contains('-$sUpper')) {
+              keysToDelete.add(pk);
+            } else {
+              final val = prBox.get(pk);
+              if (val is Map) {
+                final vs = (val['serial'] ?? val['id'] ?? '').toString().toUpperCase();
+                if (vs == sUpper) keysToDelete.add(pk);
+              }
             }
           }
-        }
-
-        if (dispRef != null) {
-          try {
-            await dispRef.delete();
+          for (final pk in keysToDelete) {
+            await prBox.delete(pk);
             deletedCount++;
-          } catch (_) {}
+          }
+          await LocalStorageService.enqueueSync({
+            'type': 'delete_prescription',
+            'branchId': bId,
+            'serial': item.serial,
+          });
         }
 
         setState(() {
@@ -636,9 +966,13 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
         });
       }
 
-      _log("✨ Reconciliation complete: Merged and copied clinical data to $mergedCount serials, scheduled sync.");
-      Future.delayed(const Duration(milliseconds: 500), () {
-        SyncService().triggerUpload();
+      if (eBox != null) await eBox.flush();
+      if (dBox != null) await dBox.flush();
+      if (prBox != null) await prBox.flush();
+
+      _log("✨ Reconciliation complete: Merged into $mergedCount serial visit entries and removed $deletedCount redundant dispensary/prescription records.");
+      SyncService().triggerUpload(force: true).catchError((e) {
+        debugPrint('[SyncService] Background sync error: $e');
       });
     } catch (e) {
       _log("❌ Reconciliation execution failed: $e");
@@ -751,51 +1085,106 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     }
   }
 
+  Future<void> _runStructureSanitizer() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+            SizedBox(width: 8),
+            Text("Purge Bogus Branches & Bloat?"),
+          ],
+        ),
+        content: const Text(
+          "This action will:\n\n"
+          "1. 🗑️ Delete bogus branch docs in Firestore ('all', 'global', and numeric CNICs) and reparent any data to real branches.\n"
+          "2. 📦 Clean root-level collections ('employees', 'biometric_devices', etc.) so all branch data strictly resides in branches/{branchId}/.\n"
+          "3. 👤 Purge placeholder 'Employee (Staff PIN)' ghost entries and free their credentials.\n\n"
+          "Do you want to proceed?",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+            child: const Text("Start Structure Purge"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() {
+      _isProcessing = true;
+      _logs = ["🚀 Initiating Full Firestore Structure Sanitization..."];
+      _progress = 0.1;
+    });
+
+    try {
+      await FirestoreStructureSanitizer.executeFullStructureSanitization(
+        onProgress: (msg) {
+          _log(msg);
+        },
+      );
+
+      setState(() => _progress = 1.0);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("✅ Structure Sanitization completed successfully!"),
+            backgroundColor: Color(0xFF10B981),
+          ),
+        );
+      }
+    } catch (e) {
+      _log("❌ Error during structure sanitization: $e");
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
   // ─── Entry point ────────────────────────────────────────────────────────────
 
   Future<void> _startCleanup() async {
     setState(() {
       _isProcessing = true;
-      _logs = ["🚀 Starting global scan across all patients..."];
+      _logs = ["🚀 Starting global local scan across all patients in Hive..."];
       _progress = 0.0;
       _serialsDatesCache.clear();
       _dispensaryDatesCache.clear();
     });
 
     try {
-      // 1. Fetch ALL patients from EVERYWHERE (collectionGroup)
-      _log("📦 Fetching all patient records (global scan)...");
-      
-      List<DocumentSnapshot> allDocs = [];
+      if (!Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+        await LocalStorageService.openBoxSafe(LocalStorageService.patientsBox);
+      }
+      final pBox = Hive.box(LocalStorageService.patientsBox);
 
-      try {
-        final querySnap = await _fs.collectionGroup('patients').get();
-        allDocs = querySnap.docs;
-      } catch (e) {
-        if (e.toString().contains('failed-precondition')) {
-          _log("⚠️ Global patients index missing. Falling back to branch-by-branch scan...");
-          // Manual fallback: Iterate branches
-          final branches = await _fs.collection('branches').get();
-          for (var b in branches.docs) {
-            final pSnap = await b.reference.collection('patients').get();
-            allDocs.addAll(pSnap.docs);
-          }
-          // Also check top-level if it exists
-          try {
-            final tSnap = await _fs.collection('patients').get();
-            allDocs.addAll(tSnap.docs);
-          } catch (_) {}
-        } else {
-          rethrow;
+      _log("📦 Reading all patient records from local Hive storage...");
+      
+      final List<_LocalDocItem> allDocs = [];
+      for (final key in pBox.keys) {
+        final val = pBox.get(key);
+        if (val is Map) {
+          final data = Map<String, dynamic>.from(val);
+          final id = key.toString();
+          final bId = (data['branchId'] ?? 'unknown').toString();
+          allDocs.add(_LocalDocItem(
+            id: id,
+            path: 'branches/$bId/patients/$id',
+            data: data,
+          ));
         }
       }
 
-      _log("🔎 Found ${allDocs.length} total records across all collections.");
+      _log("🔎 Found ${allDocs.length} total local records in Hive.");
 
       // 2. Group by (branchId + canonicalKey)
-      final Map<String, List<DocumentSnapshot>> groups = {};
+      final Map<String, List<_LocalDocItem>> groups = {};
       for (final doc in allDocs) {
-        final data = doc.data() as Map<String, dynamic>? ?? {};
+        final data = doc.data();
         final branchId = data['branchId']?.toString() ?? 'unknown';
         final key = _canonicalKey(data, doc.id);
         final compositeKey = "${branchId}_$key";
@@ -806,11 +1195,11 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       // - Multiple docs for same key -> MERGE
       // - Single doc with wrong ID -> FIX (MOVE)
       // - Single doc with correct ID -> IGNORE
-      final Map<String, List<DocumentSnapshot>> toProcess = {};
+      final Map<String, List<_LocalDocItem>> toProcess = {};
       int ignoredCount = 0;
 
       groups.forEach((compKey, docs) {
-        final data = docs.first.data() as Map<String, dynamic>;
+        final data = docs.first.data();
         final canonicalId = _canonicalKey(data, docs.first.id);
         
         bool needsFix = false;
@@ -818,8 +1207,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           needsFix = true; // Duplicates
         } else {
           final doc = docs.first;
-          // If ID is not canonical OR it's in the global collection (needs moving to branch)
-          if (doc.id != canonicalId || doc.reference.path.startsWith('patients/')) {
+          if (doc.id != canonicalId) {
             needsFix = true;
           }
         }
@@ -839,7 +1227,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
       for (final entry in toProcess.entries) {
         final docs = entry.value;
-        final data = docs.first.data() as Map<String, dynamic>;
+        final data = docs.first.data();
         final branchId = data['branchId']?.toString() ?? 'unknown';
         
         setState(() {
@@ -855,7 +1243,12 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
         _progress = 1.0;
         _isProcessing = false;
       });
-      _log("✨ ALL RECORDS PROCESSED SUCCESSFULLY!");
+      _log("✨ ALL RECORDS PROCESSED SUCCESSFULLY LOCALLY!");
+      
+      // Trigger background sync to Firestore
+      SyncService().triggerUpload(force: true).catchError((e) {
+        debugPrint('[SyncService] Background sync error: $e');
+      });
     } catch (e, st) {
       _log("❌ Fatal error: $e");
       _log("   $st");
@@ -866,20 +1259,37 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   // ─── Branch processing ──────────────────────────────────────────────────────
 
   Future<void> _processBranch(String branchId) async {
-    final patientsRef =
-        _fs.collection('branches').doc(branchId).collection('patients');
-    final allPatients = await patientsRef.get();
+    if (!Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+      await LocalStorageService.openBoxSafe(LocalStorageService.patientsBox);
+    }
+    final pBox = Hive.box(LocalStorageService.patientsBox);
+
+    final List<_LocalDocItem> branchDocs = [];
+    for (final key in pBox.keys) {
+      final val = pBox.get(key);
+      if (val is Map) {
+        final data = Map<String, dynamic>.from(val);
+        final bId = (data['branchId'] ?? '').toString();
+        if (bId.toLowerCase() == branchId.toLowerCase() || branchId.isEmpty || branchId == 'all') {
+          branchDocs.add(_LocalDocItem(
+            id: key.toString(),
+            path: 'branches/$bId/patients/$key',
+            data: data,
+          ));
+        }
+      }
+    }
 
     // Group by canonical key
-    final Map<String, List<DocumentSnapshot>> groups = {};
-    for (final doc in allPatients.docs) {
+    final Map<String, List<_LocalDocItem>> groups = {};
+    for (final doc in branchDocs) {
       final key = _canonicalKey(doc.data(), doc.id);
       groups.putIfAbsent(key, () => []).add(doc);
     }
 
     // Only process groups that actually have duplicates
     final dupeGroups = groups.entries.where((e) => e.value.length > 1).toList();
-    _log("   Found ${dupeGroups.length} duplicate group(s) in $branchId");
+    _log("   Found ${dupeGroups.length} duplicate group(s) locally in $branchId");
 
     for (final entry in dupeGroups) {
       await _performMerge(branchId, entry.value);
@@ -914,8 +1324,8 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   // Prefer the document whose ID is already the stripped (registration) form —
   // that is the authoritative record created by PatientRegisterPage.
 
-  int _scoreDoc(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>? ?? {};
+  int _scoreDoc(_LocalDocItem doc) {
+    final data = doc.data();
 
     // Bonus: if the doc ID is already a pure-digit CNIC or canonical child ID,
     // treat it as inherently more authoritative by adding a large base score.
@@ -933,23 +1343,21 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   // ─── Merge ──────────────────────────────────────────────────────────────────
 
   Future<void> _performMerge(
-      String branchId, List<DocumentSnapshot> docs, {DocumentSnapshot? electedMaster}) async {
+      String branchId, List<_LocalDocItem> docs, {_LocalDocItem? electedMaster}) async {
     if (docs.isEmpty) return;
 
-    // 1. Elect master: registration doc (pure-digit ID) in the correct branch wins.
-    //    Prefer documents that are already in branches/{branchId}/patients.
+    // 1. Elect master: registration doc (pure-digit ID or canonical child ID) in the correct branch wins.
     final master = electedMaster ?? docs.reduce((a, b) {
       final scoreA = _scoreDoc(a);
       final scoreB = _scoreDoc(b);
       return scoreA >= scoreB ? a : b;
     });
     
-    final masterData = master.data() as Map<String, dynamic>? ?? {};
+    final masterData = master.data();
     final canonicalId = _canonicalKey(masterData, master.id);
     final masterName = masterData['name'] ?? 'Unknown';
 
-    // Check if master itself needs to be moved to a new document (rename)
-    bool renamingMaster = master.id != canonicalId || master.reference.path.startsWith('patients/');
+    bool renamingMaster = master.id != canonicalId;
 
     _log("💡 ${renamingMaster ? 'Fixing' : 'Merging'} record for: $masterName (canonical → $canonicalId)");
 
@@ -957,7 +1365,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     final Map<String, dynamic> merged = Map<String, dynamic>.from(masterData);
     for (final doc in docs) {
       if (doc.id == master.id) continue;
-      final data = doc.data() as Map<String, dynamic>? ?? {};
+      final data = doc.data();
       data.forEach((key, incoming) {
         if (!merged.containsKey(key) || _isMissingValue(merged[key])) {
           if (!_isMissingValue(incoming)) {
@@ -972,43 +1380,118 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       });
     }
 
-    // 3. Normalise ID fields
-    merged['cnic']      = canonicalId;
+    // 3. Normalise ID fields and format CNIC
+    final cleanDigits = canonicalId.replaceAll(RegExp(r'[-\s]'), '');
+    final formattedCnic = RegExp(r'^\d{13}$').hasMatch(cleanDigits)
+        ? '${cleanDigits.substring(0, 5)}-${cleanDigits.substring(5, 12)}-${cleanDigits.substring(12, 13)}'
+        : (merged['cnic']?.toString() ?? canonicalId);
+
+    final cleanBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
+    merged['cnic']      = formattedCnic;
     merged['patientId'] = canonicalId;
-    merged['branchId']  = branchId;
+    merged['branchId']  = cleanBranch;
 
-    // 4. Determine final reference
-    final finalRef = _fs.collection('branches').doc(branchId).collection('patients').doc(canonicalId);
-
-    // 5. Write to final doc
-    await finalRef.set(merged, SetOptions(merge: true));
-    if (finalRef.id != master.id || finalRef.path != master.reference.path) {
-       _log("   ✅ Created/Enriched $canonicalId");
-    } else {
-       _log("   ✅ Master enriched in place");
+    // 4. Save to local patientsBox
+    if (!Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+      await LocalStorageService.openBoxSafe(LocalStorageService.patientsBox);
     }
+    final pBox = Hive.box(LocalStorageService.patientsBox);
+    final sanitizedMaster = LocalStorageService.sanitize(merged);
+    await pBox.put(canonicalId, sanitizedMaster);
+    _log("   ✅ Saved canonical patient locally in branch $cleanBranch: $canonicalId");
+
+    // Enqueue sync for master patient
+    await LocalStorageService.enqueueSync({
+      'type': 'save_patient',
+      'branchId': cleanBranch,
+      'patientId': canonicalId,
+      'data': sanitizedMaster,
+    });
 
     // Collect all old IDs to repoint
     final List<String> oldIds = docs
-        .where((d) => d.reference.path != finalRef.path)
+        .where((d) => d.id != canonicalId)
         .map((d) => d.id)
         .toList();
 
     if (oldIds.isNotEmpty) {
-      _log("   🔄 Migrating prescriptions and references for ${oldIds.length} duplicate IDs...");
+      _log("   🔄 Repointing local entries and prescriptions for ${oldIds.length} duplicate IDs...");
       
-      // Migrate prescriptions for all old IDs in parallel
-      await Future.wait(oldIds.map((oldId) => _migratePrescriptions(branchId, oldId, canonicalId)));
-
-      // Repoint references for all old IDs in a single scan run
-      await _fastUpdatePatientRefs(branchId: branchId, fromIds: oldIds, toId: canonicalId);
-
-      // Delete old docs
-      for (final doc in docs) {
-        if (doc.reference.path == finalRef.path) continue; // Skip the master we wrote
-        await doc.reference.delete();
-        _log("      🗑️ Deleted duplicate doc ${doc.id}");
+      // Repoint in local entriesBox
+      if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+        final eBox = Hive.box(LocalStorageService.entriesBox);
+        for (final ek in eBox.keys.toList()) {
+          final ev = eBox.get(ek);
+          if (ev is Map) {
+            final eMap = Map<String, dynamic>.from(ev);
+            final pId = (eMap['patientId'] ?? '').toString();
+            final cnic = (eMap['cnic'] ?? eMap['patientCnic'] ?? '').toString();
+            if (oldIds.contains(pId) || oldIds.contains(cnic)) {
+              eMap['patientId'] = canonicalId;
+              eMap['cnic'] = formattedCnic;
+              final sanitizedEntry = LocalStorageService.sanitize(eMap);
+              await eBox.put(ek, sanitizedEntry);
+              await LocalStorageService.enqueueSync({
+                'type': 'save_entry',
+                'branchId': branchId,
+                'serial': eMap['serial'] ?? ek,
+                'data': sanitizedEntry,
+              });
+            }
+          }
+        }
+        await eBox.flush();
       }
+
+      // Repoint in local prescriptionsBox
+      if (Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
+        final prBox = Hive.box(LocalStorageService.prescriptionsBox);
+        for (final pk in prBox.keys.toList()) {
+          final pv = prBox.get(pk);
+          if (pv is Map) {
+            final prMap = Map<String, dynamic>.from(pv);
+            final pId = (prMap['patientId'] ?? '').toString();
+            final cnic = (prMap['patientCnic'] ?? prMap['cnic'] ?? '').toString();
+            if (oldIds.contains(pId) || oldIds.contains(cnic)) {
+              prMap['patientId'] = canonicalId;
+              prMap['patientCnic'] = formattedCnic;
+              await prBox.put(pk, LocalStorageService.sanitize(prMap));
+            }
+          }
+        }
+        await prBox.flush();
+      }
+
+      // Repoint in local dispensaryBox
+      if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+        final dBox = Hive.box(LocalStorageService.dispensaryBox);
+        for (final dk in dBox.keys.toList()) {
+          final dv = dBox.get(dk);
+          if (dv is Map) {
+            final dMap = Map<String, dynamic>.from(dv);
+            final pId = (dMap['patientId'] ?? '').toString();
+            final cnic = (dMap['cnic'] ?? dMap['patientCnic'] ?? '').toString();
+            if (oldIds.contains(pId) || oldIds.contains(cnic)) {
+              dMap['patientId'] = canonicalId;
+              dMap['cnic'] = formattedCnic;
+              await dBox.put(dk, LocalStorageService.sanitize(dMap));
+            }
+          }
+        }
+        await dBox.flush();
+      }
+
+      // Delete old duplicate docs from local patientsBox and enqueue sync
+      for (final oldId in oldIds) {
+        await pBox.delete(oldId);
+        await LocalStorageService.enqueueSync({
+          'type': 'delete_patient',
+          'branchId': branchId,
+          'patientId': oldId,
+        });
+        _log("      🗑️ Deleted duplicate patient locally: $oldId");
+      }
+      await pBox.flush();
     }
   }
 
@@ -1307,109 +1790,66 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
   // ─── Prescription Merge & Cleanup Logic ──────────────────────────────────────
 
-  Future<DocumentSnapshot?> _locateSerialDoc({
-    required String branchId,
-    required String dateKey,
-    required String serial,
-    String? preferredQueueType,
-  }) async {
-    final types = ['zakat', 'non-zakat', 'gmwf', 'credits', 'emergency'];
-    if (preferredQueueType != null && preferredQueueType.isNotEmpty) {
-      types.remove(preferredQueueType);
-      types.insert(0, preferredQueueType);
-    }
-    
-    final results = await Future.wait(types.map((type) async {
-      try {
-        final ref = _fs
-            .collection('branches').doc(branchId)
-            .collection('serials').doc(dateKey)
-            .collection(type).doc(serial);
-        final snap = await ref.get();
-        if (snap.exists) {
-          return {'snap': snap, 'queueType': type};
-        }
-      } catch (_) {}
-      return null;
-    }));
-    
-    final matched = results.firstWhere((r) => r != null, orElse: () => null);
-    if (matched != null) {
-      return matched['snap'] as DocumentSnapshot;
-    }
-    return null;
-  }
-
   Future<void> _scanPrescriptions() async {
     setState(() {
       _isScanningPrescriptions = true;
       _hasScannedPrescriptions = true;
       _prescriptionMigrationItems.clear();
-      _logs = ["🔎 Scanning Firestore for prescription records..."];
+      _logs = ["🔎 Scanning local Hive storage for prescription records..."];
       _progress = 0.0;
     });
 
     try {
-      List<DocumentSnapshot> allDocs = [];
-
-      try {
-        final querySnap = await _fs.collectionGroup('prescriptions').get();
-        allDocs = querySnap.docs;
-      } catch (e) {
-        if (e.toString().contains('failed-precondition')) {
-          _log("⚠️ Global prescriptions index missing. Falling back to branch scan...");
-          final branches = await _fs.collection('branches').get();
-          for (var b in branches.docs) {
-            final branchId = b.id;
-            _log("📂 Scanning branch $branchId prescriptions...");
-            final cnicDocs = await b.reference.collection('prescriptions').get();
-            for (var cDoc in cnicDocs.docs) {
-              final subSnap = await cDoc.reference.collection('prescriptions').get();
-              allDocs.addAll(subSnap.docs);
-            }
-          }
-        } else {
-          rethrow;
-        }
+      if (!Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
+        await LocalStorageService.openBoxSafe(LocalStorageService.prescriptionsBox);
+      }
+      if (!Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+        await LocalStorageService.openBoxSafe(LocalStorageService.entriesBox);
       }
 
-      _log("🔎 Found ${allDocs.length} prescription documents.");
+      final pBox = Hive.box(LocalStorageService.prescriptionsBox);
+      final eBox = Hive.box(LocalStorageService.entriesBox);
+
+      _log("🔎 Found ${pBox.length} local prescription documents in Hive.");
       
       final Map<String, Map<String, dynamic>> items = {};
       int done = 0;
-      final total = allDocs.length;
+      final total = pBox.length;
 
-      for (final doc in allDocs) {
-        final data = doc.data() as Map<String, dynamic>? ?? {};
-        final serial = doc.id;
+      // Index entries for fast O(1) lookup
+      final Map<String, MapEntry<dynamic, Map<String, dynamic>>> entriesBySerial = {};
+      for (final ek in eBox.keys) {
+        final ev = eBox.get(ek);
+        if (ev is Map) {
+          final eMap = Map<String, dynamic>.from(ev);
+          final s = (eMap['serial'] ?? eMap['id'] ?? '').toString().trim().toUpperCase();
+          if (s.isNotEmpty) {
+            entriesBySerial[s] = MapEntry(ek, eMap);
+          }
+          final cleanKey = ek.toString().trim().toUpperCase();
+          entriesBySerial[cleanKey] = MapEntry(ek, eMap);
+        }
+      }
+
+      for (final key in pBox.keys) {
+        final val = pBox.get(key);
+        if (val == null || val is! Map) {
+          done++;
+          continue;
+        }
+        final data = Map<String, dynamic>.from(val);
+        final serial = (data['serial'] ?? data['id'] ?? key).toString().trim();
+        final upperSerial = serial.toUpperCase();
         String branchId = data['branchId']?.toString() ?? '';
-        String patientCnic = '';
-
-        final parts = doc.reference.path.split('/');
-        if (parts.length >= 6 && parts[0] == 'branches') {
-          branchId = parts[1];
-          patientCnic = parts[3];
-        } else if (parts.length >= 4 && parts[0] == 'prescriptions') {
-          patientCnic = parts[1];
-        }
-
-        if (patientCnic.isEmpty) {
-          patientCnic = (data['patientCnic'] ?? data['cnic'] ?? '').toString();
-        }
-        if (branchId.isEmpty || branchId == 'unknown') {
-          branchId = 'unknown';
-        }
-        
+        String patientCnic = (data['patientCnic'] ?? data['cnic'] ?? data['patientId'] ?? '').toString().trim();
         patientCnic = patientCnic.replaceAll('-', '').replaceAll(' ', '').trim();
-        final itemKey = "${branchId}_${patientCnic}_$serial";
+
+        final itemKey = "${branchId.isEmpty ? 'unknown' : branchId}_${patientCnic}_$serial";
 
         // Extract dateKey
-        String dateKey = '';
-        if (serial.contains('-')) {
+        String dateKey = (data['dateKey'] ?? '').toString().trim();
+        if (dateKey.isEmpty && serial.contains('-')) {
           dateKey = serial.split('-')[0];
-        }
-        if (dateKey.isEmpty || dateKey.length != 6 || int.tryParse(dateKey) == null) {
-          dateKey = data['dateKey']?.toString() ?? '';
         }
         if (dateKey.isEmpty) {
           final created = data['createdAt'];
@@ -1421,69 +1861,78 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             } catch (_) {}
           }
         }
+        if (dateKey.isEmpty) {
+          dateKey = LocalStorageService.getTodayDateKey();
+        }
 
-        final preferredType = data['queueType']?.toString() ?? '';
-        
-        // Locate matching serial document in standard collections
-        DocumentSnapshot? serialDoc;
-        String resolvedQueue = preferredType;
-        if (branchId != 'unknown' && dateKey.isNotEmpty) {
-          serialDoc = await _locateSerialDoc(
-            branchId: branchId,
-            dateKey: dateKey,
-            serial: serial,
-            preferredQueueType: preferredType,
-          );
-          if (serialDoc != null) {
-            final sPathParts = serialDoc.reference.path.split('/');
-            if (sPathParts.length >= 5) {
-              resolvedQueue = sPathParts[4];
+        final preferredType = (data['queueType'] ?? 'zakat').toString();
+
+        // Locate local serial entry
+        MapEntry<dynamic, Map<String, dynamic>>? entryMatch = entriesBySerial[upperSerial];
+        if (entryMatch == null && branchId.isNotEmpty) {
+          entryMatch = entriesBySerial['${branchId.toUpperCase()}-$upperSerial'] ??
+                       entriesBySerial['${branchId.toLowerCase()}-$upperSerial'];
+        }
+        if (entryMatch == null) {
+          // Cross-branch scan: inspect all keys in entriesBySerial for this serial across all branches
+          for (final candidateKey in entriesBySerial.keys) {
+            if (candidateKey.endsWith('-$upperSerial') || candidateKey.endsWith('_$upperSerial')) {
+              entryMatch = entriesBySerial[candidateKey];
+              if (branchId.isEmpty && entryMatch?.value['branchId'] != null) {
+                branchId = entryMatch!.value['branchId'].toString();
+              }
+              break;
             }
           }
         }
+        if (branchId.isEmpty && entryMatch != null && entryMatch.value['branchId'] != null) {
+          branchId = entryMatch.value['branchId'].toString();
+        }
 
-        final serialDocExists = serialDoc != null;
+        String resolvedQueue = preferredType;
+        bool serialDocExists = entryMatch != null;
         String status = 'orphaned';
+
         if (serialDocExists) {
-          final sData = serialDoc.data() as Map<String, dynamic>? ?? {};
-          final hasPresc = sData['prescription'] != null;
+          final sData = entryMatch.value;
+          resolvedQueue = (sData['queueType'] ?? preferredType).toString();
+          final hasPresc = sData['prescription'] != null || 
+              (sData['medicines'] is List && (sData['medicines'] as List).isNotEmpty);
           status = hasPresc ? 'already_merged' : 'needs_merge';
         }
 
-        final serialDocPath = serialDocExists 
-            ? serialDoc.reference.path 
-            : "branches/$branchId/serials/$dateKey/${resolvedQueue.isEmpty ? 'zakat' : resolvedQueue}/$serial";
-
         items[itemKey] = {
           'key': itemKey,
-          'branchId': branchId,
+          'hiveKey': key,
+          'branchId': branchId.isNotEmpty ? branchId : 'unknown',
           'patientCnic': patientCnic,
           'serial': serial,
           'dateKey': dateKey,
           'queueType': resolvedQueue.isEmpty ? 'zakat' : resolvedQueue,
           'patientName': data['patientName'] ?? data['name'] ?? 'Unknown Patient',
           'createdAt': data['createdAt'],
-          'medicines': data['prescriptions'] ?? [],
-          'prescriptionDocPath': doc.reference.path,
+          'medicines': data['prescriptions'] ?? data['medicines'] ?? [],
           'prescriptionData': data,
-          'serialDocPath': serialDocPath,
+          'matchedEntryKey': entryMatch?.key,
           'status': status,
           'serialDocExists': serialDocExists,
         };
 
         done++;
-        setState(() {
-          _progress = done / total;
-        });
+        if (total > 0 && done % 50 == 0) {
+          setState(() {
+            _progress = done / total;
+          });
+        }
       }
 
       setState(() {
         _prescriptionMigrationItems = items;
         _isScanningPrescriptions = false;
       });
-      _log("✨ Scan complete! Found ${items.length} prescriptions to check.");
+      _log("✨ Local scan complete! Found ${items.length} prescriptions in Hive to check.");
     } catch (e, st) {
-      _log("❌ Scan failed: $e");
+      _log("❌ Local scan failed: $e");
       _log("   $st");
       setState(() {
         _isScanningPrescriptions = false;
@@ -1500,53 +1949,236 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       _processingPrescriptionKeys.add(key);
     });
 
-    final branchId = item['branchId']?.toString() ?? '';
+    String branchId = (item['branchId'] ?? '').toString().trim();
+    if (branchId.isEmpty || branchId == 'unknown') {
+      if (item['matchedEntryKey'] != null && item['matchedEntryKey'].toString().contains('-')) {
+        branchId = item['matchedEntryKey'].toString().split('-').first;
+      } else {
+        final localBranches = LocalStorageService.getLocalBranchesList();
+        branchId = localBranches.isNotEmpty ? (localBranches.first['id'] ?? 'default').toString() : 'default';
+      }
+    }
     final patientCnic = item['patientCnic']?.toString() ?? '';
     final serial = item['serial']?.toString() ?? '';
     final dateKey = item['dateKey']?.toString() ?? '';
     final queueType = item['queueType']?.toString() ?? 'zakat';
-    final serialDocPath = item['serialDocPath']?.toString() ?? '';
-    final prescriptionDocPath = item['prescriptionDocPath']?.toString() ?? '';
+    final hiveKey = item['hiveKey'];
+    final matchedEntryKey = item['matchedEntryKey'];
     final isOrphaned = item['status'] == 'orphaned';
 
-    _log("⏳ Cleaning prescription $serial...");
+    _log("⏳ Cleaning local prescription $serial...");
 
     try {
+      final eBox = Hive.box(LocalStorageService.entriesBox);
+      final prBox = Hive.box(LocalStorageService.prescriptionsBox);
+      final dBox = Hive.isBoxOpen(LocalStorageService.dispensaryBox)
+          ? Hive.box(LocalStorageService.dispensaryBox)
+          : null;
+
+      final pData = item['prescriptionData'] is Map ? Map<String, dynamic>.from(item['prescriptionData'] as Map) : <String, dynamic>{};
+      final pMeds = pData['prescriptions'] ?? pData['medicines'];
+      final docName = pData['doctorName'] ?? pData['prescribedBy'];
+      final docId = pData['doctorId'];
+      final diag = pData['diagnosis'];
+      final comp = pData['complaint'] ?? pData['condition'];
+      final days = pData['daysOfMedicine'];
+      final vitals = pData['vitals'];
+      final lab = pData['labResults'];
+      final extra = pData['extraCharge'];
+
+      // Also inspect dispensaryBox for any matching dispense records for this serial
+      Map<String, dynamic>? dispData;
+      final List<dynamic> dKeysToDelete = [];
+      if (dBox != null) {
+        final sUpper = serial.toUpperCase();
+        for (final dk in dBox.keys) {
+          final kStr = dk.toString().toUpperCase();
+          if (kStr == sUpper || kStr.endsWith('_$sUpper') || kStr.contains('-$sUpper')) {
+            dKeysToDelete.add(dk);
+            if (dispData == null) {
+              final val = dBox.get(dk);
+              if (val is Map) dispData = Map<String, dynamic>.from(val);
+            }
+          } else {
+            final val = dBox.get(dk);
+            if (val is Map) {
+              final vs = (val['serial'] ?? val['id'] ?? '').toString().toUpperCase();
+              if (vs == sUpper) {
+                dKeysToDelete.add(dk);
+                dispData ??= Map<String, dynamic>.from(val);
+              }
+            }
+          }
+        }
+      }
+
+      final hasDispensed = dispData != null &&
+          ((dispData['dispenseStatus'] ?? dispData['status'] ?? '').toString().toLowerCase() == 'dispensed' ||
+           (dispData['dispenseStatus'] ?? dispData['status'] ?? '').toString().toLowerCase() == 'completed');
+
       if (isOrphaned && forceRecreateSerial) {
-        // Option 1: Re-create the missing serial document
-        final serialData = {
+        // Re-create missing serial document in local Hive entriesBox
+        final newEntry = {
           'serial': serial,
+          'id': serial,
           'patientId': patientCnic,
           'cnic': patientCnic,
           'patientName': item['patientName'],
+          'name': item['patientName'],
           'status': 'completed',
-          'dispenseStatus': 'waiting',
+          'dispenseStatus': hasDispensed ? 'dispensed' : 'waiting',
           'queueType': queueType,
           'dateKey': dateKey,
           'branchId': branchId,
-          'createdAt': item['createdAt'] ?? FieldValue.serverTimestamp(),
-          'completedAt': item['createdAt'] ?? FieldValue.serverTimestamp(),
-          'prescription': item['prescriptionData'],
+          'createdAt': item['createdAt'] ?? DateTime.now().toIso8601String(),
+          'completedAt': item['createdAt'] ?? DateTime.now().toIso8601String(),
+          'prescription': pData,
+          if (pMeds != null) 'medicines': pMeds,
+          if (pMeds != null) 'prescriptions': pMeds,
+          if (docName != null) 'doctorName': docName,
+          if (docName != null) 'prescribedBy': docName,
+          if (docId != null) 'doctorId': docId,
+          if (diag != null) 'diagnosis': diag,
+          if (comp != null) 'complaint': comp,
+          if (comp != null) 'condition': comp,
+          if (days != null) 'daysOfMedicine': days,
+          if (vitals != null) 'vitals': vitals,
+          if (lab != null) 'labResults': lab,
+          if (extra != null) 'extraCharge': extra,
+          if (dispData != null) ...{
+            if (dispData['dispensedAt'] != null) 'dispensedAt': dispData['dispensedAt'],
+            if (dispData['dispensedBy'] != null) 'dispensedBy': dispData['dispensedBy'],
+            if (dispData['dispenserName'] != null) 'dispenserName': dispData['dispenserName'],
+            if (dispData['charges'] != null) 'charges': dispData['charges'],
+            if (dispData['receivedAmount'] != null) 'receivedAmount': dispData['receivedAmount'],
+          },
         };
-        await _fs.doc(serialDocPath).set(serialData, SetOptions(merge: true));
-        _log("   ✅ Re-created missing serial visit entry: $serialDocPath");
-      } else if (!isOrphaned) {
-        // Merge prescription into existing serial doc
-        await _fs.doc(serialDocPath).set({
-          'prescription': item['prescriptionData'],
-          'status': 'completed',
-          'completedAt': item['prescriptionData']['completedAt'] ?? item['prescriptionData']['createdAt'] ?? FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-        _log("   ✅ Merged prescription into serial visit entry: $serialDocPath");
+        final newKey = '${branchId.toLowerCase()}-$serial';
+        await eBox.put(newKey, LocalStorageService.sanitize(newEntry));
+        await eBox.put(serial.toUpperCase(), LocalStorageService.sanitize(newEntry));
+        await eBox.put(serial.toLowerCase(), LocalStorageService.sanitize(newEntry));
+
+        // Enqueue sync for Firestore in the background
+        await LocalStorageService.enqueueSync({
+          'type': 'save_entry',
+          'branchId': branchId,
+          'dateKey': dateKey,
+          'queueType': queueType,
+          'serial': serial,
+          'data': newEntry,
+        });
+        _log("   ✅ Re-created missing serial visit entry locally: $newKey");
+      } else if (!isOrphaned && matchedEntryKey != null) {
+        final existingRaw = eBox.get(matchedEntryKey);
+        if (existingRaw is Map) {
+          final updatedEntry = Map<String, dynamic>.from(existingRaw);
+          updatedEntry['prescription'] = pData;
+          updatedEntry['status'] = 'completed';
+          updatedEntry['completedAt'] ??= pData['completedAt'] ??
+              pData['createdAt'] ??
+              DateTime.now().toIso8601String();
+          if (hasDispensed) {
+            updatedEntry['dispenseStatus'] = 'dispensed';
+          }
+          if (pMeds != null) {
+            updatedEntry['medicines'] = pMeds;
+            updatedEntry['prescriptions'] ??= pMeds;
+          }
+          if (docName != null) {
+            updatedEntry['doctorName'] = docName;
+            updatedEntry['prescribedBy'] ??= docName;
+          }
+          if (docId != null) updatedEntry['doctorId'] = docId;
+          if (diag != null) updatedEntry['diagnosis'] = diag;
+          if (comp != null) {
+            updatedEntry['complaint'] = comp;
+            updatedEntry['condition'] ??= comp;
+          }
+          if (days != null) updatedEntry['daysOfMedicine'] = days;
+          if (vitals != null) updatedEntry['vitals'] = vitals;
+          if (lab != null) updatedEntry['labResults'] = lab;
+          if (extra != null) updatedEntry['extraCharge'] = extra;
+          if (dispData != null) {
+            if (dispData['dispensedAt'] != null) updatedEntry['dispensedAt'] = dispData['dispensedAt'];
+            if (dispData['dispensedBy'] != null) updatedEntry['dispensedBy'] = dispData['dispensedBy'];
+            if (dispData['dispenserName'] != null) updatedEntry['dispenserName'] = dispData['dispenserName'];
+            if (dispData['charges'] != null) updatedEntry['charges'] = dispData['charges'];
+            if (dispData['receivedAmount'] != null) updatedEntry['receivedAmount'] = dispData['receivedAmount'];
+          }
+
+          final sanitized = LocalStorageService.sanitize(updatedEntry);
+          await eBox.put(matchedEntryKey, sanitized);
+          await eBox.put(serial.toUpperCase(), sanitized);
+          await eBox.put(serial.toLowerCase(), sanitized);
+
+          // Enqueue sync for Firestore in the background
+          await LocalStorageService.enqueueSync({
+            'type': 'save_entry',
+            'branchId': branchId,
+            'dateKey': dateKey,
+            'queueType': queueType,
+            'serial': serial,
+            'data': updatedEntry,
+          });
+          _log("   ✅ Merged prescription & dispensary data into local serial visit entry: $matchedEntryKey");
+        }
       }
 
-      // Delete the redundant prescription document
-      await _fs.doc(prescriptionDocPath).delete();
-      _log("   🗑️ Deleted original prescription document: $prescriptionDocPath");
+      // Delete all redundant prescription keys from local Hive prescriptionsBox
+      final sUpper = serial.toUpperCase();
+      final keysToDelete = <dynamic>{};
+      if (hiveKey != null) keysToDelete.add(hiveKey);
+      for (final pk in prBox.keys) {
+        final kStr = pk.toString().toUpperCase();
+        if (kStr == sUpper || kStr.endsWith('_$sUpper') || kStr.contains('-$sUpper')) {
+          keysToDelete.add(pk);
+        } else {
+          final pv = prBox.get(pk);
+          if (pv is Map) {
+            final vs = (pv['serial'] ?? pv['id'] ?? '').toString().toUpperCase();
+            if (vs == sUpper) keysToDelete.add(pk);
+          }
+        }
+      }
+      for (final pk in keysToDelete) {
+        await prBox.delete(pk);
+      }
+
+      // Enqueue sync deletion for prescription from Firestore
+      await LocalStorageService.enqueueSync({
+        'type': 'delete_prescription',
+        'branchId': branchId,
+        'patientCnic': patientCnic,
+        'serial': serial,
+      });
+
+      // Also delete all matching redundant dispensary keys from local Hive dispensaryBox
+      if (dBox != null && dKeysToDelete.isNotEmpty) {
+        for (final dk in dKeysToDelete) {
+          await dBox.delete(dk);
+        }
+        await dBox.flush();
+        await LocalStorageService.enqueueSync({
+          'type': 'delete_dispensary',
+          'branchId': branchId,
+          'dateKey': dateKey,
+          'serial': serial,
+        });
+        _log("   🗑️ Removed redundant dispensary record for: $serial");
+      }
+
+      await eBox.flush();
+      await prBox.flush();
+      _log("   🗑️ Removed redundant local prescription: $serial");
 
       setState(() {
         _prescriptionMigrationItems.remove(key);
         _processingPrescriptionKeys.remove(key);
+      });
+
+      // Trigger background sync without blocking UI
+      SyncService().triggerUpload(force: true).catchError((e) {
+        debugPrint('[SyncService] Background sync error: $e');
       });
     } catch (e, st) {
       _log("❌ Failed to process prescription $serial: $e");
@@ -1576,8 +2208,8 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Bulk Merge & Clean Prescriptions"),
-        content: Text("Are you sure you want to merge and delete all ${pending.length} prescription documents? "
-            "Orphaned prescriptions (where no serial visit doc exists) will be automatically re-created inside their serials collection to preserve patient history."),
+        content: Text("Are you sure you want to merge and delete all ${pending.length} prescription documents locally? "
+            "Orphaned prescriptions will be automatically re-created in local visits to preserve patient history, and all updates will be queued for sync."),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -1596,7 +2228,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
     setState(() {
       _isProcessing = true;
-      _currentBranch = "Merging prescriptions...";
+      _currentBranch = "Merging prescriptions locally...";
       _progress = 0.0;
     });
 
@@ -1618,13 +2250,97 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       _progress = 1.0;
     });
 
+    // Trigger sync in the end
+    SyncService().triggerUpload(force: true).catchError((e) {
+      debugPrint('[SyncService] Background sync error: $e');
+    });
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Bulk prescription cleanup completed!"),
+          content: Text("Bulk local prescription cleanup completed! Background sync queued."),
           backgroundColor: Colors.green,
         ),
       );
+    }
+  }
+
+  Future<void> _unifyAllBranchesSerialsDispensary() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.hub_rounded, color: Color(0xFF0D9488)),
+            SizedBox(width: 8),
+            Text("Unify All Branches"),
+          ],
+        ),
+        content: const Text(
+          "This operation reconciles data across ALL branches in local Hive storage:\n\n"
+          "• Prescriptions & dispensary records are merged directly into EACH BRANCH'S OWN serial visit entries (e.g. branches/khi_01/serials/..., branches/saddar/serials/...). Each branch's data stays in its own separate branch.\n"
+          "• Re-creates canonical visit entries for any orphaned prescriptions or dispensary records in their respective branch.\n"
+          "• Completely purges redundant standalone documents from legacy prescription & dispensary boxes.\n"
+          "• Queues unified records for background Firestore sync to each branch's own serial collection.\n\n"
+          "Do you want to run unification across all branches?",
+          style: TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0D9488),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text("Unify All Branches"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() {
+      _isProcessing = true;
+      _currentBranch = "Unifying all branches...";
+      _logs = ["🔄 Unifying serials, prescriptions & dispensary records across ALL branches..."];
+      _progress = 0.0;
+    });
+
+    try {
+      final count = await LocalStorageService.unifyAndMergeAllLocalSerials(null);
+      SyncService().triggerUpload(force: true).catchError((_) {});
+
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 1.0;
+          _currentBranch = "";
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("✅ Unified $count records across all branches! Duplicates purged and sync queued."),
+          backgroundColor: const Color(0xFF0D9488),
+          duration: const Duration(seconds: 4),
+        ));
+      }
+      _log("✨ All-branches unification complete: $count records unified into canonical serial entries.");
+
+      // Refresh prescription scan if active
+      if (_hasScannedPrescriptions) {
+        await _scanPrescriptions();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _currentBranch = "";
+        });
+      }
+      _log("❌ Failed to unify records across all branches: $e");
     }
   }
 
@@ -1633,7 +2349,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   Future<void> _scanForDuplicates() async {
     setState(() {
       _isScanning = true;
-      _logs = ["🔎 Scanning for duplicate patient records..."];
+      _logs = ["🔎 Scanning local Hive storage for duplicate patient records..."];
       _duplicatesByLetter.clear();
       _electedMasterIds.clear();
       _progress = 0.0;
@@ -1642,35 +2358,33 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     });
 
     try {
-      _log("📦 Fetching all patient records (global scan)...");
-      List<DocumentSnapshot> allDocs = [];
+      _log("📦 Fetching all patient records from local Hive...");
+      if (!Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+        await LocalStorageService.openBoxSafe(LocalStorageService.patientsBox);
+      }
+      final pBox = Hive.box(LocalStorageService.patientsBox);
 
-      try {
-        final querySnap = await _fs.collectionGroup('patients').get();
-        allDocs = querySnap.docs;
-      } catch (e) {
-        if (e.toString().contains('failed-precondition')) {
-          _log("⚠️ Global patients index missing. Falling back to branch-by-branch scan...");
-          final branches = await _fs.collection('branches').get();
-          for (var b in branches.docs) {
-            final pSnap = await b.reference.collection('patients').get();
-            allDocs.addAll(pSnap.docs);
-          }
-          try {
-            final tSnap = await _fs.collection('patients').get();
-            allDocs.addAll(tSnap.docs);
-          } catch (_) {}
-        } else {
-          rethrow;
+      final List<_LocalDocItem> allDocs = [];
+      for (final key in pBox.keys) {
+        final val = pBox.get(key);
+        if (val is Map) {
+          final data = Map<String, dynamic>.from(val);
+          final id = key.toString();
+          final bId = (data['branchId'] ?? 'unknown').toString();
+          allDocs.add(_LocalDocItem(
+            id: id,
+            path: 'branches/$bId/patients/$id',
+            data: data,
+          ));
         }
       }
 
-      _log("🔎 Found ${allDocs.length} total records across all collections.");
+      _log("🔎 Found ${allDocs.length} total records in local Hive storage.");
 
       // Group by (branchId + canonicalKey)
-      final Map<String, List<DocumentSnapshot>> groups = {};
+      final Map<String, List<_LocalDocItem>> groups = {};
       for (final doc in allDocs) {
-        final data = doc.data() as Map<String, dynamic>? ?? {};
+        final data = doc.data();
         final branchId = data['branchId']?.toString() ?? 'unknown';
         final key = _canonicalKey(data, doc.id);
         final compositeKey = "${branchId}_$key";
@@ -1678,12 +2392,12 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       }
 
       // Identify duplicate groups (docs.length > 1)
-      final Map<String, Map<String, List<DocumentSnapshot>>> duplicates = {};
+      final Map<String, Map<String, List<_LocalDocItem>>> duplicates = {};
       int dupeCount = 0;
 
       groups.forEach((compKey, docs) {
         if (docs.length > 1) {
-          final data = docs.first.data() as Map<String, dynamic>? ?? {};
+          final data = docs.first.data();
           final name = data['name']?.toString() ?? '';
           final letter = name.isNotEmpty ? name[0].toUpperCase() : '#';
           
@@ -1706,7 +2420,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
       // Sort keys alphabetically
       final sortedLetters = duplicates.keys.toList()..sort();
-      final Map<String, Map<String, List<DocumentSnapshot>>> sortedDuplicates = {};
+      final Map<String, Map<String, List<_LocalDocItem>>> sortedDuplicates = {};
       for (final letter in sortedLetters) {
         sortedDuplicates[letter] = duplicates[letter]!;
       }
@@ -1722,9 +2436,9 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
         }
       });
 
-      _log("✨ Scan complete! Found $dupeCount duplicate patient groups.");
+      _log("✨ Local scan complete! Found $dupeCount duplicate patient groups.");
     } catch (e, st) {
-      _log("❌ Scan failed: $e");
+      _log("❌ Local scan failed: $e");
       _log("   $st");
       setState(() {
         _isScanning = false;
@@ -1775,7 +2489,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     });
   }
 
-  Future<void> _mergeSingleGroup(String groupKey, String branchId, List<DocumentSnapshot> docs) async {
+  Future<void> _mergeSingleGroup(String groupKey, String branchId, List<_LocalDocItem> docs) async {
     final masterId = _electedMasterIds[groupKey];
     if (masterId == null) return;
 
@@ -1785,19 +2499,24 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       _mergingGroupKeys.add(groupKey);
     });
 
-    _log("⏳ Merging duplicate group $groupKey...");
+    _log("⏳ Merging duplicate group $groupKey locally...");
     try {
       await _performMerge(branchId, docs, electedMaster: masterDoc);
-      _log("✅ Successfully merged group $groupKey.");
+      _log("✅ Successfully merged group $groupKey locally.");
 
       setState(() {
         _mergingGroupKeys.remove(groupKey);
+      });
+
+      // Background sync queued
+      SyncService().triggerUpload(force: true).catchError((e) {
+        debugPrint('[SyncService] Background sync error: $e');
       });
       
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Group merged successfully!"),
+          content: Text("Group merged locally! Sync queued."),
           backgroundColor: Colors.green,
           duration: Duration(seconds: 2),
         ),
@@ -1848,14 +2567,14 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   Future<void> _mergeAllUnderSelectedLetter() async {
     final letter = _selectedLetter;
     if (letter == null) return;
-    final groups = Map<String, List<DocumentSnapshot>>.from(_duplicatesByLetter[letter] ?? {});
+    final groups = Map<String, List<_LocalDocItem>>.from(_duplicatesByLetter[letter] ?? {});
     if (groups.isEmpty) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text("Merge All under '$letter'"),
-        content: Text("Are you sure you want to merge all ${groups.length} duplicate groups under the letter '$letter' using the currently selected masters?"),
+        content: Text("Are you sure you want to merge all ${groups.length} duplicate groups under the letter '$letter' locally using the currently selected masters?"),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -1874,7 +2593,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
 
     setState(() {
       _isProcessing = true;
-      _currentBranch = "Merging letter $letter...";
+      _currentBranch = "Merging letter $letter locally...";
       _progress = 0.0;
     });
 
@@ -1884,7 +2603,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     for (final entry in groups.entries) {
       final groupKey = entry.key;
       final docs = entry.value;
-      final branchId = (docs.first.data() as Map<String, dynamic>? ?? {})['branchId']?.toString() ?? 'unknown';
+      final branchId = (docs.first.data()['branchId'] ?? 'unknown').toString();
       final masterId = _electedMasterIds[groupKey];
       final masterDoc = docs.firstWhere((d) => d.id == masterId, orElse: () => docs.first);
 
@@ -1903,8 +2622,6 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           _mergingGroupKeys.remove(groupKey);
         });
 
-        // Fire-and-forget the success transition so it happens asynchronously.
-        // We set updateLetterSelection to true so that whichever animation finishes last shifts the tab.
         _animateAndRemoveGroup(
           groupKey: groupKey,
           letter: letter,
@@ -1924,10 +2641,15 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       _progress = 1.0;
     });
 
+    // Trigger sync in the end
+    SyncService().triggerUpload(force: true).catchError((e) {
+      debugPrint('[SyncService] Background sync error: $e');
+    });
+
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text("Finished merging duplicates under letter '$letter'."),
+        content: Text("Finished merging duplicates locally under letter '$letter'. Background sync queued."),
         backgroundColor: AppColors.primary,
       ),
     );
@@ -1944,10 +2666,187 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     return 'N/A';
   }
 
+  // ─── UI Helpers & KPI Getters ──────────────────────────────────────────────
+
+  int get _localPatientsCount {
+    if (Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+      return Hive.box(LocalStorageService.patientsBox).length;
+    }
+    return 0;
+  }
+
+  int get _syncQueuePendingCount {
+    if (Hive.isBoxOpen(LocalStorageService.syncBox)) {
+      return Hive.box(LocalStorageService.syncBox).length;
+    }
+    return 0;
+  }
+
+  int get _totalDuplicateGroups {
+    return _duplicatesByLetter.values.fold(0, (total, m) => total + m.length);
+  }
+
+  List<Map<String, dynamic>> get _filteredConflicts {
+    if (_conflictFilter == 'raw_cnic') {
+      return _childParentConflicts.where((c) => c['isRawCnicChild'] == true).toList();
+    }
+    if (_conflictFilter == 'shared_cnic') {
+      return _childParentConflicts.where((c) => c['hasCnicCollision'] == true).toList();
+    }
+    return _childParentConflicts;
+  }
+
+  Widget _buildKpiCard({
+    required String label,
+    required String value,
+    required IconData icon,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.gray200),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.02),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 20),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      value,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: color,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.gray600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabButton({
+    required int index,
+    required String title,
+    required IconData icon,
+    int? count,
+    Color? badgeColor,
+  }) {
+    final isSelected = _activeTab == index;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _activeTab = index),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.white : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.05),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: isSelected ? AppColors.primary : AppColors.gray600,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: isSelected ? AppColors.primary : AppColors.gray600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (count != null && count > 0) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: badgeColor ?? (isSelected ? AppColors.primary : AppColors.gray400),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    count > 999 ? '999+' : count.toString(),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ─── UI ─────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    final conflictsCount = _childParentConflicts.length;
+    final duplicatesCount = _totalDuplicateGroups;
+    final prescriptionsCount = _prescriptionMigrationItems.length;
+
     return Scaffold(
       backgroundColor: AppColors.gray50,
       appBar: AppBar(
@@ -1962,10 +2861,50 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Custom Tab Selector (Premium Aesthetics)
+          // Executive KPI HUD Row
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 4),
+            child: Row(
+              children: [
+                _buildKpiCard(
+                  label: "Local Patients",
+                  value: _localPatientsCount.toString(),
+                  icon: Icons.people_alt_rounded,
+                  color: const Color(0xFF0D9488),
+                  onTap: _scanAndPreviewPatientRepairs,
+                ),
+                const SizedBox(width: 12),
+                _buildKpiCard(
+                  label: "Child/Parent Conflicts",
+                  value: conflictsCount.toString(),
+                  icon: Icons.family_restroom_rounded,
+                  color: const Color(0xFFE11D48),
+                  onTap: () => setState(() => _activeTab = 0),
+                ),
+                const SizedBox(width: 12),
+                _buildKpiCard(
+                  label: "Duplicates (A-Z)",
+                  value: duplicatesCount.toString(),
+                  icon: Icons.copy_rounded,
+                  color: AppColors.primary,
+                  onTap: () => setState(() => _activeTab = 1),
+                ),
+                const SizedBox(width: 12),
+                _buildKpiCard(
+                  label: "Sync Queue Pending",
+                  value: _syncQueuePendingCount.toString(),
+                  icon: Icons.cloud_sync_rounded,
+                  color: const Color(0xFF7C3AED),
+                  onTap: null,
+                ),
+              ],
+            ),
+          ),
+
+          // Custom Tab Selector (4 Modern Tabs)
           Container(
-            color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            color: Colors.transparent,
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
             child: Container(
               decoration: BoxDecoration(
                 color: AppColors.gray100,
@@ -1974,110 +2913,68 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
               padding: const EdgeInsets.all(4),
               child: Row(
                 children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _activeTab = 0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: _activeTab == 0 ? Colors.white : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
-                          boxShadow: _activeTab == 0
-                              ? [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.05),
-                                    blurRadius: 4,
-                                    offset: const Offset(0, 2),
-                                  )
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Text(
-                          "Manual Review (A-Z)",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: _activeTab == 0 ? AppColors.primary : AppColors.gray600,
-                          ),
-                        ),
-                      ),
-                    ),
+                  _buildTabButton(
+                    index: 0,
+                    title: "Child & Parent Conflicts",
+                    icon: Icons.child_care_rounded,
+                    count: conflictsCount,
+                    badgeColor: const Color(0xFFE11D48),
                   ),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _activeTab = 1),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: _activeTab == 1 ? Colors.white : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
-                          boxShadow: _activeTab == 1
-                              ? [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.05),
-                                    blurRadius: 4,
-                                    offset: const Offset(0, 2),
-                                  )
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Text(
-                          "Prescription Cleanups",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: _activeTab == 1 ? AppColors.primary : AppColors.gray600,
-                          ),
-                        ),
-                      ),
-                    ),
+                  _buildTabButton(
+                    index: 1,
+                    title: "Manual Review (A-Z)",
+                    icon: Icons.people_outline_rounded,
+                    count: duplicatesCount,
+                    badgeColor: AppColors.primary,
                   ),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _activeTab = 2),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: _activeTab == 2 ? Colors.white : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
-                          boxShadow: _activeTab == 2
-                              ? [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.05),
-                                    blurRadius: 4,
-                                    offset: const Offset(0, 2),
-                                  )
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Text(
-                          "Automated Global Run",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: _activeTab == 2 ? AppColors.primary : AppColors.gray600,
-                          ),
-                        ),
-                      ),
-                    ),
+                  _buildTabButton(
+                    index: 2,
+                    title: "Prescription Cleanups",
+                    icon: Icons.medication_outlined,
+                    count: prescriptionsCount,
+                    badgeColor: const Color(0xFF10B981),
+                  ),
+                  _buildTabButton(
+                    index: 3,
+                    title: "Automated Global Run",
+                    icon: Icons.bolt_rounded,
                   ),
                 ],
               ),
             ),
           ),
+
+          // Quick Diagnostics Actions
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
             child: Row(
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: _isProcessing ? null : _scanAndPreviewPatientRepairs,
-                    icon: const Icon(Icons.preview_rounded),
+                    icon: const Icon(Icons.preview_rounded, size: 18),
                     label: const Text('Preview & Repair Patient IDs'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF0D9488),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      elevation: 0,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _formatAllPatientCnics,
+                    icon: const Icon(Icons.badge_outlined, size: 18),
+                    label: const Text('Format CNICs (xxxxx-xxxxxxx-x)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0284C7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      elevation: 0,
                     ),
                   ),
                 ),
@@ -2085,12 +2982,29 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: _isProcessing ? null : _scanAndPreviewSerialsDispensary,
-                    icon: const Icon(Icons.compare_arrows_rounded),
+                    icon: const Icon(Icons.compare_arrows_rounded, size: 18),
                     label: const Text('Preview & Fix Serials/Dispensary'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF7C3AED),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      elevation: 0,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _unifyAllBranchesSerialsDispensary,
+                    icon: const Icon(Icons.hub_rounded, size: 18),
+                    label: const Text('Unify All Branches (Rx/Disp/Serials)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0D9488),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      elevation: 0,
                     ),
                   ),
                 ),
@@ -2099,15 +3013,479 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
           ),
           
           Expanded(
-            child: _activeTab == 0 
-                ? _buildManualReviewTab() 
-                : _activeTab == 1 
-                    ? _buildPrescriptionCleanupsTab() 
-                    : _buildAutomatedTab(),
+            child: _activeTab == 0
+                ? _buildChildParentConflictsTab()
+                : _activeTab == 1
+                    ? _buildManualReviewTab()
+                    : _activeTab == 2
+                        ? _buildPrescriptionCleanupsTab()
+                        : _buildAutomatedTab(),
           ),
           _buildMergeProgressPanel(),
         ],
       ),
+    );
+  }
+
+  Widget _buildChildParentConflictsTab() {
+    if (_isScanningConflicts) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(color: Color(0xFFE11D48)),
+            const SizedBox(height: 20),
+            const Text(
+              "Scanning patient registry for child & parent conflicts...",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.gray800),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "Checking CNICs, guardian fields, and verifying linked clinical history...",
+              style: TextStyle(fontSize: 13, color: AppColors.gray500),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (!_hasScannedConflicts) {
+      return Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.family_restroom_rounded, size: 72, color: const Color(0xFFE11D48).withValues(alpha: 0.8)),
+            const SizedBox(height: 24),
+            const Text(
+              "Child & Parent CNIC Conflict Resolution",
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: AppColors.navy),
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 550),
+              child: Text(
+                "Detect child patients registered directly under an adult's raw CNIC before the adult existed, "
+                "or records sharing the same CNIC without child designations. "
+                "Cleaning conflicted registrations removes token issuance collisions between parent and child on the same day.\n\n"
+                "✅ All clinical visit histories, prescriptions, and dispensary logs remain 100% preserved.",
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13.5, color: AppColors.gray600, height: 1.5),
+              ),
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton.icon(
+              onPressed: _scanChildParentConflicts,
+              icon: const Icon(Icons.search_rounded),
+              label: const Text("Scan for Child / Parent Conflicts"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFE11D48),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 18),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: 0,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_childParentConflicts.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF10B981).withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.verified_user_rounded, size: 64, color: Color(0xFF10B981)),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                "No Child/Parent Conflicts Found!",
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: AppColors.navy),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                "All child and adult profiles are cleanly partitioned with zero token collision risk.",
+                style: TextStyle(fontSize: 14, color: AppColors.gray600),
+              ),
+              const SizedBox(height: 32),
+              OutlinedButton.icon(
+                onPressed: _scanChildParentConflicts,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text("Scan Again"),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF10B981),
+                  side: const BorderSide(color: Color(0xFF10B981), width: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final filtered = _filteredConflicts;
+    final rawCnicCount = _childParentConflicts.where((c) => c['isRawCnicChild'] == true).length;
+    final sharedCnicCount = _childParentConflicts.where((c) => c['hasCnicCollision'] == true).length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Filter & Batch Actions Bar
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border(bottom: BorderSide(color: AppColors.gray200)),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // Filter Chips
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ChoiceChip(
+                    label: Text("All (${_childParentConflicts.length})"),
+                    selected: _conflictFilter == 'all',
+                    onSelected: (_) => setState(() => _conflictFilter = 'all'),
+                    selectedColor: const Color(0xFFE11D48).withValues(alpha: 0.15),
+                    labelStyle: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: _conflictFilter == 'all' ? const Color(0xFFE11D48) : AppColors.gray700,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: Text("Raw CNIC ($rawCnicCount)"),
+                    selected: _conflictFilter == 'raw_cnic',
+                    onSelected: (_) => setState(() => _conflictFilter = 'raw_cnic'),
+                    selectedColor: Colors.orange.withValues(alpha: 0.15),
+                    labelStyle: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: _conflictFilter == 'raw_cnic' ? Colors.orange.shade800 : AppColors.gray700,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: Text("Shared CNIC ($sharedCnicCount)"),
+                    selected: _conflictFilter == 'shared_cnic',
+                    onSelected: (_) => setState(() => _conflictFilter = 'shared_cnic'),
+                    selectedColor: Colors.purple.withValues(alpha: 0.15),
+                    labelStyle: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: _conflictFilter == 'shared_cnic' ? Colors.purple.shade800 : AppColors.gray700,
+                    ),
+                  ),
+                ],
+              ),
+
+              // Batch Action Buttons
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _isProcessing ? null : _scanChildParentConflicts,
+                    icon: const Icon(Icons.refresh_rounded, size: 16),
+                    label: const Text("Re-scan"),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _batchMigrateAllConflicts,
+                    icon: const Icon(Icons.drive_file_rename_outline_rounded, size: 16),
+                    label: const Text("Migrate All to Canonical IDs"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF10B981),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _batchDeleteAllConflicts,
+                    icon: const Icon(Icons.delete_sweep_rounded, size: 16),
+                    label: const Text("Delete Conflicted Registrations (Preserve History)"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFE11D48),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        // Conflicts List
+        Expanded(
+          child: filtered.isEmpty
+              ? Center(
+                  child: Text(
+                    "No conflict records match the selected filter.",
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(24),
+                  itemCount: filtered.length,
+                  itemBuilder: (context, index) {
+                    final item = filtered[index];
+                    final hiveKey = (item['hiveKey'] ?? item['patientId']).toString();
+                    final name = (item['patientName'] ?? 'Unknown').toString();
+                    final cnic = (item['cnic'] ?? '').toString();
+                    final guardianCnic = (item['guardianCnic'] ?? '').toString();
+                    final branchId = (item['branchId'] ?? '').toString();
+                    final isChild = item['isChild'] == true;
+                    final isRawCnicChild = item['isRawCnicChild'] == true;
+                    final hasCnicCollision = item['hasCnicCollision'] == true;
+                    final linkedVisits = (item['linkedVisitsCount'] ?? 0) as int;
+                    final linkedPrescriptions = (item['linkedPrescriptionsCount'] ?? 0) as int;
+                    final isProcessingThis = _processingConflictKeys.contains(hiveKey);
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 14),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        side: BorderSide(color: AppColors.gray200, width: 1),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Avatar Icon
+                                Container(
+                                  width: 44,
+                                  height: 44,
+                                  decoration: BoxDecoration(
+                                    color: isChild
+                                        ? const Color(0xFFFEF3C7)
+                                        : const Color(0xFFDBEAFE),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    isChild ? "👶" : "👤",
+                                    style: const TextStyle(fontSize: 22),
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+
+                                // Profile Details
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(
+                                            name,
+                                            style: const TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold,
+                                              color: AppColors.navy,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: isChild
+                                                  ? const Color(0xFFFEF3C7)
+                                                  : const Color(0xFFDBEAFE),
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Text(
+                                              isChild ? "Child Patient" : "Adult Patient",
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                                color: isChild
+                                                    ? const Color(0xFF92400E)
+                                                    : const Color(0xFF1E40AF),
+                                              ),
+                                            ),
+                                          ),
+                                          if (branchId.isNotEmpty) ...[
+                                            const SizedBox(width: 6),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: AppColors.gray100,
+                                                borderRadius: BorderRadius.circular(6),
+                                              ),
+                                              child: Text(
+                                                "Branch: ${branchId.toUpperCase()}",
+                                                style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: AppColors.gray700),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Row(
+                                        children: [
+                                          Text("CNIC / Key: ", style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                                          Text(
+                                            cnic.isNotEmpty ? cnic : hiveKey,
+                                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                                          ),
+                                          if (guardianCnic.isNotEmpty) ...[
+                                            const SizedBox(width: 14),
+                                            Text("Guardian CNIC: ", style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                                            Text(
+                                              guardianCnic,
+                                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Conflict Badges
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    if (isRawCnicChild)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.orange.shade50,
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(color: Colors.orange.shade200),
+                                        ),
+                                        child: Text(
+                                          "⚠️ Raw Parent CNIC",
+                                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.orange.shade900),
+                                        ),
+                                      ),
+                                    if (hasCnicCollision) ...[
+                                      const SizedBox(height: 4),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.purple.shade50,
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(color: Colors.purple.shade200),
+                                        ),
+                                        child: Text(
+                                          "⚡ CNIC Shared with Other Profile",
+                                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.purple.shade900),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+
+                            const SizedBox(height: 12),
+                            Divider(height: 1, color: AppColors.gray200),
+                            const SizedBox(height: 10),
+
+                            // Medical History Preservation & Resolution Actions
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                // History preservation badge
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF0D9488).withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: const Color(0xFF0D9488).withValues(alpha: 0.3)),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.shield_outlined, size: 14, color: Color(0xFF0D9488)),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        "History Preserved: $linkedVisits Visits • $linkedPrescriptions Prescriptions",
+                                        style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: Color(0xFF0D9488)),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Actions
+                                if (isProcessingThis)
+                                  const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFE11D48)),
+                                  )
+                                else
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      OutlinedButton.icon(
+                                        onPressed: () => _deleteConflictRegistration(item),
+                                        icon: const Icon(Icons.delete_outline_rounded, size: 16),
+                                        label: const Text("Delete Registration (Keep History)"),
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: const Color(0xFFE11D48),
+                                          side: const BorderSide(color: Color(0xFFE11D48)),
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      ElevatedButton.icon(
+                                        onPressed: () => _migrateConflictToChildId(item),
+                                        icon: const Icon(Icons.drive_file_rename_outline_rounded, size: 16),
+                                        label: const Text("Migrate to Child ID"),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF10B981),
+                                          foregroundColor: Colors.white,
+                                          elevation: 0,
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 
@@ -2354,7 +3732,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
       ],
     );
   }
-  Widget _buildDuplicateGroupCard(String groupKey, List<DocumentSnapshot> docs) {
+  Widget _buildDuplicateGroupCard(String groupKey, List<_LocalDocItem> docs) {
     final firstDoc = docs.first;
     final firstData = firstDoc.data() as Map<String, dynamic>? ?? {};
     final patientName = firstData['name'] ?? 'Unknown';
@@ -2559,7 +3937,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             ),
     );
   }
-  Widget _buildDocDetailCard(String groupKey, DocumentSnapshot doc, List<DocumentSnapshot> allDocs) {
+  Widget _buildDocDetailCard(String groupKey, _LocalDocItem doc, List<_LocalDocItem> allDocs) {
     final data = doc.data() as Map<String, dynamic>? ?? {};
     final selectedMasterId = _electedMasterIds[groupKey];
     final isSelected = selectedMasterId == doc.id;
@@ -2852,6 +4230,21 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          ElevatedButton.icon(
+            onPressed: _isProcessing ? null : _runStructureSanitizer,
+            icon: const Icon(Icons.delete_sweep_rounded),
+            label: Text(
+              _isProcessing ? "Sanitizing Structure..." : "Purge Bogus Branches & Root Bloat",
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
         ],
       ),
     );
@@ -2894,12 +4287,12 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             const CircularProgressIndicator(color: AppColors.primary),
             const SizedBox(height: 20),
             const Text(
-              "Scanning all prescription documents in Firestore...",
+              "Scanning local prescription documents in Hive...",
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.gray800),
             ),
             const SizedBox(height: 8),
             Text(
-              "Parsing paths, dates, and checking serial matches...",
+              "Matching local serial entries and checking prescription data...",
               style: TextStyle(fontSize: 13, color: AppColors.gray500),
             ),
           ],
@@ -2923,10 +4316,10 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 500),
               child: Text(
-                "Scan Firestore to identify older prescription documents. "
+                "Scan local Hive storage to identify prescription documents needing consolidation. "
                 "The tool will locate their corresponding daily serial entries, "
                 "merge the prescription data inside them, and delete the redundant "
-                "original collections one-by-one or in bulk.",
+                "local records before syncing all changes in the background.",
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 14, color: AppColors.gray600, height: 1.5),
               ),
@@ -2935,7 +4328,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
             ElevatedButton.icon(
               onPressed: _scanPrescriptions,
               icon: const Icon(Icons.search),
-              label: const Text("Scan Database for Prescriptions"),
+              label: const Text("Scan Local Prescriptions"),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primary,
                 foregroundColor: Colors.white,
@@ -2971,7 +4364,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                "All prescription documents have been successfully merged or cleaned from Firestore.",
+                "All prescription documents have been successfully consolidated into local visit entries.",
                 style: TextStyle(fontSize: 14, color: AppColors.gray600),
               ),
               const SizedBox(height: 32),
@@ -3026,17 +4419,34 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
                   ],
                 ),
               ),
-              ElevatedButton.icon(
-                onPressed: _isProcessing ? null : _mergeAndCleanAllPrescriptions,
-                icon: const Icon(Icons.cleaning_services),
-                label: const Text("Bulk Merge & Clean All"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  elevation: 0,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _isProcessing ? null : _unifyAllBranchesSerialsDispensary,
+                    icon: const Icon(Icons.hub_rounded, size: 16),
+                    label: const Text("Unify All Branches"),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF0D9488),
+                      side: const BorderSide(color: Color(0xFF0D9488), width: 1.5),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _mergeAndCleanAllPrescriptions,
+                    icon: const Icon(Icons.cleaning_services),
+                    label: const Text("Bulk Merge & Clean All"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      elevation: 0,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

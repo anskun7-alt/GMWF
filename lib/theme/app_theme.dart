@@ -589,6 +589,7 @@ class RoleThemeData {
       case 'rec+dis':         return RoleTheme.dispenser;
       case 'receptionist':    return RoleTheme.receptionist;
       case 'madrassa admin':
+      case 'madrassa principal':
       case 'madrassa teacher':
       case 'madrassa guardian':
       case 'madrassa':        return RoleTheme.madrassa;

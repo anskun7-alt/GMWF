@@ -102,8 +102,30 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
     } catch (_) {}
   }
 
-  Stream<DocumentSnapshot> _patientStream() => _firestore
-      .collection('branches').doc(widget.branchId.toLowerCase()).collection('patients').doc(_currentPatientId).get().asStream();
+  List<Map<String, dynamic>> _getLocalChildren(String? cnic) {
+    if (cnic == null || cnic.isEmpty) return [];
+    final clean = cnic.replaceAll(RegExp(r'\D'), '');
+    if (clean.isEmpty) return [];
+    final all = LocalStorageService.getAllLocalPatients();
+    return all.where((p) {
+      if (p['isAdult'] == true) return false;
+      final g = (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+      return g == clean;
+    }).toList();
+  }
+
+  Map<String, dynamic>? _getLocalGuardian(String? guardianCnic) {
+    if (guardianCnic == null || guardianCnic.trim().isEmpty || guardianCnic == 'Unknown') return null;
+    return LocalStorageService.getLocalPatientByCnic(guardianCnic);
+  }
+
+  Stream<DocumentSnapshot>? _patientStream() {
+    if (_currentPatientData != null || LocalStorageService.getLocalPatient(_currentPatientId) != null) {
+      return null;
+    }
+    return _firestore
+        .collection('branches').doc(widget.branchId.toLowerCase()).collection('patients').doc(_currentPatientId).get().asStream();
+  }
 
   Stream<QuerySnapshot> _childrenStream(String? cnic) => _firestore
       .collection('branches').doc(widget.branchId.toLowerCase()).collection('patients')
@@ -274,11 +296,13 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                 ])),
               ),
             ),
+            Divider(height: 1, thickness: 1, color: t.bgRule),
             Container(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-              decoration: BoxDecoration(color: t.bgCard,
-                  borderRadius: const BorderRadius.vertical(bottom: Radius.circular(24)),
-                  border: Border(top: BorderSide(color: t.bgRule))),
+              decoration: BoxDecoration(
+                color: t.bgCard,
+                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(24)),
+              ),
               child: Row(children: [
                 Expanded(child: TextButton(
                   onPressed: () => Navigator.pop(ctx),
@@ -443,6 +467,21 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   @override
   Widget build(BuildContext context) {
     final t = RoleThemeScope.dataOf(context);
+    final localData = _currentPatientData ?? LocalStorageService.getLocalPatient(_currentPatientId);
+    if (localData != null) {
+      return Scaffold(
+        backgroundColor: t.bg,
+        body: FadeTransition(
+          opacity: _fadeAnim,
+          child: LayoutBuilder(builder: (context, constraints) {
+            return constraints.maxWidth > 700
+                ? _wideLayout(localData, t)
+                : _narrowLayout(localData, t);
+          }),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: t.bg,
       body: StreamBuilder<DocumentSnapshot>(
@@ -887,8 +926,18 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   Widget _buildFamilySection(Map<String, dynamic> data, RoleThemeData t) {
     final isAdult = data['isAdult'] == true;
     if (isAdult) {
+      final cnic = data['cnic']?.toString();
+      final localChildren = _getLocalChildren(cnic);
+      if (localChildren.isNotEmpty) {
+        return _card(t, 'Family Members', Icons.family_restroom_rounded, const Color(0xFF1565C0),
+            localChildren.map((d) {
+              return _infoRow(t, '${d['name'] ?? 'N/A'} (${d['age'] ?? '?'} yrs)', '${d['gender'] ?? 'N/A'}',
+                  Icons.person_outline_rounded);
+            }).toList());
+      }
+
       return StreamBuilder<QuerySnapshot>(
-        stream: _childrenStream(data['cnic']),
+        stream: _childrenStream(cnic),
         builder: (ctx, snap) {
           if (!snap.hasData || snap.data!.docs.isEmpty) return const SizedBox.shrink();
           return _card(t, 'Family Members', Icons.family_restroom_rounded, const Color(0xFF1565C0),
@@ -900,8 +949,19 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
         },
       );
     } else {
+      final guardianCnic = data['guardianCnic']?.toString();
+      final localGuardian = _getLocalGuardian(guardianCnic);
+      if (localGuardian != null) {
+        return _card(t, 'Guardian Details', Icons.shield_outlined, const Color(0xFF6A1B9A), [
+          _infoRow(t, 'Guardian Name', localGuardian['name'] ?? 'N/A', Icons.person_outline_rounded),
+          _infoRow(t, 'Age', '${localGuardian['age'] ?? '?'} yrs', Icons.calendar_today_outlined),
+          _infoRow(t, 'Gender', localGuardian['gender'] ?? 'N/A', Icons.wc_rounded),
+          _infoRow(t, 'CNIC', data['guardianCnic'] ?? 'N/A', Icons.credit_card_outlined),
+        ]);
+      }
+
       return FutureBuilder<DocumentSnapshot?>(
-        future: _getGuardian(data['guardianCnic']),
+        future: _getGuardian(guardianCnic),
         builder: (ctx, snap) {
           if (!snap.hasData || snap.data == null) {
             return _card(t, 'Guardian Details', Icons.shield_outlined, const Color(0xFF6A1B9A), [

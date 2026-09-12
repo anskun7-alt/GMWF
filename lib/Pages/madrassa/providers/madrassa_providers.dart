@@ -4,20 +4,15 @@ import 'package:intl/intl.dart';
 import 'package:collection/collection.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../utils/madrassa_local_storage.dart';
+import '../../../services/local_storage_service.dart';
 import '../models/madrassa_config.dart';
 
 // Selected Date Provider for the daily log (keyed by branchId)
 final madrassaSelectedDateProvider = StateProvider.family<DateTime, String>((ref, branchId) => DateTime.now());
 
-// Config Stream Provider
+// Config Stream Provider (from Hive local storage)
 final madrassaConfigProvider = StreamProvider.family<MadrassaConfig, String>((ref, branchId) {
-  return FirebaseFirestore.instance
-      .collection('branches')
-      .doc(branchId)
-      .collection('madrassa_config')
-      .doc('current')
-      .snapshots()
-      .map((s) => MadrassaConfig.fromFirestore(s));
+  return MadrassaLocalStorage.streamConfigCached(branchId);
 });
 
 // Students List Stream Provider (from Hive local storage)
@@ -38,6 +33,11 @@ final madrassaDailyLogProvider = StreamProvider.family<Map<String, dynamic>, ({S
 // Monthly Logs Stream Provider (from Hive local storage)
 final madrassaMonthlyLogsProvider = StreamProvider.family<List<Map<String, dynamic>>, ({String branchId, int year, int month})>((ref, arg) {
   return MadrassaLocalStorage.streamLogsForMonthCached(arg.branchId, arg.year, arg.month);
+});
+
+// Monthly Fee Payments Stream Provider (from Hive local storage)
+final madrassaFeePaymentsProvider = StreamProvider.family<Map<String, Map<String, dynamic>>, ({String branchId, int year, int month})>((ref, arg) {
+  return MadrassaLocalStorage.streamFeePaymentsForMonthCached(arg.branchId, arg.year, arg.month);
 });
 
 // Filtered Students Provider for Daily Attendance Log (combines students roster, selected date, and log maps reactively)
@@ -125,8 +125,8 @@ final madrassaFilteredStudentsProvider = Provider.family<AsyncValue<List<Map<Str
 // All Logs Stream Provider
 final madrassaAllLogsProvider = StreamProvider.family<List<Map<String, dynamic>>, String>((ref, branchId) {
   final Stream<List<Map<String, dynamic>>> hiveSource = () async* {
+    final box = await LocalStorageService.ensureBoxOpen(MadrassaLocalStorage.logsBox);
     yield MadrassaLocalStorage.getAllLogsCached(branchId);
-    final box = Hive.box(MadrassaLocalStorage.logsBox);
     final prefix = '${branchId.toLowerCase().trim()}__log__';
     await for (final event in box.watch()) {
       final key = event.key?.toString() ?? '';

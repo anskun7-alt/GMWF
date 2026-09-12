@@ -86,7 +86,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
   // Maps inventoryId → total quantity already prescribed across ALL
   // pending (not-yet-dispensed) patients in Hive.
   // Rebuilt by _buildReservedQuantities() on load and before each add.
-  Map<String, int> _reservedQuantities = {};
+    Map<String, int> _reservedQuantities = {};
+  Timer? _stockBoxDebounce;
 
   static const Color _teal     = Color(0xFF00695C);
   static const Color _orange   = Color(0xFFFF6D00);
@@ -133,6 +134,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
   ];
 
   StreamSubscription<Map<String, dynamic>>? _realtimeSub;
+  void Function(void Function())? _activeDialogSetState;
 
   // ── Derived: extra charge (PKR) ────────────────────────────────────────────
   int get _extraCharge {
@@ -162,7 +164,17 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       if (mounted) _complaintFocus.requestFocus();
     });
 
-    _realtimeSub = RealtimeManager().messageStream.listen(_handleRealtimeUpdate);
+        _realtimeSub = RealtimeManager().messageStream.listen(_handleRealtimeUpdate);
+
+    if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+      Hive.box(LocalStorageService.stockBox).listenable().addListener(_debouncedStockBoxReload);
+    } else {
+      LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
+        if (mounted && box.isOpen) {
+          box.listenable().addListener(_debouncedStockBoxReload);
+        }
+      });
+    }
   }
 
   int _resolveDaysOfMedicine() {
@@ -181,22 +193,12 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
   }
 
   String? _getEffectiveCamp() {
-    final p = widget.selectedPatientData;
-    if (p != null) {
-      final pCamp = (p['dispensaryId'] ?? p['campId'] ?? p['dispensaryTag'] ?? p['subLocation'])?.toString().trim();
-      if (pCamp != null && pCamp.isNotEmpty && pCamp.toLowerCase() != 'all') {
-        return pCamp.toLowerCase();
-      }
-      final serial = (p['serial'] ?? p['id'] ?? widget.serialId).toString().toUpperCase();
-      if (serial.contains('-SADD-') || serial.contains('-SADDAR-') || serial.contains('-SAD-') || serial.contains('-KAP-')) return 'saddar';
-      if (serial.contains('-HAJI-') || serial.contains('-HC-')) return 'haji_camp';
+    final patientCamp = widget.selectedPatientData?['dispensaryId'] ??
+        widget.selectedPatientData?['campId'] ??
+        widget.selectedPatientData?['dispensaryTag'];
+    if (patientCamp != null && patientCamp.toString().trim().isNotEmpty) {
+      return patientCamp.toString().trim().toLowerCase();
     }
-    final active = CampSessionService.getActiveCamp(widget.branchId);
-    if (active != null && active.isNotEmpty && active.toLowerCase() != 'all') return active.toLowerCase();
-    final s = widget.serialId.toUpperCase();
-    if (s.contains('-SADD-') || s.contains('-SADDAR-') || s.contains('-SAD-') || s.contains('-KAP-')) return 'saddar';
-    if (s.contains('-HAJI-') || s.contains('-HC-')) return 'haji_camp';
-
     if (CampSessionService.hasCampsForBranch(widget.branchId)) {
       final available = CampSessionService.getAvailableCampOptions();
       if (available.isNotEmpty) return available.first['id'];
@@ -224,10 +226,29 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     if (type == null || data.isEmpty) return;
 
     final msgBranch = (data['branchId'] ?? event['branchId'] ?? '').toString().toLowerCase().trim();
-    if (msgBranch.isNotEmpty && msgBranch != widget.branchId.toLowerCase().trim()) return;
+    final myBranch  = widget.branchId.toLowerCase().trim();
+    if (msgBranch.isNotEmpty && myBranch.isNotEmpty && msgBranch != myBranch &&
+        !msgBranch.contains(myBranch) && !myBranch.contains(msgBranch) &&
+        msgBranch != 'all' && msgBranch != 'default') {
+      return;
+    }
 
     if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered') {
-      LocalStorageService.saveLocalInventoryItem(data);
+      final rawDelta = data['_quantityDelta'];
+      final medId = (data['id'] ?? data['medicineId'] ?? data['_docId'] ?? data['docId'])?.toString();
+      if (rawDelta != null && medId != null && medId.isNotEmpty) {
+        final delta = (rawDelta is num) ? rawDelta.toDouble() : double.tryParse(rawDelta.toString()) ?? 0.0;
+        final existing = LocalStorageService.getLocalInventoryItem(medId);
+        if (existing != null) {
+          if (delta != 0) {
+            LocalStorageService.updateLocalStockQuantity(medId, delta);
+          }
+        } else {
+          LocalStorageService.saveLocalInventoryItem(data);
+        }
+      } else {
+        LocalStorageService.saveLocalInventoryItem(data);
+      }
       _loadInventory();
       return;
     } else if (type == RealtimeEvents.deleteStockItem || type == 'delete_stock_item') {
@@ -317,7 +338,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       filterByCamp: shouldFilterByCamp,
     ).where((m) => !_isSyringeItem(m)).toList();
 
-    if (localItems.isEmpty && !shouldFilterByCamp && (effCamp == null || effCamp == 'all')) {
+    if (localItems.isEmpty) {
       localItems = LocalStorageService.getAllLocalStockItems(
         branchId: widget.branchId,
         filterByCamp: false,
@@ -328,11 +349,14 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     for (final s in localItems) {
       final item = Map<String, dynamic>.from(s);
-      final rawName = (item['name'] ?? '').toString();
-      item['name'] = MasterProformaService.cleanBrandToFormula(rawName);
-      final rawFormula = (item['formula'] ?? '').toString();
-      if (rawFormula.isNotEmpty) {
-        item['formula'] = MasterProformaService.cleanBrandToFormula(rawFormula);
+      final isCustom = item['isCustomized'] == true || item['userEdited'] == true;
+      if (!isCustom) {
+        final rawName = (item['name'] ?? '').toString();
+        item['name'] = MasterProformaService.cleanBrandToFormula(rawName);
+        final rawFormula = (item['formula'] ?? '').toString();
+        if (rawFormula.isNotEmpty) {
+          item['formula'] = MasterProformaService.cleanBrandToFormula(rawFormula);
+        }
       }
       item['quantity'] = item['quantity'] ?? item['stock'] ?? 0;
       combined.add(item);
@@ -347,9 +371,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     if (mounted) {
       setState(() => _allInventory = combined);
+      _activeDialogSetState?.call(() {});
     }
     // Build reserved map after inventory is loaded
     await _buildReservedQuantities();
+    _activeDialogSetState?.call(() {});
   }
 
   // ── FIX: Scan ALL pending prescriptions in Hive and sum up reserved qty ──
@@ -363,8 +389,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     final Map<String, int> reserved = {};
 
     try {
-      final prescBox   = Hive.box(LocalStorageService.prescriptionsBox);
-      final entriesBox = Hive.box(LocalStorageService.entriesBox);
+      final prescBox   = await LocalStorageService.ensureBoxOpen(LocalStorageService.prescriptionsBox);
+      final entriesBox = await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
       final mySerial   = widget.serialId.trim().toLowerCase();
       // PERF FIX: prescriptionsBox accumulates every prescription ever
       // written locally. Scanning the whole box on every dialog-open and
@@ -379,12 +405,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         if (raw is! Map) continue;
 
         final prescSerialRaw = (raw['serial'] ?? raw['id'] ?? '').toString();
-        if (prescSerialRaw.isEmpty) continue;
-
-        final parts = prescSerialRaw.split('-');
-        final effectiveDatePrefix = (parts.isNotEmpty && parts[0].toUpperCase() == 'X')
-            ? (parts.length > 1 ? parts[1] : '')
-            : (parts.isNotEmpty ? parts[0] : '');
+        final effectiveDatePrefix = CampSessionService.getDateKeyFromSerial(prescSerialRaw);
         if (effectiveDatePrefix.isNotEmpty && effectiveDatePrefix != todayKey) {
           continue;
         }
@@ -436,11 +457,26 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     if (mounted) {
       setState(() => _reservedQuantities = reserved);
+      _activeDialogSetState?.call(() {});
     }
+  }
+
+    void _debouncedStockBoxReload() {
+    _stockBoxDebounce?.cancel();
+    _stockBoxDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (mounted) _loadInventory();
+    });
   }
 
   @override
   void dispose() {
+    _activeDialogSetState = null;
+    _stockBoxDebounce?.cancel();
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+        Hive.box(LocalStorageService.stockBox).listenable().removeListener(_debouncedStockBoxReload);
+      }
+    } catch (_) {}
     _realtimeSub?.cancel();
     _searchFocusNode.dispose();
     _complaintFocus.dispose();
@@ -599,12 +635,14 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       'Surbex',
     ];
 
-    await showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (dialogCtx) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
+    try {
+      await showDialog(
+        context: context,
+        barrierDismissible: true,
+        builder: (dialogCtx) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              _activeDialogSetState = setDialogState;
             final query = queryCtrl.text.trim().toLowerCase();
 
             // Compute category counts across all inventory
@@ -1351,11 +1389,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                     ),
 
                     // ── Footer ────────────────────────────────────────
+                    Divider(height: 1, thickness: 1, color: isDark ? const Color(0xFF334155) : Colors.grey.shade200),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                       decoration: BoxDecoration(
                         color: isDark ? const Color(0xFF1E293B) : Colors.grey.shade100,
-                        border: Border(top: BorderSide(color: isDark ? const Color(0xFF334155) : Colors.grey.shade200)),
                         borderRadius: const BorderRadius.only(
                           bottomLeft: Radius.circular(24),
                           bottomRight: Radius.circular(24),
@@ -1399,6 +1437,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         );
       },
     );
+  } finally {
+    _activeDialogSetState = null;
+  }
   }
 
   Future<void> _addMedicineDialog({Map<String, dynamic>? inventoryMed}) async {
@@ -3375,6 +3416,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'doctorName':      doctorName,
         'prescribedBy':    doctorName,
         'updatedBy':       doctorName,
+        'dispensaryTag':   patientData['dispensaryTag']?.toString(),
+        'dispensaryId':    patientData['dispensaryId']?.toString(),
+        'campId':          patientData['campId']?.toString(),
+        'campName':        patientData['campName']?.toString(),
+        'session':         patientData['session']?.toString() ?? CampSessionService.getCurrentSession(null, widget.branchId),
         // ── FIX: Mark as not yet dispensed so _buildReservedQuantities
         //         picks it up correctly for subsequent patients
         'dispenseStatus':  'pending',
@@ -3401,7 +3447,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       }
 
       // 2. Embed into Hive entriesBox (updating ALL matching serial keys)
-      final entriesBox = Hive.box(LocalStorageService.entriesBox);
+      final entriesBox = await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
       final rawSerial  = widget.serialId.trim().toLowerCase();
       final targetBranch = widget.branchId.trim().toLowerCase();
 
@@ -3423,6 +3469,10 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       if (matchingKeys.isEmpty) {
         matchingKeys.add('${widget.branchId}-${widget.serialId.trim()}');
       }
+
+      final normBranch = widget.branchId.trim().toLowerCase();
+      final normSerialUpper = serialClean.toUpperCase();
+      final canonicalKey = '$normBranch-$normSerialUpper';
 
       Map<String, dynamic>? updated;
       for (final k in matchingKeys) {
@@ -3447,13 +3497,38 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         base['daysOfMedicine'] = days;
         base['extraCharge']    = extraCharge;
         base['vitals']         = vitalsMap;
-        base['dispenseStatus'] = 'pending';
+        base['dispenseStatus'] ??= 'pending';
+        base['dateKey']        ??= dateKey;
+        base['session']        ??= (patientData['session'] ?? CampSessionService.getCurrentSession(null, widget.branchId));
+        base['branchId']       ??= widget.branchId;
+        base['serial']         ??= serialClean;
+        base['patientCnic']    ??= patientCnic;
+        base['cnic']           ??= patientCnic;
+        base['guardianCnic']   ??= patientData['guardianCnic']?.toString();
+        base['patientAge']     ??= (patientData['age'] ?? patientData['patientAge'])?.toString();
+        base['patientGender']  ??= (patientData['gender'] ?? patientData['patientGender'])?.toString();
+        base['dispensaryTag']  ??= patientData['dispensaryTag']?.toString();
+        base['dispensaryId']   ??= patientData['dispensaryId']?.toString();
+        base['campId']         ??= patientData['campId']?.toString();
+        base['campName']       ??= patientData['campName']?.toString();
+        base['createdBy']      ??= (patientData['createdBy'] ?? base['createdBy']);
+        base['createdByName']  ??= (patientData['createdByName'] ?? base['createdByName']);
+        base['receptionistId'] ??= (patientData['receptionistId'] ?? base['receptionistId']);
+        base['receptionistName'] ??= (patientData['receptionistName'] ?? base['receptionistName']);
+        base['tokenBy']        ??= (patientData['tokenBy'] ?? base['tokenBy']);
 
         updated = base;
-        await entriesBox.put(k, base);
       }
 
       final finalUpdated = updated ?? Map<String, dynamic>.from(patientData);
+      await entriesBox.put(canonicalKey, finalUpdated);
+
+      // Clean up redundant non-canonical keys
+      for (final k in matchingKeys) {
+        if (k.toString() != canonicalKey && entriesBox.containsKey(k)) {
+          await entriesBox.delete(k);
+        }
+      }
 
       // 3. Update Firestore Cloud Document (un-awaited background sync so network latency never blocks UI/LAN)
       final campDocKey = CampSessionService.getCampDateDocId(
@@ -3468,6 +3543,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'status':         'completed',
         'completedAt':    nowIso,
         'prescription':   medicalData,
+        'patientName':     resolvedPatientName,
+        'patientCnic':     patientCnic,
         'doctorName':     doctorName,
         'doctorId':       doctorId,
         'daysOfMedicine': days,
@@ -3679,10 +3756,6 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
   // ── Build ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    if (widget.isSaving) {
-      return const Center(child: CircularProgressIndicator(color: _teal));
-    }
-
     final isDark = _isDark;
     return LayoutBuilder(builder: (context, constraints) {
       final compact = constraints.maxWidth < 500;

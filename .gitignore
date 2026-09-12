@@ -70,7 +70,7 @@ scripts/pending_punches.json
 *.pdf
 *.patch
 *.png
-scratch/test_output.json
+scratch/
 build_output.txt
 debug_branches.txt
 

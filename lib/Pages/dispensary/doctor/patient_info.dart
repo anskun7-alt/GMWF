@@ -396,7 +396,7 @@ class PatientInfo extends StatelessWidget {
               final bId    = branchId ?? patient['branchId']?.toString() ?? '';
               if (serial.isNotEmpty && bId.isNotEmpty) {
                 final entryKey = '$bId-$serial';
-                final box = Hive.box(LocalStorageService.entriesBox);
+                final box = await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
                 final existing = box.get(entryKey);
                 if (existing != null) {
                   final updatedEntry = Map<String, dynamic>.from(existing);

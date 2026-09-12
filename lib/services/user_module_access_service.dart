@@ -52,7 +52,10 @@ class UserModuleAccessService {
 
   /// Checks if a module is explicitly blocked for a user by Chairman.
   static bool isModuleBlockedForUser(String userId, String moduleId, {String userRole = ''}) {
-    if (userRole.toLowerCase().trim() == 'chairman') return false;
+    final cr = userRole.toLowerCase().trim();
+    if (cr == 'chairman' || cr == 'ceo' || cr == 'hq manager' || cr == 'hq_manager' || cr == 'admin' || cr == 'global admin' || cr == 'director') {
+      return false;
+    }
     if (!Hive.isBoxOpen(boxName)) return false;
     final val = _box.get(_key(userId, moduleId));
     if (val is Map) {
@@ -64,9 +67,9 @@ class UserModuleAccessService {
   /// Primary access check used by Navigation, Dashboard, and Module Wrappers.
   /// 
   /// RULES:
-  /// 1. CHAIRMAN IS ALWAYS UNRESTRICTED (`role == 'chairman' -> true`).
+  /// 1. CHAIRMAN & CEO ARE ALWAYS UNRESTRICTED.
   /// 2. If explicitly blocked for `userId`, returns `false`.
-  /// 3. Global Admin / CEO default access.
+  /// 3. Global Admin / CEO / HQ Manager default access.
   /// 4. Fallbacks to default role permissions.
   static bool canUserAccessModule({
     required String userId,
@@ -75,21 +78,25 @@ class UserModuleAccessService {
   }) {
     final cleanRole = role.toLowerCase().trim();
 
-    // RULE 1: Chairman is highest authority and CAN NEVER be restricted anywhere.
-    if (cleanRole == 'chairman') {
+    // RULE 1: Chairman, CEO, Admin and Global Admin have full executive authority
+    if (cleanRole == 'chairman' || cleanRole == 'ceo' || cleanRole == 'global admin' || cleanRole == 'admin') {
       return true;
     }
 
-    // RULE 2: Explicit Chairman User-level Block check
+    // RULE 2: Explicit Chairman User-level Block check (leadership roles are exempted)
     if (userId.isNotEmpty && isModuleBlockedForUser(userId, moduleId, userRole: cleanRole)) {
       return false;
     }
 
-    // RULE 2.5: HQ Manager specific exclusions (Server Control & Office Boy removed for HQ Manager only)
+    // RULE 2.5: HQ Manager specific exclusions (Server Control only - Food Tokens / Office Boy is fully permitted)
     if (cleanRole == 'hq manager' || cleanRole == 'hq_manager' || cleanRole == 'headquarters manager' || cleanRole == 'hqmanager' || cleanRole == 'hq') {
       final mod = moduleId.toLowerCase().trim();
-      if (mod == 'server_sync' || mod == 'server' || mod == 'office_boy' || mod == 'office boy' || mod == 'officeboy') {
+      if (mod == 'server_sync' || mod == 'server') {
         return false;
+      }
+      // HQ Manager has full access to Food Tokens / Office Boy
+      if (mod == 'office_boy' || mod == 'office boy' || mod == 'officeboy') {
+        return true;
       }
     }
 
@@ -125,10 +132,11 @@ class UserModuleAccessService {
         return ['chairman', 'ceo', 'admin', 'global admin', 'madrassa admin', 'madrassa teacher', 'madrassa guardian', 'branch manager', 'supervisor'].contains(cleanRole);
       case 'school':
         return ['chairman', 'ceo', 'admin', 'global admin', 'principal', 'school admin', 'school teacher', 'branch manager'].contains(cleanRole);
+      case 'office_boy':
       case 'dasterkhwaan':
-        return ['chairman', 'ceo', 'admin', 'global admin', 'server', 'office boy', 'kitchen', 'branch manager', 'supervisor'].contains(cleanRole);
       case 'dasterkhwaan_food_log':
-        return ['chairman', 'ceo', 'admin', 'global admin', 'server', 'office boy', 'kitchen', 'branch manager', 'supervisor'].contains(cleanRole);
+      case 'kitchen':
+        return ['chairman', 'ceo', 'admin', 'global admin', 'server', 'office boy', 'kitchen', 'branch manager', 'supervisor', 'hq manager', 'manager'].contains(cleanRole);
       case 'donations':
         return ['chairman', 'ceo', 'admin', 'global admin', 'donations', 'office boy', 'global accounts', 'branch manager', 'hq manager', 'manager'].contains(cleanRole);
       default:

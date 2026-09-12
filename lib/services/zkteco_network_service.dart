@@ -14,6 +14,7 @@ import '../models/biometric_credential.dart';
 import 'local_storage_service.dart';
 import 'finance_local_storage.dart';
 import 'camp_session_service.dart';
+import 'sync_service.dart';
 import '../realtime/realtime_events.dart';
 import '../realtime/realtime_manager.dart';
 
@@ -28,11 +29,36 @@ class ZkTecoNetworkService {
   static Timer? _activePollingTimer;
   static StreamSubscription? _firestorePunchesSub;
 
-  // [FIX-3.2] Persistent Hive-backed punch deduplication store with 24h TTL and 10000 max size
+  // [FIX-3.2] Persistent Hive-backed & fast in-memory punch deduplication store with 24h TTL and 10000 max size
   static const int _dedupMaxSize = 10000;
   static const Duration _dedupTtl = Duration(hours: 24);
+  static final Map<String, DateTime> _inMemoryDedup = {};
+  static final Map<String, DateTime> _pinLastPunchTime = {};
 
-  static bool isPunchDuplicate(String dedupKey) {
+  static bool isPunchDuplicate(String dedupKey, {String? pin, String? deviceIp, DateTime? timestamp}) {
+    final now = DateTime.now();
+
+    // 1. Fast in-memory exact match check
+    if (_inMemoryDedup.containsKey(dedupKey)) {
+      final cachedAt = _inMemoryDedup[dedupKey]!;
+      if (now.difference(cachedAt) <= _dedupTtl) {
+        return true;
+      }
+      _inMemoryDedup.remove(dedupKey);
+    }
+
+    // 2. Hardware multi-beep debounce: If the same PIN scans on the same device within 15 seconds
+    if (pin != null && pin.isNotEmpty && deviceIp != null && deviceIp.isNotEmpty) {
+      final pinKey = '${deviceIp}_$pin';
+      final lastPunch = _pinLastPunchTime[pinKey];
+      final punchTime = timestamp ?? now;
+      if (lastPunch != null && punchTime.difference(lastPunch).inSeconds.abs() < 15) {
+        debugPrint('[ZkTecoNetworkService] Debounced rapid multi-scan for PIN $pin on $deviceIp (< 15s)');
+        return true;
+      }
+    }
+
+    // 3. Persistent Hive check
     try {
       if (!Hive.isBoxOpen(LocalStorageService.zktecoPunchDedupBox)) {
         return false;
@@ -41,7 +67,7 @@ class ZkTecoNetworkService {
       final raw = box.get(dedupKey);
       if (raw == null) return false;
       final recordedAt = DateTime.tryParse(raw.toString());
-      if (recordedAt != null && DateTime.now().difference(recordedAt) > _dedupTtl) {
+      if (recordedAt != null && now.difference(recordedAt) > _dedupTtl) {
         box.delete(dedupKey);
         return false;
       }
@@ -51,11 +77,24 @@ class ZkTecoNetworkService {
     }
   }
 
-  static void recordPunchDedupKey(String dedupKey) {
+  static void recordPunchDedupKey(String dedupKey, {String? pin, String? deviceIp, DateTime? timestamp}) {
+    final now = DateTime.now();
+    _inMemoryDedup[dedupKey] = now;
+    if (_inMemoryDedup.length > _dedupMaxSize) {
+      _inMemoryDedup.remove(_inMemoryDedup.keys.first);
+    }
+
+    if (pin != null && pin.isNotEmpty && deviceIp != null && deviceIp.isNotEmpty) {
+      _pinLastPunchTime['${deviceIp}_$pin'] = timestamp ?? now;
+      if (_pinLastPunchTime.length > 5000) {
+        _pinLastPunchTime.remove(_pinLastPunchTime.keys.first);
+      }
+    }
+
     try {
       if (Hive.isBoxOpen(LocalStorageService.zktecoPunchDedupBox)) {
         final box = Hive.box(LocalStorageService.zktecoPunchDedupBox);
-        box.put(dedupKey, DateTime.now().toIso8601String());
+        box.put(dedupKey, now.toIso8601String());
 
         // Max-size purge if over 10000 entries
         if (box.length > _dedupMaxSize) {
@@ -217,11 +256,13 @@ class ZkTecoNetworkService {
       }
 
       if (path.contains('/iclock/getrequest') || path.contains('/getrequest')) {
-        // Send ADMS command instructing device to upload all stored punches from memory
-        final cmdResponse = 'C:101:CHECK\r\nC:102:DATA QUERY ATTLOG\r\n';
-        request.response.write(cmdResponse);
+        // [PERF-FIX] Do NOT dispatch DATA QUERY ATTLOG on routine heartbeats.
+        // Doing so forces the device to dump its entire historical memory (thousands of punches)
+        // on every single poll, overwhelming the server and freezing clients.
+        // ZKTeco devices push new punches naturally to /iclock/cdata as they happen.
+        request.response.headers.contentType = ContentType.text;
+        request.response.write('OK\n');
         await request.response.close();
-        debugPrint('[ZkTecoNetworkService] Dispatched DATA QUERY ATTLOG command to $clientIp ($sn)');
         return;
       }
     } else if (request.method == 'POST') {
@@ -343,6 +384,18 @@ class ZkTecoNetworkService {
       final cleanPin = pin.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '').trim();
       if (cleanPin.isNotEmpty && !cleanPin.startsWith('PP')) {
         timestamp ??= DateTime.now();
+
+        // Ignore historical punches older than 3 days to avoid reprocessing stale memory dumps
+        if (DateTime.now().difference(timestamp).inDays.abs() > 3) {
+          continue;
+        }
+
+        final dedupKey = '${clientIp}_${cleanPin}_${timestamp.toIso8601String()}';
+        if (isPunchDuplicate(dedupKey)) {
+          continue;
+        }
+        recordPunchDedupKey(dedupKey);
+
         processIncomingPunch(
           pin: cleanPin,
           timestamp: timestamp,
@@ -363,7 +416,18 @@ class ZkTecoNetworkService {
     required String deviceIp,
     String deviceSn = '',
     required String source,
+    bool enqueueForSync = true,
+    bool broadcastLan = true,
   }) async {
+    final dedupKey = '${deviceIp}_${pin}_${timestamp.toIso8601String()}';
+    if (!isPunchDuplicate(dedupKey)) {
+      recordPunchDedupKey(dedupKey);
+    }
+
+    final bool isFromCloud = (source == 'firestore_sync' || source == 'firestore_listener');
+    final bool shouldEnqueue = enqueueForSync && !isFromCloud;
+    final bool shouldBroadcast = broadcastLan && !isFromCloud;
+
     totalPunchesReceivedNotifier.value++;
 
     // 1. Resolve physical building location and branch from device config
@@ -381,10 +445,18 @@ class ZkTecoNetworkService {
     // 2. Audit: Calculate time drift between Biometric Device clock and Server PC clock
     final serverTime = DateTime.now();
     final deviceTime = timestamp;
-    final int timeDriftSeconds = serverTime.difference(deviceTime).inSeconds;
-    final bool hasSignificantDrift = timeDriftSeconds.abs() > 180; // > 3 minutes drift
+    final int rawDifference = serverTime.difference(deviceTime).inSeconds;
 
-    String formatDrift(int sec) {
+    // Clock drift alerts only apply to live real-time hardware events (< 10m old).
+    // Historical pulls from device memory or Firestore backfills are past events, NOT clock drift.
+    final bool isLiveEvent = (source == 'zkteco_udp_realtime' || source == 'zkteco_hardware' || source == 'zkteco') &&
+        rawDifference.abs() <= 600;
+
+    final int timeDriftSeconds = isLiveEvent ? rawDifference : 0;
+    final bool hasSignificantDrift = isLiveEvent && timeDriftSeconds.abs() > 180; // > 3 minutes drift on live punch
+
+    String formatDrift(int sec, bool isLive) {
+      if (!isLive) return 'Historical Sync';
       if (sec.abs() < 10) return 'In Sync (±0s)';
       final sign = sec >= 0 ? '+' : '-';
       final absSec = sec.abs();
@@ -401,7 +473,7 @@ class ZkTecoNetworkService {
       'deviceTimestamp': deviceTime.toIso8601String(),
       'serverTimestamp': serverTime.toIso8601String(),
       'timeDriftSeconds': timeDriftSeconds,
-      'timeDriftFormatted': formatDrift(timeDriftSeconds),
+      'timeDriftFormatted': formatDrift(timeDriftSeconds, isLiveEvent),
       'hasTimeDriftAlert': hasSignificantDrift,
       'deviceIp': deviceIp,
       'deviceSn': deviceSn,
@@ -421,34 +493,43 @@ class ZkTecoNetworkService {
 
     debugPrint('[ZkTecoNetworkService] Processing Punch (Drift: ${punchRecord['timeDriftFormatted']}): $punchRecord');
 
-    if (credential != null) {
-      if (isCrossBranch) {
-        // Cross-branch punch detected -> Create Pending HQ Authorization Record
-        final pendingRecord = {
-          'id': _uuid.v4(),
-          'punchId': punchRecord['id'],
-          'pin': pin,
-          'entityId': credential.entityId,
-          'entityName': credential.entityName,
-          'entityType': credential.entityType,
-          'employeeBranchId': credential.branchId,
-          'employeeBranchName': LocalStorageService.getBranchName(credential.branchId),
-          'punchBranchId': deviceBranch,
-          'punchBranchName': LocalStorageService.getBranchName(deviceBranch),
-          'deviceIp': deviceIp,
-          'deviceSn': deviceSn,
-          'deviceName': device?.deviceName ?? 'ZKTeco Device ($deviceIp)',
-          'buildingLocation': buildingLocation,
-          'timestamp': timestamp.toIso8601String(),
-          'status': 'pending', // 'pending' | 'approved' | 'rejected'
-          'reviewedBy': null,
-          'reviewedAt': null,
-          'rejectReason': null,
-          'source': source,
-        };
-        await _saveCrossBranchPendingPunch(pendingRecord);
-        punchRecord['crossBranchInfo'] = pendingRecord;
+    if (credential == null) {
+      debugPrint('[ZkTecoNetworkService] Unassigned biometric key detected for PIN $pin at $buildingLocation ($deviceIp)');
+      // Broadcast unassigned biometric key to UI & Server Log if recent (< 24h)
+      if (isLiveEvent || rawDifference.abs() <= 86400) {
+        _punchStreamController.add(punchRecord);
+      }
+      return;
+    }
 
+    if (isCrossBranch) {
+      // Cross-branch punch detected -> Create Pending HQ Authorization Record
+      final pendingRecord = {
+        'id': _uuid.v4(),
+        'punchId': punchRecord['id'],
+        'pin': pin,
+        'entityId': credential.entityId,
+        'entityName': credential.entityName,
+        'entityType': credential.entityType,
+        'employeeBranchId': credential.branchId,
+        'employeeBranchName': LocalStorageService.getBranchName(credential.branchId),
+        'punchBranchId': deviceBranch,
+        'punchBranchName': LocalStorageService.getBranchName(deviceBranch),
+        'deviceIp': deviceIp,
+        'deviceSn': deviceSn,
+        'deviceName': device?.deviceName ?? 'ZKTeco Device ($deviceIp)',
+        'buildingLocation': buildingLocation,
+        'timestamp': timestamp.toIso8601String(),
+        'status': 'pending', // 'pending' | 'approved' | 'rejected'
+        'reviewedBy': null,
+        'reviewedAt': null,
+        'rejectReason': null,
+        'source': source,
+      };
+      await _saveCrossBranchPendingPunch(pendingRecord);
+      punchRecord['crossBranchInfo'] = pendingRecord;
+
+      if (shouldBroadcast) {
         try {
           RealtimeManager().sendMessage({
             'event_type': 'cross_branch_punch_alert',
@@ -457,30 +538,27 @@ class ZkTecoNetworkService {
         } catch (e) {
           debugPrint('[ZkTecoNetworkService] Realtime alert broadcast error: $e');
         }
-      } else {
-        // Auto-route to specific entity attendance module
-        await _routePunchToModule(
-          credential,
-          timestamp,
-          buildingLocation,
-          source,
-          deviceBranch: deviceBranch,
-          deviceSn: deviceSn,
-        );
-
-        // Instantly save to hierarchical Firestore tree: branches/{branchId}/biometric_punches/{entityId}/records/{punchId}
-        // Punches are recorded locally and queued via sync/LAN to prevent excessive Firestore write quotas.
       }
     } else {
-      debugPrint('[ZkTecoNetworkService] Unmapped punch received from hardware for PIN $pin');
-      // [FIX-2.1] Persist unmapped punch so admin can view and 1-click assign in Attendance tab
-      await _saveUnmappedPunch(punchRecord);
+      // Auto-route to specific entity attendance module
+      await _routePunchToModule(
+        credential,
+        timestamp,
+        buildingLocation,
+        source,
+        deviceBranch: deviceBranch,
+        deviceSn: deviceSn,
+        enqueueForSync: shouldEnqueue,
+      );
     }
 
-    // Broadcast punches to UI & Live Server Log
-    _punchStreamController.add(punchRecord);
+    // Broadcast live or recent (< 24h) mapped punches to UI & Live Server Log
+    final bool isRecentOrLive = isLiveEvent || (rawDifference >= 0 && rawDifference <= 86400);
+    if (isRecentOrLive) {
+      _punchStreamController.add(punchRecord);
+    }
 
-    if (credential != null) {
+    if (shouldBroadcast) {
       try {
         RealtimeManager().sendMessage({
           'event_type': RealtimeEvents.saveBiometricLog,
@@ -499,6 +577,7 @@ class ZkTecoNetworkService {
     String source, {
     String deviceBranch = '',
     String deviceSn = '',
+    bool enqueueForSync = true,
   }) async {
     final type = credential.entityType.toLowerCase();
     final dateStr = DateFormat('yyyy-MM-dd').format(timestamp);
@@ -517,14 +596,15 @@ class ZkTecoNetworkService {
         location,
         deviceBranch: deviceBranch,
         deviceSn: deviceSn,
+        enqueueForSync: enqueueForSync,
       );
-      await _recordSchoolTeacherAttendance(credential, dateStr, timeStr, source);
+      await _recordSchoolTeacherAttendance(credential, dateStr, timeStr, source, enqueueForSync: enqueueForSync);
     } else if (type == 'madrassa_student' || type == 'madrassa') {
       // Record in Madrassa Student Log Box
-      await _recordMadrassaStudentAttendance(credential, dateStr, timeStr, source);
+      await _recordMadrassaStudentAttendance(credential, dateStr, timeStr, source, enqueueForSync: enqueueForSync);
     } else if (type == 'school_student' || type == 'school') {
       // Record in School Daily Attendance Box
-      await _recordSchoolStudentAttendance(credential, dateStr, timeStr, source);
+      await _recordSchoolStudentAttendance(credential, dateStr, timeStr, source, enqueueForSync: enqueueForSync);
     } else {
       // Record in Office / Department / Dispensary Staff Employee Attendance Box
       await _recordEmployeeAttendance(
@@ -536,6 +616,7 @@ class ZkTecoNetworkService {
         location,
         deviceBranch: deviceBranch,
         deviceSn: deviceSn,
+        enqueueForSync: enqueueForSync,
       );
     }
   }
@@ -549,6 +630,7 @@ class ZkTecoNetworkService {
     String location, {
     String deviceBranch = '',
     String deviceSn = '',
+    bool enqueueForSync = true,
   }) async {
     try {
       if (!Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
@@ -564,11 +646,12 @@ class ZkTecoNetworkService {
       final sessionKey = shiftInfo.session.toLowerCase(); // 'morning', 'evening', 'night'
       
       // Resolve effective branch accurately:
+      // CRITICAL: The physical device where the employee just punched (deviceBranch) takes top priority
       String effectiveBranch = '';
-      if (credential.branchId.isNotEmpty && credential.branchId != 'all' && credential.branchId != 'main') {
-        effectiveBranch = credential.branchId.toLowerCase().trim();
-      } else if (deviceBranch.isNotEmpty && deviceBranch != 'all' && deviceBranch != 'main') {
+      if (deviceBranch.isNotEmpty && deviceBranch != 'all' && deviceBranch != 'main') {
         effectiveBranch = deviceBranch.toLowerCase().trim();
+      } else if (credential.branchId.isNotEmpty && credential.branchId != 'all' && credential.branchId != 'main') {
+        effectiveBranch = credential.branchId.toLowerCase().trim();
       } else if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
         final empRaw = Hive.box(LocalStorageService.employeesBox).get(credential.entityId);
         if (empRaw is Map && empRaw['branchId'] != null) {
@@ -579,6 +662,16 @@ class ZkTecoNetworkService {
       if (effectiveBranch.isEmpty) {
         effectiveBranch = 'karachi';
       }
+
+      String resolveBranchDisplayName(String bId) {
+        final clean = bId.toLowerCase().replaceAll('branch_', '').trim();
+        if (clean.contains('haji')) return 'Haji Camp';
+        if (clean.contains('saddar')) return 'Saddar';
+        final fromStorage = LocalStorageService.getBranchName(bId);
+        return fromStorage.isNotEmpty ? fromStorage : (bId[0].toUpperCase() + bId.substring(1));
+      }
+
+      final branchDisplayName = resolveBranchDisplayName(effectiveBranch);
 
       if (existing != null) {
         final existingMap = Map<String, dynamic>.from(existing as Map);
@@ -607,68 +700,60 @@ class ZkTecoNetworkService {
             ? Map<String, dynamic>.from(existingMap['shifts'] as Map) 
             : <String, dynamic>{};
 
-        final bool sessionExists = shifts.containsKey(sessionKey);
-        Map<String, dynamic> shiftEntry;
-
-        if (sessionExists && shifts[sessionKey] is Map) {
-          shiftEntry = Map<String, dynamic>.from(shifts[sessionKey] as Map);
-          // If shift entry already has checkIn, and this punch is later, treat as shift checkOut
-          if (shiftEntry['checkInTimestamp'] != null && shiftEntry['checkInTimestamp'] != punchTimestamp.toIso8601String()) {
-            final checkInTs = DateTime.tryParse(shiftEntry['checkInTimestamp'].toString());
-            if (checkInTs != null && punchTimestamp.isAfter(checkInTs)) {
-              shiftEntry['checkOutTime'] = timeStr;
-              shiftEntry['checkOutTimestamp'] = punchTimestamp.toIso8601String();
-              shiftEntry['status'] = 'present';
-              shiftEntry['departureTime'] = timeStr;
+        // Check if there is an unclosed shift at THIS physical facility/branch:
+        String? openShiftKeyAtThisBranch;
+        final cleanEff = effectiveBranch.replaceAll('branch_', '').trim();
+        for (final entry in shifts.entries) {
+          if (entry.value is Map) {
+            final m = entry.value as Map;
+            final bId = (m['branchId'] ?? '').toString().toLowerCase().replaceAll('branch_', '').trim();
+            final hasIn = m['checkInTime'] != null;
+            final hasOut = m['checkOutTime'] != null;
+            if (hasIn && !hasOut && (bId == cleanEff || bId.isEmpty || cleanEff.isEmpty)) {
+              openShiftKeyAtThisBranch = entry.key;
+              break;
             }
-          } else if (shiftEntry['checkInTime'] == null) {
-            shiftEntry['checkInTime'] = timeStr;
-            shiftEntry['checkInTimestamp'] = punchTimestamp.toIso8601String();
-            shiftEntry['arrivalTime'] = timeStr;
           }
-          shifts[sessionKey] = shiftEntry;
+        }
+
+        if (openShiftKeyAtThisBranch != null) {
+          // Punch OUT: Close the unclosed shift at this facility/camp
+          final shiftEntry = Map<String, dynamic>.from(shifts[openShiftKeyAtThisBranch] as Map);
+          final inTsStr = shiftEntry['checkInTimestamp']?.toString();
+          final inTs = inTsStr != null ? DateTime.tryParse(inTsStr) : null;
+          if (inTs == null || punchTimestamp.isAfter(inTs)) {
+            shiftEntry['checkOutTime'] = timeStr;
+            shiftEntry['checkOutTimestamp'] = punchTimestamp.toIso8601String();
+            shiftEntry['status'] = 'present';
+            shiftEntry['departureTime'] = timeStr;
+            shifts[openShiftKeyAtThisBranch] = shiftEntry;
+          }
         } else {
-          // Check if there is an unclosed earlier shift at the same branch/facility
-          String? unclosedShiftKey;
-          for (final entry in shifts.entries) {
-            if (entry.value is Map) {
-              final m = entry.value as Map;
-              final bId = m['branchId']?.toString() ?? '';
-              final hasIn = m['checkInTime'] != null;
-              final hasOut = m['checkOutTime'] != null;
-              if (hasIn && !hasOut && (bId.isEmpty || bId == effectiveBranch)) {
-                unclosedShiftKey = entry.key;
-                break;
-              }
+          // Punch IN: Start a new shift/session at this facility/camp
+          String shiftKey = sessionKey;
+          if (shifts.containsKey(shiftKey)) {
+            final existingShift = shifts[shiftKey];
+            final existingBranch = existingShift is Map ? (existingShift['branchId'] ?? '').toString().toLowerCase().replaceAll('branch_', '').trim() : '';
+            if (existingBranch != cleanEff) {
+              shiftKey = '${sessionKey}_$cleanEff';
             }
           }
 
-          if (unclosedShiftKey != null) {
-            // Close the unclosed earlier shift (e.g. employee worked standard full day from morning until afternoon/evening)
-            final prevShift = Map<String, dynamic>.from(shifts[unclosedShiftKey] as Map);
-            prevShift['checkOutTime'] = timeStr;
-            prevShift['checkOutTimestamp'] = punchTimestamp.toIso8601String();
-            prevShift['departureTime'] = timeStr;
-            prevShift['status'] = 'present';
-            shifts[unclosedShiftKey] = prevShift;
-          } else {
-            // Distinct new shift (e.g. Evening shift after Morning shift was already checked out, or separate branch)
-            shiftEntry = {
-              'branchId': effectiveBranch,
-              'branchName': LocalStorageService.getBranchName(effectiveBranch),
-              'location': location,
-              'session': sessionKey,
-              'status': 'present',
-              'checkInTime': timeStr,
-              'arrivalTime': timeStr,
-              'checkInTimestamp': punchTimestamp.toIso8601String(),
-              'checkOutTime': null,
-              'departureTime': null,
-              'checkOutTimestamp': null,
-              'source': '$source ($location)',
-            };
-            shifts[sessionKey] = shiftEntry;
-          }
+          final shiftEntry = {
+            'branchId': effectiveBranch,
+            'branchName': branchDisplayName,
+            'location': location,
+            'session': sessionKey,
+            'status': 'present',
+            'checkInTime': timeStr,
+            'arrivalTime': timeStr,
+            'checkInTimestamp': punchTimestamp.toIso8601String(),
+            'checkOutTime': null,
+            'departureTime': null,
+            'checkOutTimestamp': null,
+            'source': '$source ($location)',
+          };
+          shifts[shiftKey] = shiftEntry;
         }
 
         existingMap['shifts'] = shifts;
@@ -713,25 +798,28 @@ class ZkTecoNetworkService {
 
         existingMap['lastPunchTime'] = punchTimestamp.toIso8601String();
         existingMap['status'] = 'present';
-        existingMap['synced'] = false;
+        existingMap['synced'] = !enqueueForSync;
         // [BUG-FIX] Write pin/biometricPin so fallback matcher in getAttendanceForDate() works
         existingMap['pin'] = credential.biometricPin;
         existingMap['biometricPin'] = credential.biometricPin;
         await box.put(key, existingMap);
 
-        // Enqueue cloud sync
-        await LocalStorageService.enqueueSync({
-          'type': 'save_attendance_record',
-          'branchId': effectiveBranch,
-          'date': dateStr,
-          'employeeId': credential.entityId,
-          'data': existingMap,
-        });
+        if (enqueueForSync) {
+          // Enqueue cloud sync
+          await LocalStorageService.enqueueSync({
+            'type': 'save_attendance_record',
+            'branchId': effectiveBranch,
+            'date': dateStr,
+            'employeeId': credential.entityId,
+            'entityId': 'att_${effectiveBranch}_${credential.entityId}_$dateStr',
+            'data': existingMap,
+          });
+        }
       } else {
         // First scan of the day -> Check-In time for the respective shift
         final shiftEntry = {
           'branchId': effectiveBranch,
-          'branchName': LocalStorageService.getBranchName(effectiveBranch),
+          'branchName': branchDisplayName,
           'location': location,
           'session': sessionKey,
           'status': 'present',
@@ -763,23 +851,25 @@ class ZkTecoNetworkService {
           },
           'source': '$source ($location)',
           'lastPunchTime': punchTimestamp.toIso8601String(),
-          'synced': false,
+          'synced': !enqueueForSync,
           // [BUG-FIX] Write pin/biometricPin so fallback matcher in getAttendanceForDate() works
           'pin': credential.biometricPin,
           'biometricPin': credential.biometricPin,
         };
         await box.put(key, newRecord);
 
-        // Enqueue cloud sync
-        await LocalStorageService.enqueueSync({
-          'type': 'save_attendance_record',
-          'branchId': effectiveBranch,
-          'date': dateStr,
-          'employeeId': credential.entityId,
-          'data': newRecord,
-        });
+        if (enqueueForSync) {
+          // Enqueue cloud sync
+          await LocalStorageService.enqueueSync({
+            'type': 'save_attendance_record',
+            'branchId': effectiveBranch,
+            'date': dateStr,
+            'employeeId': credential.entityId,
+            'entityId': 'att_${effectiveBranch}_${credential.entityId}_$dateStr',
+            'data': newRecord,
+          });
+        }
       }
-      await box.flush();
       debugPrint('[ZkTecoNetworkService] Recorded Employee Attendance for ${credential.entityName} ($sessionKey shift)');
     } catch (e) {
       debugPrint('[ZkTecoNetworkService] Error recording employee attendance: $e');
@@ -790,8 +880,9 @@ class ZkTecoNetworkService {
     BiometricCredential credential,
     String dateStr,
     String timeStr,
-    String source,
-  ) async {
+    String source, {
+    bool enqueueForSync = true,
+  }) async {
     try {
       if (!Hive.isBoxOpen(LocalStorageService.schoolLogsBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.schoolLogsBox);
@@ -818,15 +909,17 @@ class ZkTecoNetworkService {
       logMap['lastUpdated'] = DateTime.now().toIso8601String();
 
       await box.put(logKey, logMap);
-      await box.flush();
 
-      // Enqueue cloud sync
-      await LocalStorageService.enqueueSync({
-        'type': 'save_school_teacher_log',
-        'branchId': branchId,
-        'date': dateStr,
-        'data': logMap,
-      });
+      if (enqueueForSync) {
+        // Enqueue cloud sync
+        await LocalStorageService.enqueueSync({
+          'type': 'save_school_teacher_log',
+          'branchId': branchId,
+          'date': dateStr,
+          'entityId': 'tchlog_${branchId}_$dateStr',
+          'data': logMap,
+        });
+      }
 
       debugPrint('[ZkTecoNetworkService] Recorded School Faculty Attendance in Teacher Log for ${credential.entityName}');
     } catch (e) {
@@ -838,8 +931,9 @@ class ZkTecoNetworkService {
     BiometricCredential credential,
     String dateStr,
     String timeStr,
-    String source,
-  ) async {
+    String source, {
+    bool enqueueForSync = true,
+  }) async {
     try {
       if (!Hive.isBoxOpen(LocalStorageService.madrassaLogsBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.madrassaLogsBox);
@@ -891,36 +985,17 @@ class ZkTecoNetworkService {
 
       logMap[credential.entityId] = existingStudentLog;
       await box.put(logKey, logMap);
-      await box.flush();
 
-      // Enqueue cloud sync
-      await LocalStorageService.enqueueSync({
-        'type': 'save_madrassa_daily_log',
-        'branchId': branchId,
-        'date': dateStr,
-        'data': logMap,
-      });
-
-      // Direct real-time write to Cloud Firestore if online
-      try {
-        final branchDoc = FirebaseFirestore.instance.collection('branches').doc(branchId);
-        await branchDoc
-            .collection('madrassa_attendance')
-            .doc(dateStr)
-            .set({'date': dateStr, 'branchId': branchId, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-
-        await branchDoc
-            .collection('madrassa_attendance')
-            .doc(dateStr)
-            .collection('records')
-            .doc(credential.entityId)
-            .set(record, SetOptions(merge: true));
-
-        await branchDoc
-            .collection('madrassa_logs')
-            .doc(logKey)
-            .set(logMap, SetOptions(merge: true));
-      } catch (_) {}
+      if (enqueueForSync) {
+        // Enqueue cloud sync
+        await LocalStorageService.enqueueSync({
+          'type': 'save_madrassa_daily_log',
+          'branchId': branchId,
+          'date': dateStr,
+          'entityId': 'madlog_${branchId}_$dateStr',
+          'data': logMap,
+        });
+      }
 
       debugPrint('[ZkTecoNetworkService] Recorded Madrassa Student Attendance in Daily Log for ${credential.entityName}');
     } catch (e) {
@@ -932,8 +1007,9 @@ class ZkTecoNetworkService {
     BiometricCredential credential,
     String dateStr,
     String timeStr,
-    String source,
-  ) async {
+    String source, {
+    bool enqueueForSync = true,
+  }) async {
     try {
       if (!Hive.isBoxOpen(LocalStorageService.schoolLogsBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.schoolLogsBox);
@@ -987,36 +1063,17 @@ class ZkTecoNetworkService {
       logMap['lastUpdated'] = DateTime.now().toIso8601String();
 
       await box.put(logKey, logMap);
-      await box.flush();
 
-      // Enqueue cloud sync
-      await LocalStorageService.enqueueSync({
-        'type': 'save_school_daily_log',
-        'branchId': branchId,
-        'date': dateStr,
-        'data': logMap,
-      });
-
-      // Direct real-time write to Cloud Firestore if online
-      try {
-        final branchDoc = FirebaseFirestore.instance.collection('branches').doc(branchId);
-        await branchDoc
-            .collection('school_attendance')
-            .doc(dateStr)
-            .set({'date': dateStr, 'branchId': branchId, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-
-        await branchDoc
-            .collection('school_attendance')
-            .doc(dateStr)
-            .collection('records')
-            .doc(credential.entityId)
-            .set(record, SetOptions(merge: true));
-
-        await branchDoc
-            .collection('school_logs')
-            .doc(logKey)
-            .set(logMap, SetOptions(merge: true));
-      } catch (_) {}
+      if (enqueueForSync) {
+        // Enqueue cloud sync
+        await LocalStorageService.enqueueSync({
+          'type': 'save_school_daily_log',
+          'branchId': branchId,
+          'date': dateStr,
+          'entityId': 'schlog_${branchId}_$dateStr',
+          'data': logMap,
+        });
+      }
 
       debugPrint('[ZkTecoNetworkService] Recorded School Student Attendance in Daily Log for ${credential.entityName}');
     } catch (e) {
@@ -1024,22 +1081,12 @@ class ZkTecoNetworkService {
     }
   }
 
-  static Future<void> _saveUnmappedPunch(Map<String, dynamic> punch) async {
-    try {
-      if (!Hive.isBoxOpen(LocalStorageService.unmappedPunchesBox)) {
-        await LocalStorageService.openBoxSafe(LocalStorageService.unmappedPunchesBox);
-      }
-      final box = Hive.box(LocalStorageService.unmappedPunchesBox);
-      await box.put(punch['id'], punch);
-    } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Error saving unmapped punch: $e');
-    }
-  }
-
   // ── Device Registration & Heartbeat Management ────────────────────────────
 
   static void _registerDeviceHeartbeat(String sn, String ip) async {
     try {
+      if (isDeviceDeleted(sn) || isDeviceDeleted(ip)) return;
+
       if (!Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.biometricDevicesBox);
       }
@@ -1052,6 +1099,7 @@ class ZkTecoNetworkService {
         final val = box.get(key);
         if (val != null) {
           final cfg = BiometricDeviceConfig.fromMap(Map<String, dynamic>.from(val as Map));
+          if (isDeviceDeleted(cfg.deviceId) || isDeviceDeleted(cfg.deviceName)) continue;
           if (cfg.serialNumber == sn || cfg.ipAddress == ip) {
             existingDevice = cfg;
             matchedKey = key.toString();
@@ -1060,8 +1108,14 @@ class ZkTecoNetworkService {
         }
       }
 
+      if (existingDevice != null &&
+          (isDeviceDeleted(existingDevice.deviceId) || isDeviceDeleted(existingDevice.deviceName))) {
+        return;
+      }
+
       final now = DateTime.now();
       final deviceKey = matchedKey ?? _uuid.v4();
+      if (isDeviceDeleted(deviceKey)) return;
 
       final updated = (existingDevice ??
               BiometricDeviceConfig(
@@ -1090,6 +1144,7 @@ class ZkTecoNetworkService {
     for (var val in box.values) {
       if (val != null) {
         final cfg = BiometricDeviceConfig.fromMap(Map<String, dynamic>.from(val as Map));
+        if (isDeviceDeleted(cfg.deviceId) || isDeviceDeleted(cfg.deviceName)) continue;
         if (cfg.ipAddress == ip || (sn.isNotEmpty && cfg.serialNumber == sn)) {
           return cfg;
         }
@@ -1103,31 +1158,48 @@ class ZkTecoNetworkService {
     final box = Hive.box(LocalStorageService.biometricDevicesBox);
     final now = DateTime.now();
     final List<BiometricDeviceConfig> result = [];
-    for (var v in box.values) {
+    final keysToPrune = <dynamic>[];
+
+    for (var entry in box.toMap().entries) {
+      final key = entry.key;
+      final v = entry.value;
       if (v is Map) {
         try {
-          final cfg = BiometricDeviceConfig.fromMap(v);
+          final cfg = BiometricDeviceConfig.fromMap(Map<String, dynamic>.from(v));
+          if (isDeviceDeleted(cfg.deviceId) || isDeviceDeleted(cfg.deviceName) || isDeviceDeleted(key.toString())) {
+            keysToPrune.add(key);
+            continue;
+          }
           final isRecentlyActive = cfg.lastHeartbeat != null &&
               now.difference(cfg.lastHeartbeat!).inSeconds < 120;
           result.add(cfg.copyWith(status: isRecentlyActive ? 'Online' : 'Offline'));
         } catch (_) {}
       }
     }
+
+    for (final k in keysToPrune) {
+      box.delete(k).ignore();
+    }
+
     return result;
   }
 
-  static Future<void> saveDeviceConfig(BiometricDeviceConfig config) async {
+  static Future<void> saveDeviceConfig(BiometricDeviceConfig config, {String? oldBranchId}) async {
     if (!Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
       await LocalStorageService.openBoxSafe(LocalStorageService.biometricDevicesBox);
     }
     final box = Hive.box(LocalStorageService.biometricDevicesBox);
     await box.put(config.deviceId, config.toMap());
 
+    // Clear from tombstone if previously deleted
+    await removeDeletedDeviceTombstone(config.deviceId);
+    if (config.deviceName.isNotEmpty) {
+      await removeDeletedDeviceTombstone(config.deviceName);
+    }
+
     // Sync to Cloud Firestore across branches and globally
     try {
-      final targetBranch = (config.branchId.isNotEmpty && config.branchId != 'all')
-          ? config.branchId.toLowerCase().trim()
-          : 'karachi';
+      final targetBranch = LocalStorageService.sanitizeBranchId(config.branchId, fallback: 'karachi');
       final data = config.toMap()..['updatedAt'] = FieldValue.serverTimestamp();
 
       await FirebaseFirestore.instance
@@ -1138,43 +1210,177 @@ class ZkTecoNetworkService {
           .set(data, SetOptions(merge: true))
           .catchError((_) {});
 
-      await FirebaseFirestore.instance
-          .collection('biometric_devices')
-          .doc(config.deviceId)
-          .set(data, SetOptions(merge: true))
-          .catchError((_) {});
-      debugPrint('[ZkTecoNetworkService] Saved device config to Firestore: ${config.deviceName} (${config.ipAddress})');
+      // If branch changed, delete from old branch so no duplicate resurrects
+      if (oldBranchId != null && oldBranchId.isNotEmpty && oldBranchId != targetBranch) {
+        FirebaseFirestore.instance
+            .collection('branches')
+            .doc(oldBranchId)
+            .collection('biometric_devices')
+            .doc(config.deviceId)
+            .delete()
+            .catchError((_) {});
+      }
+
+      debugPrint('[ZkTecoNetworkService] Saved device config to Firestore branch: $targetBranch/${config.deviceName}');
     } catch (e) {
       debugPrint('[ZkTecoNetworkService] Firestore device save notice: $e');
     }
+
+    // Enqueue for durable cloud sync
+    await LocalStorageService.enqueueSync({
+      'type': 'save_biometric_device',
+      'deviceId': config.deviceId,
+      'branchId': config.branchId,
+      'data': config.toMap(),
+    });
+
+    // Broadcast over LAN so other machines update immediately
+    try {
+      RealtimeManager().sendMessage(RealtimeEvents.payload(
+        type: RealtimeEvents.saveBiometricDevice,
+        branchId: config.branchId,
+        data: {'deviceId': config.deviceId, 'data': config.toMap()},
+      ));
+    } catch (_) {}
+
+    SyncService().triggerUpload();
   }
 
-  static Future<void> deleteDeviceConfig(String deviceId, {String? branchId}) async {
+  // ── Deleted Device Tombstone Helpers ───────────────────────────────────────
+  static Set<String> _getDeletedDeviceIds() {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        final list = box.get('deleted_biometric_device_ids');
+        if (list is List) {
+          return list.map((e) => e.toString().trim().toLowerCase()).where((e) => e.isNotEmpty).toSet();
+        }
+      }
+    } catch (_) {}
+    return <String>{};
+  }
+
+  static Future<void> addDeletedDeviceTombstone(String identifier) async {
+    try {
+      final clean = identifier.trim().toLowerCase();
+      if (clean.isEmpty) return;
+      final box = await LocalStorageService.ensureBoxOpen('app_settings');
+      final set = _getDeletedDeviceIds();
+      set.add(clean);
+      await box.put('deleted_biometric_device_ids', set.toList());
+      await box.flush();
+    } catch (_) {}
+  }
+
+  static Future<void> removeDeletedDeviceTombstone(String identifier) async {
+    try {
+      final clean = identifier.trim().toLowerCase();
+      if (clean.isEmpty) return;
+      final box = await LocalStorageService.ensureBoxOpen('app_settings');
+      final set = _getDeletedDeviceIds();
+      set.remove(clean);
+      await box.put('deleted_biometric_device_ids', set.toList());
+      await box.flush();
+    } catch (_) {}
+  }
+
+  static bool isDeviceDeleted(String? identifier) {
+    if (identifier == null) return false;
+    final clean = identifier.trim().toLowerCase();
+    if (clean.isEmpty) return false;
+    return _getDeletedDeviceIds().contains(clean);
+  }
+
+  static Future<void> deleteDeviceConfig(String deviceId, {String? branchId, String? deviceName, String? ipAddress}) async {
+    final cleanId = deviceId.trim();
+    await addDeletedDeviceTombstone(cleanId);
+    if (deviceName != null && deviceName.trim().isNotEmpty) {
+      await addDeletedDeviceTombstone(deviceName.trim());
+    }
+
     if (Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
       final box = Hive.box(LocalStorageService.biometricDevicesBox);
-      await box.delete(deviceId);
+      final keysToDelete = <dynamic>[];
+      for (final key in box.keys) {
+        if (key.toString().toLowerCase() == cleanId.toLowerCase()) {
+          keysToDelete.add(key);
+          continue;
+        }
+        final val = box.get(key);
+        if (val is Map) {
+          final dId = (val['deviceId'] ?? '').toString().trim().toLowerCase();
+          final dName = (val['deviceName'] ?? '').toString().trim().toLowerCase();
+          final dIp = (val['ipAddress'] ?? '').toString().trim().toLowerCase();
+          if (dId == cleanId.toLowerCase() ||
+              (deviceName != null && dName == deviceName.trim().toLowerCase()) ||
+              (ipAddress != null && dIp == ipAddress.trim().toLowerCase())) {
+            keysToDelete.add(key);
+          }
+        }
+      }
+      for (final k in keysToDelete) {
+        await box.delete(k);
+      }
+      await box.flush();
     }
 
     try {
-      final targetBranch = (branchId != null && branchId.isNotEmpty && branchId != 'all')
-          ? branchId.toLowerCase().trim()
-          : 'karachi';
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(targetBranch)
+      final targetBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
+      final candBranches = <String>{targetBranch, 'karachi', 'saddar', 'haji_camp', 'main'};
+      for (final cand in candBranches) {
+        FirebaseFirestore.instance
+            .collection('branches')
+            .doc(cand)
+            .collection('biometric_devices')
+            .doc(cleanId)
+            .delete()
+            .catchError((_) {});
+      }
+      FirebaseFirestore.instance
           .collection('biometric_devices')
-          .doc(deviceId)
+          .doc(cleanId)
           .delete()
           .catchError((_) {});
-      await FirebaseFirestore.instance
-          .collection('biometric_devices')
-          .doc(deviceId)
-          .delete()
+
+      // Delete any matching docs via collectionGroup
+      FirebaseFirestore.instance
+          .collectionGroup('biometric_devices')
+          .get()
+          .then((snap) {
+            for (final doc in snap.docs) {
+              final d = doc.data();
+              final dId = (d['deviceId'] ?? doc.id).toString();
+              final dName = (d['deviceName'] ?? '').toString();
+              if (doc.id == cleanId || dId == cleanId ||
+                  (deviceName != null && dName.toLowerCase() == deviceName.trim().toLowerCase())) {
+                doc.reference.delete().ignore();
+              }
+            }
+          })
           .catchError((_) {});
-      debugPrint('[ZkTecoNetworkService] Deleted device config from Firestore: $deviceId');
+
+      debugPrint('[ZkTecoNetworkService] Deleted device config across candidate branches: $cleanId');
     } catch (e) {
       debugPrint('[ZkTecoNetworkService] Firestore device delete notice: $e');
     }
+
+    // Enqueue for durable cloud sync
+    await LocalStorageService.enqueueSync({
+      'type': 'delete_biometric_device',
+      'deviceId': cleanId,
+      'branchId': branchId ?? 'karachi',
+    });
+
+    // Broadcast over LAN so other machines remove it immediately
+    try {
+      RealtimeManager().sendMessage(RealtimeEvents.payload(
+        type: RealtimeEvents.deleteBiometricDevice,
+        branchId: branchId ?? 'karachi',
+        data: {'deviceId': cleanId},
+      ));
+    } catch (_) {}
+
+    SyncService().triggerUpload();
   }
 
   /// Syncs all biometric devices from Cloud Firestore down to local Hive
@@ -1191,10 +1397,18 @@ class ZkTecoNetworkService {
 
       final snap = await query.get(const GetOptions(source: Source.serverAndCache));
       for (final doc in snap.docs) {
+        final docId = doc.id;
         final data = doc.data();
-        final deviceId = doc.id;
+        final devId = (data['deviceId'] ?? docId).toString();
+        final devName = (data['deviceName'] ?? '').toString();
+        if (isDeviceDeleted(docId) || isDeviceDeleted(devId) || isDeviceDeleted(devName)) {
+          doc.reference.delete().ignore();
+          box.delete(docId).ignore();
+          box.delete(devId).ignore();
+          continue;
+        }
         final cfg = BiometricDeviceConfig.fromMap(Map<String, dynamic>.from(data));
-        await box.put(deviceId, cfg.toMap());
+        await box.put(devId, cfg.toMap());
       }
       debugPrint('[ZkTecoNetworkService] Synced ${snap.docs.length} biometric devices from Firestore');
     } catch (e) {
@@ -1202,43 +1416,13 @@ class ZkTecoNetworkService {
     }
   }
 
-  /// Realtime stream listener for biometric devices from Firestore.
-  /// Global device listeners are intentionally disabled to avoid quota spikes; use
-  /// branch-scoped syncs or explicit one-time fetches instead.
+  /// Sync biometric devices from Firestore once on demand without realtime stream.
   static void listenToBiometricDevicesFromFirestore({String? branchId}) {
     _remoteDevicesSub?.cancel();
-    try {
-      final normalized = (branchId ?? '').trim().toLowerCase();
-      if (normalized.isEmpty || normalized == 'all' || normalized == 'global') {
-        debugPrint('[ZkTecoNetworkService] Skipping global biometric devices listener to avoid quota spikes.');
-        return;
-      }
-
-      final query = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(normalized)
-          .collection('biometric_devices');
-
-      _remoteDevicesSub = query.snapshots().listen((snap) async {
-        if (!Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
-          await LocalStorageService.openBoxSafe(LocalStorageService.biometricDevicesBox);
-        }
-        final box = Hive.box(LocalStorageService.biometricDevicesBox);
-        for (final change in snap.docChanges) {
-          final doc = change.doc;
-          if (change.type == DocumentChangeType.removed) {
-            await box.delete(doc.id);
-          } else {
-            final data = doc.data();
-            if (data != null) {
-              final cfg = BiometricDeviceConfig.fromMap(Map<String, dynamic>.from(data));
-              await box.put(doc.id, cfg.toMap());
-            }
-          }
-        }
-      });
-    } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Remote devices listener notice: $e');
+    _remoteDevicesSub = null;
+    final normalized = (branchId ?? '').trim().toLowerCase();
+    if (normalized.isNotEmpty && normalized != 'all' && normalized != 'global') {
+      syncBiometricDevicesFromFirestore(branchId: normalized);
     }
   }
 
@@ -1404,6 +1588,8 @@ class ZkTecoNetworkService {
               deviceIp: deviceIp,
               deviceSn: deviceSn,
               source: source,
+              enqueueForSync: false,
+              broadcastLan: false,
             );
             processedCount++;
           }
@@ -1418,50 +1604,14 @@ class ZkTecoNetworkService {
     }
   }
 
-  /// Listens to Cloud Firestore for biometric punches synced from Python services or remote apps
+  /// One-time sync of Cloud Firestore biometric punches (zero continuous Firestore snapshots).
   static void listenToFirestorePunches() {
     _firestorePunchesSub?.cancel();
     try {
-      // 1. Historical initial backfill for past 30 days
-      syncBiometricPunchesFromFirestore(daysBack: 30);
-
-      // 2. Real-time stream listener for recent activity
-      final cutoff = DateTime.now().subtract(const Duration(days: 7)).toIso8601String();
-      _firestorePunchesSub = FirebaseFirestore.instance
-          .collection('biometric_punches')
-          .where('timestamp', isGreaterThanOrEqualTo: cutoff)
-          .snapshots()
-          .listen((snap) {
-        for (var doc in snap.docChanges) {
-          if (doc.type == DocumentChangeType.added || doc.type == DocumentChangeType.modified) {
-            final data = doc.doc.data();
-            if (data != null) {
-              final pin = (data['pin'] ?? data['userId'] ?? data['biometricPin'])?.toString() ?? '';
-              final timeStr = data['timestamp']?.toString() ?? '';
-              final deviceIp = data['deviceIp']?.toString() ?? '192.168.1.100';
-              final deviceSn = data['deviceSn']?.toString() ?? '';
-              final source = data['source']?.toString() ?? 'firestore_sync';
-
-              if (pin.isNotEmpty && timeStr.isNotEmpty) {
-                final timestamp = DateTime.tryParse(timeStr) ?? DateTime.now();
-                final dedupKey = '${deviceIp}_${pin}_$timeStr';
-                if (!isPunchDuplicate(dedupKey)) {
-                  recordPunchDedupKey(dedupKey);
-                  processIncomingPunch(
-                    pin: pin,
-                    timestamp: timestamp,
-                    deviceIp: deviceIp,
-                    deviceSn: deviceSn,
-                    source: source,
-                  );
-                }
-              }
-            }
-          }
-        }
-      });
+      // Historical one-time backfill for recent days without holding open snapshots
+      syncBiometricPunchesFromFirestore(daysBack: 7);
     } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Firestore listener notice: $e');
+      debugPrint('[ZkTecoNetworkService] Firestore sync notice: $e');
     }
   }
 
@@ -1538,33 +1688,7 @@ class ZkTecoNetworkService {
         debugPrint('[ZkTecoNetworkService] Root biometric_punches query note: $pe');
       }
 
-      // 3. Query branch unmapped punches for today
-      for (final b in branchList) {
-        try {
-          final unmappedSnap = await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(b)
-              .collection('unmapped_punches')
-              .where('timestamp', isGreaterThanOrEqualTo: startOfDay)
-              .where('timestamp', isLessThanOrEqualTo: endOfDay)
-              .get();
-
-          if (Hive.isBoxOpen(LocalStorageService.unmappedPunchesBox)) {
-            final uBox = Hive.box(LocalStorageService.unmappedPunchesBox);
-            for (final doc in unmappedSnap.docs) {
-              final d = doc.data();
-              final id = doc.id;
-              if (!uBox.containsKey(id)) {
-                await uBox.put(id, d);
-              }
-            }
-          }
-        } catch (ue) {
-          debugPrint('[ZkTecoNetworkService] Branch $b unmapped punches sync note: $ue');
-        }
-      }
-
-      // 4. Update today's punch diagnostic counters
+      // 3. Update today's punch diagnostic counters
       final diag = getTodayPunchDiagnostics(branchId);
       totalPunchesReceivedNotifier.value = diag['total'] ?? 0;
 
@@ -2297,7 +2421,7 @@ class ZkTecoNetworkService {
 
       // Persist to Cloud Firestore employee document
       try {
-        final targetBranch = (branchId.isNotEmpty && branchId != 'all') ? branchId.toLowerCase().trim() : 'karachi';
+        final targetBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
         FirebaseFirestore.instance
             .collection('branches')
             .doc(targetBranch)
@@ -2413,30 +2537,25 @@ class ZkTecoNetworkService {
     // Save with clean entityId as the primary key
     await box.put(cleanEntityId, credential.toMap());
 
-    // Sync to Cloud Firestore
-    try {
-      final targetBranch = (credential.branchId.isNotEmpty && credential.branchId != 'all')
-          ? credential.branchId.toLowerCase().trim()
-          : 'karachi';
-      final credData = credential.toMap()
-        ..['updatedAt'] = FieldValue.serverTimestamp();
+    // Sync to Cloud Firestore (Non-blocking background)
+    unawaited(() async {
+      try {
+        final targetBranch = LocalStorageService.sanitizeBranchId(credential.branchId, fallback: 'karachi');
+        final credData = credential.toMap()
+          ..['updatedAt'] = FieldValue.serverTimestamp();
 
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(targetBranch)
-          .collection('biometric_credentials')
-          .doc(cleanEntityId)
-          .set(credData, SetOptions(merge: true))
-          .catchError((_) {});
-
-      await FirebaseFirestore.instance
-          .collection('biometric_credentials')
-          .doc(cleanEntityId)
-          .set(credData, SetOptions(merge: true))
-          .catchError((_) {});
-    } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Credential Firestore sync notice: $e');
-    }
+        await FirebaseFirestore.instance
+            .collection('branches')
+            .doc(targetBranch)
+            .collection('biometric_credentials')
+            .doc(cleanEntityId)
+            .set(credData, SetOptions(merge: true))
+            .timeout(const Duration(seconds: 5))
+            .catchError((_) {});
+      } catch (e) {
+        debugPrint('[ZkTecoNetworkService] Credential Firestore sync notice: $e');
+      }
+    }());
   }
 
   static Future<void> deleteBiometricCredential(String entityId, {String? branchId}) async {
@@ -2446,27 +2565,170 @@ class ZkTecoNetworkService {
     if (Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
       final box = Hive.box(LocalStorageService.biometricCredentialsBox);
       await box.delete(cleanEntityId);
+      // Also delete any other keys mapped to this entityId
+      final otherKeys = <dynamic>[];
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map && (val['entityId']?.toString().trim() == cleanEntityId)) {
+          otherKeys.add(k);
+        }
+      }
+      for (final k in otherKeys) {
+        await box.delete(k);
+      }
     }
 
-    try {
-      final targetBranch = (branchId != null && branchId.isNotEmpty && branchId != 'all')
-          ? branchId.toLowerCase().trim()
-          : 'karachi';
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(targetBranch)
-          .collection('biometric_credentials')
-          .doc(cleanEntityId)
-          .delete()
-          .catchError((_) {});
-      await FirebaseFirestore.instance
-          .collection('biometric_credentials')
-          .doc(cleanEntityId)
-          .delete()
-          .catchError((_) {});
-    } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Credential delete notice: $e');
+    // Unassign biometricPin and pin from employee profile in employeesBox
+    if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+      final empBox = Hive.box(LocalStorageService.employeesBox);
+      for (final key in empBox.keys) {
+        final raw = empBox.get(key);
+        if (raw is Map) {
+          final id = (raw['localId'] ?? raw['id'] ?? key).toString().trim();
+          if (id == cleanEntityId) {
+            final updated = Map<String, dynamic>.from(raw);
+            updated.remove('biometricPin');
+            updated.remove('pin');
+            await empBox.put(key, updated);
+            break;
+          }
+        }
+      }
     }
+
+    // Also remove from madrassa students if entity is student
+    if (Hive.isBoxOpen(LocalStorageService.madrassaStudentsBox)) {
+      final mBox = Hive.box(LocalStorageService.madrassaStudentsBox);
+      for (final key in mBox.keys) {
+        final raw = mBox.get(key);
+        if (raw is Map) {
+          final id = (raw['id'] ?? key).toString().trim();
+          if (id == cleanEntityId || key.toString().endsWith('__std__$cleanEntityId')) {
+            final updated = Map<String, dynamic>.from(raw);
+            updated.remove('biometricPin');
+            updated.remove('pin');
+            await mBox.put(key, updated);
+            break;
+          }
+        }
+      }
+    }
+
+    // Cloud Firestore delete (Non-blocking background)
+    unawaited(() async {
+      try {
+        final targetBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
+        await FirebaseFirestore.instance
+            .collection('branches')
+            .doc(targetBranch)
+            .collection('biometric_credentials')
+            .doc(cleanEntityId)
+            .delete()
+            .timeout(const Duration(seconds: 5))
+            .catchError((_) {});
+      } catch (e) {
+        debugPrint('[ZkTecoNetworkService] Credential delete notice: $e');
+      }
+    }());
+  }
+
+  /// Removes only employee credentials for a branch (or globally), preserving Madrassa students.
+  static Future<int> clearEmployeeBiometricCredentials({String? branchId}) {
+    return clearAllBiometricCredentials(branchId: branchId, targetEntityType: 'employee');
+  }
+
+  /// Removes biometric credentials for a branch (or globally), clearing PINs so they can be manually assigned.
+  /// If [targetEntityType] is 'employee', preserves Madrassa students.
+  static Future<int> clearAllBiometricCredentials({String? branchId, String? targetEntityType}) async {
+    int count = 0;
+    if (!Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
+      await LocalStorageService.openBoxSafe(LocalStorageService.biometricCredentialsBox);
+    }
+    final credBox = Hive.box(LocalStorageService.biometricCredentialsBox);
+
+    final cleanBranch = (branchId ?? '').toLowerCase().trim();
+    final isAll = cleanBranch.isEmpty || cleanBranch == 'all' || cleanBranch == 'main' || cleanBranch == 'global';
+
+    final keysToDelete = <dynamic>[];
+    final unlinkedEntityIds = <String>{};
+
+    for (final key in credBox.keys) {
+      final val = credBox.get(key);
+      if (val is Map) {
+        final b = (val['branchId'] ?? '').toString().toLowerCase().trim();
+        final entityId = (val['entityId'] ?? '').toString().trim();
+        final eType = (val['entityType'] ?? '').toString().toLowerCase().trim();
+
+        if (targetEntityType != null && targetEntityType.isNotEmpty) {
+          if (targetEntityType == 'employee') {
+            if (eType == 'madrassa_student' || eType == 'school_student' || eType == 'student') {
+              continue; // PRESERVE Madrassa students!
+            }
+          } else if (eType != targetEntityType) {
+            continue;
+          }
+        }
+
+        if (isAll || b.isEmpty || b == cleanBranch || b.contains(cleanBranch) || cleanBranch.contains(b)) {
+          keysToDelete.add(key);
+          if (entityId.isNotEmpty) unlinkedEntityIds.add(entityId);
+        }
+      } else {
+        if (isAll && targetEntityType == null) keysToDelete.add(key);
+      }
+    }
+
+    for (final k in keysToDelete) {
+      await credBox.delete(k);
+      count++;
+    }
+
+    // Clear biometricPin and pin from employee profiles in employeesBox
+    if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+      final empBox = Hive.box(LocalStorageService.employeesBox);
+      for (final key in empBox.keys) {
+        final raw = empBox.get(key);
+        if (raw is Map) {
+          final empId = (raw['localId'] ?? raw['id'] ?? key).toString().trim();
+          final empBranch = (raw['branchId'] ?? '').toString().toLowerCase().trim();
+          if (isAll || unlinkedEntityIds.contains(empId) || empBranch == cleanBranch || empBranch.contains(cleanBranch)) {
+            if (raw['biometricPin'] != null || raw['pin'] != null) {
+              final updated = Map<String, dynamic>.from(raw);
+              updated.remove('biometricPin');
+              updated.remove('pin');
+              await empBox.put(key, updated);
+            }
+          }
+        }
+      }
+    }
+
+    // Cloud Firestore delete
+    unawaited(() async {
+      try {
+        if (isAll) {
+          final snap = await FirebaseFirestore.instance.collectionGroup('biometric_credentials').get();
+          for (final doc in snap.docs) {
+            await doc.reference.delete().catchError((_) {});
+          }
+        } else {
+          final targetBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
+          final snap = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(targetBranch)
+              .collection('biometric_credentials')
+              .get();
+          for (final doc in snap.docs) {
+            await doc.reference.delete().catchError((_) {});
+          }
+        }
+      } catch (e) {
+        debugPrint('[ZkTecoNetworkService] Firestore credentials clear notice: $e');
+      }
+    }());
+
+    debugPrint('[ZkTecoNetworkService] Cleared $count credentials for branch: $branchId');
+    return count;
   }
 
   /// Syncs all biometric credentials from Cloud Firestore down to local Hive
@@ -2495,44 +2757,13 @@ class ZkTecoNetworkService {
     }
   }
 
-  /// Realtime stream listener for biometric credentials from Firestore.
-  /// Global credentials listeners are skipped to keep the sync rate predictable.
+  /// Sync biometric credentials from Firestore once on demand without realtime stream.
   static void listenToBiometricCredentialsFromFirestore({String? branchId}) {
     _remoteCredsSub?.cancel();
-    try {
-      final normalized = (branchId ?? '').trim().toLowerCase();
-      if (normalized.isEmpty || normalized == 'all' || normalized == 'global') {
-        debugPrint('[ZkTecoNetworkService] Skipping global biometric credentials listener to avoid quota spikes.');
-        return;
-      }
-
-      final query = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(normalized)
-          .collection('biometric_credentials');
-
-      _remoteCredsSub = query.snapshots().listen((snap) async {
-        if (!Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
-          await LocalStorageService.openBoxSafe(LocalStorageService.biometricCredentialsBox);
-        }
-        final box = Hive.box(LocalStorageService.biometricCredentialsBox);
-        for (final change in snap.docChanges) {
-          final doc = change.doc;
-          if (change.type == DocumentChangeType.removed) {
-            await box.delete(doc.id);
-          } else {
-            final data = doc.data();
-            if (data != null) {
-              final cred = BiometricCredential.fromMap(Map<String, dynamic>.from(data));
-              if (cred.entityId.isNotEmpty) {
-                await box.put(cred.entityId.trim(), cred.toMap());
-              }
-            }
-          }
-        }
-      });
-    } catch (e) {
-      debugPrint('[ZkTecoNetworkService] Remote credentials listener notice: $e');
+    _remoteCredsSub = null;
+    final normalized = (branchId ?? '').trim().toLowerCase();
+    if (normalized.isNotEmpty && normalized != 'all' && normalized != 'global') {
+      syncBiometricCredentialsFromFirestore(branchId: normalized);
     }
   }
 
@@ -2621,7 +2852,10 @@ class ZkTecoNetworkService {
     );
 
     await registerBiometricCredential(cred);
-    await processPendingUnmappedPunches();
+    unawaited(processPendingUnmappedPunches().catchError((e) {
+      debugPrint('[ZkTecoNetworkService] Background unmapped punches notice: $e');
+      return 0;
+    }));
     return finalPin;
   }
 
@@ -2636,6 +2870,12 @@ class ZkTecoNetworkService {
     final empCanonical = LocalStorageService.getBranchName(cleanEmp).toLowerCase();
     final devCanonical = LocalStorageService.getBranchName(cleanDev).toLowerCase();
     if (empCanonical == devCanonical || cleanEmp == cleanDev) return false;
+
+    // Multi-camp Karachi branch family (Saddar, Haji Camp, Kapaya, Karachi)
+    bool isKarachiFamily(String b) => b.contains('karachi') || b.contains('saddar') || b.contains('haji') || b.contains('kapaya');
+    if (isKarachiFamily(cleanEmp) && isKarachiFamily(cleanDev)) {
+      return false; // Authorized multi-camp / split-shift Karachi employee
+    }
 
     // Check if employee profile has multiple assigned branches or multi-camp schedules
     if (entityId != null && entityId.isNotEmpty && Hive.isBoxOpen(LocalStorageService.employeesBox)) {
@@ -3225,38 +3465,7 @@ class ZkTecoNetworkService {
       }
     }
 
-    // 2. Unmapped punches from today (Now included so users see exact diagnostics!)
-    if (Hive.isBoxOpen(LocalStorageService.unmappedPunchesBox)) {
-      final box = Hive.box(LocalStorageService.unmappedPunchesBox);
-      for (final v in box.values) {
-        if (v is Map) {
-          final m = Map<String, dynamic>.from(v);
-          final ts = m['timestamp']?.toString() ?? '';
-          if (ts.startsWith(todayStr)) {
-            list.add({
-              'id': m['id'] ?? 'unmapped_${m['pin']}_$ts',
-              'pin': m['pin']?.toString() ?? '---',
-              'timestamp': ts,
-              'deviceIp': m['deviceIp'] ?? '192.168.1.150',
-              'deviceSn': m['deviceSn'] ?? '',
-              'deviceName': m['deviceName'] ?? 'ZKTeco Scanner',
-              'buildingLocation': m['buildingLocation'] ?? 'Office',
-              'source': m['source'] ?? 'zkteco',
-              'isMapped': false,
-              'entityId': null,
-              'entityName': 'Unmapped PIN ${m['pin']}',
-              'entityType': 'unmapped',
-              'entityBranchName': '',
-              'deviceBranchName': m['deviceBranchName'] ?? '',
-              'isCrossBranchPending': false,
-              'statusMessage': 'PIN ${m['pin']} is not linked to any employee profile',
-            });
-          }
-        }
-      }
-    }
-
-    // 3. Employee attendance punches from today
+    // 2. Employee attendance punches from today
     if (Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
       final box = Hive.box(LocalStorageService.attendanceBox);
       for (final v in box.values) {

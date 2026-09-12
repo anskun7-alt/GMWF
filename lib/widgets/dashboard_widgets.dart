@@ -16,6 +16,7 @@ import '../theme/app_theme.dart';
 import '../services/donations_local_storage.dart';
 import '../services/local_storage_service.dart';
 import '../services/home_dashboard_service.dart';
+import '../services/branch_record_service.dart';
 import '../pages/donations/donations_shared.dart' as don;
 import '../theme/role_theme_provider.dart';
 
@@ -62,18 +63,20 @@ class DS {
 
 // ── Dashboard Filter System ──────────────────────────────────────────────────
 
-enum TimeRange { today, week, month, custom }
+enum TimeRange { today, yesterday, week, biweek, month, thisMonth, custom }
 
 class DashboardFilter {
   final TimeRange timeRange;
   final String branchId; // 'all' or specific ID
   final String? patientType; // 'zakat', 'non-zakat', 'gmwf', null for all
+  final bool multiDayMedicineOnly; // multi-day course (daysOfMedicine > 1)
   final DateTimeRange? customRange;
 
   const DashboardFilter({
     this.timeRange = TimeRange.today,
     this.branchId = 'all',
     this.patientType,
+    this.multiDayMedicineOnly = false,
     this.customRange,
   });
 
@@ -81,12 +84,14 @@ class DashboardFilter {
     TimeRange? timeRange,
     String? branchId,
     String? patientType,
+    bool? multiDayMedicineOnly,
     DateTimeRange? customRange,
   }) {
     return DashboardFilter(
       timeRange: timeRange ?? this.timeRange,
       branchId: branchId ?? this.branchId,
       patientType: patientType ?? this.patientType,
+      multiDayMedicineOnly: multiDayMedicineOnly ?? this.multiDayMedicineOnly,
       customRange: customRange ?? this.customRange,
     );
   }
@@ -99,8 +104,11 @@ class DashboardController extends ValueNotifier<DashboardFilter> {
   void setTimeRange(TimeRange range) => value = value.copyWith(timeRange: range);
   void setBranch(String id) => value = value.copyWith(branchId: id);
   void setPatientType(String? type) => value = value.copyWith(patientType: type);
+  void setMultiDayMedicineOnly(bool val) => value = value.copyWith(multiDayMedicineOnly: val);
+  void toggleMultiDayMedicineOnly() => value = value.copyWith(multiDayMedicineOnly: !value.multiDayMedicineOnly);
   void setCustomRange(DateTimeRange range) =>
       value = value.copyWith(timeRange: TimeRange.custom, customRange: range);
+  void resetFilters() => value = const DashboardFilter();
 }
 
 // Global instance for convenience, though preferred to pass via context or provider
@@ -155,10 +163,21 @@ DateTimeRange _resolveFilter(DashboardFilter? filter) {
   final today = DateTime(now.year, now.month, now.day);
   if (filter == null) return DateTimeRange(start: today, end: today);
   switch (filter.timeRange) {
-    case TimeRange.today: return DateTimeRange(start: today, end: today);
-    case TimeRange.week:  return DateTimeRange(start: today.subtract(const Duration(days: 6)), end: today);
-    case TimeRange.month: return DateTimeRange(start: today.subtract(const Duration(days: 30)), end: today);
-    case TimeRange.custom: return filter.customRange ?? DateTimeRange(start: today, end: today);
+    case TimeRange.today:
+      return DateTimeRange(start: today, end: today);
+    case TimeRange.yesterday:
+      final yest = today.subtract(const Duration(days: 1));
+      return DateTimeRange(start: yest, end: yest);
+    case TimeRange.week:
+      return DateTimeRange(start: today.subtract(const Duration(days: 6)), end: today);
+    case TimeRange.biweek:
+      return DateTimeRange(start: today.subtract(const Duration(days: 13)), end: today);
+    case TimeRange.month:
+      return DateTimeRange(start: today.subtract(const Duration(days: 29)), end: today);
+    case TimeRange.thisMonth:
+      return DateTimeRange(start: DateTime(now.year, now.month, 1), end: today);
+    case TimeRange.custom:
+      return filter.customRange ?? DateTimeRange(start: today, end: today);
   }
 }
 
@@ -195,14 +214,38 @@ String _statsCacheKey(String branchId, DashboardFilter? filter) {
   final custom = filter?.customRange != null
       ? '_${filter!.customRange!.start.toIso8601String()}_${filter.customRange!.end.toIso8601String()}'
       : '';
-  return '$branch|$range$custom';
+  final pType = filter?.patientType != null ? '_${filter!.patientType}' : '';
+  final multi = filter?.multiDayMedicineOnly == true ? '_multiDay' : '';
+  return '$branch|$range$custom$pType$multi';
+}
+
+BranchStats? statsCacheGet(String key) => _statsCacheGet(key)?.stats;
+String statsCacheKey(String branchId, DashboardFilter? filter) => _statsCacheKey(branchId, filter);
+
+bool _isMatchingBranchLocal(String docBranchId, String targetBranchId) {
+  final b1 = docBranchId.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
+  final b2 = targetBranchId.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
+  if (b2 == 'all' || b2 == 'global' || b2.isEmpty) return true;
+  if (b1.isEmpty) {
+    // If docBranchId is empty, default to matching karachi
+    return b2 == 'karachi';
+  }
+  if (b1 == b2) return true;
+  if (b2 == 'karachi') {
+    return b1.contains('karachi') || b1.contains('haji') || b1.contains('kapaya') || b1.contains('saddar');
+  }
+  if (b2.contains('karachi') || b2.contains('haji') || b2.contains('saddar') || b2.contains('kapaya')) {
+    if (b2.contains('haji')) return b1.contains('haji');
+    if (b2.contains('saddar') || b2.contains('kapaya')) return b1.contains('saddar') || b1.contains('kapaya') || (b1 == 'karachi');
+    return b1.contains('karachi');
+  }
+  return b1 == b2 || b1.contains(b2) || b2.contains(b1);
 }
 
 Future<BranchStats> fetchBranchStats(String originalBranchId, {DashboardFilter? filter}) async {
   final cacheKey = _statsCacheKey(originalBranchId, filter);
   final cached = _statsCacheGet(cacheKey);
   if (cached != null) {
-    debugPrint('[DashCache] HIT for $cacheKey');
     return cached.stats;
   }
   final range = _resolveFilter(filter);
@@ -210,116 +253,285 @@ Future<BranchStats> fetchBranchStats(String originalBranchId, {DashboardFilter? 
     final branchId = originalBranchId.toLowerCase().trim();
     DateTime start = range.start;
     DateTime end = range.end;
-
-    // Safety limit to 31 days max to prevent massive unindexed reads
-    if (end.difference(start).inDays > 31) {
-      start = end.subtract(const Duration(days: 31));
+    if (end.isBefore(start)) {
+      final tmp = start;
+      start = end;
+      end = tmp;
     }
 
-    final List<DateTime> days = [];
-    for (int i = 0; i <= end.difference(start).inDays; i++) {
-      days.add(start.add(Duration(days: i)));
+    if (end.difference(start).inDays > 90) {
+      start = end.subtract(const Duration(days: 90));
+    }
+
+    final dayKeysDmyy = <String>{};
+    final dayKeysYmd = <String>{};
+    final dfDmyy = DateFormat('ddMMyy');
+    final dfYmd = DateFormat('yyyy-MM-dd');
+    final daysCount = end.difference(start).inDays;
+    for (int i = 0; i <= daysCount; i++) {
+      final d = start.add(Duration(days: i));
+      dayKeysDmyy.add(dfDmyy.format(d));
+      dayKeysYmd.add(dfYmd.format(d));
     }
 
     int z = 0, nz = 0, gm = 0, das = 0, served = 0, dispensed = 0, dispRev = 0;
     int zRev = 0, nzRev = 0, gmRev = 0;
     double donTotal = 0;
 
-    final dashStart = DateFormat('yyyy-MM-dd').format(start);
-    final dashEnd   = DateFormat('yyyy-MM-dd').format(end);
+    final onlyMulti = filter?.multiDayMedicineOnly == true;
+    final pType = filter?.patientType?.toLowerCase().replaceAll('-', '').replaceAll('_', '').trim();
+    final isMatchAll = branchId.isEmpty || branchId == 'all' || branchId == 'global';
 
-    // 1. Fetch donations for the date range (with 1.5s timeout)
-    final donSnap = await FirebaseFirestore.instance
-        .collection('branches').doc(branchId).collection('donations')
-        .where('date', isGreaterThanOrEqualTo: dashStart)
-        .where('date', isLessThanOrEqualTo: dashEnd)
-        .get()
-        .timeout(const Duration(milliseconds: 1500));
+    // 1. Tokens & dispensary revenue from LocalStorageService.entriesBox
+    if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+      final box = Hive.box(LocalStorageService.entriesBox);
+      final Map<String, Map<String, dynamic>> entryMap = {};
 
-    final seenReceipts = <String>{};
-    for (final doc in donSnap.docs) {
-      final data = doc.data();
-      final syncStatus = data['syncStatus']?.toString().toLowerCase().trim();
-      final status = data['status']?.toString().toLowerCase().trim();
-      if (syncStatus == 'deleted' || status == 'deleted') continue;
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is! Map) continue;
+        final e = Map<String, dynamic>.from(val);
+        final status = e['status']?.toString().toLowerCase();
+        final syncStatus = e['syncStatus']?.toString().toLowerCase();
+        if (status == 'deleted' || syncStatus == 'deleted' || status == 'void' || status == 'cancelled') continue;
 
-      final payMethod = data['paymentMethod']?.toString().toLowerCase().trim() ?? '';
-      if (payMethod == 'bank_deposit') continue;
+        final b = (e['branchId'] as String? ?? '').toLowerCase().trim();
+        if (!isMatchAll && !_isMatchingBranchLocal(b, branchId)) continue;
 
-      final receiptNo = data['receiptNo']?.toString() ?? '';
-      final clean = don.cleanReceiptNumber(receiptNo);
-      if (seenReceipts.contains(clean)) continue;
-      seenReceipts.add(clean);
+        final dk = e['dateKey']?.toString().trim() ?? '';
+        final rawDate = e['createdAt'] ?? e['date'] ?? e['timestamp'];
+        bool dateMatches = dayKeysDmyy.contains(dk) || dayKeysYmd.contains(dk);
 
-      final amt = data['amount'];
-      donTotal += (amt is num) ? amt.toDouble() : (double.tryParse(amt?.toString() ?? '0') ?? 0.0);
+        if (!dateMatches && rawDate != null) {
+          DateTime? dt;
+          if (rawDate is Timestamp) {
+            dt = rawDate.toDate().toLocal();
+          } else if (rawDate is DateTime) {
+            dt = rawDate.toLocal();
+          } else if (rawDate is int) {
+            dt = DateTime.fromMillisecondsSinceEpoch(rawDate).toLocal();
+          } else {
+            final s = rawDate.toString().trim();
+            for (final ymd in dayKeysYmd) {
+              if (s.contains(ymd)) { dateMatches = true; break; }
+            }
+            if (!dateMatches) {
+              for (final dmyy in dayKeysDmyy) {
+                if (s.contains(dmyy)) { dateMatches = true; break; }
+              }
+            }
+            if (!dateMatches) {
+              dt = DateTime.tryParse(s)?.toLocal();
+            }
+          }
+          if (!dateMatches && dt != null) {
+            final dateOnly = DateTime(dt.year, dt.month, dt.day);
+            dateMatches = !dateOnly.isBefore(start) && !dateOnly.isAfter(end);
+          }
+        }
+
+        // Serial check fallback (e.g. 050926-SADD-010)
+        if (!dateMatches) {
+          final rawSerial = (e['serial'] ?? e['id'] ?? e['tokenNumber'] ?? k).toString().trim();
+          for (final dmyy in dayKeysDmyy) {
+            if (rawSerial.contains(dmyy)) { dateMatches = true; break; }
+          }
+        }
+
+        if (!dateMatches) continue;
+
+        final rawSerial = (e['serial'] ?? e['id'] ?? e['tokenNumber'] ?? k).toString().trim().toLowerCase();
+        final parts = rawSerial.split('-');
+        final sNum = parts.length > 1 ? parts.last : rawSerial;
+        final canonicalKey = parts.length > 2
+            ? '${parts[0]}-${parts[1]}-${parts[2]}'
+            : (parts.length > 1 ? '${parts[0]}-${parts[1]}' : sNum);
+        entryMap['$b|$dk|$canonicalKey'] = e;
+      }
+
+      for (final val in entryMap.values) {
+        final rawType = (val['queueType'] ?? val['category'] ?? val['type'] ?? '').toString().toLowerCase();
+        final normType = rawType.replaceAll('-', '').replaceAll('_', '').trim();
+        final days = (val['daysOfMedicine'] as num?)?.toInt() ?? 1;
+        final status = val['status']?.toString().toLowerCase();
+
+        if (onlyMulti && days <= 1) continue;
+        if (pType != null && pType.isNotEmpty && !normType.contains(pType)) continue;
+
+        if (normType.contains('zakat') && !normType.contains('non')) {
+          z++;
+          final rev = 20 * days;
+          dispRev += rev;
+          zRev += rev;
+        } else if (normType.contains('nonzakat') || normType.contains('non_zakat') || normType.contains('non')) {
+          nz++;
+          final rev = 100 * days;
+          dispRev += rev;
+          nzRev += rev;
+        } else if (normType.contains('gmwf')) {
+          gm++;
+          final rev = 0 * days;
+          dispRev += rev;
+          gmRev += rev;
+        } else if (normType.contains('dasterkhwan') || normType.contains('food') || normType.contains('rashan')) {
+          das++;
+        }
+
+        if (status == 'dispensed' || status == 'completed') {
+          dispensed++;
+        }
+      }
     }
 
-    final df = DateFormat('ddMMyy');
-
-    Future<Map<String, int>> fetchDay(DateTime day) async {
-      final dsLegacy = df.format(day);
-      final dsDash   = DateFormat('yyyy-MM-dd').format(day);
-      final base = FirebaseFirestore.instance.collection('branches').doc(branchId).collection('serials').doc(dsLegacy);
-
-      final results = await Future.wait([
-        base.collection('zakat').get(),
-        base.collection('non-zakat').get(),
-        base.collection('gmwf').get(),
-        base.collection('dasterkhwan').get(),
-        FirebaseFirestore.instance.collection('branches/$branchId/dispensary/$dsLegacy/$dsLegacy').get(),
-        FirebaseFirestore.instance.collection('branches').doc(branchId).collection('dasterkhwaan').doc(dsDash).get(),
-      ]).timeout(const Duration(milliseconds: 1500));
-
-      final dayZ  = (results[0] as QuerySnapshot).size;
-      final dayNz = (results[1] as QuerySnapshot).size;
-      final dayGm = (results[2] as QuerySnapshot).size;
-
-      int dayDispRev = 0, dayZRev = 0, dayNzRev = 0, dayGmRev = 0;
-
-      for (final doc in (results[0] as QuerySnapshot).docs) {
-        final d = (doc.data() as Map<String, dynamic>?)?['daysOfMedicine'] as num? ?? 1;
-        final rev = 20 * d.toInt();
-        dayDispRev += rev;
-        dayZRev += rev;
+    // 2. Dispensed counts from dispensary box
+    if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+      final dispBox = Hive.box(LocalStorageService.dispensaryBox);
+      int localDispCount = 0;
+      for (final raw in dispBox.values) {
+        if (raw is! Map) continue;
+        final d = Map<String, dynamic>.from(raw);
+        final b = (d['branchId'] as String? ?? '').toLowerCase().trim();
+        if (!isMatchAll && !_isMatchingBranchLocal(b, branchId)) continue;
+        final dk = d['dateKey']?.toString() ?? '';
+        if (dayKeysDmyy.contains(dk) || dayKeysYmd.contains(dk)) {
+          localDispCount++;
+        }
       }
-      for (final doc in (results[1] as QuerySnapshot).docs) {
-        final d = (doc.data() as Map<String, dynamic>?)?['daysOfMedicine'] as num? ?? 1;
-        final rev = 100 * d.toInt();
-        dayDispRev += rev;
-        dayNzRev += rev;
+      if (localDispCount > dispensed) {
+        dispensed = localDispCount;
       }
-      for (final doc in (results[2] as QuerySnapshot).docs) {
-        final d = (doc.data() as Map<String, dynamic>?)?['daysOfMedicine'] as num? ?? 1;
-        final rev = 0 * d.toInt();
-        dayDispRev += rev;
-        dayGmRev += rev;
-      }
-
-      final dayDas = (results[3] as QuerySnapshot).size;
-      final dayDispensed = (results[4] as QuerySnapshot).size;
-
-      int dayServed = 0;
-      final dayDoc = results[5] as DocumentSnapshot;
-      if (dayDoc.exists) {
-        final dayData = dayDoc.data() as Map<String, dynamic>?;
-        dayServed = (dayData?['servedTokens'] as num?)?.toInt() ?? 0;
-      }
-
-      return {
-        'z': dayZ, 'nz': dayNz, 'gm': dayGm,
-        'das': dayDas, 'served': dayServed, 'dispensed': dayDispensed,
-        'dispRev': dayDispRev, 'zRev': dayZRev, 'nzRev': dayNzRev, 'gmRev': dayGmRev,
-      };
     }
 
-    final dayResults = await Future.wait(days.map(fetchDay));
-    for (final r in dayResults) {
-      z += r['z']!; nz += r['nz']!; gm += r['gm']!;
-      das += r['das']!; served += r['served']!; dispensed += r['dispensed']!;
-      dispRev += r['dispRev']!; zRev += r['zRev']!; nzRev += r['nzRev']!; gmRev += r['gmRev']!;
+    // 2b. Dasterkhwaan tokens (food tokens issued & served)
+    if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
+      final tokenBox = Hive.box(LocalStorageService.dasterkhwaanTokensBox);
+      for (final raw in tokenBox.values) {
+        if (raw is! Map) continue;
+        final t = Map<String, dynamic>.from(raw);
+        final b = (t['branchId'] as String? ?? '').toLowerCase().trim();
+        if (!isMatchAll && !_isMatchingBranchLocal(b, branchId)) continue;
+        final dk = t['dateKey']?.toString() ?? '';
+        final rawDate = t['time'] ?? t['dateKey'] ?? t['timestamp'];
+        bool matchesDate = dayKeysYmd.contains(dk) || dayKeysDmyy.contains(dk);
+        if (!matchesDate && rawDate != null) {
+          DateTime? dt;
+          if (rawDate is Timestamp) dt = rawDate.toDate().toLocal();
+          else if (rawDate is DateTime) dt = rawDate.toLocal();
+          else if (rawDate is String) dt = DateTime.tryParse(rawDate)?.toLocal();
+          if (dt != null) {
+            final dateOnly = DateTime(dt.year, dt.month, dt.day);
+            matchesDate = !dateOnly.isBefore(start) && !dateOnly.isAfter(end);
+          }
+        }
+        if (matchesDate) {
+          das++;
+          if (t['served'] == true) {
+            served++;
+          }
+        }
+      }
     }
 
+    // 3. Donations aggregation
+    final donBoxName = Hive.isBoxOpen(LocalStorageService.donationsBox)
+        ? LocalStorageService.donationsBox
+        : (Hive.isBoxOpen(DonationsLocalStorage.donationsBox) ? DonationsLocalStorage.donationsBox : null);
+    if (donBoxName != null) {
+      final donBox = Hive.box(donBoxName);
+      final seenReceipts = <String>{};
+      for (final raw in donBox.values) {
+        if (raw is! Map) continue;
+        final val = Map<String, dynamic>.from(raw);
+        final status = val['status']?.toString().toLowerCase();
+        final syncStatus = val['syncStatus']?.toString().toLowerCase();
+        if (status == 'deleted' || syncStatus == 'deleted') continue;
+
+        final b = (val['branchId'] as String? ?? '').toLowerCase().trim();
+        if (!isMatchAll && !_isMatchingBranchLocal(b, branchId)) continue;
+
+        final rawDate = val['date'] ?? val['createdAt'] ?? val['timestamp'];
+        bool matchesDate = false;
+        if (rawDate != null) {
+          DateTime? dt;
+          if (rawDate is Timestamp) {
+            dt = rawDate.toDate().toLocal();
+          } else if (rawDate is DateTime) {
+            dt = rawDate.toLocal();
+          } else if (rawDate is int) {
+            dt = DateTime.fromMillisecondsSinceEpoch(rawDate).toLocal();
+          } else {
+            final s = rawDate.toString().trim();
+            for (final ymd in dayKeysYmd) {
+              if (s.contains(ymd)) { matchesDate = true; break; }
+            }
+            if (!matchesDate) {
+              for (final dmyy in dayKeysDmyy) {
+                if (s.contains(dmyy)) { matchesDate = true; break; }
+              }
+            }
+            if (!matchesDate) {
+              dt = DateTime.tryParse(s)?.toLocal();
+            }
+          }
+          if (!matchesDate && dt != null) {
+            final dateOnly = DateTime(dt.year, dt.month, dt.day);
+            matchesDate = !dateOnly.isBefore(start) && !dateOnly.isAfter(end);
+          }
+        }
+        if (!matchesDate) continue;
+
+        final payMethod = val['paymentMethod']?.toString().toLowerCase() ?? '';
+        if (payMethod == 'bank_deposit') continue;
+
+        final receiptNo = val['receiptNo']?.toString() ?? '';
+        final clean = don.cleanReceiptNumber(receiptNo);
+        if (clean.isNotEmpty && seenReceipts.contains(clean)) continue;
+        if (clean.isNotEmpty) seenReceipts.add(clean);
+
+        final amt = val['amount'];
+        final amtDouble = (amt is num) ? amt.toDouble() : (double.tryParse(amt?.toString() ?? '0') ?? 0.0);
+        donTotal += amtDouble;
+      }
+    }
+
+    // 4. Fallback to branch day cache if tokens are empty
+    if (z == 0 && nz == 0 && gm == 0 && das == 0) {
+      try {
+        final targetBranches = isMatchAll
+            ? LocalStorageService.getLocalBranchesList().map((b) => b['id'] as String).toList()
+            : [branchId];
+        for (final b in targetBranches) {
+          for (final dk in dayKeysDmyy) {
+            final cachedDocs = LocalStorageService.getBranchDayCache(b, dk, 'dispensary');
+            if (cachedDocs != null) {
+              for (final val in cachedDocs) {
+                final rawType = val['type']?.toString().toLowerCase() ?? '';
+                final normType = rawType.replaceAll('-', '').replaceAll('_', '').trim();
+                final days = (val['daysOfMedicine'] as num?)?.toInt() ?? 1;
+                if (onlyMulti && days <= 1) continue;
+                if (pType != null && pType.isNotEmpty && !normType.contains(pType)) continue;
+
+                if (normType.contains('zakat') && !normType.contains('non')) {
+                  z++;
+                  final rev = 20 * days;
+                  dispRev += rev;
+                  zRev += rev;
+                } else if (normType.contains('non')) {
+                  nz++;
+                  final rev = 100 * days;
+                  dispRev += rev;
+                  nzRev += rev;
+                } else if (normType.contains('gmwf')) {
+                  gm++;
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 5. Local numbers are final (Pure local-first architecture — 0 Firestore reads)
     final result = BranchStats(
       zakat: z, nonZakat: nz, gmwf: gm,
       dispensed: dispensed, prescribed: 0,
@@ -331,7 +543,7 @@ Future<BranchStats> fetchBranchStats(String originalBranchId, {DashboardFilter? 
     _statsCachePut(cacheKey, result);
     return result;
   } catch (e) {
-    debugPrint('[fetchBranchStats] Error or Timeout ($e). Using local Hive stats fallback.');
+    debugPrint('[fetchBranchStats] Error ($e). Using local Hive stats fallback.');
     final localResult = await fetchLocalBranchStats(originalBranchId, range.start);
     _statsCachePut(cacheKey, localResult);
     return localResult;
@@ -354,7 +566,7 @@ Stream<BranchStats> streamBranchStats(String originalBranchId, {DashboardFilter?
   // The Hive boxes are kept fresh by SyncService + ServerSyncManager (30-min
   // downloads + real-time LAN push). We watch for changes and recompute.
   if (isOnlyToday) {
-    return _streamTodayStatsFromHive(originalBranchId);
+    return _streamTodayStatsFromHive(originalBranchId, filter: filter);
   }
 
   // ── HISTORICAL / MULTI-DAY: use cached Firestore fetch ────────────────────
@@ -368,14 +580,17 @@ Stream<BranchStats> streamBranchStats(String originalBranchId, {DashboardFilter?
 }
 
 /// Builds today's [BranchStats] purely from Hive, reacting to any box change.
-Stream<BranchStats> _streamTodayStatsFromHive(String branchId) async* {
+Stream<BranchStats> _streamTodayStatsFromHive(String branchId, {DashboardFilter? filter}) async* {
   BranchStats _compute() {
     final today     = LocalStorageService.getTodayDateKey();          // ddMMyy
     final todayDash = DateFormat('yyyy-MM-dd').format(DateTime.now()); // yyyy-MM-dd
 
     int z = 0, nz = 0, gm = 0, dispensed = 0, dispRev = 0;
-    int zRev = 0, nzRev = 0;
+    int zRev = 0, nzRev = 0, gmRev = 0;
     double donTotal = 0;
+
+    final onlyMulti = filter?.multiDayMedicineOnly == true;
+    final pType = filter?.patientType;
 
     // ── Tokens (entries box) ────────────────────────────────────────────────
     final entries = LocalStorageService.getLocalEntries(branchId)
@@ -383,13 +598,19 @@ Stream<BranchStats> _streamTodayStatsFromHive(String branchId) async* {
         .toList();
 
     for (final e in entries) {
-      final qt   = (e['queueType'] as String?)?.toLowerCase().trim() ?? 'zakat';
       final days = (e['daysOfMedicine'] as num?)?.toInt() ?? 1;
-      if (qt == 'non-zakat') {
+      if (onlyMulti && days <= 1) continue;
+
+      final rawQt = (e['queueType'] ?? e['category'] ?? e['type'] ?? '').toString().toLowerCase().trim();
+      final qt = rawQt.replaceAll('-', '').replaceAll('_', '').trim();
+      final normFilter = pType?.toLowerCase().replaceAll('-', '').replaceAll('_', '').trim();
+      if (normFilter != null && normFilter.isNotEmpty && !qt.contains(normFilter)) continue;
+
+      if (qt.contains('nonzakat') || qt.contains('non')) {
         nz++;
         dispRev += 100 * days;
         nzRev   += 100 * days;
-      } else if (qt == 'gmwf') {
+      } else if (qt.contains('gmwf')) {
         gm++;
       } else {
         z++;
@@ -424,55 +645,56 @@ Stream<BranchStats> _streamTodayStatsFromHive(String branchId) async* {
       donTotal += (amt is num) ? amt.toDouble() : (double.tryParse(amt?.toString() ?? '0') ?? 0.0);
     }
 
+    // ── Food Tokens (dasterkhwaan_tokens box) ──────────────────────────────
+    int das = 0, dasServed = 0;
+    if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
+      final tokenBox = Hive.box(LocalStorageService.dasterkhwaanTokensBox);
+      for (final raw in tokenBox.values) {
+        if (raw is! Map) continue;
+        final t = Map<String, dynamic>.from(raw);
+        final recBranch = t['branchId']?.toString().toLowerCase().trim() ?? '';
+        if (recBranch.isNotEmpty && recBranch != branchId.toLowerCase().trim()) continue;
+        final date = t['dateKey']?.toString() ?? '';
+        if (date != todayDash && date != today) continue;
+        das++;
+        if (t['served'] == true) dasServed++;
+      }
+    }
+
     return BranchStats(
       zakat: z, nonZakat: nz, gmwf: gm,
       dispensed: dispensed, prescribed: 0,
-      dasterkhwaan: 0, dasterkhwaanServed: 0,
+      dasterkhwaan: das, dasterkhwaanServed: dasServed,
       donations: donTotal.toInt(),
       dispensaryRevenue: dispRev,
-      zakatRevenue: zRev, nonZakatRevenue: nzRev, gmwfRevenue: 0,
+      zakatRevenue: zRev, nonZakatRevenue: nzRev, gmwfRevenue: gmRev,
     );
   }
 
   // Emit an initial value immediately
   yield _compute();
 
-  // Merge watch streams from the three relevant boxes and recompute on any change
-  final entriesStream    = Hive.box(LocalStorageService.entriesBox).watch();
-  final dispensaryStream = Hive.box(LocalStorageService.dispensaryBox).watch();
-  final donationsStream  = Hive.box(LocalStorageService.donationsBox).watch();
+  // Merge watch streams from the relevant boxes and recompute on any change
+  final streams = <Stream>[];
+  if (Hive.isBoxOpen(LocalStorageService.entriesBox)) streams.add(Hive.box(LocalStorageService.entriesBox).watch());
+  if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) streams.add(Hive.box(LocalStorageService.dispensaryBox).watch());
+  if (Hive.isBoxOpen(LocalStorageService.donationsBox)) streams.add(Hive.box(LocalStorageService.donationsBox).watch());
+  if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) streams.add(Hive.box(LocalStorageService.dasterkhwaanTokensBox).watch());
 
-  await for (final _ in Rx.merge([entriesStream, dispensaryStream, donationsStream])) {
-    yield _compute();
+  if (streams.isNotEmpty) {
+    await for (final _ in Rx.merge(streams)) {
+      yield _compute();
+    }
   }
 }
 
 
 Future<BranchStats> fetchAllBranchesStats(List<String> ids, {DashboardFilter? filter}) async {
   if (ids.isEmpty) return const BranchStats();
-  
-  final futures = ids.map((id) => fetchBranchStats(id, filter: filter)).toList();
-  final results = await Future.wait(futures);
-  
-  int z = 0, nz = 0, gm = 0, das = 0, dasServed = 0, don = 0, disp = 0, presc = 0, dispRev = 0;
-  int zRev = 0, nzRev = 0, gmRev = 0;
-  for (final r in results) {
-    z += r.zakat; nz += r.nonZakat; gm += r.gmwf;
-    das += r.dasterkhwaan; dasServed += r.dasterkhwaanServed;
-    don += r.donations; disp += r.dispensed; presc += r.prescribed;
-    dispRev += r.dispensaryRevenue;
-    zRev += r.zakatRevenue; nzRev += r.nonZakatRevenue; gmRev += r.gmwfRevenue;
-  }
-  return BranchStats(
-    zakat: z, nonZakat: nz, gmwf: gm,
-    dasterkhwaan: das, dasterkhwaanServed: dasServed,
-    donations: don, dispensed: disp, prescribed: presc,
-    dispensaryRevenue: dispRev,
-    zakatRevenue: zRev, nonZakatRevenue: nzRev, gmwfRevenue: gmRev,
-  );
+  return fetchBranchStats('all', filter: filter);
 }
 
-Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids) async* {
+Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids, {DashboardFilter? filter}) async* {
   BranchStats _compute() {
     if (ids.isEmpty) return const BranchStats();
     final targetSet = ids.map((i) => i.toLowerCase().trim()).toSet();
@@ -482,8 +704,11 @@ Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids) async* {
     final todayDash = DateFormat('yyyy-MM-dd').format(DateTime.now()); // yyyy-MM-dd
 
     int z = 0, nz = 0, gm = 0, dispensed = 0, dispRev = 0;
-    int zRev = 0, nzRev = 0;
+    int zRev = 0, nzRev = 0, gmRev = 0;
     double donTotal = 0;
+
+    final onlyMulti = filter?.multiDayMedicineOnly == true;
+    final pType = filter?.patientType;
 
     // ── 1. Tokens (entries box) ──────────────────────────────────────────────
     if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
@@ -495,14 +720,21 @@ Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids) async* {
         final bId = (e['branchId'] as String?)?.toLowerCase().trim() ?? '';
         if (!matchAll && !targetSet.contains(bId)) continue;
 
-        final qt   = (e['queueType'] as String?)?.toLowerCase().trim() ?? 'zakat';
         final days = (e['daysOfMedicine'] as num?)?.toInt() ?? 1;
-        if (qt == 'non-zakat') {
+        if (onlyMulti && days <= 1) continue;
+
+        final rawQt = (e['queueType'] ?? e['category'] ?? e['type'] ?? '').toString().toLowerCase().trim();
+        final qt = rawQt.replaceAll('-', '').replaceAll('_', '').trim();
+        final normFilter = pType?.toLowerCase().replaceAll('-', '').replaceAll('_', '').trim();
+        if (normFilter != null && normFilter.isNotEmpty && !qt.contains(normFilter)) continue;
+
+        if (qt.contains('nonzakat') || qt.contains('non')) {
           nz++;
           dispRev += 100 * days;
           nzRev   += 100 * days;
-        } else if (qt == 'gmwf') {
+        } else if (qt.contains('gmwf')) {
           gm++;
+          gmRev += 0 * days;
         } else {
           z++;
           dispRev += 20 * days;
@@ -550,13 +782,29 @@ Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids) async* {
       }
     }
 
+    // ── 4. Food Tokens (dasterkhwaan_tokens box) ───────────────────────────
+    int das = 0, dasServed = 0;
+    if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
+      final tokenBox = Hive.box(LocalStorageService.dasterkhwaanTokensBox);
+      for (final raw in tokenBox.values) {
+        if (raw is! Map) continue;
+        final t = Map<String, dynamic>.from(raw);
+        final recBranch = t['branchId']?.toString().toLowerCase().trim() ?? '';
+        if (!matchAll && !targetSet.contains(recBranch)) continue;
+        final date = t['dateKey']?.toString() ?? '';
+        if (date != todayDash && date != today) continue;
+        das++;
+        if (t['served'] == true) dasServed++;
+      }
+    }
+
     return BranchStats(
       zakat: z, nonZakat: nz, gmwf: gm,
       dispensed: dispensed, prescribed: 0,
-      dasterkhwaan: 0, dasterkhwaanServed: 0,
+      dasterkhwaan: das, dasterkhwaanServed: dasServed,
       donations: donTotal.toInt(),
       dispensaryRevenue: dispRev,
-      zakatRevenue: zRev, nonZakatRevenue: nzRev, gmwfRevenue: 0,
+      zakatRevenue: zRev, nonZakatRevenue: nzRev, gmwfRevenue: gmRev,
     );
   }
 
@@ -566,6 +814,7 @@ Stream<BranchStats> _streamCombinedTodayStatsFromHive(List<String> ids) async* {
   if (Hive.isBoxOpen(LocalStorageService.entriesBox)) streams.add(Hive.box(LocalStorageService.entriesBox).watch());
   if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) streams.add(Hive.box(LocalStorageService.dispensaryBox).watch());
   if (Hive.isBoxOpen(LocalStorageService.donationsBox)) streams.add(Hive.box(LocalStorageService.donationsBox).watch());
+  if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) streams.add(Hive.box(LocalStorageService.dasterkhwaanTokensBox).watch());
 
   if (streams.isNotEmpty) {
     await for (final _ in Rx.merge(streams)) {
@@ -578,7 +827,7 @@ Stream<BranchStats> streamAllBranchesStats(List<String> ids, {DashboardFilter? f
   if (ids.isEmpty) return Stream.value(const BranchStats());
   final isOnlyToday = (filter == null || filter.timeRange == TimeRange.today);
   if (isOnlyToday) {
-    return _streamCombinedTodayStatsFromHive(ids);
+    return _streamCombinedTodayStatsFromHive(ids, filter: filter);
   }
   
   final streams = ids.map((id) => streamBranchStats(id, filter: filter)).toList();
@@ -2146,6 +2395,137 @@ class ExecutiveTopBranchFetcher extends StatelessWidget {
   }
 }
 
+// ── Peak Records Banner ──────────────────────────────────────────────────────
+class PeakRecordsBanner extends StatelessWidget {
+  final RoleThemeData t;
+  final String branchId;
+  const PeakRecordsBanner({super.key, required this.t, this.branchId = 'all'});
+
+  @override
+  Widget build(BuildContext context) {
+    final records = BranchRecordService.getBranchRecords(branchId);
+    final isDark = t.isDarkCanvas;
+    final count = records.peakRecord.count;
+    final dateStr = records.peakRecord.dateFormatted.isNotEmpty
+        ? records.peakRecord.dateFormatted
+        : "No history yet";
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: DS.s2, vertical: DS.s2),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        borderRadius: BorderRadius.circular(DS.r2),
+        border: Border.all(
+          color: records.isNewRecordToday
+              ? const Color(0xFFF59E0B)
+              : (isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+          width: records.isNewRecordToday ? 1.5 : 1.0,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: records.isNewRecordToday
+                ? const Color(0xFFF59E0B).withValues(alpha: 0.15)
+                : Colors.black.withValues(alpha: 0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFF59E0B), Color(0xFFD97706)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.emoji_events_rounded, color: Colors.white, size: 20),
+          ),
+          const SizedBox(width: DS.s2),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'ALL-TIME PEAK SINGLE-DAY RECORD',
+                      style: TextStyle(
+                        color: Color(0xFFD97706),
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.0,
+                      ),
+                    ),
+                    if (records.isNewRecordToday) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF59E0B),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Text(
+                          'BROKEN TODAY!',
+                          style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.w900, color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      '$count',
+                      style: TextStyle(
+                        color: t.textPrimary,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Patients dealt',
+                      style: TextStyle(
+                        color: t.textSecondary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF0F172A) : const Color(0xFFFEF3C7),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFF59E0B).withValues(alpha: 0.3)),
+            ),
+            child: Text(
+              dateStr,
+              style: const TextStyle(
+                color: Color(0xFFD97706),
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // I. GRAND TOTALS CARD — Simplified, references RevenueHeroCard data
 // ════════════════════════════════════════════════════════════════════════════════
@@ -2714,242 +3094,519 @@ class GlobalFilterBar extends StatelessWidget {
     this.branches = const [],
   });
 
+  static String formatRangeLabel(DashboardFilter filter) {
+    final range = _resolveFilter(filter);
+    final df = DateFormat('d MMM yyyy');
+    if (range.start.year == range.end.year &&
+        range.start.month == range.end.month &&
+        range.start.day == range.end.day) {
+      if (range.start.day == DateTime.now().day &&
+          range.start.month == DateTime.now().month &&
+          range.start.year == DateTime.now().year) {
+        return 'Today (${DateFormat('d MMM').format(range.start)})';
+      }
+      return df.format(range.start);
+    }
+    final daysCount = range.end.difference(range.start).inDays + 1;
+    return '${DateFormat('d MMM').format(range.start)} - ${df.format(range.end)} ($daysCount Days)';
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = RoleThemeScope.dataOf(context);
-    final isMobile = MediaQuery.of(context).size.width < 750;
-    final showBranchSelector = branches.length > 1;
 
     return ValueListenableBuilder<DashboardFilter>(
       valueListenable: controller,
       builder: (context, filter, child) {
-        return Container(
-          decoration: BoxDecoration(
-            color: t.bgCard,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: t.bgRule, width: 1.2),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.03),
-                blurRadius: 16,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: isMobile
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildFilterSection(
-                        icon: Icons.calendar_today_rounded,
-                        title: 'Time Range',
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: _buildTimeChips(context, filter),
-                        ),
-                      ),
-                      if (showBranchSelector) ...[
-                        const SizedBox(height: 16),
-                        _buildFilterSection(
-                          icon: Icons.location_on_rounded,
-                          title: 'Selected Branch',
-                          child: _buildBranchSelector(context, filter),
-                        ),
-                      ],
-                      const SizedBox(height: 16),
-                      _buildFilterSection(
-                        icon: Icons.category_rounded,
-                        title: 'Patient Classification',
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: _buildTypeChips(filter),
-                        ),
-                      ),
-                    ],
-                  )
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        flex: 5,
-                        child: _buildFilterSection(
-                          icon: Icons.calendar_today_rounded,
-                          title: 'Time Range',
-                          child: _buildTimeChips(context, filter),
-                        ),
-                      ),
-                      if (showBranchSelector) ...[
-                        Container(
-                          width: 1,
-                          height: 48,
-                          color: t.bgRule,
-                          margin: const EdgeInsets.symmetric(horizontal: 16),
-                        ),
-                        Expanded(
-                          flex: 4,
-                          child: _buildFilterSection(
-                            icon: Icons.location_on_rounded,
-                            title: 'Selected Branch',
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: _buildBranchSelector(context, filter),
-                            ),
-                          ),
-                        ),
-                      ],
-                      Container(
-                        width: 1,
-                        height: 48,
-                        color: t.bgRule,
-                        margin: const EdgeInsets.symmetric(horizontal: 16),
-                      ),
-                      Expanded(
-                        flex: 5,
-                        child: _buildFilterSection(
-                          icon: Icons.category_rounded,
-                          title: 'Patient Classification',
-                          child: _buildTypeChips(filter),
-                        ),
+        final isFiltered = filter.timeRange != TimeRange.today ||
+            (filter.branchId.isNotEmpty && filter.branchId != 'all') ||
+            filter.patientType != null ||
+            filter.multiDayMedicineOnly;
+
+        final activeBranchName = filter.branchId.isEmpty || filter.branchId == 'all'
+            ? 'All Branches'
+            : (branches.firstWhere((b) => b['id'] == filter.branchId, orElse: () => <String, dynamic>{'name': filter.branchId})['name'] ?? filter.branchId);
+
+        final rangeText = formatRangeLabel(filter);
+
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () {
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => DashboardFilterDialog(
+                      controller: controller,
+                      branches: branches,
+                    ),
+                  );
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: isFiltered ? t.accent.withValues(alpha: 0.12) : t.bgCard,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isFiltered ? t.accent : t.bgRule,
+                      width: isFiltered ? 1.4 : 1.0,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.04),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
                       ),
                     ],
                   ),
-          ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.tune_rounded,
+                        size: 15,
+                        color: isFiltered ? t.accent : t.textSecondary,
+                      ),
+                      const SizedBox(width: 7),
+                      Text(
+                        'Filters',
+                        style: TextStyle(
+                          color: isFiltered ? t.accent : t.textPrimary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 7),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                        decoration: BoxDecoration(
+                          color: isFiltered
+                              ? t.accent.withValues(alpha: 0.18)
+                              : (t.isDarkCanvas ? Colors.white10 : const Color(0xFFF1F5F9)),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '$rangeText · $activeBranchName${filter.patientType != null ? ' · ${filter.patientType!.toUpperCase()}' : ''}${filter.multiDayMedicineOnly ? ' · 2+ Days' : ''}',
+                          style: TextStyle(
+                            color: isFiltered ? t.accent : t.textSecondary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        size: 16,
+                        color: isFiltered ? t.accent : t.textSecondary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (isFiltered) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message: 'Reset Filters',
+                child: InkWell(
+                  onTap: controller.resetFilters,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                    ),
+                    child: const Icon(Icons.restart_alt_rounded, size: 15, color: Colors.redAccent),
+                  ),
+                ),
+              ),
+            ],
+          ],
         );
       },
     );
   }
+}
 
-  Widget _buildFilterSection({
-    required IconData icon,
-    required String title,
-    required Widget child,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 13, color: DS.neutral),
-            const SizedBox(width: 6),
-            Text(
-              title,
-              style: const TextStyle(
-                color: DS.neutral,
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 0.3,
+class DashboardFilterDialog extends StatelessWidget {
+  final DashboardController controller;
+  final List<Map<String, dynamic>> branches;
+
+  const DashboardFilterDialog({
+    super.key,
+    required this.controller,
+    this.branches = const [],
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = RoleThemeScope.dataOf(context);
+    final showBranchSelector = branches.length > 1;
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      child: ValueListenableBuilder<DashboardFilter>(
+        valueListenable: controller,
+        builder: (context, filter, _) {
+          final isFiltered = filter.timeRange != TimeRange.today ||
+              (filter.branchId.isNotEmpty && filter.branchId != 'all') ||
+              filter.patientType != null ||
+              filter.multiDayMedicineOnly;
+
+          return Container(
+            width: 640,
+            constraints: const BoxConstraints(maxWidth: 700),
+            decoration: BoxDecoration(
+              color: t.bgCard,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: t.bgRule, width: 1.2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.18),
+                  blurRadius: 32,
+                  offset: const Offset(0, 12),
+                ),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Dialog Top Bar
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: t.accent.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(Icons.tune_rounded, size: 18, color: t.accent),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Dashboard Data Filters',
+                              style: TextStyle(
+                                color: t.textPrimary,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              GlobalFilterBar.formatRangeLabel(filter),
+                              style: TextStyle(
+                                color: t.textSecondary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (isFiltered)
+                        TextButton.icon(
+                          onPressed: controller.resetFilters,
+                          icon: const Icon(Icons.restart_alt_rounded, size: 15),
+                          label: const Text('Reset All', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.redAccent,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: Icon(Icons.close_rounded, size: 20, color: t.textSecondary),
+                        splashRadius: 20,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Divider(color: t.bgRule, height: 1),
+                  const SizedBox(height: 16),
+
+                  // Section 1: Time Range Presets
+                  _buildSectionLabel(Icons.calendar_today_rounded, 'Time Range & Date Presets', t),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _timeChip('Today', TimeRange.today, filter.timeRange, t),
+                      _timeChip('Yesterday', TimeRange.yesterday, filter.timeRange, t),
+                      _timeChip('7 Days', TimeRange.week, filter.timeRange, t),
+                      _timeChip('14 Days', TimeRange.biweek, filter.timeRange, t),
+                      _timeChip('30 Days', TimeRange.month, filter.timeRange, t),
+                      _timeChip('This Month', TimeRange.thisMonth, filter.timeRange, t),
+                      _customDateChip(context, filter, t),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+
+                  // Section 2: Branches (if multiple)
+                  if (showBranchSelector) ...[
+                    _buildSectionLabel(Icons.location_on_rounded, 'Selected Branch', t),
+                    const SizedBox(height: 10),
+                    Builder(
+                      builder: (context) {
+                        final filteredBranches = branches.where((b) {
+                          final id = (b['id'] ?? '').toString().toLowerCase().trim();
+                          final name = (b['name'] ?? '').toString().toLowerCase().trim();
+                          return id.isNotEmpty && id != 'all' && id != 'global' && name != 'all' && name != 'global';
+                        }).toList();
+
+                        return Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _branchChip('all', 'All Branches', filter.branchId, t),
+                            ...filteredBranches.map((b) => _branchChip(b['id'] ?? '', b['name'] ?? '', filter.branchId, t)),
+                          ],
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 18),
+                  ],
+
+                  // Section 3: Patient Classification
+                  _buildSectionLabel(Icons.category_rounded, 'Patient Classification', t),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _typeChip('All Patients', null, filter.patientType, DS.neutral),
+                      _typeChip('Zakat', 'zakat', filter.patientType, DS.zakat),
+                      _typeChip('Non-Zakat', 'non-zakat', filter.patientType, DS.nonZakat),
+                      _typeChip('GMWF', 'gmwf', filter.patientType, DS.gmwf),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+
+                  // Section 4: Dispensary Course Filter
+                  _buildSectionLabel(Icons.medication_liquid_rounded, 'Dispensary Course Filter', t),
+                  const SizedBox(height: 10),
+                  _buildMultiDayCourseChip(filter, t),
+                  const SizedBox(height: 22),
+
+                  // Apply & Close
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.check_rounded, size: 16),
+                        label: const Text('Apply & Close', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: t.accent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          elevation: 0,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-          ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSectionLabel(IconData icon, String title, RoleThemeData t) {
+    return Row(
+      children: [
+        Icon(icon, size: 13, color: DS.neutral),
+        const SizedBox(width: 6),
+        Text(
+          title,
+          style: const TextStyle(
+            color: DS.neutral,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.3,
+          ),
         ),
-        const SizedBox(height: 8),
-        child,
       ],
     );
   }
 
-  Widget _buildTimeChips(BuildContext context, DashboardFilter filter) {
-    return Row(children: [
-      _chip('Today', TimeRange.today, filter.timeRange, (v) => controller.setTimeRange(v)),
-      _chip('Week', TimeRange.week, filter.timeRange, (v) => controller.setTimeRange(v)),
-      _chip('Month', TimeRange.month, filter.timeRange, (v) => controller.setTimeRange(v)),
-      _chip('Custom', TimeRange.custom, filter.timeRange, (v) => _pickDateRange(context, v)),
-    ]);
-  }
-
-  Widget _buildBranchSelector(BuildContext context, DashboardFilter filter) {
-    final activeBranch = branches.firstWhere((b) => b['id'] == filter.branchId, orElse: () => <String, dynamic>{'name': 'All Branches'});
-    return PopupMenuButton<String>(
-      onSelected: controller.setBranch,
-      itemBuilder: (context) => [
-        const PopupMenuItem(value: 'all', child: Text('All Branches')),
-        ...branches.map((b) => PopupMenuItem(value: b['id'], child: Text(b['name']))),
-      ],
+  Widget _timeChip(String label, TimeRange value, TimeRange activeValue, RoleThemeData t) {
+    final active = value == activeValue;
+    return InkWell(
+      onTap: () => controller.setTimeRange(value),
+      borderRadius: BorderRadius.circular(10),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: DS.s2, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
-          color: DS.blueMuted, borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: DS.blue.withValues(alpha: 0.2)),
+          color: active ? t.accent : DS.neutralBg,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: active ? t.accent : DS.border),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.location_on_rounded, size: 14, color: DS.blue),
-            const SizedBox(width: 8),
-            Text(activeBranch['name'] ?? 'Unknown', style: const TextStyle(color: DS.blue, fontSize: 12, fontWeight: FontWeight.w700)),
-            const SizedBox(width: 4),
-            const Icon(Icons.keyboard_arrow_down_rounded, size: 14, color: DS.blue),
-          ],
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+            color: active ? Colors.white : DS.neutral,
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildTypeChips(DashboardFilter filter) {
-    return Row(children: [
-      _typeChip('All', null, filter.patientType, DS.neutral),
-      _typeChip('Zakat', 'zakat', filter.patientType, DS.zakat),
-      _typeChip('Non-Zakat', 'non-zakat', filter.patientType, DS.nonZakat),
-      _typeChip('GMWF', 'gmwf', filter.patientType, DS.gmwf),
-    ]);
+  Widget _customDateChip(BuildContext context, DashboardFilter filter, RoleThemeData t) {
+    final active = filter.timeRange == TimeRange.custom;
+    final label = active && filter.customRange != null
+        ? 'Custom (${filter.customRange!.end.difference(filter.customRange!.start).inDays + 1}d) 📅'
+        : 'Custom Range 📅';
+
+    return InkWell(
+      onTap: () async {
+        final currentRange = controller.value.customRange ?? _resolveFilter(controller.value);
+        final range = await showDateRangePicker(
+          context: context,
+          firstDate: DateTime(2020),
+          lastDate: DateTime.now().add(const Duration(days: 365)),
+          initialDateRange: currentRange,
+        );
+        if (range != null) {
+          controller.setCustomRange(range);
+        } else {
+          controller.setTimeRange(TimeRange.custom);
+        }
+      },
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? t.accent : DS.neutralBg,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: active ? t.accent : DS.border),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+            color: active ? Colors.white : DS.neutral,
+          ),
+        ),
+      ),
+    );
   }
 
-  Widget _chip<T>(String label, T value, T activeValue, ValueChanged<T> onSelected) {
-    final active = value == activeValue;
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: ChoiceChip(
-        label: Text(label, style: TextStyle(fontSize: 11, fontWeight: active ? FontWeight.w800 : FontWeight.w600)),
-        selected: active,
-        onSelected: (s) => onSelected(value),
-        selectedColor: DS.blue,
-        labelStyle: TextStyle(color: active ? Colors.white : DS.neutral),
-        backgroundColor: DS.neutralBg,
-        showCheckmark: false,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  Widget _branchChip(String branchId, String branchName, String activeBranchId, RoleThemeData t) {
+    final active = (branchId == 'all' && (activeBranchId.isEmpty || activeBranchId == 'all' || activeBranchId == 'global')) ||
+        (branchId != 'all' && branchId.toLowerCase().trim() == activeBranchId.toLowerCase().trim());
+    return InkWell(
+      onTap: () => controller.setBranch(branchId),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? DS.blue : DS.neutralBg,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: active ? DS.blue : DS.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.location_on_rounded, size: 12, color: active ? Colors.white : DS.neutral),
+            const SizedBox(width: 5),
+            Text(
+              branchName,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                color: active ? Colors.white : DS.neutral,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _typeChip(String label, String? value, String? activeValue, Color color) {
     final active = value == activeValue;
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: InkWell(
-        onTap: () => controller.setPatientType(value),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: active ? color : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: active ? color : DS.border),
-          ),
-          child: Text(label, style: TextStyle(
+    return InkWell(
+      onTap: () => controller.setPatientType(value),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? color : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: active ? color : DS.border),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
             color: active ? Colors.white : DS.neutral,
-            fontSize: 11, fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-          )),
+            fontSize: 11,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+          ),
         ),
       ),
     );
   }
 
-  void _pickDateRange(BuildContext context, TimeRange v) async {
-    final range = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now().add(const Duration(days: 365)),
-      initialDateRange: controller.value.customRange,
+  Widget _buildMultiDayCourseChip(DashboardFilter filter, RoleThemeData t) {
+    final active = filter.multiDayMedicineOnly;
+    return InkWell(
+      onTap: controller.toggleMultiDayMedicineOnly,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFF0284C7) : const Color(0xFF0284C7).withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: active ? const Color(0xFF0284C7) : const Color(0xFF0284C7).withValues(alpha: 0.3),
+            width: 1.2,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              active ? Icons.check_circle_rounded : Icons.medication_rounded,
+              size: 14,
+              color: active ? Colors.white : const Color(0xFF0284C7),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'Multi-Day Course (2+ Days)',
+              style: TextStyle(
+                color: active ? Colors.white : const Color(0xFF0284C7),
+                fontSize: 11,
+                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
-    if (range != null) {
-      controller.setCustomRange(range);
-    } else {
-      controller.setTimeRange(v);
-    }
   }
 }
 

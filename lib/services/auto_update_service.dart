@@ -33,9 +33,9 @@ class UpdateInfo {
 
 class AutoUpdateService {
   /// Default fallback version of the GMWF application if PackageInfo is unavailable.
-  static const String currentVersion = '1.4.4';
+  static const String currentVersion = '1.5.0';
   static const int protocolVersion = 2;
-  static const String minSupportedVersion = '1.4.4';
+  static const String minSupportedVersion = '1.4.8';
 
   /// Default GitHub repository configuration for auto-updates.
   static const String defaultRepoOwner = 'gmwf-1122';

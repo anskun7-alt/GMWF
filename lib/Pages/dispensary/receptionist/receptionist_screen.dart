@@ -10,6 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:another_flushbar/flushbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:gmwf/services/auth_service.dart';
+import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/local_storage_service.dart' as lss;
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
@@ -17,10 +18,11 @@ import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/widgets/clock_skew_warning_banner.dart';
-import 'package:gmwf/widgets/connection_status_widget.dart';
 import 'package:gmwf/widgets/gmwf_app_bar.dart';
+import 'package:gmwf/widgets/update_dialog_widget.dart';
 import '../user_settings_dialog.dart';
 import '../../../utils/notification_deduper.dart';
+import 'package:gmwf/services/cloud_messaging_service.dart';
 import 'patient_register.dart';
 import 'token_screen.dart';
 
@@ -71,10 +73,6 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
   bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(widget.branchId);
 
-  // Listenables
-  late final ValueListenable<Box> _entriesListenable;
-  late final ValueListenable<Box> _patientsListenable;
-
   // Manual refresh notifier for token log
   final ValueNotifier<int> _refreshNotifier = ValueNotifier<int>(0);
 
@@ -117,10 +115,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       }
     }
 
-    _entriesListenable =
-        Hive.box(lss.LocalStorageService.entriesBox).listenable();
-    _patientsListenable =
-        Hive.box(lss.LocalStorageService.patientsBox).listenable();
+    lss.LocalStorageService.ensureBoxOpen(lss.LocalStorageService.patientsBox);
+    lss.LocalStorageService.ensureBoxOpen(lss.LocalStorageService.entriesBox);
 
     if (!widget.isEmbedded) {
       SyncService().start(widget.branchId);
@@ -140,6 +136,12 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       if (mounted) setState(() => _connectionStatus = status);
     });
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !widget.isEmbedded) {
+        UpdateDialogWidget.showUpdateDialogIfNeeded(context);
+      }
+    });
+
     _realtimeSub = RealtimeManager().messageStream.listen((event) async {
       final type = event['event_type'] as String?;
       final rawData = event['data'];
@@ -149,35 +151,17 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
       // TOKEN REVERSAL APPROVED
       if (type == 'token_reversal_approved') {
-        final eventBranch = data?['branchId'] as String?;
-        if (eventBranch != widget.branchId) return;
+        final eventBranch = data?['branchId']?.toString().toLowerCase().trim();
+        final myBranch = widget.branchId.toLowerCase().trim();
+        if (eventBranch != null && eventBranch.isNotEmpty && myBranch.isNotEmpty &&
+            eventBranch != myBranch && !eventBranch.contains(myBranch) && !myBranch.contains(eventBranch)) {
+          return;
+        }
 
-        final tokenSerial = data?['tokenSerial'] as String?;
-        if (tokenSerial == null || tokenSerial.isEmpty) return;
-
-        final box = Hive.box(lss.LocalStorageService.entriesBox);
-        final directKey = '${widget.branchId}-$tokenSerial';
-
-        if (box.containsKey(directKey)) {
-          await box.delete(directKey);
-          await box.flush();
-          debugPrint('[Receptionist] ✅ Direct key delete successful: $directKey');
-        } else {
-          bool deleted = false;
-          for (final k in box.keys.toList()) {
-            final v = box.get(k);
-            if (v is Map && v['serial']?.toString() == tokenSerial) {
-              await box.delete(k);
-              await box.flush();
-              debugPrint('[Receptionist] ✅ Scan delete successful: key=$k');
-              deleted = true;
-              break;
-            }
-          }
-          if (!deleted) {
-            debugPrint('[Receptionist] ⚠️ Token not found locally, forcing download');
-            await lss.LocalStorageService.downloadTodayTokens(widget.branchId);
-          }
+        final tokenSerial = (data?['tokenSerial'] ?? data?['serial'] ?? data?['tokenId'])?.toString();
+        if (tokenSerial != null && tokenSerial.isNotEmpty) {
+          await lss.LocalStorageService.deleteLocalEntry(widget.branchId, tokenSerial);
+          debugPrint('[Receptionist] ✅ Token reversal processed for $tokenSerial');
         }
 
         // Force UI refresh
@@ -207,7 +191,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           if (existing != null) {
             final updated = Map<String, dynamic>.from(existing)
               ..addAll(lss.LocalStorageService.sanitize(changes));
-            await lss.LocalStorageService.saveLocalPatient(updated);
+            await lss.LocalStorageService.saveLocalPatient(updated, isFromSync: true);
           } else {
             await lss.LocalStorageService.downloadAllPatients(widget.branchId);
           }
@@ -218,16 +202,41 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         return;
       }
 
-      // PRESCRIPTION SAVED BY DOCTOR -> TRIGGER RECEPTIONIST TOAST
-      if (!widget.suppressPrescriptionNotifications &&
-          (type == RealtimeEvents.savePrescription ||
-              type == 'prescription_created' ||
-              (type == RealtimeEvents.saveEntry &&
-                  (data?['status'] == 'completed' || data?['prescriptions'] != null)))) {
+      // PRESCRIPTION SAVED BY DOCTOR -> TRIGGER RECEPTIONIST TOAST & UPDATE LOCAL ENTRY
+      if (type == RealtimeEvents.savePrescription ||
+          type == 'prescription_created' ||
+          type == 'save_prescription' ||
+          (type == RealtimeEvents.saveEntry &&
+              (data?['status'] == 'completed' || data?['prescriptions'] != null))) {
         final eventBranch =
             data?['branchId'] as String? ?? event['branchId'] as String?;
         if (eventBranch == null || eventBranch == widget.branchId) {
-          _showPrescriptionNotification(data, event);
+          if (!widget.suppressPrescriptionNotifications) {
+            _showPrescriptionNotification(data, event);
+          }
+          final serial = (data?['serial'] ?? data?['id'])?.toString().trim();
+          if (serial != null && serial.isNotEmpty && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+            try {
+              final eBox = Hive.box(LocalStorageService.entriesBox);
+              final normB = widget.branchId.trim().toLowerCase();
+              final key = '$normB-$serial';
+              final existing = eBox.get(key) ?? eBox.get('$normB-${serial.toUpperCase()}');
+              if (existing is Map) {
+                final updated = Map<String, dynamic>.from(existing);
+                updated['status'] = 'completed';
+                if (data != null) {
+                  updated['prescription'] = data;
+                  updated['prescriptionId'] = data['id'] ?? serial;
+                  updated['completedAt'] ??= data['completedAt'] ?? DateTime.now().toIso8601String();
+                  if (data['doctorName'] != null) updated['doctorName'] = data['doctorName'];
+                }
+                final writeKey = (existing == eBox.get('$normB-${serial.toUpperCase()}'))
+                    ? '$normB-${serial.toUpperCase()}'
+                    : key;
+                eBox.put(writeKey, updated);
+              }
+            } catch (_) {}
+          }
         }
       }
 
@@ -274,6 +283,21 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     final rawTime = data['completedAt'] ?? data['createdAt'] ?? data['timestamp'];
     final dt = rawTime != null ? DateTime.tryParse(rawTime.toString()) : null;
     if (dt != null && DateTime.now().difference(dt).inMinutes > 3) return;
+
+    // Isolate notifications by camp in multi-camp branches so other camps' prescriptions are not alerted
+    if (CampSessionService.hasCampsForBranch(widget.branchId)) {
+      final activeCamp = CampSessionService.getActiveCamp(widget.branchId);
+      if (activeCamp != null && activeCamp.isNotEmpty && activeCamp != 'all') {
+        final matches = CampSessionService.matchesCamp(
+          selectedCamp: activeCamp,
+          dispensaryId: data['dispensaryId']?.toString(),
+          campId: data['campId']?.toString(),
+          dispensaryTag: data['dispensaryTag']?.toString(),
+          serial: serial,
+        );
+        if (!matches) return;
+      }
+    }
 
     final branchKey = '${widget.branchId}_$serial';
 
@@ -449,7 +473,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       final isOnline = results.any((r) => r != ConnectivityResult.none);
       if (_online != isOnline && mounted) {
         setState(() => _online = isOnline);
-        if (isOnline) _forceSync();
+        if (isOnline) {
+          RealtimeManager().forceFlushAndCatchUp().ignore();
+          SyncService().triggerUpload().ignore();
+        }
       }
     });
   }
@@ -503,10 +530,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       // 1. Force-flush LAN WebSocket outbox & request catch-up from LAN server
       await RealtimeManager().forceFlushAndCatchUp();
 
-      // 2. If online, sync with cloud
+      // 2. If online, sync pending and today records with cloud
       if (_online) {
-        await SyncService().forceFullRefresh(widget.branchId);
-        await lss.LocalStorageService.downloadTodayTokens(widget.branchId);
+        await SyncService().syncTodayOnly(widget.branchId);
+        await SyncService().triggerUpload();
       }
       if (mounted) {
         Flushbar(
@@ -640,12 +667,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
     try {
       final requestId = 'req_reversal_${widget.receptionistId}_${DateTime.now().millisecondsSinceEpoch}';
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('edit_requests')
-          .doc(requestId)
-          .set({
+      final reqPayload = <String, dynamic>{
+        'id': requestId,
+        'requestId': requestId,
         'type': 'token_reversal',
         'requestType': 'token_reversal',
         'status': 'pending',
@@ -662,11 +686,54 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         'reason': reasonCtrl.text.trim().isNotEmpty
             ? reasonCtrl.text.trim()
             : null,
-        'requestedAt': FieldValue.serverTimestamp(),
+        'requestedAt': DateTime.now().toIso8601String(),
         'reviewedAt': null,
         'reviewedBy': null,
         'decision': null,
+      };
+
+      await LocalStorageService.saveLocalEditRequest(reqPayload);
+
+      await LocalStorageService.enqueueSync({
+        'type': 'save_token_reversal_request',
+        'branchId': widget.branchId,
+        'requestId': requestId,
+        'data': reqPayload,
       });
+
+      RealtimeManager().sendMessage({
+        ...RealtimeEvents.payload(
+          type: 'request_created',
+          branchId: widget.branchId,
+          data: reqPayload,
+        ),
+      });
+
+      try {
+        await FirebaseFirestore.instance
+            .collection('branches')
+            .doc(widget.branchId)
+            .collection('edit_requests')
+            .doc(requestId)
+            .set({
+          ...reqPayload,
+          'requestedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('[ReceptionistScreen] Firestore offline, saved locally: $e');
+      }
+
+      // Notify supervisor via Cloud Messaging (works even if supervisor's app is closed)
+      try {
+        CloudMessagingService().notifySupervisorPendingRequests(
+          branchId: widget.branchId,
+          requestType: 'Token Reversal',
+          requesterName: requesterName,
+          details: 'Token reversal requested for #$serial ($patientName)',
+        );
+      } catch (e) {
+        debugPrint('[ReceptionistScreen] Supervisor notification error: $e');
+      }
 
       if (mounted) {
         Flushbar(
@@ -718,23 +785,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       onSync: _forceSync,
       onLogout: _logout,
       isLoggingOut: _isLoggingOut,
-      bottom: isMobile
-          ? PreferredSize(
-              preferredSize: const Size.fromHeight(44),
-              child: TabBar(
-                controller: _mobileTabController,
-                indicatorColor: const Color(0xFF00A86B),
-                labelColor: const Color(0xFF00A86B),
-                unselectedLabelColor: Colors.grey,
-                labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                tabs: const [
-                  Tab(icon: Icon(Icons.token, size: 18), text: 'Token'),
-                  Tab(icon: Icon(Icons.list_alt, size: 18), text: 'Log'),
-                  Tab(icon: Icon(Icons.person_add, size: 18), text: 'Register'),
-                ],
-              ),
-            )
-          : null,
+      bottom: null,
     );
   }
 
@@ -748,26 +799,76 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     return {};
   }
 
+  bool _isEffectivelyToday(Map<String, dynamic> e, String currentTodayKey, String todayIso) {
+    final status = (e['status'] ?? '').toString().toLowerCase().trim();
+    final dispenseStatus = (e['dispenseStatus'] ?? '').toString().toLowerCase().trim();
+    final isTerminal = status == 'completed' ||
+        status == 'dispensed' ||
+        status == 'cancelled' ||
+        status == 'expired' ||
+        status == 'reversed' ||
+        status == 'deleted' ||
+        dispenseStatus == 'dispensed';
+
+    final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
+    final serialDk = CampSessionService.getDateKeyFromSerial(serial);
+    final dk = (e['dateKey'] as String?)?.trim() ?? '';
+    final rawTime = e['createdAt'] ?? e['timestamp'] ?? e['time'] ?? e['date'];
+
+    // 1. Exact match with today's dateKey or ISO date string
+    bool isTodayExact = false;
+    if (dk == currentTodayKey || (serialDk.isNotEmpty && serialDk == currentTodayKey)) {
+      isTodayExact = true;
+    } else if (rawTime != null) {
+      final rawStr = rawTime.toString();
+      if (rawStr.startsWith(todayIso)) {
+        isTodayExact = true;
+      } else {
+        final dt = DateTime.tryParse(rawStr);
+        if (dt != null) {
+          final dtKey = CampSessionService.resolveShiftAndDateKey(dt, widget.branchId).dateKey;
+          if (dtKey == currentTodayKey) isTodayExact = true;
+        }
+      }
+    }
+
+    if (isTodayExact) return true;
+
+    // 2. Shift/Rollover Tolerance [FIX-B]: If the token's status is non-terminal
+    // (still actively waiting / in-progress), also accept the previous calendar day's dateKey
+    // or timestamp within 24h so active patients don't suddenly vanish across boundaries.
+    if (!isTerminal) {
+      final prevDateKey = DateFormat('ddMMyy').format(DateTime.now().subtract(const Duration(days: 1)));
+      final prevTodayIso = DateFormat('yyyy-MM-dd').format(DateTime.now().subtract(const Duration(days: 1)));
+
+      if (dk == prevDateKey || (serialDk.isNotEmpty && serialDk == prevDateKey)) {
+        return true;
+      }
+      if (rawTime != null) {
+        final rawStr = rawTime.toString();
+        if (rawStr.startsWith(prevTodayIso)) {
+          return true;
+        }
+        final dt = DateTime.tryParse(rawStr);
+        if (dt != null && DateTime.now().difference(dt).inHours < 24) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   List<Map<String, dynamic>> _getFilteredTodayTokens() {
-    final today = CampSessionService.resolveShiftAndDateKey().dateKey;
-    final activeShift = CampSessionService.getCurrentSession();
-    final userData = _getUserData();
-    final scheduledCamps = CampSessionService.getMatchingScheduledCamps(userData);
-    final effectiveCamp = _hasMultiCamps
-        ? (scheduledCamps.isNotEmpty
-            ? scheduledCamps.first
-            : CampSessionService.getActiveCamp(widget.branchId))
-        : null;
-
-    final rawEntries = lss.LocalStorageService.getLocalEntries(widget.branchId);
-
-    final myId = widget.receptionistId.trim().toLowerCase();
-    final myName = (_username ?? widget.receptionistName).trim().toLowerCase();
+    if (!Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) return [];
+    try {
+      final today = CampSessionService.resolveShiftAndDateKey(DateTime.now(), widget.branchId).dateKey;
+      final todayIso = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final rawEntries = lss.LocalStorageService.getLocalEntries(widget.branchId);
 
     final filtered = rawEntries.where((e) {
-      // 1. Date filter (strictly today)
-      final dk = (e['dateKey'] as String?);
-      if (dk != today) return false;
+      // 1. Date filter (today by dateKey, serial, or rollover tolerance)
+      if (!_isEffectivelyToday(e, today, todayIso)) return false;
 
       final serial = (e['serial'] ?? e['id'])?.toString();
       if (!CampSessionService.isSerialMatchingBranch(serial, widget.branchId)) return false;
@@ -778,34 +879,29 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       if (st == 'deleted' || syncSt == 'deleted') return false;
 
       // 3. Must have valid patient name or cnic
-      final name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
-      final cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'] ?? '').toString().trim();
-      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown') && cnic.isEmpty) {
-        return false;
-      }
-
-      // 4. Strict USER ONLY filter (Only this logged-in user's issued tokens!)
-      final cb = (e['createdBy'] ?? e['receptionistId'] ?? e['addedById'] ?? '').toString().trim().toLowerCase();
-      final cbn = (e['createdByName'] ?? e['receptionistName'] ?? e['performedBy'] ?? e['by'] ?? '').toString().trim().toLowerCase();
-
-      bool matchesUser = false;
-      if (myId.isNotEmpty && cb.isNotEmpty) {
-        if (cb == myId || cb.contains(myId) || myId.contains(cb)) {
-          matchesUser = true;
+      var name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
+      var cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'] ?? '').toString().trim();
+      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown' || name == 'null') && cnic.isEmpty) {
+        final presc = e['prescription'];
+        if (presc is Map) {
+          final pName = (presc['patientName'] ?? presc['name'])?.toString().trim();
+          if (pName != null && pName.isNotEmpty && pName.toLowerCase() != 'unknown' && pName.toLowerCase() != 'unknown patient' && pName.toLowerCase() != 'null') {
+            name = pName.toLowerCase();
+          }
+        }
+        if ((name.isEmpty || name == 'unknown patient' || name == 'unknown' || name == 'null') && cnic.isEmpty) {
+          if (serial != null && serial.isNotEmpty) {
+            name = 'token #$serial';
+          } else {
+            return false;
+          }
         }
       }
-      if (myName.isNotEmpty && cbn.isNotEmpty) {
-        if (cbn == myName || cbn.contains(myName) || myName.contains(cbn)) {
-          matchesUser = true;
-        }
-      }
-      // If neither ID nor Name matched, strictly reject (e.g. Kashif's tokens when Ahad is logged in)
-      if (!matchesUser) return false;
 
-      // 5. Strict Camp Isolation
-      if (_hasMultiCamps && effectiveCamp != null && effectiveCamp.isNotEmpty && effectiveCamp != 'all') {
+      // 4. Camp Filter (Uses selected camp filter if set)
+      if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
         final matches = CampSessionService.matchesCamp(
-          selectedCamp: effectiveCamp,
+          selectedCamp: _selectedCampFilter,
           dispensaryId: e['dispensaryId']?.toString(),
           campId: e['campId']?.toString(),
           dispensaryTag: e['dispensaryTag']?.toString(),
@@ -814,13 +910,13 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         if (!matches) return false;
       }
 
-      // 6. Shift Filter (Supports 'all', 'morning', 'evening', 'night')
+      // 5. Shift Filter (Supports 'all', 'morning', 'evening', 'night')
       if (_selectedSessionFilter != 'all') {
         final eSession = (e['session'] as String?)?.trim().toLowerCase() ?? '';
         if (eSession.isNotEmpty) {
           if (eSession != _selectedSessionFilter) return false;
         } else {
-          final rawTime = e['createdAt'] ?? e['time'] ?? e['timestamp'] ?? e['date'];
+          final rawTime = e['createdAt'] ?? e['timestamp'] ?? e['time'];
           if (rawTime != null) {
             final dt = DateTime.tryParse(rawTime.toString());
             if (dt != null && CampSessionService.getCurrentSession(dt, widget.branchId) != _selectedSessionFilter) {
@@ -835,66 +931,72 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
     final Map<String, Map<String, dynamic>> uniqueBySerial = {};
     for (final e in filtered) {
-      final s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
+      String s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
+      final branchPrefix = '${widget.branchId.trim().toUpperCase()}-';
+      if (s.startsWith(branchPrefix)) {
+        s = s.substring(branchPrefix.length);
+      }
       if (s.isEmpty) continue;
       if (!uniqueBySerial.containsKey(s)) {
-        uniqueBySerial[s] = e;
+        uniqueBySerial[s] = Map<String, dynamic>.from(e);
       } else {
-        final existingName = (uniqueBySerial[s]!['patientName'] ?? uniqueBySerial[s]!['name'] ?? '').toString().toLowerCase();
-        final currentName = (e['patientName'] ?? e['name'] ?? '').toString().toLowerCase();
-        if (existingName.contains('unknown') && !currentName.contains('unknown')) {
-          uniqueBySerial[s] = e;
-        }
+        final target = uniqueBySerial[s]!;
+        e.forEach((k, v) {
+          if (v != null && v != '' && v != 'unknown') {
+            final old = target[k];
+            if (old == null || old == '' || old == 'unknown') {
+              target[k] = v;
+            }
+          }
+        });
       }
     }
 
     return uniqueBySerial.values.toList();
+    } catch (e) {
+      debugPrint('[ReceptionistScreen] _getFilteredTodayTokens error: $e');
+      return [];
+    }
   }
 
   Map<String, int> _getSessionCounts() {
-    final today = CampSessionService.resolveShiftAndDateKey().dateKey;
-    final userData = _getUserData();
-    final scheduledCamps = CampSessionService.getMatchingScheduledCamps(userData);
-    final effectiveCamp = _hasMultiCamps
-        ? (scheduledCamps.isNotEmpty
-            ? scheduledCamps.first
-            : CampSessionService.getActiveCamp(widget.branchId))
-        : null;
-
-    final rawEntries = lss.LocalStorageService.getLocalEntries(widget.branchId);
-    final myId = widget.receptionistId.trim().toLowerCase();
-    final myName = (_username ?? widget.receptionistName).trim().toLowerCase();
+    if (!Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) {
+      return {'all': 0, 'morning': 0, 'evening': 0, 'night': 0};
+    }
+    try {
+      final today = CampSessionService.resolveShiftAndDateKey(DateTime.now(), widget.branchId).dateKey;
+      final todayIso = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final rawEntries = lss.LocalStorageService.getLocalEntries(widget.branchId);
 
     int all = 0, morning = 0, evening = 0, night = 0;
 
     final Map<String, Map<String, dynamic>> uniqueBySerial = {};
     for (final e in rawEntries) {
-      final dk = (e['dateKey'] as String?);
-      if (dk != today) continue;
+      if (!_isEffectivelyToday(e, today, todayIso)) continue;
+
       final serial = (e['serial'] ?? e['id'])?.toString();
       if (!CampSessionService.isSerialMatchingBranch(serial, widget.branchId)) continue;
       final st = (e['status'] as String?)?.toLowerCase().trim();
       final syncSt = (e['syncStatus'] as String?)?.toLowerCase().trim();
       if (st == 'deleted' || syncSt == 'deleted') continue;
-      final name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
-      final cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'] ?? '').toString().trim();
-      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown') && cnic.isEmpty) continue;
-
-      final cb = (e['createdBy'] ?? e['receptionistId'] ?? e['addedById'] ?? '').toString().trim().toLowerCase();
-      final cbn = (e['createdByName'] ?? e['receptionistName'] ?? e['performedBy'] ?? e['by'] ?? '').toString().trim().toLowerCase();
-
-      bool matchesUser = false;
-      if (myId.isNotEmpty && cb.isNotEmpty) {
-        if (cb == myId || cb.contains(myId) || myId.contains(cb)) matchesUser = true;
+      var name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
+      var cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'] ?? '').toString().trim();
+      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown' || name == 'null') && cnic.isEmpty) {
+        final presc = e['prescription'];
+        if (presc is Map) {
+          final pName = (presc['patientName'] ?? presc['name'])?.toString().trim();
+          if (pName != null && pName.isNotEmpty && pName.toLowerCase() != 'unknown' && pName.toLowerCase() != 'unknown patient' && pName.toLowerCase() != 'null') {
+            name = pName.toLowerCase();
+          }
+        }
+        if ((name.isEmpty || name == 'unknown patient' || name == 'unknown' || name == 'null') && cnic.isEmpty) {
+          if (serial == null || serial.isEmpty) continue;
+        }
       }
-      if (myName.isNotEmpty && cbn.isNotEmpty) {
-        if (cbn == myName || cbn.contains(myName) || myName.contains(cbn)) matchesUser = true;
-      }
-      if (!matchesUser) continue;
 
-      if (_hasMultiCamps && effectiveCamp != null && effectiveCamp.isNotEmpty && effectiveCamp != 'all') {
+      if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
         final matches = CampSessionService.matchesCamp(
-          selectedCamp: effectiveCamp,
+          selectedCamp: _selectedCampFilter,
           dispensaryId: e['dispensaryId']?.toString(),
           campId: e['campId']?.toString(),
           dispensaryTag: e['dispensaryTag']?.toString(),
@@ -903,7 +1005,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         if (!matches) continue;
       }
 
-      final s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
+      String s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
+      final branchPrefix = '${widget.branchId.trim().toUpperCase()}-';
+      if (s.startsWith(branchPrefix)) {
+        s = s.substring(branchPrefix.length);
+      }
       if (s.isNotEmpty) {
         uniqueBySerial[s] = e;
       }
@@ -930,6 +1036,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     }
 
     return {'all': all, 'morning': morning, 'evening': evening, 'night': night};
+    } catch (e) {
+      debugPrint('[ReceptionistScreen] _getSessionCounts error: $e');
+      return {'all': 0, 'morning': 0, 'evening': 0, 'night': 0};
+    }
   }
 
   Widget _buildShiftSelector(bool isMobile) {
@@ -1061,88 +1171,93 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildSummaryCards(bool isMobile) {
-    final todayEntries = _getFilteredTodayTokens();
+    try {
+      final todayEntries = _getFilteredTodayTokens();
 
-    int zakat = 0, nonZakat = 0, gmwf = 0;
-    int zakatAmount = 0, nonZakatAmount = 0;
+      int zakat = 0, nonZakat = 0, gmwf = 0;
+      int zakatAmount = 0, nonZakatAmount = 0;
 
-    for (final e in todayEntries) {
-      var qt = (e['queueType'] as String?)?.toLowerCase().trim() ?? 'unknown';
-      if (_isKarachi && (qt == 'non-zakat' || qt.contains('non'))) {
-        qt = 'zakat';
+      for (final e in todayEntries) {
+        var qt = (e['queueType'] as String?)?.toLowerCase().trim() ?? 'unknown';
+        if (_isKarachi && (qt == 'non-zakat' || qt.contains('non'))) {
+          qt = 'zakat';
+        }
+        final days = _getDaysOfMedicine(e);
+        switch (qt) {
+          case 'zakat':
+            zakat++;
+            zakatAmount += 20 * days;
+            break;
+          case 'non-zakat':
+            nonZakat++;
+            nonZakatAmount += 100 * days;
+            break;
+          case 'gmwf':
+            gmwf++;
+            break;
+          default:
+            zakat++;
+            zakatAmount += 20 * days;
+        }
       }
-      final days = _getDaysOfMedicine(e);
-      switch (qt) {
-        case 'zakat':
-          zakat++;
-          zakatAmount += 20 * days;
-          break;
-        case 'non-zakat':
-          nonZakat++;
-          nonZakatAmount += 100 * days;
-          break;
-        case 'gmwf':
-          gmwf++;
-          break;
-        default:
-          zakat++;
-          zakatAmount += 20 * days;
-      }
+
+      final total = zakat + nonZakat + gmwf;
+      final totalAmount = zakatAmount + nonZakatAmount;
+
+      final cards = [
+        _compactSummaryCard(
+          _isKarachi ? 'PKR 20' : 'Zakat',
+          zakat,
+          'PKR $zakatAmount',
+          const Color(0xFF00875A), // Solid Emerald Green
+          Icons.volunteer_activism_rounded,
+          isMobile: isMobile,
+        ),
+        _compactSummaryCard(
+          _isKarachi ? 'PKR 100' : 'Non-Zakat',
+          nonZakat,
+          _isKarachi && nonZakat == 0 ? 'Disabled 🔒' : 'PKR $nonZakatAmount',
+          const Color(0xFF00875A),
+          Icons.person_outline_rounded,
+          isMobile: isMobile,
+          isOutlined: true,
+          outlineColor: const Color(0xFF00875A), // Green Outline on White Card
+        ),
+        _compactSummaryCard(
+          'GMWF',
+          gmwf,
+          'PKR 0',
+          const Color(0xFFD97706), // Solid Amber
+          null,
+          isImage: true,
+          isMobile: isMobile,
+        ),
+        _compactSummaryCard(
+          'Total',
+          total,
+          'PKR $totalAmount',
+          const Color(0xFFD97706),
+          Icons.people_outline_rounded,
+          isMobile: isMobile,
+          isOutlined: true,
+          outlineColor: const Color(0xFFD97706), // Amber Outline on White Card
+        ),
+      ];
+
+      return Row(
+        children: cards
+            .map((c) => Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: isMobile ? 1.5 : 4),
+                    child: c,
+                  ),
+                ))
+            .toList(),
+      );
+    } catch (e) {
+      debugPrint('[ReceptionistScreen] _buildSummaryCards error: $e');
+      return const SizedBox.shrink();
     }
-
-    final total = zakat + nonZakat + gmwf;
-    final totalAmount = zakatAmount + nonZakatAmount;
-
-    final cards = [
-      _compactSummaryCard(
-        _isKarachi ? 'PKR 20' : 'Zakat',
-        zakat,
-        'PKR $zakatAmount',
-        const Color(0xFF00875A), // Solid Emerald Green
-        Icons.volunteer_activism_rounded,
-        isMobile: isMobile,
-      ),
-      _compactSummaryCard(
-        _isKarachi ? 'PKR 100' : 'Non-Zakat',
-        nonZakat,
-        _isKarachi && nonZakat == 0 ? 'Disabled 🔒' : 'PKR $nonZakatAmount',
-        const Color(0xFF00875A),
-        Icons.person_outline_rounded,
-        isMobile: isMobile,
-        isOutlined: true,
-        outlineColor: const Color(0xFF00875A), // Green Outline on White Card
-      ),
-      _compactSummaryCard(
-        'GMWF',
-        gmwf,
-        'PKR 0',
-        const Color(0xFFD97706), // Solid Amber
-        null,
-        isImage: true,
-        isMobile: isMobile,
-      ),
-      _compactSummaryCard(
-        'Total',
-        total,
-        'PKR $totalAmount',
-        const Color(0xFFD97706),
-        Icons.people_outline_rounded,
-        isMobile: isMobile,
-        isOutlined: true,
-        outlineColor: const Color(0xFFD97706), // Amber Outline on White Card
-      ),
-    ];
-
-    return Row(
-      children: cards
-          .map((c) => Expanded(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: isMobile ? 2 : 4),
-                  child: c,
-                ),
-              ))
-          .toList(),
-    );
   }
 
   int _getDaysOfMedicine(Map<String, dynamic> entry) {
@@ -1181,10 +1296,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         : Colors.white.withValues(alpha: 0.85);
 
     return Container(
-      height: isMobile ? 70 : 76,
+      height: isMobile ? 66 : 76,
       decoration: BoxDecoration(
         color: bgColor,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isOutlined
               ? effectiveOutline
@@ -1208,8 +1323,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         ],
       ),
       padding: EdgeInsets.symmetric(
-        horizontal: isMobile ? 8 : 10,
-        vertical: isMobile ? 6 : 8,
+        horizontal: isMobile ? 5 : 10,
+        vertical: isMobile ? 4 : 8,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1218,33 +1333,44 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                title,
-                style: TextStyle(
-                  color: primaryTextColor,
-                  fontSize: isMobile ? 10.5 : 12,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.2,
+              Flexible(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: primaryTextColor,
+                    fontSize: isMobile ? 9.5 : 12,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.1,
+                  ),
                 ),
               ),
+              const SizedBox(width: 2),
               if (isImage)
-                Image.asset('assets/logo/gmwf-1.webp',
-                    height: isMobile ? 14 : 17)
+                Image.asset(
+                  'assets/logo/gmwf-1.webp',
+                  height: isMobile ? 12 : 17,
+                  fit: BoxFit.contain,
+                )
               else if (icon != null)
-                Icon(icon, size: isMobile ? 14 : 16, color: primaryTextColor),
+                Icon(icon, size: isMobile ? 12 : 16, color: primaryTextColor),
             ],
           ),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(
-                '$count',
-                style: TextStyle(
-                  color: primaryTextColor,
-                  fontSize: isMobile ? 18 : 22,
-                  fontWeight: FontWeight.w900,
-                  height: 1.0,
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  '$count',
+                  style: TextStyle(
+                    color: primaryTextColor,
+                    fontSize: isMobile ? 16 : 22,
+                    fontWeight: FontWeight.w900,
+                    height: 1.0,
+                  ),
                 ),
               ),
               if (!isMobile)
@@ -1294,11 +1420,79 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         final e = rawList[i];
         final serial = e['serial'] as String? ?? 'N/A';
         final rawName = (e['patientName'] ?? e['name'] ?? e['fullName'])?.toString().trim();
-        final name = (rawName != null && rawName.isNotEmpty && rawName.toLowerCase() != 'null')
+        var name = (rawName != null &&
+                rawName.isNotEmpty &&
+                rawName.toLowerCase() != 'null' &&
+                rawName.toLowerCase() != 'unknown' &&
+                rawName.toLowerCase() != 'unknown patient')
             ? rawName
-            : 'Unknown Patient';
-        final cnic = (e['cnic'] as String?)?.trim() ?? '';
-        final guardianCnic = (e['guardianCnic'] as String?)?.trim() ?? '';
+            : '';
+        var cnic = (e['patientCnic'] ?? e['cnic'] ?? '').toString().trim();
+        var guardianCnic = (e['guardianCnic'] ?? '').toString().trim();
+        final pId = (e['patientId'] ?? e['id'] ?? '').toString().trim();
+
+        if (name.isEmpty) {
+          final presc = e['prescription'] is Map
+              ? e['prescription'] as Map
+              : lss.LocalStorageService.getLocalPrescription(
+                  serial,
+                  branchId: widget.branchId,
+                  cnic: cnic.isNotEmpty ? cnic : guardianCnic,
+                  patientId: pId,
+                  patientName: rawName,
+                );
+          final pName = (presc?['patientName'] ?? presc?['name'] ?? presc?['fullName'])?.toString().trim();
+          if (pName != null &&
+              pName.isNotEmpty &&
+              pName.toLowerCase() != 'null' &&
+              pName.toLowerCase() != 'unknown' &&
+              pName.toLowerCase() != 'unknown patient') {
+            name = pName;
+            e['patientName'] = name;
+          }
+        }
+
+        if (name.isEmpty || cnic.isEmpty) {
+          if (pId.isNotEmpty) {
+            final lp = lss.LocalStorageService.getLocalPatient(pId);
+            if (lp != null) {
+              final lpName = (lp['name'] ?? lp['patientName'] ?? lp['fullName'])?.toString().trim();
+              if (name.isEmpty &&
+                  lpName != null &&
+                  lpName.isNotEmpty &&
+                  lpName.toLowerCase() != 'null' &&
+                  lpName.toLowerCase() != 'unknown' &&
+                  lpName.toLowerCase() != 'unknown patient') {
+                name = lpName;
+                e['patientName'] = name;
+              }
+              final lpCnic = (lp['cnic'] ?? lp['guardianCnic'])?.toString().trim() ?? '';
+              if (cnic.isEmpty && lpCnic.isNotEmpty) {
+                cnic = lpCnic;
+                e['cnic'] = cnic;
+              }
+            }
+          }
+          final isChildEntry = e['isAdult'] == false || pId.contains('_child_') || guardianCnic.isNotEmpty;
+          if (name.isEmpty && cnic.isNotEmpty && !isChildEntry) {
+            final lp = lss.LocalStorageService.getLocalPatientByCnic(cnic);
+            if (lp != null) {
+              final lpName = (lp['name'] ?? lp['patientName'] ?? lp['fullName'])?.toString().trim();
+              if (lpName != null &&
+                  lpName.isNotEmpty &&
+                  lpName.toLowerCase() != 'null' &&
+                  lpName.toLowerCase() != 'unknown' &&
+                  lpName.toLowerCase() != 'unknown patient') {
+                name = lpName;
+                e['patientName'] = name;
+              }
+            }
+          }
+        }
+
+        if (name.isEmpty) {
+          name = 'Unknown Patient';
+        }
         final queueTypeRaw =
             (e['queueType'] as String?)?.toLowerCase().trim() ?? 'unknown';
         final effectiveQueueType = (_isKarachi && (queueTypeRaw == 'non-zakat' || queueTypeRaw.contains('non')))
@@ -1697,31 +1891,116 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     final screenWidth = MediaQuery.of(context).size.width;
     final isMobile = screenWidth < 800;
 
+    if (!Hive.isBoxOpen('app_settings')) {
+      return FutureBuilder<Box>(
+        future: lss.LocalStorageService.ensureBoxOpen('app_settings'),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData || snapshot.data == null || !snapshot.data!.isOpen) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator(color: Color(0xFF00875A))),
+            );
+          }
+          final isDark = snapshot.data!.get('is_dark_mode', defaultValue: false) == true;
+          return _buildScaffoldWithTheme(context, isDark, isMobile);
+        },
+      );
+    }
+
     return ValueListenableBuilder<Box>(
       valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
       builder: (context, box, _) {
-        final isDark = box.get('is_dark_mode', defaultValue: false) == true;
+        final isDark = box.isOpen ? (box.get('is_dark_mode', defaultValue: false) == true) : false;
+        return _buildScaffoldWithTheme(context, isDark, isMobile);
+      },
+    );
+  }
 
-        final body = Container(
-          decoration: BoxDecoration(
-            color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
+  Widget _buildScaffoldWithTheme(BuildContext context, bool isDark, bool isMobile) {
+    final body = Container(
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
+      ),
+      child: Column(
+        children: [
+          ClockSkewWarningBanner(branchId: widget.branchId),
+          Expanded(
+            child: isMobile ? _buildMobileBody() : _buildDesktopBody(),
           ),
-          child: Column(
-            children: [
-              ClockSkewWarningBanner(branchId: widget.branchId),
-              Expanded(
-                child: isMobile ? _buildMobileBody() : _buildDesktopBody(),
-              ),
-            ],
-          ),
+        ],
+      ),
+    );
+
+    if (widget.isEmbedded) return body;
+
+    return Scaffold(
+      backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
+      appBar: _buildAppBar(isMobile),
+      body: body,
+    );
+  }
+
+  Widget _buildWithEntriesListenable(Widget Function(BuildContext, Box?, Widget?) builder) {
+    if (Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) {
+      final box = Hive.box(lss.LocalStorageService.entriesBox);
+      if (box.isOpen) {
+        return ValueListenableBuilder<Box>(
+          valueListenable: box.listenable(),
+          builder: (ctx, b, w) {
+            try {
+              if (b == null || !b.isOpen) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(color: Color(0xFF00875A)),
+                  ),
+                );
+              }
+              return builder(ctx, b, w);
+            } catch (e) {
+              return const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: CircularProgressIndicator(color: Color(0xFF00875A)),
+                ),
+              );
+            }
+          },
         );
-
-        if (widget.isEmbedded) return body;
-
-        return Scaffold(
-          backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
-          appBar: _buildAppBar(isMobile),
-          body: body,
+      }
+    }
+    return FutureBuilder<Box>(
+      future: lss.LocalStorageService.ensureBoxOpen(lss.LocalStorageService.entriesBox),
+      builder: (context, snapshot) {
+        if (snapshot.hasData && snapshot.data != null && snapshot.data!.isOpen) {
+          return ValueListenableBuilder<Box>(
+            valueListenable: snapshot.data!.listenable(),
+            builder: (ctx, b, w) {
+              try {
+                if (b == null || !b.isOpen) {
+                  return const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: CircularProgressIndicator(color: Color(0xFF00875A)),
+                    ),
+                  );
+                }
+                return builder(ctx, b, w);
+              } catch (e) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(color: Color(0xFF00875A)),
+                  ),
+                );
+              }
+            },
+          );
+        }
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(color: Color(0xFF00875A)),
+          ),
         );
       },
     );
@@ -1730,12 +2009,12 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   Widget _buildMobileBody() {
     return Column(children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-        child: ValueListenableBuilder<Box>(
-          valueListenable: _entriesListenable,
-          builder: (context, _, _) => _buildSummaryCards(true),
+        padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+        child: _buildWithEntriesListenable(
+          (context, _, _) => _buildSummaryCards(true),
         ),
       ),
+      _buildMobileToggle(),
       Expanded(
         child: TabBarView(
           controller: _mobileTabController,
@@ -1805,9 +2084,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 Expanded(
                   child: ValueListenableBuilder<int>(
                     valueListenable: _refreshNotifier,
-                    builder: (context, _, _) => ValueListenableBuilder<Box>(
-                      valueListenable: _entriesListenable,
-                      builder: (context, _, _) => _buildTokenLog(true),
+                    builder: (context, _, _) => _buildWithEntriesListenable(
+                      (context, _, _) => _buildTokenLog(true),
                     ),
                   ),
                 ),
@@ -1918,16 +2196,14 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 flex: 2,
                 child: ValueListenableBuilder<int>(
                   valueListenable: _refreshNotifier,
-                  builder: (context, _, _) => ValueListenableBuilder<Box>(
-                    valueListenable: _entriesListenable,
-                    builder: (context, _, _) => Column(
+                  builder: (context, _, _) => _buildWithEntriesListenable(
+                    (context, _, _) => Column(
                       children: [
                         _buildSummaryCards(false),
                         const SizedBox(height: 16),
                         Expanded(
-                          child: ValueListenableBuilder<Box>(
-                            valueListenable: _patientsListenable,
-                            builder: (context, box, _) {
+                          child: Builder(
+                            builder: (context) {
                               final todayCount = _getFilteredTodayTokens().length;
                               return Card(
                                 elevation: 8,
@@ -2030,6 +2306,126 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMobileToggle() {
+    return AnimatedBuilder(
+      animation: _mobileTabController,
+      builder: (context, _) {
+        final activeIndex = _mobileTabController.index;
+        return Container(
+          width: double.infinity,
+          height: 44,
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: _isDark ? const Color(0xFF1E293B) : Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: _isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+              width: 1.2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: _isDark ? 0.20 : 0.04),
+                blurRadius: 6,
+                offset: const Offset(0, 2),
+              )
+            ],
+          ),
+          child: Row(
+            children: [
+              _buildMobileToggleButton(
+                label: 'Issue Token',
+                icon: Icons.confirmation_number_outlined,
+                isSelected: activeIndex == 0,
+                onTap: () => _mobileTabController.animateTo(0),
+              ),
+              _buildMobileToggleButton(
+                label: 'Register Patient',
+                icon: Icons.person_add_alt_1_rounded,
+                isSelected: activeIndex == 2,
+                onTap: () => _mobileTabController.animateTo(2),
+              ),
+              _buildMobileToggleButton(
+                label: "Today's Log",
+                icon: Icons.format_list_bulleted_rounded,
+                isSelected: activeIndex == 1,
+                onTap: () => _mobileTabController.animateTo(1),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMobileToggleButton({
+    required String label,
+    required IconData icon,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              gradient: isSelected
+                  ? const LinearGradient(
+                      colors: [Color(0xFF00A86B), Color(0xFF00875A)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    )
+                  : null,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: isSelected
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFF00A86B).withValues(alpha: _isDark ? 0.4 : 0.25),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      )
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  size: 14,
+                  color: isSelected
+                      ? Colors.white
+                      : (_isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                ),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                      color: isSelected
+                          ? Colors.white
+                          : (_isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

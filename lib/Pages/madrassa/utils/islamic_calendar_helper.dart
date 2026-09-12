@@ -1,4 +1,7 @@
 import 'package:flutter/foundation.dart';
+import 'package:hijri/hijri_calendar.dart';
+
+import 'package:hive/hive.dart';
 
 /// Represents an Islamic (Hijri) Date
 class HijriDate {
@@ -12,7 +15,7 @@ class HijriDate {
     required this.day,
   });
 
-  /// English month names
+  /// English month names (standard common names)
   static const List<String> monthNamesEn = [
     'Muharram',
     'Safar',
@@ -49,7 +52,7 @@ class HijriDate {
     return isUrdu ? monthNamesUr[month - 1] : monthNamesEn[month - 1];
   }
 
-  /// Formatted representation, e.g. "15 Ramadan 1447 AH" or "۱۵ رمضان المبارک ۱۴۴۷ھ"
+  /// Formatted representation, e.g. "24 Rabi al-Awwal 1448 AH" or "۲۴ ربیع الاول ۱۴۴۸ھ"
   String format({bool isUrdu = false}) {
     if (isUrdu) {
       return '$day ${monthName(isUrdu: true)} $yearھ';
@@ -81,44 +84,32 @@ class IslamicEvent {
   });
 }
 
-/// Robust Islamic (Hijri) Calendar Helper with Umm al-Qura astronomical conversion
-/// and automatic Islamic holidays detection.
+/// Robust Islamic (Hijri) Calendar Helper aligned specifically for Pakistan.
+/// Uses the astronomical lunar engine adjusted by -1 day to match Pakistan's Central Ruet-e-Hilal moon sighting.
 class IslamicCalendarHelper {
+  /// Pakistan regional sighting offset (Pakistan is 1 day behind Saudi Umm al-Qura calendar)
+  static int pakistanDayOffset = -1;
+
   /// Converts a Gregorian [DateTime] to an Islamic [HijriDate]
-  /// using the standard Umm al-Qura astronomical conversion algorithm.
-  static HijriDate fromGregorian(DateTime date) {
-    int year = date.year;
-    int month = date.month;
-    int day = date.day;
-
-    // Julian day calculation
-    if (month < 3) {
-      year -= 1;
-      month += 12;
+  /// calibrated for the Pakistan region.
+  static HijriDate fromGregorian(DateTime date, {int? customOffset}) {
+    int offset = customOffset ?? pakistanDayOffset;
+    if (customOffset == null) {
+      try {
+        if (Hive.isBoxOpen('app_settings')) {
+          final saved = Hive.box('app_settings').get('hijri_offset');
+          if (saved is int) {
+            offset = saved;
+          } else if (saved is String) {
+            final parsed = int.tryParse(saved);
+            if (parsed != null) offset = parsed;
+          }
+        }
+      } catch (_) {}
     }
-
-    final a = (year / 100).floor();
-    final b = 2 - a + (a / 4).floor();
-    final jd = (365.25 * (year + 4716)).floor() +
-        (30.6001 * (month + 1)).floor() +
-        day +
-        b -
-        1524.5;
-
-    // Islamic epoch adjustment
-    final z = (jd + 0.5).floor();
-    final iCycle = ((z - 1948439.5) / 10631).floor();
-    final iRemainder = (z - 1948439.5) - 10631 * iCycle;
-
-    final iYearInCycle = ((iRemainder + 0.5) / 354.36667).floor();
-    final hYear = 30 * iCycle + iYearInCycle;
-
-    // Day within the Hijri year
-    final iDayInYear = iRemainder - ((11 * iYearInCycle + 3) / 30).floor() - 354 * iYearInCycle;
-    final hMonth = ((iDayInYear + 28.5001) / 29.5).floor().clamp(1, 12);
-    final hDay = (iDayInYear - ((hMonth - 1) * 29.5).floor()).toInt().clamp(1, 30);
-
-    return HijriDate(year: hYear, month: hMonth, day: hDay);
+    final adjustedDate = date.add(Duration(days: offset));
+    final h = HijriCalendar.fromDate(adjustedDate);
+    return HijriDate(year: h.hYear, month: h.hMonth, day: h.hDay);
   }
 
   /// Detects if a given Gregorian [DateTime] corresponds to an Islamic Holiday or Special Day.

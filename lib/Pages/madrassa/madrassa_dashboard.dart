@@ -10,6 +10,8 @@ import 'views/madrassa_overview_view.dart';
 import 'views/madrassa_progress_view.dart';
 import 'dialogs/enrollment_dialog.dart';
 import 'madrassa_strings.dart';
+import 'utils/madrassa_local_storage.dart';
+import '../../services/local_storage_service.dart';
 import '../../services/sync_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/user_theme_service.dart';
@@ -40,14 +42,13 @@ class MadrassaDashboard extends StatefulWidget {
 
 class _MadrassaDashboardState extends State<MadrassaDashboard> {
   late int _selectedIndex;
+  late Future<void> _bootstrapFuture;
 
   @override
   void initState() {
     super.initState();
     _selectedIndex = widget.initialIndex ?? 0;
-    if (widget.branchId.isNotEmpty && widget.branchId != 'unknown') {
-      SyncService().start(widget.branchId);
-    }
+    _bootstrapFuture = _bootstrapMadrassa();
     if (widget.autoOpenAddStudent) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         showAddStudentDialog(
@@ -60,16 +61,47 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
     }
   }
 
+  Future<void> _bootstrapMadrassa() async {
+    await LocalStorageService.initForRoles([
+      widget.role,
+      'madrassa',
+      'madrassa admin',
+      'madrassa teacher',
+      'qari',
+      'nazim',
+    ]);
+    await MadrassaLocalStorage.ensureBoxesOpen();
+    if (widget.branchId.isNotEmpty && widget.branchId != 'unknown') {
+      SyncService().start(widget.branchId);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => MadrassaLanguageProvider(),
-      child: Builder(
+    return FutureBuilder<void>(
+      future: _bootstrapFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(
+                color: Color(0xFF00796B),
+              ),
+            ),
+          );
+        }
+        return ChangeNotifierProvider(
+          create: (_) => MadrassaLanguageProvider(),
+          child: Builder(
         builder: (context) {
           final branchId = widget.branchId;
 
           if (branchId == 'unknown') {
-            return const Center(child: Text('Please select a branch first'));
+            return const Scaffold(
+              body: Center(
+                child: Text('Please select a branch first'),
+              ),
+            );
           }
 
           final isTeacherOrAdmin = widget.isAdmin || widget.role.toLowerCase() == 'madrassa teacher';
@@ -101,6 +133,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
               MonthlyReportView(
                 branchId: branchId,
                 username: widget.username,
+                role: widget.role,
               ),
               MadrassaConfigView(
                 branchId: branchId,
@@ -136,24 +169,24 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
           ];
 
           final navIcons = [
-            if (widget.isAdmin) const Icon(Icons.dashboard_outlined),
-            const Icon(Icons.calendar_today_outlined),
-            const Icon(Icons.people_outline),
+            if (widget.isAdmin) Icons.dashboard_outlined,
+            Icons.calendar_today_outlined,
+            Icons.people_outline,
             if (isTeacherOrAdmin) ...[
-              const Icon(Icons.trending_up_outlined),
-              const Icon(Icons.bar_chart_outlined),
-              const Icon(Icons.settings_outlined),
+              Icons.trending_up_outlined,
+              Icons.bar_chart_outlined,
+              Icons.settings_outlined,
             ],
           ];
 
           final navActiveIcons = [
-            if (widget.isAdmin) const Icon(Icons.dashboard),
-            const Icon(Icons.calendar_today),
-            const Icon(Icons.people),
+            if (widget.isAdmin) Icons.dashboard_rounded,
+            Icons.calendar_today_rounded,
+            Icons.people_alt_rounded,
             if (isTeacherOrAdmin) ...[
-              const Icon(Icons.trending_up),
-              const Icon(Icons.bar_chart),
-              const Icon(Icons.settings),
+              Icons.trending_up_rounded,
+              Icons.bar_chart_rounded,
+              Icons.settings_rounded,
             ],
           ];
 
@@ -163,112 +196,42 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
               valueListenable: UserThemeService.listenable(widget.username),
               builder: (context, Box box, _) {
                 final isDark = UserThemeService.isDarkMode(widget.username);
-                final scaffoldBg = isDark ? const Color(0xFF0F172A) : const Color(0xFFF8F9FD);
-                final cardBg = isDark ? const Color(0xFF1E293B) : Colors.white;
-                final textPrimary = isDark ? Colors.white : const Color(0xFF1A1C1E);
-                final textMuted = isDark ? const Color(0xFF94A3B8) : Colors.grey;
-                final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
-                const accentColor = Color(0xFF0F6C5A);
+                final scaffoldBg = isDark ? const Color(0xFF090D16) : const Color(0xFFF6F8FB);
+                final cardBg = isDark ? const Color(0xFF131B2E) : Colors.white;
+                final textPrimary = isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A);
+                final textMuted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+                final borderColor = isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0);
+                const emeraldPrimary = Color(0xFF0F766E);
+                const emeraldLight = Color(0xFF14B8A6);
 
                 return LayoutBuilder(
                   builder: (context, constraints) {
                     final isMobile = constraints.maxWidth < 600;
-                    final isTablet = constraints.maxWidth >= 600 && constraints.maxWidth <= 900;
+                    final isTablet = constraints.maxWidth >= 600 && constraints.maxWidth <= 960;
 
                     if (isMobile) {
                       return Scaffold(
                         backgroundColor: scaffoldBg,
-                        appBar: AppBar(
-                          backgroundColor: cardBg,
-                          elevation: 0,
-                          titleSpacing: 12,
-                          automaticallyImplyLeading: false,
-                          title: Row(
-                            children: [
-                              Image.asset('assets/logo/gmwf-1.webp', height: 32),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Gulzar Madina Madrassa',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: context.urduStyle(
-                                        style: TextStyle(
-                                          color: textPrimary,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 15,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 1),
-                                    Text(
-                                      '${widget.username.isNotEmpty && widget.username.toLowerCase() != 'unknown' ? "${widget.username} • " : ""}${widget.role}',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          actions: [
-                            // Dark Mode Toggle
-                            IconButton(
-                              icon: Icon(
-                                isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                                color: isDark ? const Color(0xFFFDE047) : accentColor,
-                                size: 20,
-                              ),
-                              tooltip: isDark ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode') : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                              onPressed: () async {
-                                await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
-                              },
-                            ),
-                            // Language Toggle
-                            IconButton(
-                              icon: Text(
-                                context.isUrdu ? 'EN' : 'اردو',
-                                style: context.urduStyle(
-                                  style: TextStyle(
-                                    color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: context.isUrdu ? 12 : 14,
-                                  ),
-                                ),
-                              ),
-                              onPressed: () {
-                                Provider.of<MadrassaLanguageProvider>(context, listen: false).toggleLanguage();
-                              },
-                            ),
-                            const SizedBox(width: 4),
-                          ],
+                        appBar: _buildMobileAppBar(
+                          context,
+                          isDark: isDark,
+                          cardBg: cardBg,
+                          borderColor: borderColor,
+                          textPrimary: textPrimary,
+                          textMuted: textMuted,
                         ),
                         body: Stack(
                           fit: StackFit.expand,
                           children: [
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: Opacity(
-                                  opacity: isDark ? 0.085 : 0.11,
-                                  child: Image.asset(
-                                    'assets/images/islamic_pattern.webp',
-                                    fit: BoxFit.cover,
-                                    repeat: ImageRepeat.repeat,
-                                    color: const Color(0xFFD4AF37),
-                                    colorBlendMode: BlendMode.srcIn,
-                                  ),
-                                ),
-                              ),
-                            ),
+                            _buildIslamicWatermark(isDark),
                             AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 200),
+                              duration: const Duration(milliseconds: 250),
+                              transitionBuilder: (child, animation) {
+                                return FadeTransition(
+                                  opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+                                  child: child,
+                                );
+                              },
                               child: KeyedSubtree(
                                 key: ValueKey(_selectedIndex),
                                 child: views[_selectedIndex],
@@ -288,115 +251,40 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                     } else if (isTablet) {
                       return Scaffold(
                         backgroundColor: scaffoldBg,
-                        appBar: AppBar(
-                          backgroundColor: cardBg,
-                          elevation: 0,
-                          titleSpacing: 12,
-                          automaticallyImplyLeading: false,
-                          title: Row(
-                            children: [
-                              Image.asset('assets/logo/gmwf-1.webp', height: 32),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Gulzar Madina Madrassa',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: context.urduStyle(
-                                        style: TextStyle(
-                                          color: textPrimary,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 1),
-                                    Text(
-                                      '${widget.username.isNotEmpty && widget.username.toLowerCase() != 'unknown' ? "${widget.username} • " : ""}${widget.role}',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          actions: [
-                            // Dark Mode Toggle
-                            IconButton(
-                              icon: Icon(
-                                isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                                color: isDark ? const Color(0xFFFDE047) : accentColor,
-                                size: 20,
-                              ),
-                              tooltip: isDark ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode') : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                              onPressed: () async {
-                                await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
-                              },
-                            ),
-                            // Language Toggle
-                            IconButton(
-                              icon: Text(
-                                context.isUrdu ? 'EN' : 'اردو',
-                                style: context.urduStyle(
-                                  style: TextStyle(
-                                    color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: context.isUrdu ? 12 : 14,
-                                  ),
-                                ),
-                              ),
-                              onPressed: () {
-                                Provider.of<MadrassaLanguageProvider>(context, listen: false).toggleLanguage();
-                              },
-                            ),
-                            const SizedBox(width: 8),
-                          ],
+                        appBar: _buildTabletAppBar(
+                          context,
+                          isDark: isDark,
+                          cardBg: cardBg,
+                          borderColor: borderColor,
+                          textPrimary: textPrimary,
+                          textMuted: textMuted,
+                          currentTitle: navTitles[_selectedIndex],
                         ),
                         body: Row(
                           children: [
-                            NavigationRail(
-                              backgroundColor: cardBg,
-                              selectedIndex: _selectedIndex,
-                              onDestinationSelected: (i) => setState(() => _selectedIndex = i),
-                              labelType: NavigationRailLabelType.none,
-                              selectedIconTheme: IconThemeData(color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC)),
-                              unselectedIconTheme: IconThemeData(color: textMuted),
-                              destinations: List.generate(navTitles.length, (idx) {
-                                return NavigationRailDestination(
-                                  icon: navIcons[idx],
-                                  selectedIcon: navActiveIcons[idx],
-                                  label: Text(navTitles[idx]),
-                                );
-                              }),
+                            _buildTabletSidebar(
+                              context,
+                              isDark: isDark,
+                              cardBg: cardBg,
+                              borderColor: borderColor,
+                              textMuted: textMuted,
+                              navIcons: navIcons,
+                              navActiveIcons: navActiveIcons,
+                              navTitles: navTitles,
                             ),
                             VerticalDivider(width: 1, thickness: 1, color: borderColor),
                             Expanded(
                               child: Stack(
                                 fit: StackFit.expand,
                                 children: [
-                                  Positioned.fill(
-                                    child: IgnorePointer(
-                                      child: Opacity(
-                                        opacity: isDark ? 0.085 : 0.11,
-                                        child: Image.asset(
-                                          'assets/images/islamic_pattern.webp',
-                                          fit: BoxFit.cover,
-                                          repeat: ImageRepeat.repeat,
-                                          color: const Color(0xFFD4AF37),
-                                          colorBlendMode: BlendMode.srcIn,
-                                        ),
-                                      ),
+                                  _buildIslamicWatermark(isDark),
+                                  AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 250),
+                                    child: KeyedSubtree(
+                                      key: ValueKey(_selectedIndex),
+                                      child: views[_selectedIndex],
                                     ),
                                   ),
-                                  views[_selectedIndex],
                                 ],
                               ),
                             ),
@@ -404,231 +292,58 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                         ),
                       );
                     } else {
-                      // Desktop (> 900px)
+                      // Desktop (> 960px)
                       return Scaffold(
                         backgroundColor: scaffoldBg,
-                        appBar: AppBar(
-                          backgroundColor: cardBg,
-                          elevation: 0,
-                          automaticallyImplyLeading: false,
-                          title: Row(
-                            children: [
-                              Image.asset('assets/logo/gmwf-1.webp', height: 32),
-                              const SizedBox(width: 12),
-                              Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Gulzar Madina Madrassa',
-                                    overflow: TextOverflow.ellipsis,
-                                    style: context.urduStyle(
-                                      style: TextStyle(
-                                        color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080),
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 16,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 1),
-                                  Text(
-                                    '${widget.username.isNotEmpty && widget.username.toLowerCase() != 'unknown' ? "${widget.username} • " : ""}${widget.role}',
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 11.5,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(width: 14),
-                              Container(width: 1, height: 24, color: borderColor),
-                              const SizedBox(width: 14),
-                              Flexible(
-                                child: Text(
-                                  navTitles[_selectedIndex],
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.urduStyle(
-                                    style: TextStyle(
-                                      color: textPrimary,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          actions: [
-                            // Dark Mode Toggle
-                            IconButton(
-                              icon: Icon(
-                                isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                                color: isDark ? const Color(0xFFFDE047) : accentColor,
-                                size: 20,
-                              ),
-                              tooltip: isDark ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode') : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                              onPressed: () async {
-                                await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
-                              },
-                            ),
-                            // Language Toggle
-                            IconButton(
-                              icon: Text(
-                                context.isUrdu ? 'EN' : 'اردو',
-                                style: context.urduStyle(
-                                  style: TextStyle(
-                                    color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: context.isUrdu ? 12 : 14,
-                                  ),
-                                ),
-                              ),
-                              onPressed: () {
-                                Provider.of<MadrassaLanguageProvider>(context, listen: false).toggleLanguage();
-                              },
-                            ),
-                            const SizedBox(width: 16),
-                          ],
-                          bottom: PreferredSize(
-                            preferredSize: const Size.fromHeight(1),
-                            child: Container(
-                              color: borderColor,
-                              height: 1,
-                            ),
-                          ),
-                        ),
                         body: Row(
                           children: [
-                            SizedBox(
-                              width: 180,
+                            // Executive Desktop Sidebar
+                            _buildDesktopSidebar(
+                              context,
+                              isDark: isDark,
+                              cardBg: cardBg,
+                              borderColor: borderColor,
+                              textPrimary: textPrimary,
+                              textMuted: textMuted,
+                              emeraldPrimary: emeraldPrimary,
+                              emeraldLight: emeraldLight,
+                              navIcons: navIcons,
+                              navActiveIcons: navActiveIcons,
+                              navTitles: navTitles,
+                            ),
+                            VerticalDivider(width: 1, thickness: 1, color: borderColor),
+                            // Main View Area with Desktop Top Bar
+                            Expanded(
                               child: Column(
                                 children: [
+                                  _buildDesktopTopBar(
+                                    context,
+                                    isDark: isDark,
+                                    cardBg: cardBg,
+                                    borderColor: borderColor,
+                                    textPrimary: textPrimary,
+                                    textMuted: textMuted,
+                                    currentTitle: navTitles[_selectedIndex],
+                                  ),
                                   Expanded(
-                                    child: NavigationRail(
-                                      extended: true,
-                                      backgroundColor: cardBg,
-                                      selectedIndex: _selectedIndex,
-                                      onDestinationSelected: (i) => setState(() => _selectedIndex = i),
-                                      selectedIconTheme: IconThemeData(color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC)),
-                                      unselectedIconTheme: IconThemeData(color: textMuted),
-                                      selectedLabelTextStyle: context.urduStyle(
-                                        style: TextStyle(
-                                          color: isDark ? const Color(0xFF818CF8) : const Color(0xFF4C4DDC),
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                      unselectedLabelTextStyle: context.urduStyle(
-                                        style: TextStyle(
-                                          color: textMuted,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                      leading: Column(
-                                        children: [
-                                          const SizedBox(height: 24),
-                                          Image.asset('assets/logo/gmwf-1.webp', height: 36),
-                                          const SizedBox(height: 8),
-                                          Text(
-                                            context.l.appName,
-                                            style: context.urduStyle(
-                                              style: TextStyle(
-                                                color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080),
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 14,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        _buildIslamicWatermark(isDark),
+                                        Align(
+                                          alignment: Alignment.topCenter,
+                                          child: Container(
+                                            constraints: const BoxConstraints(maxWidth: 1280),
+                                            child: AnimatedSwitcher(
+                                              duration: const Duration(milliseconds: 250),
+                                              child: KeyedSubtree(
+                                                key: ValueKey(_selectedIndex),
+                                                child: views[_selectedIndex],
                                               ),
                                             ),
                                           ),
-                                          const SizedBox(height: 16),
-                                        ],
-                                      ),
-                                      destinations: List.generate(navTitles.length, (idx) {
-                                        return NavigationRailDestination(
-                                          icon: navIcons[idx],
-                                          selectedIcon: navActiveIcons[idx],
-                                          label: Text(navTitles[idx]),
-                                        );
-                                      }),
-                                    ),
-                                  ),
-                                  Divider(height: 1, thickness: 1, color: borderColor),
-                                  Container(
-                                    color: cardBg,
-                                    width: double.infinity,
-                                    padding: const EdgeInsets.all(16),
-                                    child: Row(
-                                      children: [
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Text(
-                                                widget.username,
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 13,
-                                                  color: textPrimary,
-                                                ),
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                widget.role,
-                                                style: TextStyle(
-                                                  fontSize: 11,
-                                                  color: textMuted,
-                                                ),
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        IconButton(
-                                          icon: const Icon(Icons.logout_rounded, color: Colors.redAccent, size: 20),
-                                          tooltip: 'Sign Out',
-                                          onPressed: () async {
-                                            final navigator = Navigator.of(context);
-                                            try {
-                                              await AuthService().signOut();
-                                            } catch (e) {
-                                              debugPrint('[MadrassaDashboard] Sign out error: $e');
-                                            }
-                                            navigator.pushNamedAndRemoveUntil('/login', (_) => false);
-                                          },
                                         ),
                                       ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            VerticalDivider(width: 1, thickness: 1, color: borderColor),
-                            Expanded(
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  Positioned.fill(
-                                    child: IgnorePointer(
-                                      child: Opacity(
-                                        opacity: isDark ? 0.085 : 0.11,
-                                        child: Image.asset(
-                                          'assets/images/islamic_pattern.webp',
-                                          fit: BoxFit.cover,
-                                          repeat: ImageRepeat.repeat,
-                                          color: const Color(0xFFD4AF37),
-                                          colorBlendMode: BlendMode.srcIn,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Align(
-                                    alignment: Alignment.topCenter,
-                                    child: Container(
-                                      constraints: const BoxConstraints(maxWidth: 1200),
-                                      child: views[_selectedIndex],
                                     ),
                                   ),
                                 ],
@@ -640,21 +355,810 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                     }
                   },
                 );
+                },
+              ),
+            );
+          },
+        ),
+      );
+    },
+  );
+}
+
+  // --- Islamic Watermark Background ---
+  Widget _buildIslamicWatermark(bool isDark) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Opacity(
+          opacity: isDark ? 0.055 : 0.075,
+          child: Image.asset(
+            'assets/images/islamic_pattern.webp',
+            fit: BoxFit.cover,
+            repeat: ImageRepeat.repeat,
+            color: const Color(0xFFD4AF37),
+            colorBlendMode: BlendMode.srcIn,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- Mobile App Bar ---
+  PreferredSizeWidget _buildMobileAppBar(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textPrimary,
+    required Color textMuted,
+  }) {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(64),
+      child: Container(
+        decoration: BoxDecoration(
+          color: cardBg.withValues(alpha: 0.95),
+          border: Border(bottom: BorderSide(color: borderColor, width: 1)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.03),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(
+              children: [
+                // Logo squircle with glow
+                Container(
+                  width: 40,
+                  height: 40,
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFF0F766E).withValues(alpha: 0.3),
+                      width: 1.2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF0F766E).withValues(alpha: 0.15),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
+                ),
+                const SizedBox(width: 10),
+                // Title and role
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Gulzar Madina Madrassa',
+                        overflow: TextOverflow.ellipsis,
+                        style: context.urduStyle(
+                          style: TextStyle(
+                            color: textPrimary,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14.5,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0F766E).withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: const Color(0xFF0F766E).withValues(alpha: 0.25),
+                                width: 0.8,
+                              ),
+                            ),
+                            child: Text(
+                              widget.branchId.toUpperCase(),
+                              style: const TextStyle(
+                                color: Color(0xFF0F766E),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 9.5,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              widget.username.isNotEmpty && widget.username.toLowerCase() != 'unknown'
+                                  ? widget.username
+                                  : widget.role,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: textMuted,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // Modern Action Buttons
+                _buildSyncBtn(context, isDark),
+                const SizedBox(width: 4),
+                _buildThemeToggleBtn(isDark),
+                const SizedBox(width: 4),
+                _buildLanguageToggleBtn(context, isDark),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- Tablet App Bar ---
+  PreferredSizeWidget _buildTabletAppBar(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textPrimary,
+    required Color textMuted,
+    required String currentTitle,
+  }) {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(64),
+      child: Container(
+        decoration: BoxDecoration(
+          color: cardBg,
+          border: Border(bottom: BorderSide(color: borderColor, width: 1)),
+        ),
+        child: SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+            child: Row(
+              children: [
+                Image.asset('assets/logo/gmwf-1.webp', height: 34),
+                const SizedBox(width: 12),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Gulzar Madina Madrassa',
+                      style: context.urduStyle(
+                        style: TextStyle(
+                          color: textPrimary,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${widget.branchId.toUpperCase()} • ${widget.username} (${widget.role})',
+                      style: TextStyle(color: textMuted, fontSize: 11.5, fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0F766E).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: const Color(0xFF0F766E).withValues(alpha: 0.2)),
+                  ),
+                  child: Text(
+                    currentTitle,
+                    style: context.urduStyle(
+                      style: const TextStyle(
+                        color: Color(0xFF0F766E),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                _buildSyncBtn(context, isDark),
+                const SizedBox(width: 6),
+                _buildThemeToggleBtn(isDark),
+                const SizedBox(width: 6),
+                _buildLanguageToggleBtn(context, isDark),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- Tablet Sidebar Navigation Rail ---
+  Widget _buildTabletSidebar(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textMuted,
+    required List<IconData> navIcons,
+    required List<IconData> navActiveIcons,
+    required List<String> navTitles,
+  }) {
+    return Container(
+      width: 72,
+      color: cardBg,
+      child: NavigationRail(
+        backgroundColor: cardBg,
+        selectedIndex: _selectedIndex,
+        onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+        labelType: NavigationRailLabelType.none,
+        selectedIconTheme: const IconThemeData(color: Color(0xFF0F766E), size: 24),
+        unselectedIconTheme: IconThemeData(color: textMuted, size: 22),
+        indicatorColor: const Color(0xFF0F766E).withValues(alpha: 0.14),
+        destinations: List.generate(navTitles.length, (idx) {
+          return NavigationRailDestination(
+            icon: Icon(navIcons[idx]),
+            selectedIcon: Icon(navActiveIcons[idx]),
+            label: Text(navTitles[idx]),
+          );
+        }),
+      ),
+    );
+  }
+
+  // --- Desktop Top Bar ---
+  Widget _buildDesktopTopBar(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textPrimary,
+    required Color textMuted,
+    required String currentTitle,
+  }) {
+    return Container(
+      height: 64,
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      decoration: BoxDecoration(
+        color: cardBg,
+        border: Border(bottom: BorderSide(color: borderColor, width: 1)),
+      ),
+      child: Row(
+        children: [
+          // Section Title pill badge
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: isDark
+                    ? [const Color(0xFF0F766E).withValues(alpha: 0.25), const Color(0xFF14B8A6).withValues(alpha: 0.1)]
+                    : [const Color(0xFF0F766E).withValues(alpha: 0.12), const Color(0xFF14B8A6).withValues(alpha: 0.05)],
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: const Color(0xFF0F766E).withValues(alpha: 0.25),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF10B981),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  currentTitle,
+                  style: context.urduStyle(
+                    style: TextStyle(
+                      color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Spacer(),
+          // Branch info pill
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: borderColor),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.location_on_outlined, size: 14, color: Color(0xFF0F766E)),
+                const SizedBox(width: 4),
+                Text(
+                  widget.branchId.toUpperCase(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Sync button
+          _buildSyncBtn(context, isDark),
+          const SizedBox(width: 8),
+          // Theme Toggle
+          _buildThemeToggleBtn(isDark),
+          const SizedBox(width: 8),
+          // Language Toggle
+          _buildLanguageToggleBtn(context, isDark),
+        ],
+      ),
+    );
+  }
+
+  // --- Executive Desktop Sidebar ---
+  Widget _buildDesktopSidebar(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textPrimary,
+    required Color textMuted,
+    required Color emeraldPrimary,
+    required Color emeraldLight,
+    required List<IconData> navIcons,
+    required List<IconData> navActiveIcons,
+    required List<String> navTitles,
+  }) {
+    return Container(
+      width: 240,
+      decoration: BoxDecoration(
+        color: cardBg,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.03),
+            blurRadius: 10,
+            offset: const Offset(2, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // Sidebar Brand Header
+          Container(
+            padding: const EdgeInsets.fromLTRB(18, 24, 18, 20),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: borderColor, width: 1)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0xFF0F766E).withValues(alpha: 0.35),
+                      width: 1.2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF0F766E).withValues(alpha: 0.2),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Madrassa',
+                        style: context.urduStyle(
+                          style: TextStyle(
+                            color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 16,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        'Management Hub',
+                        style: TextStyle(
+                          color: textMuted,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Sidebar Navigation Items
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+              itemCount: navTitles.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 4),
+              itemBuilder: (context, idx) {
+                final isSelected = _selectedIndex == idx;
+                return _SidebarNavItem(
+                  title: navTitles[idx],
+                  icon: navIcons[idx],
+                  activeIcon: navActiveIcons[idx],
+                  isSelected: isSelected,
+                  isDark: isDark,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() => _selectedIndex = idx);
+                  },
+                );
               },
             ),
+          ),
+
+          // User Profile Card at Bottom
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF0E1626) : const Color(0xFFF8FAFC),
+              border: Border(top: BorderSide(color: borderColor, width: 1)),
+            ),
+            child: Row(
+              children: [
+                // Avatar Circle
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF0F766E), Color(0xFF14B8A6)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF0F766E).withValues(alpha: 0.3),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Center(
+                    child: Text(
+                      widget.username.isNotEmpty ? widget.username[0].toUpperCase() : 'M',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // User Details
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        widget.username,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12.5,
+                          color: textPrimary,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        widget.isAdmin
+                            ? 'Principal / Administrator'
+                            : widget.role,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                // Sign Out Button
+                IconButton(
+                  icon: const Icon(Icons.logout_rounded, color: Color(0xFFEF4444), size: 18),
+                  tooltip: 'Sign Out',
+                  splashRadius: 18,
+                  onPressed: () async {
+                    final navigator = Navigator.of(context);
+                    try {
+                      await AuthService().signOut();
+                    } catch (e) {
+                      debugPrint('[MadrassaDashboard] Sign out error: $e');
+                    }
+                    navigator.pushNamedAndRemoveUntil('/login', (_) => false);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Theme Toggle Button ---
+  Widget _buildThemeToggleBtn(bool isDark) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? Colors.white12 : const Color(0xFFE2E8F0),
+          width: 1,
+        ),
+      ),
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        icon: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          child: Icon(
+            isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+            key: ValueKey(isDark),
+            color: isDark ? const Color(0xFFFDE047) : const Color(0xFF0F766E),
+            size: 18,
+          ),
+        ),
+        tooltip: isDark ? 'Light Mode' : 'Dark Mode',
+        onPressed: () async {
+          await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
+        },
+      ),
+    );
+  }
+
+  // --- Language Toggle Button ---
+  Widget _buildLanguageToggleBtn(BuildContext context, bool isDark) {
+    return Container(
+      height: 36,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? Colors.white12 : const Color(0xFFE2E8F0),
+          width: 1,
+        ),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () {
+          Provider.of<MadrassaLanguageProvider>(context, listen: false).toggleLanguage();
+        },
+        child: Center(
+          child: Text(
+            context.isUrdu ? 'EN' : 'اردو',
+            style: context.urduStyle(
+              style: TextStyle(
+                color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                fontWeight: FontWeight.bold,
+                fontSize: context.isUrdu ? 12 : 13,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- Sync Cloud Data Button ---
+  Widget _buildSyncBtn(BuildContext context, bool isDark) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? Colors.white12 : const Color(0xFFE2E8F0),
+          width: 1,
+        ),
+      ),
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        icon: const Icon(
+          Icons.sync_rounded,
+          color: Color(0xFF0F766E),
+          size: 18,
+        ),
+        tooltip: context.isUrdu ? 'کلاؤڈ سے معلومات اپ ڈیٹ کریں' : 'Sync / Download Cloud Data',
+        onPressed: () async {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(context.isUrdu ? 'ڈیٹا حاصل کیا جا رہا ہے...' : 'Syncing data from cloud...'),
+              duration: const Duration(seconds: 1),
+            ),
           );
+          final now = DateTime.now();
+          await MadrassaLocalStorage.downloadStudents(widget.branchId, force: true);
+          await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month);
+          await MadrassaLocalStorage.downloadHolidays(widget.branchId);
+          if (mounted) setState(() {});
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(context.isUrdu ? 'ڈیٹا کامیابی سے اپ ڈیٹ ہو گیا' : 'Sync completed successfully!'),
+                backgroundColor: const Color(0xFF0F766E),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
         },
       ),
     );
   }
 }
 
+// ==========================================
+// DESKTOP SIDEBAR NAV ITEM (With Hover Effects)
+// ==========================================
+class _SidebarNavItem extends StatefulWidget {
+  final String title;
+  final IconData icon;
+  final IconData activeIcon;
+  final bool isSelected;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  const _SidebarNavItem({
+    required this.title,
+    required this.icon,
+    required this.activeIcon,
+    required this.isSelected,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  State<_SidebarNavItem> createState() => _SidebarNavItemState();
+}
+
+class _SidebarNavItemState extends State<_SidebarNavItem> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final activeBg = widget.isDark
+        ? const LinearGradient(
+            colors: [Color(0xFF0F766E), Color(0xFF115E59)],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+          )
+        : const LinearGradient(
+            colors: [Color(0xFF0F766E), Color(0xFF0D9488)],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+          );
+
+    final hoverBg = widget.isDark
+        ? const Color(0xFF1E293B).withValues(alpha: 0.6)
+        : const Color(0xFFF1F5F9);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            gradient: widget.isSelected ? activeBg : null,
+            color: widget.isSelected ? null : (_isHovered ? hoverBg : Colors.transparent),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: widget.isSelected
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF0F766E).withValues(alpha: 0.3),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                widget.isSelected ? widget.activeIcon : widget.icon,
+                size: 20,
+                color: widget.isSelected
+                    ? Colors.white
+                    : (_isHovered
+                        ? (widget.isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E))
+                        : (widget.isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B))),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  widget.title,
+                  style: context.urduStyle(
+                    style: TextStyle(
+                      color: widget.isSelected
+                          ? Colors.white
+                          : (_isHovered
+                              ? (widget.isDark ? Colors.white : const Color(0xFF0F172A))
+                              : (widget.isDark ? const Color(0xFFCBD5E1) : const Color(0xFF334155))),
+                      fontWeight: widget.isSelected ? FontWeight.bold : FontWeight.w500,
+                      fontSize: 13,
+                    ),
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (widget.isSelected)
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF34D399),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// MOBILE MOTION BOTTOM BAR (Glass / Floating Style)
+// ==========================================
 class MadrassaMotionBottomBar extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onTabSelected;
   final List<String> titles;
-  final List<Widget> icons;
-  final List<Widget> activeIcons;
+  final List<IconData> icons;
+  final List<IconData> activeIcons;
   final bool isDark;
 
   const MadrassaMotionBottomBar({
@@ -669,10 +1173,10 @@ class MadrassaMotionBottomBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = isDark ? const Color(0xFF1E293B) : Colors.white;
-    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
+    final bg = isDark ? const Color(0xFF101726) : Colors.white;
+    final borderColor = isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0);
     final activeGradient = isDark
-        ? const LinearGradient(colors: [Color(0xFF0D9488), Color(0xFF14B8A6)])
+        ? const LinearGradient(colors: [Color(0xFF0F766E), Color(0xFF14B8A6)])
         : const LinearGradient(colors: [Color(0xFF0F766E), Color(0xFF0D9488)]);
     final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
 
@@ -684,16 +1188,16 @@ class MadrassaMotionBottomBar extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.05),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.06),
+            blurRadius: 12,
+            offset: const Offset(0, -3),
           ),
         ],
       ),
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
           child: Row(
             children: List.generate(titles.length, (i) {
               final isSelected = selectedIndex == i;
@@ -716,7 +1220,7 @@ class MadrassaMotionBottomBar extends StatelessWidget {
                       boxShadow: isSelected
                           ? [
                               BoxShadow(
-                                color: const Color(0xFF0D9488).withValues(alpha: 0.35),
+                                color: const Color(0xFF0F766E).withValues(alpha: 0.35),
                                 blurRadius: 8,
                                 offset: const Offset(0, 2),
                               ),
@@ -728,18 +1232,16 @@ class MadrassaMotionBottomBar extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         AnimatedScale(
-                          scale: isSelected ? 1.1 : 1.0,
+                          scale: isSelected ? 1.08 : 1.0,
                           duration: const Duration(milliseconds: 200),
-                          child: IconTheme(
-                            data: IconThemeData(
-                              size: 20,
-                              color: isSelected ? Colors.white : inactiveColor,
-                            ),
-                            child: isSelected ? activeIcons[i] : icons[i],
+                          child: Icon(
+                            isSelected ? activeIcons[i] : icons[i],
+                            size: 19,
+                            color: isSelected ? Colors.white : inactiveColor,
                           ),
                         ),
                         if (isSelected) ...[
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 5),
                           Flexible(
                             child: Text(
                               titles[i],

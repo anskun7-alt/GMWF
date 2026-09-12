@@ -1,11 +1,13 @@
-// lib/pages/madrassa/views/student_detail_page.dart
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../../theme/role_theme_provider.dart';
 import '../../../widgets/read_only_document_tile.dart';
 import '../../../services/image_upload_service.dart';
 import '../../../services/user_theme_service.dart';
+import '../../../services/local_storage_service.dart';
+import '../utils/madrassa_local_storage.dart';
 import '../dialogs/enrollment_dialog.dart';
 import '../madrassa_strings.dart';
 import '../widgets/madrassa_status_menu.dart';
@@ -93,20 +95,29 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
   @override
   Widget build(BuildContext context) {
     final studentId = _data['id']?.toString() ?? '';
-
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .doc(studentId.isNotEmpty ? studentId : 'dummy')
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.hasData && snapshot.data != null && snapshot.data!.exists) {
-          final live = snapshot.data!.data() as Map<String, dynamic>?;
-          if (live != null) {
-            _data = {'id': studentId, ...live};
+    if (!Hive.isBoxOpen(LocalStorageService.madrassaStudentsBox)) {
+      return FutureBuilder<Box>(
+        future: LocalStorageService.ensureBoxOpen(LocalStorageService.madrassaStudentsBox),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator(color: Color(0xFF00796B))),
+            );
           }
+          return _buildDetailPageWithBox(context, snapshot.data!, studentId);
+        },
+      );
+    }
+    return _buildDetailPageWithBox(context, Hive.box(LocalStorageService.madrassaStudentsBox), studentId);
+  }
+
+  Widget _buildDetailPageWithBox(BuildContext context, Box studentsBox, String studentId) {
+    return ValueListenableBuilder(
+      valueListenable: studentsBox.listenable(),
+      builder: (context, Box box, _) {
+        final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId);
+        if (cached != null) {
+          _data = {'id': studentId, ...cached};
         }
 
         final name = _data['name'] ?? 'Student';

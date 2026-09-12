@@ -77,7 +77,7 @@ class SchoolAdmissionPdfService {
                       child: pw.Column(
                         children: [
                           pw.Text(
-                            'TALEEM-O-TARBIYAT SCHOOL SYSTEM',
+                            'TALEEM-WA-TARBIYAT SCHOOL SYSTEM',
                             style: pw.TextStyle(
                               fontSize: 15,
                               fontWeight: pw.FontWeight.bold,
@@ -258,7 +258,7 @@ class SchoolAdmissionPdfService {
                         style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey700),
                       ),
                       pw.Text(
-                        '2. I agree to abide by all the rules, discipline, punctuality, and attendance regulations of Taleem-o-Tarbiyat School System.',
+                        '2. I agree to abide by all the rules, discipline, punctuality, and attendance regulations of Taleem-wa-Tarbiyat School System.',
                         style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey700),
                       ),
                       pw.Text(

@@ -19,6 +19,7 @@ import 'dart:async';
 
 import '../config/constants.dart';
 import '../services/python_runner_service.dart';
+import '../utils/network_utils.dart';
 
 class LanServer {
   HttpServer? _server;
@@ -48,6 +49,10 @@ class LanServer {
   // ── [FIX 5] In-memory & disk persisted record version arbiter map ──────────
   final Map<String, int> _recordVersionMap = {};
   final Map<String, String> _recordDeviceMap = {};
+
+  // ── [LIVENESS] Track last active timestamp for each socket to evict silent/dead sockets ──
+  final Map<WebSocket, DateTime> _lastActiveTimes = {};
+  Timer? _heartbeatTimer;
 
   // ── Callbacks ──────────────────────────────────────────────────────────────
   Function(String socketId, Map<String, dynamic> info)? onClientConnected;
@@ -126,6 +131,7 @@ class LanServer {
 
       _startUdpBroadcast(ipShown);
       _startDedupPurgeTimer();
+      _startHeartbeatChecker();
 
       if (!kIsWeb) {
         if (!PythonRunnerService.instance.isRunning) {
@@ -145,6 +151,40 @@ class LanServer {
     }
   }
 
+  // ── [LIVENESS] Evict dead sockets that have gone silent ─────────────────────
+  void _startHeartbeatChecker() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      final now = DateTime.now();
+      final deadSockets = <WebSocket>[];
+      for (final client in List<WebSocket>.from(_clients)) {
+        if (client.readyState != WebSocket.open) {
+          deadSockets.add(client);
+          continue;
+        }
+        final lastActive = _lastActiveTimes[client];
+        if (lastActive != null) {
+          if (now.difference(lastActive) > const Duration(seconds: 40)) {
+            try {
+              client.add('ping');
+            } catch (_) {
+              deadSockets.add(client);
+            }
+          }
+          if (now.difference(lastActive) > const Duration(seconds: 60)) {
+            deadSockets.add(client);
+          }
+        }
+      }
+      for (final dead in deadSockets) {
+        final sid = dead.hashCode.toString();
+        print('[LanServer] ⏱️ Client $sid closed/timed out — evicting');
+        try { dead.close(1001, 'Liveness timeout'); } catch (_) {}
+        _removeClient(dead);
+      }
+    });
+  }
+
   // ── UDP Broadcast ──────────────────────────────────────────────────────────
   void _startUdpBroadcast(String ipShown) {
     try {
@@ -155,17 +195,14 @@ class LanServer {
         final payload = utf8.encode('${AppNetwork.udpMessagePrefix}$ipShown:$port');
         final broadcastAddr = InternetAddress('255.255.255.255');
         
-        InternetAddress? subnetBroadcast;
-        final parts = ipShown.split('.');
-        if (parts.length == 4) {
-          subnetBroadcast = InternetAddress('${parts[0]}.${parts[1]}.${parts[2]}.255');
-        }
-        
-        _udpTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        _udpTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
           try {
             _udpSocket?.send(payload, broadcastAddr, AppNetwork.udpBroadcastPort);
-            if (subnetBroadcast != null) {
-              _udpSocket?.send(payload, subnetBroadcast, AppNetwork.udpBroadcastPort);
+            final localSubnets = await getAllLanSubnets();
+            for (final sub in localSubnets) {
+              try {
+                _udpSocket?.send(payload, InternetAddress('$sub.255'), AppNetwork.udpBroadcastPort);
+              } catch (_) {}
             }
           } catch (e) {
             if (kDebugMode) print('[LanServer] UDP send error: $e');
@@ -207,6 +244,7 @@ class LanServer {
     final socketId = socket.hashCode.toString();
     _clients.add(socket);
     _socketById[socketId] = socket;
+    _lastActiveTimes[socket] = DateTime.now();
     if (ipAddress.isNotEmpty) {
       _clientIps[socket] = ipAddress;
     }
@@ -232,6 +270,7 @@ class LanServer {
 
   // ── Handle message ─────────────────────────────────────────────────────────
   void _handleMessage(WebSocket socket, String socketId, dynamic message) {
+    _lastActiveTimes[socket] = DateTime.now();
     if (message is! String) return;
     final trimmed = message.trim();
 
@@ -430,7 +469,7 @@ class LanServer {
         } catch (_) {}
       }
 
-      // ── Enrich and route ──────────────────────────────────────────────────
+            // ── Enrich and route ──────────────────────────────────────────────────
       final enhanced = Map<String, dynamic>.from(data);
       enhanced['_serverTimestamp']  = DateTime.now().toIso8601String();
       enhanced['_senderRole']       = _clientInfo[socket]!['role'];
@@ -440,8 +479,20 @@ class LanServer {
       // Attach socket ID so SSM can correctly credit the right connected user
       enhanced['_socketId']         = socketId;
 
-      onMessageReceived?.call(enhanced);
+      // [FIX-ROUTE-ISOLATION] Route to LAN peers FIRST and unconditionally.
+      // Previously onMessageReceived?.call(enhanced) ran before _routeMessage()
+      // inside the same try block — if the local handler (server dashboard's
+      // onMessageReceived) threw for any reason (e.g. a Hive box not open on
+      // this device), the whole _handleMessage call aborted and _routeMessage()
+      // never executed. That meant NO connected peer received the broadcast,
+      // even though the message was valid. Peer routing must never depend on
+      // whether the server's own local bookkeeping succeeds.
       _routeMessage(socket, enhanced);
+      try {
+        onMessageReceived?.call(enhanced);
+      } catch (e, st) {
+        print('❌ onMessageReceived handler threw (peer routing was NOT affected): $e\n$st');
+      }
     } catch (e) {
       print('❌ Error processing message from $socketId: $e');
     }
@@ -476,7 +527,9 @@ class LanServer {
       if (info == null || info['identified'] != true) continue;
 
       final clientBranch = (info['branchId'] as String?)?.toLowerCase().trim() ?? '';
-      if (targetBranch.isNotEmpty && clientBranch.isNotEmpty && clientBranch != targetBranch) {
+      final isUniversal = targetBranch.isEmpty || targetBranch == 'all' || targetBranch == 'default' ||
+          clientBranch.isEmpty || clientBranch == 'all' || clientBranch == 'default';
+      if (!isUniversal && clientBranch != targetBranch && !clientBranch.contains(targetBranch) && !targetBranch.contains(clientBranch)) {
         continue;
       }
 
@@ -512,6 +565,8 @@ class LanServer {
     _clients.remove(socket);
     _socketById.remove(socketId);
     _clientInfo.remove(socket);
+    _clientIps.remove(socket);
+    _lastActiveTimes.remove(socket);
 
     print('╔════════════════════════════════════════════════════════════╗');
     print('║ CLIENT DISCONNECTED: $socketId  Remaining: ${_clients.length}');
@@ -524,21 +579,23 @@ class LanServer {
   // ── Public send helpers ────────────────────────────────────────────────────
 
   /// Send to ONE specific client by socketId (used for catch-up push).
-  void sendToSocket(String socketId, String rawMessage) {
+  bool sendToSocket(String socketId, String rawMessage) {
     final socket = _socketById[socketId];
     if (socket == null) {
       print('⚠️ sendToSocket: socket $socketId not found');
-      return;
+      return false;
     }
     if (socket.readyState != WebSocket.open) {
       print('⚠️ sendToSocket: socket $socketId not open');
-      return;
+      return false;
     }
     try {
       socket.add(rawMessage);
       _messagesSent++;
+      return true;
     } catch (e) {
       print('❌ sendToSocket error for $socketId: $e');
+      return false;
     }
   }
 
@@ -592,6 +649,9 @@ class LanServer {
 
   Future<void> stop() async {
     print('[LanServer] Shutting down (${_clients.length} clients)...');
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _lastActiveTimes.clear();
     _udpTimer?.cancel();
     _udpTimer = null;
     _udpSocket?.close();
@@ -606,6 +666,7 @@ class LanServer {
     _clients.clear();
     _socketById.clear();
     _clientInfo.clear();
+    _clientIps.clear();
     try {
       await _server?.close(force: true);
     } catch (e) {

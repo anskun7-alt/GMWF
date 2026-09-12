@@ -10,11 +10,9 @@ import '../../theme/app_theme.dart';
 import '../../services/finance_local_storage.dart';
 import '../../services/finance_ledger_storage.dart';
 import '../../services/local_storage_service.dart';
-import '../../services/local_biometric_service.dart';
 import '../../services/zkteco_network_service.dart';
 import '../settings/biometric_device_manager_page.dart';
 import 'bulk_attendance_dialog.dart';
-import 'bulk_individual_attendance_dialog.dart';
 import 'shared_widgets.dart';
 import '../../services/user_theme_service.dart';
 
@@ -44,8 +42,6 @@ class _AttendanceTabState extends State<AttendanceTab> {
   // Store local modifications before saving to DB
   final Map<String, Map<String, dynamic>> _draftRecords = {};
   final TextEditingController _searchCtrl = TextEditingController();
-  String _selectedBranchFilter = 'all';
-  String _selectedDeptFilter = 'all';
   String _searchQuery = '';
   String _statusFilter = 'all';
   StreamSubscription? _punchSubscription;
@@ -106,8 +102,6 @@ class _AttendanceTabState extends State<AttendanceTab> {
   void didUpdateWidget(covariant AttendanceTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.branchId != widget.branchId) {
-      _selectedBranchFilter = 'all';
-      _selectedDeptFilter = 'all';
       _syncPunches(widget.date);
     } else if (oldWidget.date != widget.date) {
       _syncPunches(widget.date);
@@ -221,7 +215,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   // Limit by Joining Date
                   final joinStr = e['joiningDate']?.toString();
                   if (joinStr != null && joinStr.isNotEmpty) {
-                    final joinDate = DateTime.tryParse(joinStr);
+                    final joinDate = DateTime.tryParse(joinStr)?.toLocal();
                     if (joinDate != null) {
                       final joinDay = DateTime(joinDate.year, joinDate.month, joinDate.day);
                       final checkDay = DateTime(widget.date.year, widget.date.month, widget.date.day);
@@ -232,7 +226,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   // Limit by Exit Date
                   final exitStr = e['exitDate']?.toString();
                   if (exitStr != null && exitStr.isNotEmpty) {
-                    final exitDate = DateTime.tryParse(exitStr);
+                    final exitDate = DateTime.tryParse(exitStr)?.toLocal();
                     if (exitDate != null) {
                       final exitDay = DateTime(exitDate.year, exitDate.month, exitDate.day);
                       final checkDay = DateTime(widget.date.year, widget.date.month, widget.date.day);
@@ -548,31 +542,38 @@ class _AttendanceTabState extends State<AttendanceTab> {
                           return Column(children: [
                             if (isWide)
                               Container(
-                                color: const Color(0xFFF1F5F9),
+                                color: t.bgCardAlt,
                                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                                child: const Row(children: [
-                                  SizedBox(width: 44),
-                                  SizedBox(width: 12),
-                                  Expanded(child: Text('EMPLOYEE & DEPARTMENT', style: TextStyle(color: Color(0xFF64748B), fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5))),
-                                  Text('PUNCH TIMES', style: TextStyle(color: Color(0xFF64748B), fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
-                                  SizedBox(width: 50),
-                                  Text('STATUS', style: TextStyle(color: Color(0xFF64748B), fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
-                                  SizedBox(width: 70),
+                                child: Row(children: [
+                                  const SizedBox(width: 44),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: Text('EMPLOYEE & DEPARTMENT', style: TextStyle(color: t.textTertiary, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5))),
+                                  Text('PUNCH TIMES', style: TextStyle(color: t.textTertiary, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+                                  const SizedBox(width: 50),
+                                  Text('STATUS', style: TextStyle(color: t.textTertiary, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+                                  const SizedBox(width: 70),
                                 ]),
                               ),
                             Expanded(
-                              child: ListView.builder(
-                                padding: const EdgeInsets.only(bottom: 60),
-                                itemCount: displayItems.length,
-                                itemBuilder: (c, idx) {
-                                  final item = displayItems[idx];
-                                  if (item['isHeader'] == true) {
-                                    return _buildDepartmentHeader(item['departmentName'] as String, item['count'] as int, t);
-                                  }
-                                  return isWide
-                                      ? _buildCompactAttendanceRow(item, t)
-                                      : _buildAttendanceCard(item, t);
+                              child: RefreshIndicator(
+                                onRefresh: () async {
+                                  await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
+                                  await FinanceLocalStorage.downloadAttendance(widget.branchId, force: true);
                                 },
+                                child: ListView.builder(
+                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  padding: const EdgeInsets.only(bottom: 60),
+                                  itemCount: displayItems.length,
+                                  itemBuilder: (c, idx) {
+                                    final item = displayItems[idx];
+                                    if (item['isHeader'] == true) {
+                                      return _buildDepartmentHeader(item['departmentName'] as String, item['count'] as int, t);
+                                    }
+                                    return isWide
+                                        ? _buildCompactAttendanceRow(item, t)
+                                        : _buildAttendanceCard(item, t);
+                                  },
+                                ),
                               ),
                             ),
                           ]);
@@ -825,12 +826,15 @@ class _AttendanceTabState extends State<AttendanceTab> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlgState) => AlertDialog(
+          backgroundColor: t.bgCard,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Row(
             children: [
-              const Icon(Icons.fingerprint_rounded, color: Color(0xFF0F766E), size: 24),
+              Icon(Icons.fingerprint_rounded, color: t.accent, size: 24),
               const SizedBox(width: 10),
-              const Text('Assign Unmapped Biometric Scans', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Expanded(
+                child: Text('Assign Unmapped Biometric Scans', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: t.textPrimary)),
+              ),
             ],
           ),
           content: SizedBox(
@@ -842,7 +846,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 children: [
                   Text(
                     'Select which employee each punched PIN belongs to. Once assigned, all punches for that PIN will instantly mark the employee Present with their recorded punch time.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                    style: TextStyle(fontSize: 12, color: t.textSecondary),
                   ),
                   const SizedBox(height: 16),
                   ...uniquePins.map((pin) {
@@ -855,9 +859,9 @@ class _AttendanceTabState extends State<AttendanceTab> {
                       margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF8FAFC),
+                        color: t.bgCardAlt,
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                        border: Border.all(color: t.bgRule),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -873,19 +877,25 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                 child: Text('PIN $pin', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                               ),
                               const SizedBox(width: 8),
-                              Text('$punchCount scan(s) • Latest @ $timeLabel', style: const TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w500)),
+                              Text('$punchCount scan(s) • Latest @ $timeLabel', style: TextStyle(fontSize: 12, color: t.textSecondary, fontWeight: FontWeight.w500)),
                             ],
                           ),
                           const SizedBox(height: 8),
                           DropdownButtonFormField<String>(
                             value: selectedEmployees[pin],
+                            dropdownColor: t.bgCard,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
                             decoration: InputDecoration(
                               labelText: 'Assign to Employee',
+                              labelStyle: TextStyle(color: t.textSecondary),
                               isDense: true,
+                              filled: true,
+                              fillColor: t.bgCard,
                               contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+                              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
                             ),
-                            hint: const Text('Choose employee...'),
+                            hint: Text('Choose employee...', style: TextStyle(color: t.textTertiary)),
                             items: employees.map((emp) {
                               final eId = (emp['localId'] ?? emp['id']).toString();
                               final eName = emp['name']?.toString() ?? 'Employee';
@@ -896,7 +906,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                 child: Text(
                                   '$eName ($eDept)${curPin.isNotEmpty ? " [Old PIN: $curPin]" : ""}',
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(fontSize: 12.5),
+                                  style: TextStyle(fontSize: 12.5, color: t.textPrimary),
                                 ),
                               );
                             }).toList(),
@@ -917,7 +927,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
+              child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
             ),
             ElevatedButton.icon(
               onPressed: () async {
@@ -935,6 +945,15 @@ class _AttendanceTabState extends State<AttendanceTab> {
                       entityType: 'employee',
                       branchId: widget.branchId,
                     );
+                    if (emp != null) {
+                      emp['biometricPin'] = pin;
+                      emp['pin'] = pin;
+                      await FinanceLocalStorage.saveEmployee(
+                        branchId: emp['branchId']?.toString() ?? widget.branchId,
+                        data: emp,
+                        performedBy: LocalStorageService.getActiveUsername(),
+                      );
+                    }
                     count++;
                   }
                 }
@@ -943,7 +962,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text('✅ Assigned $count PIN(s) and applied punches! Staff marked Present.'),
-                      backgroundColor: const Color(0xFF0F766E),
+                      backgroundColor: t.accent,
                     ),
                   );
                   setState(() {});
@@ -952,7 +971,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
               icon: const Icon(Icons.check_circle_rounded, size: 16),
               label: const Text('Save & Apply Scans'),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0F766E),
+                backgroundColor: t.accent,
                 foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
@@ -963,21 +982,22 @@ class _AttendanceTabState extends State<AttendanceTab> {
     );
   }
 
-  void _showEditEmployeePinDialog(String empId, String empName, String currentPin) {
+  void _showEditEmployeePinDialog(String empId, String empName, String currentPin, RoleThemeData t) {
     final pinController = TextEditingController(text: currentPin);
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
+        backgroundColor: t.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: [
-            const Icon(Icons.fingerprint_rounded, color: Color(0xFF0F766E), size: 24),
+            Icon(Icons.fingerprint_rounded, color: t.accent, size: 24),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
                 'Biometric PIN for $empName',
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: t.textPrimary),
               ),
             ),
           ],
@@ -988,31 +1008,38 @@ class _AttendanceTabState extends State<AttendanceTab> {
           children: [
             Text(
               'Enter the User ID number registered for $empName on the physical ZKTeco machine (e.g. 1, 2, 1111).',
-              style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+              style: TextStyle(fontSize: 12, color: t.textSecondary),
             ),
             const SizedBox(height: 16),
             TextField(
               controller: pinController,
               keyboardType: TextInputType.number,
               autofocus: true,
+              style: TextStyle(fontSize: 13, color: t.textPrimary, fontWeight: FontWeight.w600),
               decoration: InputDecoration(
                 labelText: 'ZKTeco Hardware PIN / User ID',
+                labelStyle: TextStyle(color: t.textSecondary),
                 hintText: 'e.g. 1 or 1111',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                hintStyle: TextStyle(color: t.textTertiary),
+                filled: true,
+                fillColor: t.bgCardAlt,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.accent, width: 1.5)),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               ),
             ),
             const SizedBox(height: 8),
             Text(
               '💡 Tip: Any unmapped punches matching this PIN will automatically be routed to $empName and marked Present.',
-              style: const TextStyle(fontSize: 11, color: Color(0xFF0F766E), fontStyle: FontStyle.italic),
+              style: TextStyle(fontSize: 11, color: t.accent, fontStyle: FontStyle.italic),
             ),
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
+            child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
           ),
           ElevatedButton.icon(
             onPressed: () async {
@@ -1028,11 +1055,22 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 branchId: widget.branchId,
               );
 
+              final emp = FinanceLocalStorage.getEmployee(empId);
+              if (emp != null) {
+                emp['biometricPin'] = newPin;
+                emp['pin'] = newPin;
+                await FinanceLocalStorage.saveEmployee(
+                  branchId: emp['branchId']?.toString() ?? widget.branchId,
+                  data: emp,
+                  performedBy: LocalStorageService.getActiveUsername(),
+                );
+              }
+
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text('✅ PIN $newPin assigned to $empName! Remapped $remapped previous punch(es).'),
-                    backgroundColor: const Color(0xFF0F766E),
+                    backgroundColor: t.accent,
                   ),
                 );
                 setState(() {});
@@ -1041,7 +1079,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
             icon: const Icon(Icons.save_rounded, size: 16),
             label: const Text('Save PIN'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF0F766E),
+              backgroundColor: t.accent,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
@@ -1060,18 +1098,18 @@ class _AttendanceTabState extends State<AttendanceTab> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-              color: const Color(0xFFF1F5F9),
+              color: t.bgCardAlt,
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFFE2E8F0)),
+              border: Border.all(color: t.bgRule),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.folder_outlined, size: 13, color: Color(0xFF64748B)),
+                Icon(Icons.folder_outlined, size: 13, color: t.textSecondary),
                 const SizedBox(width: 5),
                 Text(
                   department.toUpperCase(),
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFF334155), letterSpacing: 0.5),
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: t.textPrimary, letterSpacing: 0.5),
                 ),
               ],
             ),
@@ -1079,10 +1117,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
           const SizedBox(width: 8),
           Text(
             '$count Staff',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8), fontWeight: FontWeight.w500),
+            style: TextStyle(fontSize: 11, color: t.textTertiary, fontWeight: FontWeight.w500),
           ),
           const SizedBox(width: 10),
-          const Expanded(child: Divider(color: Color(0xFFE2E8F0), thickness: 0.5)),
+          Expanded(child: Divider(color: t.bgRule, thickness: 0.5)),
         ],
       ),
     );
@@ -1094,20 +1132,20 @@ class _AttendanceTabState extends State<AttendanceTab> {
       width: 260,
       height: 36,
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
+        color: t.bgCardAlt,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: _searchQuery.isNotEmpty ? const Color(0xFF0F766E) : const Color(0xFFE2E8F0),
+          color: _searchQuery.isNotEmpty ? t.accent : t.bgRule,
           width: _searchQuery.isNotEmpty ? 1.2 : 1,
         ),
       ),
       child: TextField(
         controller: _searchCtrl,
-        style: const TextStyle(fontSize: 12, color: Color(0xFF0F172A), fontWeight: FontWeight.w500),
+        style: TextStyle(fontSize: 12, color: t.textPrimary, fontWeight: FontWeight.w500),
         decoration: InputDecoration(
           hintText: 'Search by name, PIN, role...',
-          hintStyle: const TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8)),
-          prefixIcon: const Icon(Icons.search_rounded, size: 16, color: Color(0xFF64748B)),
+          hintStyle: TextStyle(fontSize: 11.5, color: t.textTertiary),
+          prefixIcon: Icon(Icons.search_rounded, size: 16, color: t.textSecondary),
           prefixIconConstraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           suffixIcon: _searchQuery.isNotEmpty
               ? InkWell(
@@ -1116,7 +1154,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                     setState(() => _searchQuery = '');
                   },
                   borderRadius: BorderRadius.circular(12),
-                  child: const Icon(Icons.close_rounded, size: 15, color: Color(0xFF64748B)),
+                  child: Icon(Icons.close_rounded, size: 15, color: t.textSecondary),
                 )
               : null,
           suffixIconConstraints: const BoxConstraints(minWidth: 28, minHeight: 28),
@@ -1275,8 +1313,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
           runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            _actionChip('Leave Range', Icons.date_range_outlined, () => _openLeaveRangeDialog(context, t)),
-            _actionChip('Monthly Grid', Icons.table_chart_outlined, () => BulkAttendanceDialog.open(context: context, branchId: widget.branchId, theme: t, onSaved: () => setState(() {}))),
+            _actionChip('Leave Range', Icons.date_range_outlined, () => _openLeaveRangeDialog(context, t), t),
+            _actionChip('Monthly Grid', Icons.table_chart_outlined, () => BulkAttendanceDialog.open(context: context, branchId: widget.branchId, theme: t, onSaved: () => setState(() {})), t),
             _actionChip('Biometric PINs', Icons.fingerprint_rounded, () {
               Navigator.push(
                 context,
@@ -1284,13 +1322,13 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   builder: (_) => BiometricDeviceManagerPage(branchId: widget.branchId),
                 ),
               );
-            }),
+            }, t),
             ElevatedButton.icon(
               onPressed: widget.onAddEmployee,
               icon: const Icon(Icons.person_add_outlined, size: 14),
               label: const Text('Add Employee'),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0F766E),
+                backgroundColor: t.accent,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 textStyle: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
@@ -1331,25 +1369,25 @@ class _AttendanceTabState extends State<AttendanceTab> {
     );
   }
 
-  Widget _actionChip(String label, IconData icon, VoidCallback onTap) {
+  Widget _actionChip(String label, IconData icon, VoidCallback onTap, RoleThemeData t) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6.5),
         decoration: BoxDecoration(
-          color: const Color(0xFFF8FAFC),
+          color: t.bgCardAlt,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFFE2E8F0)),
+          border: Border.all(color: t.bgRule),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 13, color: const Color(0xFF475569)),
+            Icon(icon, size: 13, color: t.textSecondary),
             const SizedBox(width: 5),
             Text(
               label,
-              style: const TextStyle(color: Color(0xFF334155), fontWeight: FontWeight.w600, fontSize: 11.5),
+              style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.w600, fontSize: 11.5),
             ),
           ],
         ),
@@ -1370,22 +1408,24 @@ class _AttendanceTabState extends State<AttendanceTab> {
     required List<Map<String, dynamic>> records,
     int hol = 0,
   }) {
+    final isDark = UserThemeService.isDarkMode() || t.isDarkCanvas;
+
     if (isSunday) {
       return Container(
         margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: t.bgCard,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFE2E8F0)),
+          border: Border.all(color: t.bgRule),
         ),
         child: Row(
           children: [
-            const Icon(Icons.weekend_outlined, size: 16, color: Color(0xFF64748B)),
+            Icon(Icons.weekend_outlined, size: 16, color: t.textSecondary),
             const SizedBox(width: 8),
-            const Text('Sunday Weekend (Off Day)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF334155))),
+            Text('Sunday Weekend (Off Day)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: t.textPrimary)),
             const Spacer(),
-            Text('Working Overtime: $ot', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF0F766E))),
+            Text('Working Overtime: $ot', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: t.accent)),
           ],
         ),
       );
@@ -1395,9 +1435,9 @@ class _AttendanceTabState extends State<AttendanceTab> {
       margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: t.bgCard,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
+        border: Border.all(color: t.bgRule),
         boxShadow: const [BoxShadow(color: Color(0x04000000), blurRadius: 4, offset: Offset(0, 1))],
       ),
       child: LayoutBuilder(builder: (ctx, constraints) {
@@ -1408,29 +1448,29 @@ class _AttendanceTabState extends State<AttendanceTab> {
           runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            _statPill('All Staff', '$total', const Color(0xFF0F172A), const Color(0xFFF1F5F9), const Color(0xFFCBD5E1), filterKey: 'all'),
-            _statPill('Present', '$p', const Color(0xFF065F46), const Color(0xFFECFDF5), const Color(0xFFA7F3D0), filterKey: 'present'),
+            _statPill('All Staff', '$total', isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB), t.bgCardAlt, t.bgRule, t, isDark, filterKey: 'all'),
+            _statPill('Present', '$p', const Color(0xFF10B981), const Color(0xFF10B981).withValues(alpha: 0.12), const Color(0xFF10B981).withValues(alpha: 0.35), t, isDark, filterKey: 'present'),
             if (lat > 0)
-              _statPill('Late', '$lat', const Color(0xFF92400E), const Color(0xFFFFFBEB), const Color(0xFFFDE68A), filterKey: 'late'),
+              _statPill('Late', '$lat', const Color(0xFFF59E0B), const Color(0xFFF59E0B).withValues(alpha: 0.12), const Color(0xFFF59E0B).withValues(alpha: 0.35), t, isDark, filterKey: 'late'),
             if (lv > 0)
-              _statPill('Leave', '$lv', const Color(0xFF1E40AF), const Color(0xFFEFF6FF), const Color(0xFFBFDBFE), filterKey: 'leave'),
-            _statPill('Absent', '$a', const Color(0xFF991B1B), const Color(0xFFFEF2F2), const Color(0xFFFECACA), filterKey: 'absent'),
+              _statPill('Leave', '$lv', const Color(0xFF3B82F6), const Color(0xFF3B82F6).withValues(alpha: 0.12), const Color(0xFF3B82F6).withValues(alpha: 0.35), t, isDark, filterKey: 'leave'),
+            _statPill('Absent', '$a', const Color(0xFFEF4444), const Color(0xFFEF4444).withValues(alpha: 0.12), const Color(0xFFEF4444).withValues(alpha: 0.35), t, isDark, filterKey: 'absent'),
             if (hol > 0)
-              _statPill('Holiday', '$hol', const Color(0xFF3730A3), const Color(0xFFEEF2FF), const Color(0xFFC7D2FE), filterKey: 'holiday'),
+              _statPill('Holiday', '$hol', const Color(0xFF8B5CF6), const Color(0xFF8B5CF6).withValues(alpha: 0.12), const Color(0xFF8B5CF6).withValues(alpha: 0.35), t, isDark, filterKey: 'holiday'),
             if (_searchQuery.isNotEmpty)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFEFF6FF),
+                  color: t.accent.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: const Color(0xFFBFDBFE)),
+                  border: Border.all(color: t.accent.withValues(alpha: 0.35)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.search, size: 11, color: Color(0xFF1E40AF)),
+                    Icon(Icons.search, size: 11, color: t.accent),
                     const SizedBox(width: 4),
-                    Text('Searching: "$_searchQuery"', style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFF1E40AF))),
+                    Text('Searching: "$_searchQuery"', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: t.accent)),
                   ],
                 ),
               ),
@@ -1442,7 +1482,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
           icon: const Icon(Icons.done_all_rounded, size: 14),
           label: const Text('Mark All Present'),
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF0F766E),
+            backgroundColor: t.accent,
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
             textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
@@ -1473,8 +1513,31 @@ class _AttendanceTabState extends State<AttendanceTab> {
     );
   }
 
-  Widget _statPill(String label, String value, Color textColor, Color bg, Color border, {required String filterKey}) {
+  Widget _statPill(
+    String label,
+    String value,
+    Color themeColor,
+    Color bg,
+    Color border,
+    RoleThemeData t,
+    bool isDark, {
+    required String filterKey,
+  }) {
     final isSelected = _statusFilter == filterKey;
+    final isAll = filterKey == 'all';
+
+    final Color labelColor = isSelected
+        ? (isAll ? (isDark ? const Color(0xFF93C5FD) : const Color(0xFF1D4ED8)) : themeColor)
+        : (isAll ? t.textSecondary : themeColor.withValues(alpha: 0.9));
+
+    final Color badgeBg = isSelected
+        ? (isAll ? (isDark ? const Color(0xFF3B82F6).withValues(alpha: 0.35) : const Color(0xFFDBEAFE)) : themeColor.withValues(alpha: 0.25))
+        : (isAll ? (isDark ? const Color(0xFF334155).withValues(alpha: 0.6) : const Color(0xFFE2E8F0)) : themeColor.withValues(alpha: 0.15));
+
+    final Color badgeTextColor = isSelected
+        ? (isAll ? (isDark ? Colors.white : const Color(0xFF1E40AF)) : (isDark ? Colors.white : themeColor))
+        : (isAll ? t.textPrimary : themeColor);
+
     return InkWell(
       onTap: () {
         setState(() {
@@ -1486,29 +1549,36 @@ class _AttendanceTabState extends State<AttendanceTab> {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
         decoration: BoxDecoration(
-          color: isSelected ? textColor.withOpacity(0.08) : bg,
+          color: isSelected ? themeColor.withValues(alpha: 0.15) : bg,
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
-            color: isSelected ? textColor : border,
+            color: isSelected ? themeColor.withValues(alpha: 0.65) : border,
             width: isSelected ? 1.5 : 1,
           ),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(label, style: TextStyle(fontSize: 11, color: textColor.withOpacity(0.85), fontWeight: isSelected ? FontWeight.bold : FontWeight.w500)),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                color: labelColor,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+              ),
+            ),
             const SizedBox(width: 5),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
               decoration: BoxDecoration(
-                color: isSelected ? textColor : Colors.transparent,
+                color: badgeBg,
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
                 value,
                 style: TextStyle(
-                  fontSize: 11.5,
-                  color: isSelected ? Colors.white : textColor,
+                  fontSize: 11,
+                  color: badgeTextColor,
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -1569,13 +1639,12 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
     final rawShifts = record['shifts'];
     final Map<String, dynamic> shifts = rawShifts is Map ? Map<String, dynamic>.from(rawShifts) : {};
-    final bool hasMultiShift = shifts.length > 1 || (shifts.containsKey('morning') && shifts.containsKey('evening'));
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9), width: 1)),
+      decoration: BoxDecoration(
+        color: t.bgCard,
+        border: Border(bottom: BorderSide(color: t.bgRule, width: 1)),
       ),
       child: Row(
         children: [
@@ -1591,10 +1660,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
             borderRadius: BorderRadius.circular(16),
             child: CircleAvatar(
               radius: 16,
-              backgroundColor: const Color(0xFFF1F5F9),
+              backgroundColor: t.bgCardAlt,
               child: Text(
                 name.isNotEmpty ? name[0].toUpperCase() : '?',
-                style: const TextStyle(color: Color(0xFF0F766E), fontWeight: FontWeight.bold, fontSize: 13),
+                style: TextStyle(color: t.accent, fontWeight: FontWeight.bold, fontSize: 13),
               ),
             ),
           ),
@@ -1619,10 +1688,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
                     children: [
                       Text(
                         name,
-                        style: const TextStyle(color: Color(0xFF0F172A), fontWeight: FontWeight.w700, fontSize: 13),
+                        style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.w700, fontSize: 13),
                       ),
                       const SizedBox(width: 6),
-                      Icon(Icons.edit_outlined, size: 12, color: const Color(0xFF94A3B8).withOpacity(0.7)),
+                      Icon(Icons.edit_outlined, size: 12, color: t.textTertiary),
                     ],
                   ),
                   const SizedBox(height: 2),
@@ -1630,7 +1699,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                     children: [
                       Text(
                         '$role • $dept',
-                        style: const TextStyle(color: Color(0xFF64748B), fontSize: 11),
+                        style: TextStyle(color: t.textSecondary, fontSize: 11),
                       ),
                       Builder(builder: (_) {
                         final cred = ZkTecoNetworkService.getCredentialByEntityId(empId);
@@ -1638,15 +1707,15 @@ class _AttendanceTabState extends State<AttendanceTab> {
                             ? cred!.biometricPin 
                             : (record['biometricPin']?.toString() ?? '');
                         return InkWell(
-                          onTap: () => _showEditEmployeePinDialog(empId, name, currentPin),
+                          onTap: () => _showEditEmployeePinDialog(empId, name, currentPin, t),
                           borderRadius: BorderRadius.circular(4),
                           child: Container(
                             margin: const EdgeInsets.only(left: 6),
                             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
                             decoration: BoxDecoration(
-                              color: currentPin.isNotEmpty ? const Color(0xFFEFF6FF) : const Color(0xFFFEF2F2),
+                              color: currentPin.isNotEmpty ? const Color(0xFF3B82F6).withValues(alpha: 0.12) : const Color(0xFFEF4444).withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: currentPin.isNotEmpty ? const Color(0xFFBFDBFE) : const Color(0xFFFECACA)),
+                              border: Border.all(color: currentPin.isNotEmpty ? const Color(0xFF3B82F6).withValues(alpha: 0.35) : const Color(0xFFEF4444).withValues(alpha: 0.35)),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
@@ -1656,11 +1725,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                   style: TextStyle(
                                     fontSize: 9.5,
                                     fontWeight: FontWeight.bold,
-                                    color: currentPin.isNotEmpty ? const Color(0xFF1E40AF) : const Color(0xFFDC2626),
+                                    color: currentPin.isNotEmpty ? const Color(0xFF2563EB) : const Color(0xFFDC2626),
                                   ),
                                 ),
                                 const SizedBox(width: 2),
-                                Icon(Icons.edit, size: 8, color: currentPin.isNotEmpty ? const Color(0xFF1E40AF) : const Color(0xFFDC2626)),
+                                Icon(Icons.edit, size: 8, color: currentPin.isNotEmpty ? const Color(0xFF2563EB) : const Color(0xFFDC2626)),
                               ],
                             ),
                           ),
@@ -1675,35 +1744,67 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
           // Check In / Check Out Timestamps
           if (status == 'present' || status == 'late') ...[
-            if (hasMultiShift) ...[
+            if (shifts.isNotEmpty) ...[
               ...shifts.entries.map((entry) {
                 final sKey = entry.key.toLowerCase();
-                final sLabel = sKey.startsWith('m') ? 'M' : (sKey.startsWith('e') ? 'E' : 'N');
                 final sMap = entry.value is Map ? Map<String, dynamic>.from(entry.value as Map) : <String, dynamic>{};
                 final sIn = sMap['checkInTime']?.toString() ?? '--:--';
                 final sOut = sMap['checkOutTime']?.toString() ?? '--:--';
-                final sBranch = sMap['branchName']?.toString() ?? sMap['branchId']?.toString() ?? '';
-                final isMorning = sKey.startsWith('m');
+                String sBranch = sMap['branchName']?.toString() ?? sMap['branchId']?.toString() ?? '';
+                if (sBranch.toLowerCase().contains('haji')) {
+                  sBranch = 'Haji Camp';
+                } else if (sBranch.toLowerCase().contains('saddar')) {
+                  sBranch = 'Saddar';
+                }
+
+                final isMorning = sKey.contains('m') || sKey.contains('morn');
+                final isEvening = sKey.contains('e') || sKey.contains('even');
+                final isNight = sKey.contains('n') || sKey.contains('night');
+                final sessionLabel = isMorning ? 'M' : (isEvening ? 'E' : (isNight ? 'N' : 'S'));
+
+                final isHaji = sBranch.toLowerCase().contains('haji');
+                final badgeColor = isHaji
+                    ? const Color(0xFF6366F1) // Indigo for Haji Camp
+                    : (isMorning ? const Color(0xFF059669) : const Color(0xFF0284C7)); // Emerald for Saddar/Morning, Sky for Evening
+
                 return Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: Tooltip(
-                    message: '${isMorning ? "Morning" : (sKey.startsWith("e") ? "Evening" : "Night")} Shift${sBranch.isNotEmpty ? " • $sBranch" : ""}',
+                    message: '${isMorning ? "Morning" : (isEvening ? "Evening" : "Night")} Shift${sBranch.isNotEmpty ? " • $sBranch" : ""}',
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
                       decoration: BoxDecoration(
-                        color: isMorning ? const Color(0xFFECFDF5) : const Color(0xFFEFF6FF),
+                        color: badgeColor.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: isMorning ? const Color(0xFFA7F3D0) : const Color(0xFFBFDBFE), width: 0.8),
+                        border: Border.all(color: badgeColor.withValues(alpha: 0.35), width: 0.9),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (sBranch.isNotEmpty) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: badgeColor.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                sBranch,
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w800,
+                                  color: badgeColor,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4.5),
+                          ],
                           Text(
-                            '$sLabel: ',
+                            '$sessionLabel: ',
                             style: TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w900,
-                              color: isMorning ? const Color(0xFF047857) : const Color(0xFF1D4ED8),
+                              color: badgeColor,
                             ),
                           ),
                           Text(
@@ -1711,7 +1812,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                             style: TextStyle(
                               fontSize: 10.5,
                               fontWeight: FontWeight.bold,
-                              color: isMorning ? const Color(0xFF065F46) : const Color(0xFF1E40AF),
+                              color: t.textPrimary,
                             ),
                           ),
                         ],
@@ -1733,9 +1834,9 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFECFDF5),
+                    color: const Color(0xFF10B981).withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: const Color(0xFFA7F3D0), width: 0.8),
+                    border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.35), width: 0.8),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1744,7 +1845,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                       const SizedBox(width: 4),
                       Text(
                         checkIn != null && checkIn.isNotEmpty ? checkIn : '--:--',
-                        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFF065F46)),
+                        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: Color(0xFF059669)),
                       ),
                     ],
                   ),
@@ -1763,18 +1864,18 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                   decoration: BoxDecoration(
-                    color: checkOut != null && checkOut.isNotEmpty ? const Color(0xFFF1F5F9) : const Color(0xFFF8FAFC),
+                    color: checkOut != null && checkOut.isNotEmpty ? t.bgCardAlt : t.bgCard,
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: const Color(0xFFE2E8F0), width: 0.8),
+                    border: Border.all(color: t.bgRule, width: 0.8),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.logout_rounded, size: 10, color: Color(0xFF64748B)),
+                      Icon(Icons.logout_rounded, size: 10, color: t.textSecondary),
                       const SizedBox(width: 4),
                       Text(
                         checkOut != null && checkOut.isNotEmpty ? checkOut : 'Set Out',
-                        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: Color(0xFF475569)),
+                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: t.textSecondary),
                       ),
                     ],
                   ),
@@ -1782,7 +1883,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
               ),
             ],
           ] else ...[
-            const Text('-- : --', style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 11)),
+            Text('-- : --', style: TextStyle(color: t.textTertiary, fontSize: 11)),
           ],
 
           const SizedBox(width: 14),
@@ -1801,7 +1902,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
             icon: Icon(
               note.isNotEmpty ? Icons.sticky_note_2_rounded : Icons.note_add_outlined,
               size: 15,
-              color: note.isNotEmpty ? const Color(0xFF0F766E) : const Color(0xFFCBD5E1),
+              color: note.isNotEmpty ? t.accent : t.textTertiary,
             ),
             tooltip: note.isNotEmpty ? note : 'Add remarks',
             onPressed: () => _editNoteDialog(context, empId, record, t),
@@ -1825,15 +1926,14 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
     final rawShifts = record['shifts'];
     final Map<String, dynamic> shifts = rawShifts is Map ? Map<String, dynamic>.from(rawShifts) : {};
-    final bool hasMultiShift = shifts.length > 1 || (shifts.containsKey('morning') && shifts.containsKey('evening'));
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: t.bgCard,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
+        border: Border.all(color: t.bgRule),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1842,9 +1942,9 @@ class _AttendanceTabState extends State<AttendanceTab> {
             children: [
               CircleAvatar(
                 radius: 15,
-                backgroundColor: const Color(0xFFF1F5F9),
+                backgroundColor: t.bgCardAlt,
                 child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
-                    style: const TextStyle(color: Color(0xFF0F766E), fontWeight: FontWeight.bold, fontSize: 12)),
+                    style: TextStyle(color: t.accent, fontWeight: FontWeight.bold, fontSize: 12)),
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -1859,26 +1959,26 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF0F172A))),
+                      Text(name, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: t.textPrimary)),
                       const SizedBox(height: 2),
                       Row(
                         children: [
-                          Text('$role • $dept', style: const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+                          Text('$role • $dept', style: TextStyle(fontSize: 11, color: t.textSecondary)),
                           Builder(builder: (_) {
                             final cred = ZkTecoNetworkService.getCredentialByEntityId(empId);
                             final currentPin = cred?.biometricPin.isNotEmpty == true 
                                 ? cred!.biometricPin 
                                 : (record['biometricPin']?.toString() ?? '');
                             return InkWell(
-                              onTap: () => _showEditEmployeePinDialog(empId, name, currentPin),
+                              onTap: () => _showEditEmployeePinDialog(empId, name, currentPin, t),
                               borderRadius: BorderRadius.circular(4),
                               child: Container(
                                 margin: const EdgeInsets.only(left: 6),
                                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
                                 decoration: BoxDecoration(
-                                  color: currentPin.isNotEmpty ? const Color(0xFFEFF6FF) : const Color(0xFFFEF2F2),
+                                  color: currentPin.isNotEmpty ? const Color(0xFF3B82F6).withValues(alpha: 0.12) : const Color(0xFFEF4444).withValues(alpha: 0.12),
                                   borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(color: currentPin.isNotEmpty ? const Color(0xFFBFDBFE) : const Color(0xFFFECACA)),
+                                  border: Border.all(color: currentPin.isNotEmpty ? const Color(0xFF3B82F6).withValues(alpha: 0.35) : const Color(0xFFEF4444).withValues(alpha: 0.35)),
                                 ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -1888,11 +1988,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                       style: TextStyle(
                                         fontSize: 9.5,
                                         fontWeight: FontWeight.bold,
-                                        color: currentPin.isNotEmpty ? const Color(0xFF1E40AF) : const Color(0xFFDC2626),
+                                        color: currentPin.isNotEmpty ? const Color(0xFF2563EB) : const Color(0xFFDC2626),
                                       ),
                                     ),
                                     const SizedBox(width: 2),
-                                    Icon(Icons.edit, size: 8, color: currentPin.isNotEmpty ? const Color(0xFF1E40AF) : const Color(0xFFDC2626)),
+                                    Icon(Icons.edit, size: 8, color: currentPin.isNotEmpty ? const Color(0xFF2563EB) : const Color(0xFFDC2626)),
                                   ],
                                 ),
                               ),
@@ -1911,32 +2011,77 @@ class _AttendanceTabState extends State<AttendanceTab> {
           ),
           if (status == 'present' || status == 'late') ...[
             const SizedBox(height: 8),
-            if (hasMultiShift) ...[
+            if (shifts.isNotEmpty) ...[
               Wrap(
                 spacing: 6,
                 runSpacing: 4,
                 children: shifts.entries.map((entry) {
                   final sKey = entry.key.toLowerCase();
-                  final sLabel = sKey.startsWith('m') ? 'M' : (sKey.startsWith('e') ? 'E' : 'N');
                   final sMap = entry.value is Map ? Map<String, dynamic>.from(entry.value as Map) : <String, dynamic>{};
                   final sIn = sMap['checkInTime']?.toString() ?? '--:--';
                   final sOut = sMap['checkOutTime']?.toString() ?? '--:--';
-                  final sBranch = sMap['branchName']?.toString() ?? sMap['branchId']?.toString() ?? '';
-                  final isMorning = sKey.startsWith('m');
+                  String sBranch = sMap['branchName']?.toString() ?? sMap['branchId']?.toString() ?? '';
+                  if (sBranch.toLowerCase().contains('haji')) {
+                    sBranch = 'Haji Camp';
+                  } else if (sBranch.toLowerCase().contains('saddar')) {
+                    sBranch = 'Saddar';
+                  }
+
+                  final isMorning = sKey.contains('m') || sKey.contains('morn');
+                  final isEvening = sKey.contains('e') || sKey.contains('even');
+                  final isNight = sKey.contains('n') || sKey.contains('night');
+                  final sessionLabel = isMorning ? 'M' : (isEvening ? 'E' : (isNight ? 'N' : 'S'));
+
+                  final isHaji = sBranch.toLowerCase().contains('haji');
+                  final badgeColor = isHaji
+                      ? const Color(0xFF6366F1) // Indigo for Haji Camp
+                      : (isMorning ? const Color(0xFF059669) : const Color(0xFF0284C7)); // Emerald for Saddar/Morning, Sky for Evening
+
                   return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
                     decoration: BoxDecoration(
-                      color: isMorning ? const Color(0xFFECFDF5) : const Color(0xFFEFF6FF),
-                      borderRadius: BorderRadius.circular(5),
-                      border: Border.all(color: isMorning ? const Color(0xFFA7F3D0) : const Color(0xFFBFDBFE), width: 0.8),
+                      color: badgeColor.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: badgeColor.withValues(alpha: 0.35), width: 0.9),
                     ),
-                    child: Text(
-                      '$sLabel: $sIn ➔ $sOut${sBranch.isNotEmpty ? " ($sBranch)" : ""}',
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                        color: isMorning ? const Color(0xFF065F46) : const Color(0xFF1E40AF),
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (sBranch.isNotEmpty) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: badgeColor.withValues(alpha: 0.18),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              sBranch,
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                color: badgeColor,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4.5),
+                        ],
+                        Text(
+                          '$sessionLabel: ',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            color: badgeColor,
+                          ),
+                        ),
+                        Text(
+                          '$sIn ➔ $sOut',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.bold,
+                            color: t.textPrimary,
+                          ),
+                        ),
+                      ],
                     ),
                   );
                 }).toList(),
@@ -1946,14 +2091,14 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 children: [
                   const Icon(Icons.login_rounded, size: 12, color: Color(0xFF059669)),
                   const SizedBox(width: 4),
-                  Text('In: ${checkIn ?? "--:--"}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF065F46))),
+                  Text('In: ${checkIn ?? "--:--"}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF059669))),
                   const SizedBox(width: 14),
-                  const Icon(Icons.logout_rounded, size: 12, color: Color(0xFF64748B)),
+                  Icon(Icons.logout_rounded, size: 12, color: t.textSecondary),
                   const SizedBox(width: 4),
-                  Text('Out: ${checkOut ?? "--:--"}', style: const TextStyle(fontSize: 11, color: Color(0xFF475569))),
+                  Text('Out: ${checkOut ?? "--:--"}', style: TextStyle(fontSize: 11, color: t.textSecondary)),
                   const Spacer(),
                   if (note.isNotEmpty)
-                    Text(note, style: const TextStyle(fontSize: 10.5, fontStyle: FontStyle.italic, color: Color(0xFF64748B))),
+                    Text(note, style: TextStyle(fontSize: 10.5, fontStyle: FontStyle.italic, color: t.textTertiary)),
                 ],
               ),
             ],
@@ -1973,46 +2118,46 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
     switch (status) {
       case 'present':
-        bg = const Color(0xFFECFDF5);
-        border = const Color(0xFFA7F3D0);
-        text = const Color(0xFF065F46);
+        bg = const Color(0xFF10B981).withValues(alpha: 0.12);
+        border = const Color(0xFF10B981).withValues(alpha: 0.35);
+        text = const Color(0xFF059669);
         icon = Icons.check_circle_rounded;
         label = 'Present';
         break;
       case 'late':
-        bg = const Color(0xFFFFFBEB);
-        border = const Color(0xFFFDE68A);
-        text = const Color(0xFF92400E);
+        bg = const Color(0xFFF59E0B).withValues(alpha: 0.12);
+        border = const Color(0xFFF59E0B).withValues(alpha: 0.35);
+        text = const Color(0xFFD97706);
         icon = Icons.schedule_rounded;
         label = 'Late';
         break;
       case 'leave':
-        bg = const Color(0xFFEFF6FF);
-        border = const Color(0xFFBFDBFE);
-        text = const Color(0xFF1E40AF);
+        bg = const Color(0xFF3B82F6).withValues(alpha: 0.12);
+        border = const Color(0xFF3B82F6).withValues(alpha: 0.35);
+        text = const Color(0xFF2563EB);
         icon = Icons.event_busy_rounded;
         final lType = (record['leaveType']?.toString() ?? 'Sick').toUpperCase();
         label = 'Leave ($lType)';
         break;
       case 'half_day':
-        bg = const Color(0xFFF0FDFA);
-        border = const Color(0xFF99F6E4);
-        text = const Color(0xFF115E59);
+        bg = const Color(0xFF14B8A6).withValues(alpha: 0.12);
+        border = const Color(0xFF14B8A6).withValues(alpha: 0.35);
+        text = const Color(0xFF0D9488);
         icon = Icons.timelapse_rounded;
         label = 'Half Day';
         break;
       case 'holiday':
-        bg = const Color(0xFFEEF2FF);
-        border = const Color(0xFFC7D2FE);
-        text = const Color(0xFF3730A3);
+        bg = const Color(0xFF8B5CF6).withValues(alpha: 0.12);
+        border = const Color(0xFF8B5CF6).withValues(alpha: 0.35);
+        text = const Color(0xFF7C3AED);
         icon = Icons.celebration_rounded;
         label = 'Holiday';
         break;
       case 'absent':
       default:
-        bg = const Color(0xFFFEF2F2);
-        border = const Color(0xFFFECACA);
-        text = const Color(0xFF991B1B);
+        bg = const Color(0xFFEF4444).withValues(alpha: 0.12);
+        border = const Color(0xFFEF4444).withValues(alpha: 0.35);
+        text = const Color(0xFFDC2626);
         icon = Icons.cancel_outlined;
         label = 'Absent';
         break;
@@ -2022,7 +2167,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
       tooltip: 'Change Status',
       offset: const Offset(0, 32),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      color: Colors.white,
+      color: t.bgCard,
+      elevation: 4,
       onSelected: (newStatus) async {
         setState(() {
           record['status'] = newStatus;
@@ -2046,11 +2192,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
         await _saveRecordInstantly(empId, record);
       },
       itemBuilder: (ctx) => [
-        _buildPopupMenuItem('present', 'Present (Full Day)', Icons.check_circle_rounded, const Color(0xFF065F46), const Color(0xFFECFDF5)),
-        _buildPopupMenuItem('late', 'Late Arrival', Icons.schedule_rounded, const Color(0xFF92400E), const Color(0xFFFFFBEB)),
-        _buildPopupMenuItem('leave', 'On Approved Leave', Icons.event_busy_rounded, const Color(0xFF1E40AF), const Color(0xFFEFF6FF)),
-        _buildPopupMenuItem('half_day', 'Half Day', Icons.timelapse_rounded, const Color(0xFF115E59), const Color(0xFFF0FDFA)),
-        _buildPopupMenuItem('absent', 'Mark Absent', Icons.cancel_outlined, const Color(0xFF991B1B), const Color(0xFFFEF2F2)),
+        _buildPopupMenuItem('present', 'Present (Full Day)', Icons.check_circle_rounded, const Color(0xFF059669), const Color(0xFF10B981).withValues(alpha: 0.12)),
+        _buildPopupMenuItem('late', 'Late Arrival', Icons.schedule_rounded, const Color(0xFFD97706), const Color(0xFFF59E0B).withValues(alpha: 0.12)),
+        _buildPopupMenuItem('leave', 'On Approved Leave', Icons.event_busy_rounded, const Color(0xFF2563EB), const Color(0xFF3B82F6).withValues(alpha: 0.12)),
+        _buildPopupMenuItem('half_day', 'Half Day', Icons.timelapse_rounded, const Color(0xFF0D9488), const Color(0xFF14B8A6).withValues(alpha: 0.12)),
+        _buildPopupMenuItem('absent', 'Mark Absent', Icons.cancel_outlined, const Color(0xFFDC2626), const Color(0xFFEF4444).withValues(alpha: 0.12)),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -2096,30 +2242,31 @@ class _AttendanceTabState extends State<AttendanceTab> {
   // ── Overtime Controls for Sunday ──────────────────────────────────────────
   Widget _buildSundayOvertimeControls(Map<String, dynamic> record, String empId, RoleThemeData t) {
     final ot = record['overtimeDuration']?.toString() ?? 'none';
+    final isFull = ot == 'full';
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         InkWell(
           onTap: () async {
             setState(() {
-              record['status'] = ot == 'full' ? 'off' : 'overtime';
-              record['overtimeDuration'] = ot == 'full' ? 'none' : 'full';
+              record['status'] = isFull ? 'off' : 'overtime';
+              record['overtimeDuration'] = isFull ? 'none' : 'full';
             });
             await _saveRecordInstantly(empId, record);
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: ot == 'full' ? const Color(0xFF0F766E) : const Color(0xFFF1F5F9),
+              color: isFull ? t.accent : t.bgCardAlt,
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: ot == 'full' ? const Color(0xFF0F766E) : const Color(0xFFCBD5E1)),
+              border: Border.all(color: isFull ? t.accent : t.bgRule),
             ),
             child: Text(
               'Full OT',
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
-                color: ot == 'full' ? Colors.white : const Color(0xFF475569),
+                color: isFull ? Colors.white : t.textSecondary,
               ),
             ),
           ),
@@ -2134,23 +2281,28 @@ class _AttendanceTabState extends State<AttendanceTab> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
+        backgroundColor: t.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: Text('Remarks for ${record['name']}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF0F172A))),
+        title: Text('Remarks for ${record['name']}', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: t.textPrimary)),
         content: TextField(
           controller: ctrl,
           autofocus: true,
           maxLines: 3,
-          style: const TextStyle(fontSize: 13, color: Color(0xFF0F172A)),
-          decoration: const InputDecoration(
+          style: TextStyle(fontSize: 13, color: t.textPrimary),
+          decoration: InputDecoration(
             hintText: 'Enter reason or attendance note...',
-            border: OutlineInputBorder(),
+            hintStyle: TextStyle(color: t.textTertiary),
+            filled: true,
+            fillColor: t.bgCardAlt,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.accent, width: 1.5)),
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: t.textSecondary))),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white),
+            style: ElevatedButton.styleFrom(backgroundColor: t.accent, foregroundColor: Colors.white),
             onPressed: () async {
               record['note'] = ctrl.text.trim();
               Navigator.pop(ctx);
@@ -2183,7 +2335,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: t.bgCard,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) {
         return Padding(
@@ -2198,8 +2350,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF0F172A))),
-                      Text('$role • $dept', style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
+                      Text(name, style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: t.textPrimary)),
+                      Text('$role • $dept', style: TextStyle(fontSize: 12, color: t.textSecondary)),
                     ],
                   ),
                   if (widget.onEditEmployee != null)
@@ -2211,7 +2363,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                       icon: const Icon(Icons.edit_outlined, size: 14),
                       label: const Text('Edit Profile'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF0F766E),
+                        backgroundColor: t.accent,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         textStyle: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
@@ -2221,7 +2373,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 ],
               ),
               const SizedBox(height: 14),
-              const Divider(height: 1, color: Color(0xFFE2E8F0)),
+              Divider(height: 1, color: t.bgRule),
               const SizedBox(height: 12),
               _buildDetailItem('Phone Number', phone.isNotEmpty ? phone : 'N/A', Icons.phone_outlined, t),
               _buildDetailItem('CNIC Number', cnic.isNotEmpty ? cnic : 'N/A', Icons.badge_outlined, t),
@@ -2238,10 +2390,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
       padding: const EdgeInsets.symmetric(vertical: 5.0),
       child: Row(
         children: [
-          Icon(icon, size: 15, color: const Color(0xFF0F766E)),
+          Icon(icon, size: 15, color: t.accent),
           const SizedBox(width: 8),
-          Text('$label: ', style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
-          Text(value, style: const TextStyle(fontSize: 12, color: Color(0xFF0F172A), fontWeight: FontWeight.bold)),
+          Text('$label: ', style: TextStyle(fontSize: 12, color: t.textSecondary)),
+          Text(value, style: TextStyle(fontSize: 12, color: t.textPrimary, fontWeight: FontWeight.bold)),
         ],
       ),
     );
@@ -2293,29 +2445,31 @@ class _AttendanceTabState extends State<AttendanceTab> {
         return StatefulBuilder(
           builder: (diagCtx, setDiagState) {
             return AlertDialog(
-              backgroundColor: Colors.white,
+              backgroundColor: t.bgCard,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              title: const Text('Apply Leave / Absent Range', style: TextStyle(color: Color(0xFF0F172A), fontWeight: FontWeight.bold, fontSize: 15)),
+              title: Text('Apply Leave / Absent Range', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 15)),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Select Employee:', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                    Text('Select Employee:', style: TextStyle(color: t.textSecondary, fontSize: 11.5, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 6),
                     DropdownButtonFormField<String>(
                       value: selectedEmployeeId,
+                      dropdownColor: t.bgCard,
+                      style: TextStyle(fontSize: 12.5, color: t.textPrimary),
                       decoration: InputDecoration(
                         filled: true,
-                        fillColor: const Color(0xFFF8FAFC),
+                        fillColor: t.bgCardAlt,
                         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        border: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
-                        enabledBorder: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
+                        border: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
+                        enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
                       ),
                       items: employees.map((emp) {
                         return DropdownMenuItem<String>(
                           value: emp['localId']?.toString() ?? '',
-                          child: Text('${emp['name']} (${emp['role']})', style: const TextStyle(fontSize: 12.5)),
+                          child: Text('${emp['name']} (${emp['role']})', style: TextStyle(fontSize: 12.5, color: t.textPrimary)),
                         );
                       }).toList(),
                       onChanged: (val) {
@@ -2323,20 +2477,22 @@ class _AttendanceTabState extends State<AttendanceTab> {
                       },
                     ),
                     const SizedBox(height: 12),
-                    const Text('Status:', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                    Text('Status:', style: TextStyle(color: t.textSecondary, fontSize: 11.5, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 6),
                     DropdownButtonFormField<String>(
                       value: selectedStatus,
+                      dropdownColor: t.bgCard,
+                      style: TextStyle(fontSize: 12.5, color: t.textPrimary),
                       decoration: InputDecoration(
                         filled: true,
-                        fillColor: const Color(0xFFF8FAFC),
+                        fillColor: t.bgCardAlt,
                         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        border: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
-                        enabledBorder: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
+                        border: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
+                        enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
                       ),
-                      items: const [
-                        DropdownMenuItem(value: 'leave', child: Text('Leave', style: TextStyle(fontSize: 12.5))),
-                        DropdownMenuItem(value: 'absent', child: Text('Absent', style: TextStyle(fontSize: 12.5))),
+                      items: [
+                        DropdownMenuItem(value: 'leave', child: Text('Leave', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
+                        DropdownMenuItem(value: 'absent', child: Text('Absent', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
                       ],
                       onChanged: (val) {
                         if (val != null) setDiagState(() => selectedStatus = val);
@@ -2344,22 +2500,24 @@ class _AttendanceTabState extends State<AttendanceTab> {
                     ),
                     const SizedBox(height: 12),
                     if (selectedStatus == 'leave') ...[
-                      const Text('Leave Type:', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                      Text('Leave Type:', style: TextStyle(color: t.textSecondary, fontSize: 11.5, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 6),
                       DropdownButtonFormField<String>(
                         value: selectedLeaveType,
+                        dropdownColor: t.bgCard,
+                        style: TextStyle(fontSize: 12.5, color: t.textPrimary),
                         decoration: InputDecoration(
                           filled: true,
-                          fillColor: const Color(0xFFF8FAFC),
+                          fillColor: t.bgCardAlt,
                           contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          border: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
-                          enabledBorder: OutlineInputBorder(borderSide: const BorderSide(color: Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
+                          border: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
+                          enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: t.bgRule), borderRadius: BorderRadius.circular(8)),
                         ),
-                        items: const [
-                          DropdownMenuItem(value: 'sick', child: Text('SICK', style: TextStyle(fontSize: 12.5))),
-                          DropdownMenuItem(value: 'casual', child: Text('CASUAL', style: TextStyle(fontSize: 12.5))),
-                          DropdownMenuItem(value: 'annual', child: Text('ANNUAL', style: TextStyle(fontSize: 12.5))),
-                          DropdownMenuItem(value: 'unpaid', child: Text('UNPAID', style: TextStyle(fontSize: 12.5))),
+                        items: [
+                          DropdownMenuItem(value: 'sick', child: Text('SICK', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
+                          DropdownMenuItem(value: 'casual', child: Text('CASUAL', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
+                          DropdownMenuItem(value: 'annual', child: Text('ANNUAL', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
+                          DropdownMenuItem(value: 'unpaid', child: Text('UNPAID', style: TextStyle(fontSize: 12.5, color: t.textPrimary))),
                         ],
                         onChanged: (val) {
                           if (val != null) setDiagState(() => selectedLeaveType = val);
@@ -2373,7 +2531,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('Start Date:', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                              Text('Start Date:', style: TextStyle(color: t.textSecondary, fontSize: 11.5, fontWeight: FontWeight.bold)),
                               const SizedBox(height: 4),
                               InkWell(
                                 onTap: () async {
@@ -2392,8 +2550,12 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                 },
                                 child: Container(
                                   padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
-                                  child: Text(DateFormat('d MMM yyyy').format(startDate), style: const TextStyle(fontSize: 12)),
+                                  decoration: BoxDecoration(
+                                    color: t.bgCardAlt,
+                                    border: Border.all(color: t.bgRule),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(DateFormat('d MMM yyyy').format(startDate), style: TextStyle(fontSize: 12, color: t.textPrimary)),
                                 ),
                               ),
                             ],
@@ -2404,7 +2566,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('End Date:', style: TextStyle(color: Color(0xFF64748B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                              Text('End Date:', style: TextStyle(color: t.textSecondary, fontSize: 11.5, fontWeight: FontWeight.bold)),
                               const SizedBox(height: 4),
                               InkWell(
                                 onTap: () async {
@@ -2420,8 +2582,12 @@ class _AttendanceTabState extends State<AttendanceTab> {
                                 },
                                 child: Container(
                                   padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE2E8F0)), borderRadius: BorderRadius.circular(8)),
-                                  child: Text(DateFormat('d MMM yyyy').format(endDate), style: const TextStyle(fontSize: 12)),
+                                  decoration: BoxDecoration(
+                                    color: t.bgCardAlt,
+                                    border: Border.all(color: t.bgRule),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(DateFormat('d MMM yyyy').format(endDate), style: TextStyle(fontSize: 12, color: t.textPrimary)),
                                 ),
                               ),
                             ],
@@ -2433,9 +2599,9 @@ class _AttendanceTabState extends State<AttendanceTab> {
                 ),
               ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: t.textSecondary))),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white),
+                  style: ElevatedButton.styleFrom(backgroundColor: t.accent, foregroundColor: Colors.white),
                   onPressed: () async {
                     int count = 0;
                     var curr = DateTime(startDate.year, startDate.month, startDate.day);

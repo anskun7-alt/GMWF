@@ -328,22 +328,36 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     return completer.future;
   }
 
+  Future<DocumentSnapshot?> _fetchUserDoc() async {
+    if (widget.userId.trim().isEmpty) return null;
+    try {
+      if (widget.branchId.isNotEmpty && widget.branchId != 'all' && widget.branchId != 'global') {
+        final doc = await _firestore
+            .collection('branches')
+            .doc(widget.branchId)
+            .collection('users')
+            .doc(widget.userId)
+            .get();
+        if (doc.exists) return doc;
+      }
+      return await _firestore.collection('users').doc(widget.userId).get();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Stream<DocumentSnapshot> _userStream() {
     if (widget.userId.trim().isEmpty) {
       return const Stream.empty();
     }
-    if (widget.branchId.isNotEmpty && widget.branchId != 'all' && widget.branchId != 'global') {
-      return _firestore
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('users')
-          .doc(widget.userId)
-          .snapshots();
+    final localUser = _getLocalUser();
+    if (localUser != null) {
+      // Local user already present - avoid open Firestore snapshots
+      return const Stream.empty();
     }
-    return _firestore
-        .collection('users')
-        .doc(widget.userId)
-        .snapshots();
+    return Stream.fromFuture(_fetchUserDoc())
+        .where((doc) => doc != null)
+        .cast<DocumentSnapshot>();
   }
 
   Map<String, dynamic>? _getLocalUser() {
@@ -486,6 +500,8 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           final isDispensaryRole = _selectedRole != null &&
               ['doctor', 'receptionist', 'dispenser', 'rec+dis', 'doc+rec', 'doc+dis', 'doc+rec+dis', 'supervisor', 'branch manager']
                   .contains(_selectedRole!.toLowerCase().trim());
+          final userBranchId = (data['branchId'] ?? widget.branchId).toString().toLowerCase().trim();
+          final branchCamps = CampSessionService.getCampsForBranch(userBranchId, includeClosed: false);
 
           return Dialog(
             backgroundColor: t.bg,
@@ -602,125 +618,131 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                           ],
                           onChanged: (v) => setS(() => _selectedStatus = v),
                         ),
-
-                        if (isDispensaryRole) ...[
+                        if (isDispensaryRole && branchCamps.isNotEmpty) ...[
                           const SizedBox(height: 16),
                           Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: t.bgCardAlt,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: t.bgRule),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Icon(Icons.local_hospital_rounded, color: t.accent, size: 20),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Assigned Camp Facilities',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: t.textPrimary,
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: t.bgCardAlt,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: t.bgRule),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(Icons.local_hospital_rounded, color: t.accent, size: 20),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        'Assigned Camp Facilities',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: t.textPrimary,
+                                        ),
                                       ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 10),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    FilterChip(
-                                      label: const Text('All Dispensaries (Central)'),
-                                      selected: editedDispensaryIds.isEmpty,
-                                      selectedColor: t.accent.withValues(alpha: 0.2),
-                                      checkmarkColor: t.accent,
-                                      onSelected: (selected) {
-                                        setS(() => editedDispensaryIds.clear());
-                                      },
-                                    ),
-                                    ...['saddar', 'haji_camp'].map((campId) {
-                                      final label = CampSessionService.getCampLabel(campId);
-                                      final isSelected = editedDispensaryIds.contains(campId);
-                                      return FilterChip(
-                                        label: Text(label),
-                                        selected: isSelected,
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      FilterChip(
+                                        label: const Text('All Dispensaries (Central)'),
+                                        selected: editedDispensaryIds.isEmpty,
                                         selectedColor: t.accent.withValues(alpha: 0.2),
                                         checkmarkColor: t.accent,
                                         onSelected: (selected) {
-                                          setS(() {
-                                            if (selected) {
-                                              editedDispensaryIds.add(campId);
-                                            } else {
-                                              editedDispensaryIds.remove(campId);
-                                            }
-                                          });
+                                          setS(() => editedDispensaryIds.clear());
                                         },
-                                      );
-                                    }),
-                                  ],
-                                ),
-                              ],
+                                      ),
+                                      ...branchCamps.map((camp) {
+                                        final campId = (camp['id'] ?? '').toString().toLowerCase().trim();
+                                        final label = (camp['name'] ?? CampSessionService.getCampLabel(campId, userBranchId)).toString();
+                                        final isSelected = editedDispensaryIds.contains(campId);
+                                        return FilterChip(
+                                          label: Text(label),
+                                          selected: isSelected,
+                                          selectedColor: t.accent.withValues(alpha: 0.2),
+                                          checkmarkColor: t.accent,
+                                          onSelected: (selected) {
+                                            setS(() {
+                                              if (selected) {
+                                                editedDispensaryIds.add(campId);
+                                              } else {
+                                                editedDispensaryIds.remove(campId);
+                                              }
+                                            });
+                                          },
+                                        );
+                                      }),
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
 
-                          const SizedBox(height: 14),
-                          Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: t.bgCardAlt,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: t.bgRule),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Icon(Icons.schedule_rounded, color: t.accent, size: 20),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          'Shift Schedule (Time-based)',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
-                                            color: t.textPrimary,
+                            const SizedBox(height: 14),
+                            Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: t.bgCardAlt,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: t.bgRule),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(Icons.schedule_rounded, color: t.accent, size: 20),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            'Shift Schedule (Time-based)',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: t.textPrimary,
+                                            ),
                                           ),
-                                        ),
-                                      ],
-                                    ),
-                                    TextButton.icon(
-                                      icon: const Icon(Icons.add_circle_outline_rounded, size: 16),
-                                      label: const Text('Add Slot', style: TextStyle(fontSize: 12)),
-                                      onPressed: () async {
-                                        String selectedCamp = editedDispensaryIds.isNotEmpty ? editedDispensaryIds.first : 'saddar';
-                                        String selectedSession = 'morning';
+                                        ],
+                                      ),
+                                      TextButton.icon(
+                                        icon: const Icon(Icons.add_circle_outline_rounded, size: 16),
+                                        label: const Text('Add Slot', style: TextStyle(fontSize: 12)),
+                                        onPressed: () async {
+                                          String selectedCamp = editedDispensaryIds.isNotEmpty
+                                              ? editedDispensaryIds.first
+                                              : (branchCamps.isNotEmpty ? (branchCamps.first['id'] ?? 'central').toString() : 'central');
+                                          String selectedSession = 'morning';
 
-                                        final added = await showDialog<Map<String, String>>(
-                                          context: ctx,
-                                          builder: (dialogCtx) => StatefulBuilder(
-                                            builder: (dialogCtx, setD) {
-                                              return AlertDialog(
-                                                title: const Text('Add Mandatory Shift Schedule Slot', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                                                content: Column(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  children: [
-                                                    DropdownButtonFormField<String>(
-                                                      value: selectedCamp,
-                                                      decoration: const InputDecoration(labelText: 'Camp Facility'),
-                                                      items: ['saddar', 'haji_camp'].map((id) => DropdownMenuItem(
-                                                        value: id,
-                                                        child: Text(CampSessionService.getCampLabel(id)),
-                                                      )).toList(),
-                                                      onChanged: (v) => setD(() => selectedCamp = v ?? 'saddar'),
-                                                    ),
+                                          final added = await showDialog<Map<String, String>>(
+                                            context: ctx,
+                                            builder: (dialogCtx) => StatefulBuilder(
+                                              builder: (dialogCtx, setD) {
+                                                final campOptions = branchCamps.isNotEmpty
+                                                    ? branchCamps.map((c) => (c['id'] ?? '').toString()).toList()
+                                                    : [selectedCamp];
+
+                                                return AlertDialog(
+                                                  title: const Text('Add Mandatory Shift Schedule Slot', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                                  content: Column(
+                                                    mainAxisSize: MainAxisSize.min,
+                                                    children: [
+                                                      DropdownButtonFormField<String>(
+                                                        value: campOptions.contains(selectedCamp) ? selectedCamp : campOptions.first,
+                                                        decoration: const InputDecoration(labelText: 'Camp Facility'),
+                                                        items: campOptions.map((id) => DropdownMenuItem(
+                                                          value: id,
+                                                          child: Text(CampSessionService.getCampLabel(id, userBranchId)),
+                                                        )).toList(),
+                                                        onChanged: (v) => setD(() => selectedCamp = v ?? campOptions.first),
+                                                      ),
                                                     const SizedBox(height: 12),
                                                     DropdownButtonFormField<String>(
                                                       value: selectedSession,
@@ -845,6 +867,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                   ),
                 ),
                 // Actions
+                Divider(height: 1, thickness: 1, color: t.bgRule),
                 Container(
                   padding:
                       const EdgeInsets.fromLTRB(20, 12, 20, 20),
@@ -852,8 +875,6 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                     color: t.bgCard,
                     borderRadius: const BorderRadius.vertical(
                         bottom: Radius.circular(24)),
-                    border: Border(
-                        top: BorderSide(color: t.bgRule)),
                   ),
                   child: Row(children: [
                     Expanded(
@@ -1244,6 +1265,30 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     ));
   }
 
+  Future<void> _refreshUser() async {
+    try {
+      final doc = await _fetchUserDoc();
+      if (doc != null && doc.exists) {
+        final data = doc.data() as Map<String, dynamic>?;
+        if (data != null && Hive.isBoxOpen('local_users')) {
+          final box = Hive.box('local_users');
+          final cacheKey = data['email'] != null && (data['email'] as String).isNotEmpty
+              ? 'user:${(data['email'] as String).toLowerCase().trim()}'
+              : 'user:${widget.userId}';
+          await box.put(cacheKey, {'id': widget.userId, ...data});
+          if (mounted) setState(() {});
+        }
+      }
+      if (mounted) {
+        _snack('User details refreshed', success: true);
+      }
+    } catch (e) {
+      if (mounted) {
+        _snack('Refresh failed: $e', error: true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = RoleThemeScope.dataOf(context);
@@ -1311,10 +1356,12 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           }
 
           final data = userData!;
-          return FadeTransition(
-            opacity: _fadeAnim,
-            child: CustomScrollView(
-              physics: const BouncingScrollPhysics(),
+          return RefreshIndicator(
+            onRefresh: _refreshUser,
+            child: FadeTransition(
+              opacity: _fadeAnim,
+              child: CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
               slivers: [
                 _buildSliverAppBar(data, t),
                 SliverPadding(
@@ -1324,6 +1371,8 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                     delegate: SliverChildListDelegate([
                       const SizedBox(height: 20),
                       _buildInfoSection(data, t),
+                      const SizedBox(height: 16),
+                      _buildLinkedEmployeeSection(data, t),
                       const SizedBox(height: 16),
                       _buildContactSection(data, t),
                       const SizedBox(height: 16),
@@ -1350,11 +1399,12 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                 ),
               ],
             ),
-          );
-        },
-      ),
-    );
-  }
+          ),
+        );
+      },
+    ),
+  );
+}
 
   Widget _buildSliverAppBar(
       Map<String, dynamic> data, RoleThemeData t) {
@@ -1380,6 +1430,18 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       foregroundColor: Colors.white,
       elevation: 0,
       actions: [
+        IconButton(
+          icon: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10)),
+            child: const Icon(Icons.refresh_rounded,
+                size: 18, color: Colors.white),
+          ),
+          tooltip: 'Refresh',
+          onPressed: _refreshUser,
+        ),
         if (_canManageUserAccess(data)) ...[
           IconButton(
             icon: Container(
@@ -1625,6 +1687,479 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     ]);
   }
 
+  Widget _buildLinkedEmployeeSection(Map<String, dynamic> data, RoleThemeData t) {
+    final linkedEmpId = (data['linkedEmployeeId'] ?? data['employeeId'])?.toString();
+    Map<String, dynamic>? emp;
+    if (linkedEmpId != null && linkedEmpId.isNotEmpty) {
+      emp = FinanceLocalStorage.getEmployee(linkedEmpId);
+      if (emp == null && Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final raw = Hive.box(LocalStorageService.employeesBox).get(linkedEmpId);
+        if (raw is Map) emp = Map<String, dynamic>.from(raw);
+      }
+    }
+
+    final isLinked = emp != null && emp.isNotEmpty;
+
+    return _card(
+      t,
+      'HR Employee & Attendance Link',
+      Icons.badge_outlined,
+      const Color(0xFF0284C7),
+      [
+        if (isLinked) ...[
+          _infoRow(t, 'Employee ID', emp['id']?.toString() ?? emp['localId']?.toString() ?? linkedEmpId!, Icons.fingerprint_rounded),
+          const SizedBox(height: 8),
+          _infoRow(t, 'Staff Name', emp['name']?.toString() ?? 'N/A', Icons.person_outline),
+          const SizedBox(height: 8),
+          _infoRow(t, 'Designation', emp['designation']?.toString() ?? emp['role']?.toString() ?? 'N/A', Icons.work_outline),
+          const SizedBox(height: 8),
+          _infoRow(t, 'Department', emp['department']?.toString() ?? 'N/A', Icons.business_outlined),
+          const SizedBox(height: 8),
+          _infoRow(t, 'Base Salary', 'PKR ${NumberFormat('#,###').format((emp['currentSalary'] as num?)?.toDouble() ?? 0.0)}', Icons.payments_outlined),
+          const SizedBox(height: 8),
+          _infoRow(t, 'Attendance Status', (emp['isActive'] != false) ? 'Active on Roster' : 'Inactive / Offboarded', Icons.check_circle_outline),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF0284C7),
+                    side: const BorderSide(color: Color(0xFF0284C7)),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  icon: const Icon(Icons.swap_horiz_rounded, size: 16),
+                  label: const Text('Change Link', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  onPressed: () => _showManualLinkEmployeeDialog(data, t),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: t.danger,
+                    side: BorderSide(color: t.danger),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  icon: const Icon(Icons.link_off_rounded, size: 16),
+                  label: const Text('Unlink Employee', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  onPressed: () => _confirmUnlinkEmployee(data, linkedEmpId, t),
+                ),
+              ),
+            ],
+          ),
+        ] else ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: t.bgCardAlt,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: t.bgRule),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline, color: t.textSecondary, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'This login user is not linked to any Employee profile. It will NOT appear in Attendance, Staff Payroll, or Biometrics until linked.',
+                    style: TextStyle(color: t.textSecondary, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  icon: const Icon(Icons.link_rounded, size: 16),
+                  label: const Text('Link Existing Employee', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  onPressed: () => _showManualLinkEmployeeDialog(data, t),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: t.accent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                  label: const Text('Create & Link Employee', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  onPressed: () => _showManualCreateEmployeeDialog(data, t),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  void _showManualLinkEmployeeDialog(Map<String, dynamic> data, RoleThemeData t) {
+    final allEmployees = FinanceLocalStorage.getEmployees('all');
+    String? selectedId;
+    String search = '';
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setDState) {
+          final filtered = allEmployees.where((e) {
+            final name = (e['name'] ?? '').toString().toLowerCase();
+            final id = (e['id'] ?? e['localId'] ?? '').toString().toLowerCase();
+            final dept = (e['department'] ?? '').toString().toLowerCase();
+            final q = search.toLowerCase().trim();
+            return q.isEmpty || name.contains(q) || id.contains(q) || dept.contains(q);
+          }).toList();
+
+          return AlertDialog(
+            backgroundColor: t.bgCard,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: [
+                const Icon(Icons.link_rounded, color: Color(0xFF0284C7)),
+                const SizedBox(width: 8),
+                Text('Link User to Employee', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 16)),
+              ],
+            ),
+            content: SizedBox(
+              width: 480,
+              height: 400,
+              child: Column(
+                children: [
+                  TextField(
+                    style: TextStyle(color: t.textPrimary, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Search employees by name, department, or ID...',
+                      hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
+                      prefixIcon: Icon(Icons.search, color: t.textSecondary, size: 18),
+                      filled: true,
+                      fillColor: t.bgCardAlt,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: t.bgRule)),
+                    ),
+                    onChanged: (val) => setDState(() => search = val),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? Center(child: Text('No employees found.', style: TextStyle(color: t.textSecondary)))
+                        : ListView.builder(
+                            itemCount: filtered.length,
+                            itemBuilder: (ctx, idx) {
+                              final emp = filtered[idx];
+                              final empId = emp['id']?.toString() ?? emp['localId']?.toString() ?? '';
+                              final isSelected = selectedId == empId;
+
+                              return Container(
+                                margin: const EdgeInsets.only(bottom: 6),
+                                decoration: BoxDecoration(
+                                  color: isSelected ? const Color(0xFF0284C7).withValues(alpha: 0.12) : t.bgCardAlt,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: isSelected ? const Color(0xFF0284C7) : t.bgRule),
+                                ),
+                                child: ListTile(
+                                  dense: true,
+                                  leading: CircleAvatar(
+                                    backgroundColor: isSelected ? const Color(0xFF0284C7) : t.textTertiary.withValues(alpha: 0.2),
+                                    child: Text(
+                                      (emp['name']?.toString() ?? '?').isNotEmpty ? (emp['name']?.toString() ?? '?')[0].toUpperCase() : '?',
+                                      style: TextStyle(color: isSelected ? Colors.white : t.textPrimary, fontWeight: FontWeight.bold, fontSize: 12),
+                                    ),
+                                  ),
+                                  title: Text(emp['name']?.toString() ?? 'Unnamed', style: TextStyle(fontWeight: FontWeight.bold, color: t.textPrimary, fontSize: 13)),
+                                  subtitle: Text('${emp['department'] ?? 'General'} • ${emp['designation'] ?? emp['role'] ?? 'Staff'} (ID: $empId)', style: TextStyle(color: t.textSecondary, fontSize: 11)),
+                                  trailing: isSelected ? const Icon(Icons.check_circle, color: Color(0xFF0284C7), size: 20) : null,
+                                  onTap: () => setDState(() => selectedId = empId),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogCtx),
+                child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0284C7),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: selectedId == null
+                    ? null
+                    : () async {
+                        Navigator.pop(dialogCtx);
+                        final success = await FinanceLocalStorage.linkUserToEmployee(
+                          userId: widget.userId,
+                          employeeId: selectedId!,
+                        );
+                        if (success) {
+                          setState(() {
+                            data['linkedEmployeeId'] = selectedId;
+                            data['employeeId'] = selectedId;
+                          });
+                          _snack('✅ Successfully linked User to Employee $selectedId!', success: true);
+                        } else {
+                          _snack('❌ Failed to link Employee.', error: true);
+                        }
+                      },
+                child: const Text('Link Selected Employee', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _showManualCreateEmployeeDialog(Map<String, dynamic> data, RoleThemeData t) {
+    final nameCtrl = TextEditingController(text: data['name'] ?? data['username'] ?? '');
+    final cnicCtrl = TextEditingController(text: data['cnic'] ?? data['identification'] ?? '');
+    final phoneCtrl = TextEditingController(text: data['phone'] ?? '');
+    final roleCtrl = TextEditingController(text: data['role'] ?? 'Staff');
+    final salaryCtrl = TextEditingController(text: (data['salary'] ?? data['baseSalary'] ?? '30000').toString());
+    final bankCtrl = TextEditingController(text: data['bankName'] ?? 'Meezan Bank Limited');
+    final accountCtrl = TextEditingController(text: data['bankAccount'] ?? '');
+    String selectedDept = 'Office';
+    String selectedBranch = widget.branchId.isNotEmpty && widget.branchId != 'all' ? widget.branchId : 'gujrat';
+
+    final depts = ['Administration Staff', 'Dispensary', 'Office', 'Madrassa', 'School', 'Dasterkhwaan', 'Welfare', 'Security', 'Maintenance'];
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setDState) {
+          return AlertDialog(
+            backgroundColor: t.bgCard,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: [
+                Icon(Icons.person_add_alt_1_rounded, color: t.accent),
+                const SizedBox(width: 8),
+                Text('Create & Link Employee Profile', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 16)),
+              ],
+            ),
+            content: SizedBox(
+              width: 500,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nameCtrl,
+                      style: TextStyle(color: t.textPrimary, fontSize: 13),
+                      decoration: InputDecoration(labelText: 'Employee Full Name *', labelStyle: TextStyle(color: t.textSecondary)),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: selectedDept,
+                            dropdownColor: t.bgCard,
+                            decoration: InputDecoration(labelText: 'Department', labelStyle: TextStyle(color: t.textSecondary)),
+                            items: depts.map((d) => DropdownMenuItem(value: d, child: Text(d, style: TextStyle(color: t.textPrimary, fontSize: 12)))).toList(),
+                            onChanged: (val) { if (val != null) setDState(() => selectedDept = val); },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: roleCtrl,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(labelText: 'Designation / Role', labelStyle: TextStyle(color: t.textSecondary)),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: cnicCtrl,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(labelText: 'CNIC / ID', labelStyle: TextStyle(color: t.textSecondary)),
+                            inputFormatters: [CNICInputFormatter()],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: phoneCtrl,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(labelText: 'Phone', labelStyle: TextStyle(color: t.textSecondary)),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: salaryCtrl,
+                      style: TextStyle(color: t.textPrimary, fontSize: 13),
+                      decoration: InputDecoration(labelText: 'Base Salary (PKR) *', labelStyle: TextStyle(color: t.textSecondary)),
+                      keyboardType: TextInputType.number,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: bankCtrl,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(labelText: 'Bank Name', labelStyle: TextStyle(color: t.textSecondary)),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: accountCtrl,
+                            style: TextStyle(color: t.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(labelText: 'Account / IBAN', labelStyle: TextStyle(color: t.textSecondary)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogCtx),
+                child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: t.accent,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: () async {
+                  if (nameCtrl.text.trim().isEmpty) {
+                    _snack('Please enter employee name.', error: true);
+                    return;
+                  }
+                  final salary = double.tryParse(salaryCtrl.text.trim()) ?? 0.0;
+                  final newEmpId = 'emp_${DateTime.now().millisecondsSinceEpoch}';
+
+                  final empData = <String, dynamic>{
+                    'localId': newEmpId,
+                    'id': newEmpId,
+                    'name': nameCtrl.text.trim(),
+                    'role': roleCtrl.text.trim(),
+                    'designation': roleCtrl.text.trim(),
+                    'department': selectedDept,
+                    'branchId': selectedBranch,
+                    'cnic': cnicCtrl.text.trim(),
+                    'phone': phoneCtrl.text.trim(),
+                    'currentSalary': salary,
+                    'baseSalary': salary,
+                    'bankName': bankCtrl.text.trim(),
+                    'bankAccount': accountCtrl.text.trim(),
+                    'isActive': true,
+                    'joiningDate': DateTime.now().toIso8601String(),
+                    'userId': widget.userId,
+                    'linkedUserId': widget.userId,
+                  };
+
+                  Navigator.pop(dialogCtx);
+                  await FinanceLocalStorage.saveEmployee(
+                    branchId: selectedBranch,
+                    data: empData,
+                    performedBy: LocalStorageService.getActiveUsername(),
+                  );
+                  await FinanceLocalStorage.linkUserToEmployee(
+                    userId: widget.userId,
+                    employeeId: newEmpId,
+                  );
+
+                  setState(() {
+                    data['linkedEmployeeId'] = newEmpId;
+                    data['employeeId'] = newEmpId;
+                  });
+                  _snack('✅ Created and linked Employee $newEmpId successfully!', success: true);
+                },
+                child: const Text('Save & Link Employee', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _confirmUnlinkEmployee(Map<String, dynamic> data, String? empId, RoleThemeData t) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: t.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.link_off_rounded, color: t.danger),
+            const SizedBox(width: 8),
+            Text('Unlink Employee Profile', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 16)),
+          ],
+        ),
+        content: Text(
+          'Are you sure you want to disconnect this login User from Employee profile ($empId)?\n\nThe employee profile will remain intact in HR records, but will no longer be attached to this login account.',
+          style: TextStyle(color: t.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, false),
+            child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: t.danger,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text('Unlink', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      final success = await FinanceLocalStorage.unlinkUserAndEmployee(
+        userId: widget.userId,
+        employeeId: empId,
+      );
+      if (success) {
+        setState(() {
+          data.remove('linkedEmployeeId');
+          data.remove('employeeId');
+        });
+        _snack('✅ Successfully unlinked Employee profile.', success: true);
+      } else {
+        _snack('❌ Failed to unlink Employee profile.', error: true);
+      }
+    }
+  }
+
   Widget _buildFinancialSection(
       Map<String, dynamic> data, RoleThemeData t) {
     return _card(t, 'Financial',
@@ -1670,8 +2205,8 @@ class _UserDetailScreenState extends State<UserDetailScreen>
             : null);
 
     if (deviceInfo == null && widget.userId.isNotEmpty) {
-      return StreamBuilder<DocumentSnapshot>(
-        stream: FirebaseFirestore.instance.collection('users').doc(widget.userId).snapshots(),
+      return FutureBuilder<DocumentSnapshot>(
+        future: FirebaseFirestore.instance.collection('users').doc(widget.userId).get(),
         builder: (context, snapshot) {
           Map<String, dynamic>? fetchedInfo;
           if (snapshot.hasData && snapshot.data!.exists) {
@@ -1682,8 +2217,8 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           }
 
           if (fetchedInfo == null) {
-            return StreamBuilder<DocumentSnapshot>(
-              stream: FirebaseFirestore.instance.collection('user_sessions').doc(widget.userId).snapshots(),
+            return FutureBuilder<DocumentSnapshot>(
+              future: FirebaseFirestore.instance.collection('user_sessions').doc(widget.userId).get(),
               builder: (context, sessionSnap) {
                 if (sessionSnap.hasData && sessionSnap.data!.exists) {
                   final sData = sessionSnap.data!.data() as Map<String, dynamic>?;

@@ -25,8 +25,6 @@ import 'pages/overview.dart';
 import 'pages/dispensary/dispensar/dispensar_screen.dart';
 import 'pages/dispensary/dispensar/inventory.dart';
 import 'pages/donations/donations_screen.dart';
-import 'pages/donations/donations_shared.dart';
-
 
 import 'services/local_storage_service.dart';
 import 'services/donations_local_storage.dart';
@@ -36,6 +34,8 @@ import 'services/zkteco_network_service.dart';
 import 'services/python_runner_service.dart';
 import 'realtime/server_sync_manager.dart';
 import 'realtime/realtime_router.dart';
+import 'services/cloud_messaging_service.dart';
+import 'services/auth_service.dart';
 import 'widgets/gmwf_loading_view.dart';
 import 'widgets/custom_title_bar.dart';
 import 'tools/finance_v2_migration.dart';
@@ -66,8 +66,7 @@ Future<void> _logError(String message, [String? stack]) async {
     final dir = await getApplicationSupportDirectory();
     final logFile = File(path.join(dir.path, 'gmwf_crash.log'));
     final timestamp = DateTime.now().toIso8601String();
-    final entry =
-        '[$timestamp] ERROR: $message\nSTACK: ${stack ?? ''}\n\n';
+    final entry = '[$timestamp] ERROR: $message\nSTACK: ${stack ?? ''}\n\n';
     await logFile.writeAsString(entry, mode: FileMode.append);
     debugPrint("Error logged to file: $message");
   } catch (e) {
@@ -100,82 +99,12 @@ Future<void> _clearCrashMarkerOnSuccess() async {
   }
 }
 
-void _showCrashScreen(Object error, StackTrace stack) {
-  // Ensure we show the window if it's hidden
-  if (!kIsWeb && Platform.isWindows) {
-    try { appWindow.show(); } catch (_) {}
-  }
-
-  final crashApp = MaterialApp(
-    debugShowCheckedModeBanner: false,
-    home: Scaffold(
-      backgroundColor: Colors.red[50],
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error_outline, size: 72, color: Colors.red),
-              const SizedBox(height: 24),
-              const Text('GMWF — Startup Error',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              Text(
-                'The app failed to start:\n$error',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton.icon(
-                onPressed: () => WidgetsBinding.instance.reassembleApplication(),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry Startup'),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
-              ),
-              const SizedBox(height: 12),
-              TextButton.icon(
-                onPressed: () async {
-                  try {
-                    // Try to kill any other gmwf processes that might be locking the files.
-                    // This uses taskkill on Windows.
-                    await Process.run('taskkill', ['/f', '/im', 'gmwf.exe']);
-                    // The current process might also be killed, which is fine as it allows a clean restart.
-                  } catch (e) {
-                    debugPrint("Failed to kill processes: $e");
-                  }
-                },
-                icon: const Icon(Icons.cleaning_services, color: Colors.orange),
-                label: const Text('Kill Background Processes & Clear Locks', style: TextStyle(color: Colors.orange)),
-              ),
-              const SizedBox(height: 8),
-              TextButton.icon(
-                onPressed: () async {
-                  try {
-                    await LocalStorageService.clearAllData();
-                    WidgetsBinding.instance.reassembleApplication();
-                  } catch (e) {
-                    debugPrint("Factory reset failed: $e");
-                  }
-                },
-                icon: const Icon(Icons.delete_forever, color: Colors.red),
-                label: const Text('Factory Reset (Wipe All Data)', style: TextStyle(color: Colors.red)),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-
-  // If we haven't started an app yet, start this one immediately
-  runApp(crashApp);
-}
-
 void _installGlobalErrorHandlers() {
   FlutterError.onError = (FlutterErrorDetails details) {
     if (!kIsWeb && Platform.isWindows) {
-      try { appWindow.show(); } catch (_) {}
+      try {
+        appWindow.show();
+      } catch (_) {}
     }
     FlutterError.presentError(details);
 
@@ -185,6 +114,8 @@ void _installGlobalErrorHandlers() {
         exStr.contains('hassize') ||
         exStr.contains('_needslayout') ||
         exStr.contains('needs-paint') ||
+        exStr.contains('_debugdoingthislayout') ||
+        exStr.contains('parentdatadirty') ||
         exStr.contains('childsemantics');
 
     if (!isTransientLayout) {
@@ -196,13 +127,18 @@ void _installGlobalErrorHandlers() {
 
   PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
     if (!kIsWeb && Platform.isWindows) {
-      try { appWindow.show(); } catch (_) {}
+      try {
+        appWindow.show();
+      } catch (_) {}
     }
     final errStr = error.toString().toLowerCase();
     final isTransientLayout = errStr.contains('overflowed') ||
         errStr.contains('renderbox was not laid out') ||
         errStr.contains('hassize') ||
         errStr.contains('_needslayout') ||
+        errStr.contains('needs-paint') ||
+        errStr.contains('_debugdoingthislayout') ||
+        errStr.contains('parentdatadirty') ||
         errStr.contains('childsemantics');
 
     if (!isTransientLayout) {
@@ -219,7 +155,7 @@ Future<void> main() async {
   FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
   _installGlobalErrorHandlers();
 
-  // Show window immediately on Desktop so app is NEVER hidden on launch or startup warning
+  // Show window immediately on Desktop so app is NEVER hidden on launch
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     try {
       doWhenWindowReady(() {
@@ -249,217 +185,96 @@ Future<void> main() async {
               return Firebase.app();
             });
 
-      if (kIsWeb) {
-        await Hive.initFlutter();
-      } else if (Platform.isWindows) {
-        final appSupportDir = await getApplicationSupportDirectory();
-        final hiveDir = path.join(appSupportDir.path, 'gmwf_hive');
-        LocalStorageService.setHiveDirectoryPath(hiveDir);
-        await Hive.initFlutter(hiveDir);
-      } else {
-        final appSupportDir = await getApplicationSupportDirectory();
-        LocalStorageService.setHiveDirectoryPath(appSupportDir.path);
-        await Hive.initFlutter();
-      }
-      Hive.registerAdapter(TimestampAdapter());
+        if (kIsWeb) {
+          await Hive.initFlutter();
+        } else if (Platform.isWindows) {
+          final appSupportDir = await getApplicationSupportDirectory();
+          final hiveDir = path.join(appSupportDir.path, 'gmwf_hive');
+          LocalStorageService.setHiveDirectoryPath(hiveDir);
+          await Hive.initFlutter(hiveDir);
+        } else {
+          final appSupportDir = await getApplicationSupportDirectory();
+          LocalStorageService.setHiveDirectoryPath(appSupportDir.path);
+          await Hive.initFlutter();
+        }
+        Hive.registerAdapter(TimestampAdapter());
 
-      try {
-        await Hive.openBox('app_settings');
-      } catch (hiveErr) {
-        debugPrint('[Main] Hive app_settings box error: $hiveErr');
-      }
+        try {
+          await Hive.openBox('app_settings');
+        } catch (hiveErr) {
+          debugPrint('[Main] Hive app_settings box error: $hiveErr');
+        }
 
-      await Future.wait<dynamic>([
-        LocalStorageService.init(),
-        DonationsLocalStorage.init(),
-        ServerSyncManager.initHive(),
-        RealtimeRouter.init(),
-      ]).catchError((e) {
-        debugPrint('[Main] Non-critical service init warning: $e');
-        return <dynamic>[];
-      });
-
-      CampSessionService.checkClockSkew();
-      unawaited(CampSessionService.syncInternetTime());
-
-      await LocalStorageService.seedLocalAdmins();
-      LocalStorageService.repairMisassignedShiftSessions();
-    } catch (e, st) {
-      debugPrint('[Main] Pre-init error caught safely: $e');
-      _logError('Pre-init error: $e', st.toString());
-    }
-
-    runApp(const ProviderScope(child: MyApp()));
-  },
-);
-}
-
-/// A dedicated screen that handles the async initialization of the app
-/// while showing a loading indicator.
-class InitializationScreen extends StatefulWidget {
-const InitializationScreen({super.key});
-@override
-State<InitializationScreen> createState() => _InitializationScreenState();
-}
-
-class _InitializationScreenState extends State<InitializationScreen> {
-bool _hasError = false;
-String _errorMsg = "";
-
-@override
-void initState() {
-  super.initState();
-  if (kIsWeb || !Platform.environment.containsKey('FLUTTER_TEST')) {
-    _startInit();
-  }
-}
-
-Future<void> _startInit() async {
-  try {
-    debugPrint("[Init] Starting fast async setup...");
-    
-    // 1. Firebase (fast 5s timeout)
-    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)
-        .timeout(const Duration(seconds: 5))
-        .catchError((e) {
-          debugPrint('[Init] Firebase init warning/timeout: $e');
-          return Firebase.app();
+        await Future.wait<dynamic>([
+          LocalStorageService.init(),
+          DonationsLocalStorage.init(),
+          ServerSyncManager.initHive(),
+          RealtimeRouter.init(),
+        ]).catchError((e) {
+          debugPrint('[Main] Non-critical service init warning: $e');
+          return <dynamic>[];
         });
 
-    // 2. Hive
-    if (kIsWeb) {
-      await Hive.initFlutter();
-    } else if (Platform.isWindows) {
-      final appSupportDir = await getApplicationSupportDirectory();
-      final hiveDir = path.join(appSupportDir.path, 'gmwf_hive');
-      await Hive.initFlutter(hiveDir);
-    } else {
-      await Hive.initFlutter();
-    }
-    Hive.registerAdapter(TimestampAdapter());
+        await CampSessionService.clearServerOffset();
+        CampSessionService.checkClockSkew();
+        unawaited(CampSessionService.syncInternetTime());
 
-    // 3. Essential local services
-    await Future.wait<dynamic>([
-      LocalStorageService.init(),
-      DonationsLocalStorage.init(),
-      ServerSyncManager.initHive(),
-      RealtimeRouter.init(),
-      PdfAssetCache.preload(),
-    ]).catchError((e) {
-      debugPrint('[Init] Non-critical service init warning: $e');
-      return <dynamic>[];
-    });
+        await LocalStorageService.seedLocalAdmins();
+        await _clearCrashMarkerOnSuccess();
+        AuthService.onSignOutCallback = AuthHomeWrapper.clearSession;
 
-      await LocalStorageService.seedLocalAdmins();
-      await _clearCrashMarkerOnSuccess();
-
-      // Start embedded ZKTeco biometric listener & Firestore punch stream immediately
-      if (!kIsWeb) {
-        unawaited(ZkTecoNetworkService.startServer().catchError((e) {
-          debugPrint('[Init] ZKTeco background server start error: $e');
-          return false;
+        // Start background daemons & services
+        unawaited(CloudMessagingService().initialize().catchError((e) {
+          debugPrint('[Init] CloudMessagingService init warning: $e');
         }));
 
-        // Automatically start Python ZKTeco background sync daemon
-        unawaited(PythonRunnerService.instance.initAutoStart().catchError((e) {
-          debugPrint('[Init] Python background sync auto-start warning: $e');
-          return false;
-        }));
-      }
+        if (!kIsWeb) {
+          unawaited(ZkTecoNetworkService.startServer().catchError((e) {
+            debugPrint('[Init] ZKTeco background server start error: $e');
+            return false;
+          }));
 
-      // Launch background tasks without blocking UI splash removal
-      unawaited(_runBackgroundCleanups());
-
-      debugPrint("[Init] Fast setup success. Removing splash & moving to home.");
-      if (mounted) {
-        FlutterNativeSplash.remove();
-        if (navigatorKey.currentState != null) {
-          navigatorKey.currentState!.pushReplacementNamed('/home');
-        } else {
-          Navigator.pushReplacementNamed(context, '/home');
+          unawaited(PythonRunnerService.instance.initAutoStart().catchError((e) {
+            debugPrint('[Init] Python background sync auto-start warning: $e');
+            return false;
+          }));
         }
+
+        unawaited(_runBackgroundCleanups());
+      } catch (e, st) {
+        debugPrint('[Main] Pre-init error caught safely: $e');
+        _logError('Pre-init error: $e', st.toString());
       }
-    } catch (e, st) {
-      debugPrint("[Init] Fast init completed with warning: $e");
-      debugPrint("[Init] STACK TRACE: $st");
-      await _logError("Init Warning: $e", st.toString());
-      if (mounted) {
-        FlutterNativeSplash.remove();
-        if (navigatorKey.currentState != null) {
-          navigatorKey.currentState!.pushReplacementNamed('/home');
-        } else {
-          Navigator.pushReplacementNamed(context, '/home');
-        }
-      }
-    }
-  }
 
-  static Future<void> _runBackgroundCleanups() async {
-    try {
-      await FinanceV2Migration.runMigration();
-      await LocalStorageService.forceDeduplicatePatients();
+      // Memory optimization: clamp image cache to 25MB to prevent unbounded RAM bloat
+      try {
+        PaintingBinding.instance.imageCache.maximumSize = 100;
+        PaintingBinding.instance.imageCache.maximumSizeBytes = 25 * 1024 * 1024;
+      } catch (_) {}
 
-      if (Hive.isBoxOpen(DonationsLocalStorage.donationsBox)) {
-        final box = Hive.box(DonationsLocalStorage.donationsBox);
-        final nestedKeys = box.keys.where((k) => k.toString().split('__').length > 3).toList();
-        if (nestedKeys.isNotEmpty) {
-          await box.deleteAll(nestedKeys);
-          await box.flush();
-        }
-      }
-    } catch (cleanupErr) {
-      debugPrint('[CLEANUP] Error during background cleanup: $cleanupErr');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_hasError) {
-      // Return the error view directly if init fails
-      return _buildErrorView();
-    }
-
-    // While initializing, show the GMWF loading view
-    return const GmwfLoadingView();
-  }
-
-  Widget _buildErrorView() {
-    return Scaffold(
-      backgroundColor: Colors.red[50],
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error_outline, size: 72, color: Colors.red),
-              const SizedBox(height: 24),
-              const Text('GMWF — Startup Error', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              Text(_errorMsg, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
-              const SizedBox(height: 32),
-              ElevatedButton.icon(
-                onPressed: () => _startInit(),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry Startup'),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
-              ),
-              const SizedBox(height: 12),
-              TextButton.icon(
-                onPressed: () async {
-                  await Process.run('taskkill', ['/f', '/im', 'gmwf.exe']);
-                },
-                icon: const Icon(Icons.cleaning_services, color: Colors.orange),
-                label: const Text('Kill Background Processes', style: TextStyle(color: Colors.orange)),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+      runApp(const ProviderScope(child: MyApp()));
+    },
+  );
 }
 
+Future<void> _runBackgroundCleanups() async {
+  try {
+    await FinanceV2Migration.runMigration();
+    await LocalStorageService.forceDeduplicatePatients();
+    await LocalStorageService.repairMisassignedShiftSessions();
+
+    if (Hive.isBoxOpen(DonationsLocalStorage.donationsBox)) {
+      final box = Hive.box(DonationsLocalStorage.donationsBox);
+      final nestedKeys = box.keys.where((k) => k.toString().split('__').length > 3).toList();
+      if (nestedKeys.isNotEmpty) {
+        await box.deleteAll(nestedKeys);
+        await box.flush();
+      }
+    }
+  } catch (cleanupErr) {
+    debugPrint('[CLEANUP] Error during background cleanup: $cleanupErr');
+  }
+}
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 
@@ -471,7 +286,7 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  late final AppLifecycleListener _lifecycleListener;
+  AppLifecycleListener? _lifecycleListener;
 
   @override
   void initState() {
@@ -492,10 +307,93 @@ class _MyAppState extends State<MyApp> {
   @override
   void dispose() {
     if (!kIsWeb) {
-      _lifecycleListener.dispose();
+      _lifecycleListener?.dispose();
       PythonRunnerService.instance.stopProcess();
     }
     super.dispose();
+  }
+
+  ThemeData _buildThemeData({
+    required Color seedColor,
+    required double cardRadius,
+    required String? fontFamily,
+    required Brightness brightness,
+  }) {
+    final isDark = brightness == Brightness.dark;
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      fontFamily: fontFamily,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: seedColor,
+        primary: seedColor,
+        secondary: AppColors.navy,
+        brightness: brightness,
+      ),
+      scaffoldBackgroundColor: isDark ? const Color(0xFF090C10) : const Color(0xFFEAEFF5),
+      cardTheme: CardThemeData(
+        elevation: 0,
+        color: isDark ? const Color(0xFF161B22) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+        ),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: isDark ? const Color(0xFF161B22) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: isDark ? const Color(0xFF21262D) : Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+          borderSide: BorderSide(color: isDark ? const Color(0xFF30363D) : AppColors.gray200, width: 1.5),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+          borderSide: BorderSide(color: isDark ? const Color(0xFF30363D) : AppColors.gray200, width: 1.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+          borderSide: BorderSide(color: seedColor, width: 2.0),
+        ),
+        labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? const Color(0xFF8B949E) : AppColors.gray600),
+        hintStyle: TextStyle(fontSize: 14, color: isDark ? const Color(0xFF6E7681) : AppColors.gray400),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: seedColor,
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+          textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          elevation: 3,
+          shadowColor: seedColor.withValues(alpha: isDark ? 0.4 : 0.35),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
+        ),
+      ),
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+          TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
+          TargetPlatform.macOS: FadeUpwardsPageTransitionsBuilder(),
+        },
+      ),
+    );
   }
 
   @override
@@ -503,7 +401,7 @@ class _MyAppState extends State<MyApp> {
     if (!Hive.isBoxOpen('app_settings')) {
       return MaterialApp(
         navigatorKey: navigatorKey,
-        title: 'GM-D',
+        title: 'GMWF',
         debugShowCheckedModeBanner: false,
         routes: {
           '/home': (context) => const AuthHomeWrapper(),
@@ -512,6 +410,7 @@ class _MyAppState extends State<MyApp> {
         home: const AuthHomeWrapper(),
       );
     }
+
     return ValueListenableBuilder(
       valueListenable: Hive.box('app_settings').listenable(keys: [
         'custom_accent_color',
@@ -520,7 +419,7 @@ class _MyAppState extends State<MyApp> {
         'language',
         'font_scale',
       ]),
-      builder: (context, Box box, child) {
+      builder: (context, Box box, _) {
         final colorHex = box.get('custom_accent_color') as String?;
 
         Color seedColor = AppColors.primary;
@@ -531,7 +430,7 @@ class _MyAppState extends State<MyApp> {
           } catch (_) {}
         }
 
-        final cardRadius = box.get('card_radius', defaultValue: 16.0) as double;
+        final cardRadius = (box.get('card_radius', defaultValue: 16.0) as num).toDouble();
         final isDarkMode = box.get('is_dark_mode', defaultValue: false) as bool;
         final language = box.get('language', defaultValue: 'en') as String;
         final fontFamily = GoogleFonts.dmSans().fontFamily;
@@ -539,142 +438,25 @@ class _MyAppState extends State<MyApp> {
 
         return MaterialApp(
           navigatorKey: navigatorKey,
-          title: 'GM-D',
+          title: 'GMWF',
           debugShowCheckedModeBanner: false,
           themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
           locale: Locale(language),
-          theme: ThemeData(
-            useMaterial3: true,
+          theme: _buildThemeData(
+            seedColor: seedColor,
+            cardRadius: cardRadius,
+            fontFamily: fontFamily,
             brightness: Brightness.light,
-            fontFamily: fontFamily,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: seedColor,
-              primary: seedColor,
-              secondary: AppColors.navy,
-              brightness: Brightness.light,
-            ),
-            scaffoldBackgroundColor: const Color(0xFFEAEFF5),
-            cardTheme: CardThemeData(
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-              ),
-            ),
-            dialogTheme: DialogThemeData(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-              ),
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: Colors.white,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: const BorderSide(color: AppColors.gray200, width: 1.5),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: const BorderSide(color: AppColors.gray200, width: 1.5),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: BorderSide(color: seedColor, width: 2.0),
-              ),
-              labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.gray600),
-              hintStyle: const TextStyle(fontSize: 14, color: AppColors.gray400),
-            ),
-            elevatedButtonTheme: ElevatedButtonThemeData(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: seedColor,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                elevation: 3,
-                shadowColor: seedColor.withValues(alpha: 0.35),
-              ),
-            ),
-            outlinedButtonTheme: OutlinedButtonThemeData(
-              style: OutlinedButton.styleFrom(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
-              ),
-            ),
-            textButtonTheme: TextButtonThemeData(
-              style: TextButton.styleFrom(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
-              ),
-            ),
-            pageTransitionsTheme: const PageTransitionsTheme(
-              builders: {
-                TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-                TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-                TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
-                TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
-                TargetPlatform.macOS: FadeUpwardsPageTransitionsBuilder(),
-              },
-            ),
           ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
+          darkTheme: _buildThemeData(
+            seedColor: seedColor,
+            cardRadius: cardRadius,
             fontFamily: fontFamily,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: seedColor,
-              primary: seedColor,
-              secondary: AppColors.navy,
-              brightness: Brightness.dark,
-            ),
-            scaffoldBackgroundColor: const Color(0xFF090C10),
-            cardTheme: CardThemeData(
-              elevation: 0,
-              color: const Color(0xFF161B22),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-              ),
-            ),
-            dialogTheme: DialogThemeData(
-              backgroundColor: const Color(0xFF161B22),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-              ),
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: const Color(0xFF21262D),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: const BorderSide(color: Color(0xFF30363D), width: 1.5),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: const BorderSide(color: Color(0xFF30363D), width: 1.5),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(cardRadius),
-                borderSide: BorderSide(color: seedColor, width: 2.0),
-              ),
-              labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF8B949E)),
-              hintStyle: const TextStyle(fontSize: 14, color: Color(0xFF6E7681)),
-            ),
-            elevatedButtonTheme: ElevatedButtonThemeData(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: seedColor,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                elevation: 3,
-                shadowColor: seedColor.withValues(alpha: 0.4),
-              ),
-            ),
+            brightness: Brightness.dark,
           ),
           builder: (context, child) {
             final mediaQuery = MediaQuery.of(context);
-            final scale = Hive.isBoxOpen('app_settings')
-                ? Hive.box('app_settings').get('font_scale', defaultValue: 1.0) as double
-                : 1.0;
+            final scale = (box.get('font_scale', defaultValue: 1.0) as num).toDouble();
 
             final appDirection = isUrdu ? TextDirection.rtl : TextDirection.ltr;
             final appMediaQuery = mediaQuery.copyWith(
@@ -685,7 +467,7 @@ class _MyAppState extends State<MyApp> {
               data: appMediaQuery,
               child: Directionality(
                 textDirection: appDirection,
-                child: child!,
+                child: child ?? const SizedBox.shrink(),
               ),
             );
 
@@ -715,13 +497,11 @@ class _MyAppState extends State<MyApp> {
             '/chairman': (context) => const OverviewScreen(),
             '/donations': (context) => const DonationsScreen.embedded(),
             '/dispensar': (context) {
-              final args = ModalRoute.of(context)!.settings.arguments
-                  as Map<String, dynamic>?;
+              final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
               return DispensarScreen(branchId: args?['branchId'] ?? 'unknown');
             },
             '/inventory': (context) {
-              final args = ModalRoute.of(context)!.settings.arguments
-                  as Map<String, dynamic>?;
+              final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
               return InventoryPage(branchId: args?['branchId'] ?? 'unknown');
             },
           },
@@ -734,6 +514,10 @@ class _MyAppState extends State<MyApp> {
 class AuthHomeWrapper extends StatefulWidget {
   const AuthHomeWrapper({super.key});
 
+  static void clearSession() {
+    _AuthHomeWrapperState._cachedSession = null;
+  }
+
   @override
   State<AuthHomeWrapper> createState() => _AuthHomeWrapperState();
 }
@@ -745,6 +529,7 @@ class _SessionData {
 }
 
 class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
+  static _SessionData? _cachedSession;
   late final Future<_SessionData> _sessionFuture;
 
   @override
@@ -759,6 +544,10 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
   }
 
   Future<_SessionData> _determineSession() async {
+    if (_cachedSession != null && (_cachedSession!.user != null || _cachedSession!.localUser != null)) {
+      return _cachedSession!;
+    }
+
     try {
       if (!Hive.isBoxOpen('app_settings')) {
         try {
@@ -770,34 +559,38 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
       final currentUser = FirebaseAuth.instance.currentUser;
       if (currentUser != null) {
         final localData = _getLocalUserData(currentUser);
-        return _SessionData(user: currentUser, localUser: localData);
+        _cachedSession = _SessionData(user: currentUser, localUser: localData);
+        return _cachedSession!;
       }
 
-      // 2. Wait at most 2 seconds for authStateChanges event (prevents infinite hanging)
+      // 2. Wait at most 1.5 seconds for authStateChanges event
       final streamUser = await FirebaseAuth.instance
           .authStateChanges()
           .firstWhere((u) => u != null, orElse: () => null)
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+          .timeout(const Duration(milliseconds: 1500), onTimeout: () => null);
 
       if (streamUser != null) {
         final localData = _getLocalUserData(streamUser);
-        return _SessionData(user: streamUser, localUser: localData);
+        _cachedSession = _SessionData(user: streamUser, localUser: localData);
+        return _cachedSession!;
       }
 
-      // 3. Fallback to cached offline user credentials (2s timeout)
+      // 3. Fallback to cached offline user credentials
       final offlineUser = await offline_auth.OfflineAuthService.getCachedUserData()
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+          .timeout(const Duration(milliseconds: 1500), onTimeout: () => null);
 
       if (offlineUser != null &&
           (offlineUser['uid'] != null ||
            offlineUser['username'] != null ||
            offlineUser['email'] != null)) {
-        return _SessionData(user: null, localUser: offlineUser);
+        _cachedSession = _SessionData(user: null, localUser: offlineUser);
+        return _cachedSession!;
       }
     } catch (e) {
       debugPrint('[AuthHomeWrapper] Session resolution warning: $e');
     }
-    return _SessionData(user: null, localUser: null);
+    _cachedSession = _SessionData(user: null, localUser: null);
+    return _cachedSession!;
   }
 
   Map<String, dynamic>? _getLocalUserData(User user) {
@@ -823,14 +616,14 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
     return FutureBuilder<_SessionData>(
       future: _sessionFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting && _cachedSession == null) {
           return const GmwfLoadingView(
             message: 'Verifying Session...',
             subMessage: 'Connecting to GMWF Security Core',
           );
         }
 
-        final data = snapshot.data;
+        final data = snapshot.data ?? _cachedSession;
         if (data != null && (data.user != null || data.localUser != null)) {
           return HomeRouter(user: data.user, localUser: data.localUser);
         }

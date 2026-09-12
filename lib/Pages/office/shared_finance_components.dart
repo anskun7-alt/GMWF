@@ -32,6 +32,7 @@ class AccountPicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accounts = FinanceLedgerStorage.getOrgBankAccounts();
+    final balances = FinanceLedgerStorage.getAllAccountBalancesPaisa();
     OrgBankAccount? selectedAcc;
     if (selectedAccountCode != null) {
       selectedAcc = accounts.where((a) => a.accountCode == selectedAccountCode).firstOrNull;
@@ -64,7 +65,7 @@ class AccountPicker extends StatelessWidget {
               isExpanded: true,
               icon: const Icon(Icons.keyboard_arrow_down_rounded, color: _kTextSecondary),
               items: accounts.map((acc) {
-                final balancePaisa = FinanceLedgerStorage.getBankAccountBalancePaisa(acc.accountCode);
+                final balancePaisa = balances[acc.accountCode] ?? 0;
                 final balancePkr = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0).format(balancePaisa / 100);
 
                 return DropdownMenuItem<OrgBankAccount>(

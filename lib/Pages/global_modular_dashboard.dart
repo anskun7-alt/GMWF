@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:intl/intl.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
@@ -14,8 +13,10 @@ import 'package:lottie/lottie.dart';
 import '../models/module_registry.dart';
 import '../theme/app_theme.dart';
 import '../theme/role_theme_provider.dart';
+import '../services/user_theme_service.dart';
 import 'settings_page.dart';
 import 'support_page.dart';
+import 'notification_screen.dart';
 import '../widgets/global_module_wrapper.dart';
 import '../widgets/home_snapshot_widgets.dart';
 import '../services/sync_service.dart';
@@ -25,6 +26,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../services/local_storage_service.dart';
 import '../services/auth_service.dart';
+import '../realtime/realtime_manager.dart';
 import '../constants/navigator_key.dart';
 import 'login_page.dart';
 import '../services/offline_auth_service.dart' as offline_auth;
@@ -129,6 +131,44 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     return r.isNotEmpty && r != 'unknown' ? r : 'admin';
   }
 
+  String get _branchId {
+    String b = (widget.userData['branchId'] ?? widget.userData['branch'] ?? '').toString().toLowerCase().trim();
+    if (b.isNotEmpty && b != 'unknown' && b != 'all' && b != 'global') return b;
+
+    final email = widget.userData['email']?.toString();
+    if (email != null && email.isNotEmpty) {
+      try {
+        if (Hive.isBoxOpen('local_users')) {
+          final user = Hive.box('local_users').get('user:${email.toLowerCase()}');
+          if (user != null && user is Map) {
+            b = (user['branchId'] ?? user['branch'] ?? '').toString().toLowerCase().trim();
+            if (b.isNotEmpty && b != 'unknown' && b != 'all' && b != 'global') return b;
+          }
+        }
+      } catch (_) {}
+    }
+
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        final currentUserData = box.get('user_data');
+        if (currentUserData != null && currentUserData is Map) {
+          b = (currentUserData['branchId'] ?? currentUserData['branch'] ?? '').toString().toLowerCase().trim();
+          if (b.isNotEmpty && b != 'unknown' && b != 'all' && b != 'global') return b;
+        }
+        final sel = (box.get('selected_branch') ?? box.get('active_branch_id') ?? box.get('current_branch'))?.toString().toLowerCase().trim() ?? '';
+        if (sel.isNotEmpty && sel != 'all' && sel != 'global') return sel;
+      }
+    } catch (_) {}
+
+    final activeLocal = LocalStorageService.getActiveBranchId()?.toLowerCase().trim();
+    if (activeLocal != null && activeLocal.isNotEmpty && activeLocal != 'all' && activeLocal != 'global') {
+      return activeLocal;
+    }
+
+    return 'karachi';
+  }
+
   DashboardCategoryFilter _selectedCategory = DashboardCategoryFilter.overall;
   final TextEditingController _searchCtrl = TextEditingController();
   String _searchQuery = '';
@@ -152,19 +192,17 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
   void _loadAvailableModules() {
     final allModules = ModuleRegistry.getAvailableModules(_role);
-    if (_role == 'ceo') {
-      _availableModules = allModules
-          .where((m) =>
-              m.id == 'executive_dashboard' ||
-              m.id == 'kitchen' ||
-              m.id == 'dasterkhwaan_inventory' ||
-              m.id == 'madrassa_admin')
-          .toList();
-    } else {
-      _availableModules = _isFullExecutive
-          ? allModules.where((m) => !m.hideFromExecutives).toList()
-          : allModules;
-    }
+    allModules.removeWhere((m) => m.id == 'employee_attendance');
+    _availableModules = _isFullExecutive
+        ? allModules.where((m) => !m.hideFromExecutives).toList()
+        : allModules;
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    _loadAvailableModules();
+    _recomputeFilteredModules();
   }
 
   @override
@@ -183,6 +221,25 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     final branchId = (widget.userData['branchId'] as String? ?? '').trim();
     if (branchId.isNotEmpty && branchId != _kGlobalBranchId) {
       SyncService().start(branchId);
+    } else {
+      // Executive roles (chairman, CEO) have branchId='all' or empty.
+      // Start sync with all known real branches so data still uploads to Firestore.
+      try {
+        final localBox = Hive.box(LocalStorageService.branchesBox);
+        final realIds = <String>[];
+        for (final val in localBox.values) {
+          if (val is Map) {
+            final id = (val['id'] ?? '').toString().trim().toLowerCase();
+            final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+            if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+              realIds.add(id);
+            }
+          }
+        }
+        if (realIds.isNotEmpty) {
+          SyncService().start(realIds.first, authorizedBranches: realIds);
+        }
+      } catch (_) {}
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -220,7 +277,9 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
     _recomputeFilteredModules();
     if (!kIsWeb && (_isGlobalExecutive || _isFullExecutive)) {
-      _startBackgroundFullSync();
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) _startBackgroundFullSync();
+      });
     }
   }
 
@@ -250,7 +309,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     return execRoles.contains(_role);
   }
 
-  bool get _isSupervisor => _role == 'supervisor';
+  bool get _isSupervisor => _role == 'supervisor' || _role.contains('supervisor');
   bool get _isBranchManager => _role == 'branch manager';
 
   /// Categories visible to this role.
@@ -313,127 +372,12 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     if (_hasRunFullBackgroundSync || RoleSimulatorService.isSimulating) return;
     _hasRunFullBackgroundSync = true;
     try {
-
-      final snap = await FirebaseFirestore.instance.collection('branches').get();
-      final branches = snap.docs.map((d) => d.id).toList();
-
-      for (final originalBId in branches) {
-        final bId = originalBId.toLowerCase().trim();
-        // 1. Initial full download if not already complete (patients, inventory, tokens, donations, donors)
-        await SyncService().initialFullDownload(bId);
-
-        // 2. Pre-cache dispensary records for the last 30 days
-        final now = DateTime.now();
-        final start = now.subtract(const Duration(days: 30));
-        final end = now.add(const Duration(days: 1));
-
-        final df = DateFormat('ddMMyy');
-        final days = <String>[];
-        for (var d = start; d.isBefore(end); d = d.add(const Duration(days: 1))) {
-          days.add(df.format(d));
-        }
-
-        final missingDays = <String>[];
-        for (final day in days) {
-          final cached = LocalStorageService.getBranchDayCache(bId, day, 'dispensary');
-          if (cached == null) {
-            missingDays.add(day);
-          }
-        }
-
-        if (missingDays.isNotEmpty) {
-          // Fetch raw docs in parallel
-          final Map<String, List<Map<String, dynamic>>> rawDocsMap = {};
-          final fetchRawFutures = missingDays.map((day) async {
-            try {
-              final snapDocs = await FirebaseFirestore.instance
-                  .collection('branches/$bId/dispensary/$day/$day')
-                  .get();
-              final docs = snapDocs.docs.map((doc) {
-                final data = Map<String, dynamic>.from(doc.data());
-                data['id'] = doc.id;
-                data['_syncDayKey'] = day;
-                return data;
-              }).toList();
-              rawDocsMap[day] = docs;
-            } catch (_) {}
-          });
-          await Future.wait(fetchRawFutures);
-
-          // Combine raw docs
-          final List<Map<String, dynamic>> allRawDocs = [];
-          for (final dayDocs in rawDocsMap.values) {
-            allRawDocs.addAll(dayDocs);
-          }
-
-          if (allRawDocs.isNotEmpty) {
-            List<Map<String, dynamic>> enrichedAll;
-            try {
-              enrichedAll = await LocalStorageService.enrichRawDocs(bId, allRawDocs);
-            } catch (e) {
-              debugPrint('[GlobalModularDashboard] enrichRawDocs failed, using raw docs: $e');
-              enrichedAll = allRawDocs.map((d) {
-                String firstNonEmpty(List<dynamic> candidates) {
-                  for (final c in candidates) {
-                    final s = c?.toString().trim() ?? '';
-                    if (s.isNotEmpty && s != 'null' && s != 'N/A') return s;
-                  }
-                  return '';
-                }
-                return {
-                  ...d,
-                  'name': firstNonEmpty([d['patientName'], d['name'], 'Unknown']),
-                  'phone': d['phone']?.toString() ?? 'N/A',
-                  'age': d['age']?.toString() ?? d['patientAge']?.toString() ?? 'N/A',
-                  'gender': d['gender']?.toString() ?? d['patientGender']?.toString() ?? 'N/A',
-                  'displayCnic': firstNonEmpty([d['patientCnic'], d['cnic'], d['guardianCnic'], 'N/A']),
-                  'isChild': (d['guardianCnic'] ?? '').toString().isNotEmpty && (d['patientCnic'] ?? d['cnic'] ?? '').toString().isEmpty,
-                  'doctorName': firstNonEmpty([d['doctorName'], d['prescribedBy'], 'Unknown']),
-                  'dispenserName': firstNonEmpty([d['dispenserName'], d['dispensedBy'], 'Unknown']),
-                  'tokenBy': firstNonEmpty([d['createdByName'], d['tokenBy'], d['createdBy'], 'Unknown']),
-                  'daysOfMedicine': (d['daysOfMedicine'] as num?)?.toInt() ?? 1,
-                  'frequentFlag': d['frequentFlag'] ?? false,
-                };
-              }).toList();
-            }
-
-            // Group by day and cache
-            final Map<String, List<Map<String, dynamic>>> enrichedByDay = {};
-            final displayFormat = DateFormat('dd MMM yyyy');
-
-            for (final d in enrichedAll) {
-              final day = d['_syncDayKey'] as String? ?? df.format(now);
-              d.remove('_syncDayKey');
-              d['dispenseDate'] = displayFormat.format(LocalStorageService.parseDdMMyy(day));
-              d['type'] = _resolveType(d);
-              enrichedByDay.putIfAbsent(day, () => []).add(d);
-            }
-
-            for (final day in missingDays) {
-              final dayEnriched = enrichedByDay[day] ?? [];
-              await LocalStorageService.putBranchDayCache(bId, day, 'dispensary', dayEnriched);
-            }
-          } else {
-            // Write empty cache for days with no records so we don't query Firestore again
-            for (final day in missingDays) {
-              await LocalStorageService.putBranchDayCache(bId, day, 'dispensary', []);
-            }
-          }
-        }
-      }
-      debugPrint('[GlobalModularDashboard] Background full branch sync completed successfully.');
+      final activeBId = (_branchId.isNotEmpty && _branchId != 'all') ? _branchId : 'karachi';
+      // Sync only the active branch's essential data instead of downloading all branches simultaneously into memory
+      await SyncService().initialFullDownload(activeBId);
+      debugPrint('[GlobalModularDashboard] Active branch sync completed for $activeBId.');
     } catch (e) {
-      debugPrint('[GlobalModularDashboard] Background full branch sync error: $e');
-    }
-  }
-
-  String _resolveType(Map<String, dynamic> data) {
-    final raw = (data['queueType'] ?? data['type'] ?? '').toString().toLowerCase().trim();
-    switch (raw) {
-      case 'zakat':     return 'zakat';
-      case 'non-zakat': return 'non-zakat';
-      case 'gmwf':      return 'gmwf';
-      default:          return 'Unknown';
+      debugPrint('[GlobalModularDashboard] Background sync warning: $e');
     }
   }
 
@@ -456,24 +400,106 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
           (route) => false,
         );
       }
+    } catch (_) {}
+  }
+
+  Future<void> _confirmAndTriggerForceGlobalSync(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: const [
+            Icon(Icons.cloud_upload_rounded, color: Color(0xFF10B981), size: 28),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Force Global Cloud Sync',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'This will command ALL connected workstations, staff devices, and local servers across the network to immediately upload any local Hive data that has not yet reached Cloud Firestore.\n\nAre you sure you want to trigger this global sync now?',
+          style: TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.bolt_rounded, size: 18),
+            label: const Text('Broadcast & Sync Now'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            ),
+            SizedBox(width: 12),
+            Text('📡 Broadcasting global sync to all devices & uploading local queue...'),
+          ],
+        ),
+        backgroundColor: Color(0xFF0F766E),
+        duration: Duration(seconds: 4),
+      ),
+    );
+
+    try {
+      // 1. Broadcast over LAN to all connected client devices & server
+      RealtimeManager().sendMessage({
+        'event_type': 'force_all_users_cloud_sync',
+        'timestamp': DateTime.now().toIso8601String(),
+        'triggeredBy': _userName,
+        'triggeredByRole': _role,
+        'branchId': _branchId,
+      });
+
+      // 2. Upload executive node local sync queue
+      await SyncService().triggerUpload();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Global Cloud Sync completed successfully! All nodes notified.'),
+            backgroundColor: Color(0xFF10B981),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
     } catch (e) {
-      debugPrint('[GlobalModularDashboard] Logout navigation error: $e');
+      debugPrint('[GlobalSync] Error triggering force sync: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚠️ Sync completed with warning: $e'),
+            backgroundColor: Colors.amber.shade900,
+          ),
+        );
+      }
     }
   }
 
-  void _toggleSearch() {
-    setState(() => _searchOpen = !_searchOpen);
-    _searchOpen
-        ? _searchAnimCtrl.forward()
-        : _searchAnimCtrl.reverse();
-    if (!_searchOpen) {
-      _searchCtrl.clear();
-      setState(() {
-        _searchQuery = '';
-        _recomputeFilteredModules();
-      });
-    }
-  }
+
 
   void _changeCategory(DashboardCategoryFilter cat) {
     setState(() {
@@ -555,6 +581,14 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
             t = isDark ? t.toDarkMode() : t.toLightMode();
             final isDesktop = MediaQuery.of(ctx).size.width >= 900;
 
+            // ── SUPERVISOR DEDICATED LAYOUT: Bottom NavBar + Module Navigation Home Hub ──
+            if (_isSupervisor) {
+              return FadeTransition(
+                opacity: _pageOpacity,
+                child: _SupervisorScaffold(state: this, t: t),
+              );
+            }
+
             return FadeTransition(
               opacity: _pageOpacity,
               child: Scaffold(
@@ -573,6 +607,891 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
         );
       },
     );
+  }
+
+  int _supervisorNavIndex = 0;
+  void setSupervisorTab(int idx) {
+    if (mounted) setState(() => _supervisorNavIndex = idx);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Supervisor Scaffold & Navigation Hub (No Sidebar + Bottom Nav Bar)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _SupervisorScaffold extends StatefulWidget {
+  final _GlobalModularDashboardState state;
+  final RoleThemeData t;
+
+  const _SupervisorScaffold({required this.state, required this.t});
+
+  @override
+  State<_SupervisorScaffold> createState() => _SupervisorScaffoldState();
+}
+
+class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
+  AppModule _getModule(String id) {
+    return widget.state._availableModules.firstWhere(
+      (m) => m.id == id,
+      orElse: () => ModuleRegistry.allModules.firstWhere((m) => m.id == id),
+    );
+  }
+
+  String _getSupervisorTabTitle(int idx) {
+    switch (idx) {
+      case 1:
+        return 'Branch Summary';
+      case 2:
+        return 'Dispensary Inventory';
+      case 3:
+        return 'Pending Requests';
+      case 4:
+        return 'Inventory Ledger';
+      case 5:
+        return 'Account';
+      case 0:
+      default:
+        return 'Supervisor Portal';
+    }
+  }
+
+  String _getSupervisorTabSubtitle(int idx, String userName, String branchName) {
+    switch (idx) {
+      case 1:
+        return '$userName • $branchName Summary & Records';
+      case 2:
+        return '$userName • $branchName Stock';
+      case 3:
+        return '$userName • $branchName Approvals';
+      case 4:
+        return '$userName • $branchName Audit Log';
+      case 5:
+        return '$userName • Account & Settings';
+      case 0:
+      default:
+        return '$userName • Dispensary Operations';
+    }
+  }
+
+  Widget _buildSupervisorActiveTab(int idx, BuildContext context, Map<String, dynamic> resolvedUserData) {
+    switch (idx) {
+      case 1:
+        return _getModule('branches').builder(context, resolvedUserData);
+      case 2:
+        return _getModule('inventory').builder(context, resolvedUserData);
+      case 3:
+        return _getModule('pending_requests').builder(context, resolvedUserData);
+      case 4:
+        return _getModule('inventory_ledger').builder(context, resolvedUserData);
+      case 5:
+        return SettingsPage(userData: resolvedUserData);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final navIndex = widget.state._supervisorNavIndex;
+    final isDark = widget.state._isDark;
+    final t = widget.t;
+    final branchName = widget.state._branchId.toUpperCase();
+    final userName = widget.state._userName;
+
+    final resolvedUserData = {
+      ...widget.state.widget.userData,
+      'branchId': widget.state._branchId,
+    };
+
+    return Scaffold(
+      backgroundColor: t.bg,
+      appBar: AppBar(
+        backgroundColor: isDark ? const Color(0xFF161B22) : t.bgCard,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        automaticallyImplyLeading: false,
+        titleSpacing: 16,
+        toolbarHeight: 64,
+        title: Row(
+          children: [
+            _LogoPulse(accent: t.accent, pulseAnim: widget.state._logoPulseAnim, size: 36),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _getSupervisorTabTitle(navIndex),
+                    style: TextStyle(
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.w900,
+                      color: isDark ? Colors.white : t.textPrimary,
+                      letterSpacing: -0.2,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 1.5),
+                  Text(
+                    _getSupervisorTabSubtitle(navIndex, userName, branchName),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? const Color(0xFF8B949E) : t.textTertiary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          // Toggle Dark & Light Mode Button
+          IconButton(
+            tooltip: isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode',
+            icon: Icon(
+              isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+              color: isDark ? const Color(0xFFFBBF24) : t.textSecondary,
+              size: 20,
+            ),
+            onPressed: () async {
+              await UserThemeService.toggleDarkMode();
+              widget.state.refresh();
+            },
+          ),
+          IconButton(
+            tooltip: 'Sign Out',
+            icon: const Icon(Icons.logout_rounded, color: Color(0xFFEF4444), size: 20),
+            onPressed: widget.state._logout,
+          ),
+          const SizedBox(width: 8),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(
+            height: 1,
+            color: isDark ? const Color(0xFF30363D) : t.bgRule,
+          ),
+        ),
+      ),
+      body: Builder(
+        builder: (ctx) {
+          final curIdx = navIndex.clamp(0, 5);
+          return IndexedStack(
+            index: curIdx == 0 ? 0 : 1,
+            children: [
+              _SupervisorHomeHub(state: widget.state, t: t),
+              if (curIdx != 0)
+                KeyedSubtree(
+                  key: ValueKey('supervisor_tab_$curIdx'),
+                  child: _buildSupervisorActiveTab(curIdx, context, resolvedUserData),
+                )
+              else
+                const SizedBox.shrink(),
+            ],
+          );
+        },
+      ),
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF161B22) : t.bgCard,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.05),
+              blurRadius: 14,
+              offset: const Offset(0, -2),
+            ),
+          ],
+          border: Border(
+            top: BorderSide(
+              color: isDark ? const Color(0xFF30363D) : t.bgRule,
+              width: 1,
+            ),
+          ),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _SupervisorNavItem(
+                  icon: Icons.home_rounded,
+                  label: 'Home',
+                  isSelected: navIndex == 0,
+                  accentColor: t.accent,
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(0),
+                ),
+                _SupervisorNavItem(
+                  icon: Icons.dashboard_rounded,
+                  label: 'Summary',
+                  isSelected: navIndex == 1,
+                  accentColor: const Color(0xFF6366F1),
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(1),
+                ),
+                _SupervisorNavItem(
+                  icon: Icons.inventory_2_rounded,
+                  label: 'Inventory',
+                  isSelected: navIndex == 2,
+                  accentColor: const Color(0xFF10B981),
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(2),
+                ),
+                _SupervisorNavItem(
+                  icon: Icons.rule_rounded,
+                  label: 'Requests',
+                  isSelected: navIndex == 3,
+                  accentColor: const Color(0xFFF59E0B),
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(3),
+                ),
+                _SupervisorNavItem(
+                  icon: Icons.receipt_long_rounded,
+                  label: 'Ledger',
+                  isSelected: navIndex == 4,
+                  accentColor: const Color(0xFF8B5CF6),
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(4),
+                ),
+                _SupervisorNavItem(
+                  icon: Icons.person_rounded,
+                  label: 'Account',
+                  isSelected: navIndex == 5,
+                  accentColor: const Color(0xFF06B6D4),
+                  isDark: isDark,
+                  onTap: () => widget.state.setSupervisorTab(5),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SupervisorNavItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isSelected;
+  final Color accentColor;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  const _SupervisorNavItem({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.accentColor,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: isSelected ? accentColor.withValues(alpha: 0.12) : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  size: 20,
+                  color: isSelected
+                      ? accentColor
+                      : (isDark ? const Color(0xFF8B949E) : const Color(0xFF64748B)),
+                ),
+                const SizedBox(height: 2),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
+                      color: isSelected
+                          ? accentColor
+                          : (isDark ? const Color(0xFF8B949E) : const Color(0xFF64748B)),
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SupervisorHomeHub extends StatelessWidget {
+  final _GlobalModularDashboardState state;
+  final RoleThemeData t;
+
+  const _SupervisorHomeHub({required this.state, required this.t});
+
+  bool get _isTopBranch {
+    final ud = state.widget.userData;
+    if (ud['isTopBranch'] == true || ud['isBestBranch'] == true || ud['topBranch'] == true || ud['topPerformingBranch'] == true) {
+      return true;
+    }
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        if (box.get('is_top_branch') == true) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = state._isDark;
+    final branchName = state._branchId.toUpperCase();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isWide = constraints.maxWidth >= 750;
+        final double hPad = isWide ? 32 : 16;
+
+          return SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. Global Dashboard Hero
+                _HeroHeader(state: state, t: t, isDesktop: isWide),
+                const SizedBox(height: 16),
+
+                // 2. Congratulatory Top Performing Branch Banner (only shown if top branch)
+                if (_isTopBranch) ...[
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: hPad),
+                    child: _buildCongratulatoryBanner(branchName),
+                  ),
+                  const SizedBox(height: 18),
+                ],
+
+                // 3. Navigation Action Buttons (Summary, Inventory, Requests, Ledger, Settings)
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: hPad),
+                  child: LayoutBuilder(
+                    builder: (context, boxConstraints) {
+                      final maxWidth = boxConstraints.maxWidth;
+                      // On wide desktop (>= 980px), show all 5 modules in 1 row (5 columns)
+                      final bool isDesktopRow = maxWidth >= 980;
+                      final int crossCount = isDesktopRow ? 5 : (maxWidth >= 640 ? 2 : 1);
+                      final double itemExtent = isDesktopRow ? 144.0 : 80.0;
+
+                      final buttons = _buildModuleButtons(context, isDark, isDesktopRow);
+
+                      return GridView.builder(
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: crossCount,
+                          mainAxisExtent: itemExtent,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                        ),
+                        itemCount: buttons.length,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemBuilder: (context, idx) => buttons[idx],
+                      );
+                    },
+                  ),
+                ),
+
+                const SizedBox(height: 36),
+              ],
+            ),
+          );
+        },
+      );
+  }
+
+  Widget _buildCongratulatoryBanner(String branch) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFFD97706),
+            Color(0xFFF59E0B),
+            Color(0xFFB45309),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFF59E0B).withValues(alpha: 0.35),
+            blurRadius: 14,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.22),
+              shape: BoxShape.circle,
+            ),
+            child: const Text('🏆', style: TextStyle(fontSize: 22)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'TOP PERFORMING BRANCH!',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.white,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Congratulations! $branch is leading operational efficiency and patient throughput across GMWF healthcare centers.',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white.withValues(alpha: 0.95),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildModuleButtons(BuildContext context, bool isDark, bool isDesktopRow) {
+    return [
+      _SupervisorModuleCard(
+        context: context,
+        title: 'Summary & Overview',
+        subtitle: 'Live token queue, prescriptions status, and dispensary stats',
+        icon: Icons.dashboard_rounded,
+        gradient: const [Color(0xFF6366F1), Color(0xFF4338CA)],
+        badgeText: 'Live Queue',
+        isDark: isDark,
+        isVertical: isDesktopRow,
+        t: t,
+        onTap: () => state.setSupervisorTab(1),
+      ),
+      _SupervisorModuleCard(
+        context: context,
+        title: 'Medicine Inventory',
+        subtitle: 'Track clinical stock levels, batch updates & stock adjustments',
+        icon: Icons.inventory_2_rounded,
+        gradient: const [Color(0xFF10B981), Color(0xFF047857)],
+        badgeText: 'Stock In/Out',
+        isDark: isDark,
+        isVertical: isDesktopRow,
+        t: t,
+        onTap: () => state.setSupervisorTab(2),
+      ),
+      _SupervisorModuleCard(
+        context: context,
+        title: 'Requests & Approvals',
+        subtitle: 'Review and approve supervisor token exceptions and void requests',
+        icon: Icons.rule_rounded,
+        gradient: const [Color(0xFFF59E0B), Color(0xFFD97706)],
+        badgeText: 'Approvals',
+        isDark: isDark,
+        isVertical: isDesktopRow,
+        t: t,
+        onTap: () => state.setSupervisorTab(3),
+      ),
+      _SupervisorModuleCard(
+        context: context,
+        title: 'Medicine Stock Ledger',
+        subtitle: 'Complete registers of medicine consumption & category records',
+        icon: Icons.receipt_long_rounded,
+        gradient: const [Color(0xFF8B5CF6), Color(0xFF6D28D9)],
+        badgeText: 'Consumption',
+        isDark: isDark,
+        isVertical: isDesktopRow,
+        t: t,
+        onTap: () => state.setSupervisorTab(4),
+      ),
+      _SupervisorModuleCard(
+        context: context,
+        title: 'Account & Preferences',
+        subtitle: 'User profile, app preferences, dark mode & password',
+        icon: Icons.person_rounded,
+        gradient: const [Color(0xFF06B6D4), Color(0xFF0E7490)],
+        badgeText: 'Account',
+        isDark: isDark,
+        isVertical: isDesktopRow,
+        t: t,
+        onTap: () => state.setSupervisorTab(5),
+      ),
+    ];
+  }
+}
+
+class _SupervisorModuleCard extends StatefulWidget {
+  final BuildContext context;
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final List<Color> gradient;
+  final String badgeText;
+  final bool isDark;
+  final bool isVertical;
+  final RoleThemeData t;
+  final VoidCallback onTap;
+
+  const _SupervisorModuleCard({
+    required this.context,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.gradient,
+    required this.badgeText,
+    required this.isDark,
+    required this.isVertical,
+    required this.t,
+    required this.onTap,
+  });
+
+  @override
+  State<_SupervisorModuleCard> createState() => _SupervisorModuleCardState();
+}
+
+class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final primaryColor = widget.gradient.first;
+    final isDark = widget.isDark;
+
+    if (widget.isVertical) {
+      // ── Desktop 5-Across Vertical Tile ──
+      return MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : Colors.white,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: isDark
+                    ? [
+                        const Color(0xFF1E293B),
+                        const Color(0xFF0F172A),
+                      ]
+                    : [
+                        Colors.white,
+                        const Color(0xFFF8FAFC),
+                      ],
+              ),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: _isHovered
+                    ? primaryColor.withValues(alpha: isDark ? 0.7 : 0.5)
+                    : (isDark
+                        ? Colors.white.withValues(alpha: 0.12)
+                        : const Color(0xFFE2E8F0)),
+                width: _isHovered ? 1.5 : 1.0,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _isHovered
+                      ? primaryColor.withValues(alpha: isDark ? 0.30 : 0.16)
+                      : (isDark
+                          ? Colors.black.withValues(alpha: 0.25)
+                          : primaryColor.withValues(alpha: 0.05)),
+                  blurRadius: _isHovered ? 16 : 8,
+                  offset: Offset(0, _isHovered ? 6 : 2),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // Top Row: Squircle Icon + Badge
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: widget.gradient,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: primaryColor.withValues(alpha: 0.35),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Icon(widget.icon, color: Colors.white, size: 20),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                      decoration: BoxDecoration(
+                        color: primaryColor.withValues(alpha: isDark ? 0.20 : 0.10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: primaryColor.withValues(alpha: isDark ? 0.4 : 0.25),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Text(
+                        widget.badgeText,
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w800,
+                          color: primaryColor,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Middle: Title & Subtitle
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.title,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w800,
+                        color: isDark ? Colors.white : const Color(0xFF0F172A),
+                        letterSpacing: -0.2,
+                        height: 1.15,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      widget.subtitle,
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                        height: 1.2,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+                // Bottom row: Interactive link / arrow
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    AnimatedSlide(
+                      duration: const Duration(milliseconds: 180),
+                      offset: Offset(_isHovered ? 0.15 : 0, 0),
+                      child: Icon(
+                        Icons.arrow_forward_rounded,
+                        size: 14,
+                        color: _isHovered ? primaryColor : (isDark ? Colors.white38 : const Color(0xFF94A3B8)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } else {
+      // ── Stacked Mobile & Tablet Horizontal Card ──
+      return MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : Colors.white,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: isDark
+                    ? [
+                        const Color(0xFF1E293B),
+                        const Color(0xFF0F172A),
+                      ]
+                    : [
+                        Colors.white,
+                        const Color(0xFFF8FAFC),
+                      ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: _isHovered
+                    ? primaryColor.withValues(alpha: isDark ? 0.7 : 0.5)
+                    : (isDark
+                        ? Colors.white.withValues(alpha: 0.12)
+                        : const Color(0xFFE2E8F0)),
+                width: _isHovered ? 1.5 : 1.0,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _isHovered
+                      ? primaryColor.withValues(alpha: isDark ? 0.25 : 0.12)
+                      : (isDark
+                          ? Colors.black.withValues(alpha: 0.20)
+                          : primaryColor.withValues(alpha: 0.04)),
+                  blurRadius: _isHovered ? 12 : 6,
+                  offset: Offset(0, _isHovered ? 4 : 2),
+                ),
+              ],
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: widget.gradient,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: primaryColor.withValues(alpha: 0.35),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Icon(widget.icon, color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              widget.title,
+                              style: TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? Colors.white : const Color(0xFF0F172A),
+                                letterSpacing: -0.2,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: primaryColor.withValues(alpha: isDark ? 0.20 : 0.12),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: primaryColor.withValues(alpha: isDark ? 0.4 : 0.25),
+                                width: 0.6,
+                              ),
+                            ),
+                            child: Text(
+                              widget.badgeText,
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                color: primaryColor,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        widget.subtitle,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                          height: 1.2,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: _isHovered
+                        ? primaryColor
+                        : primaryColor.withValues(alpha: isDark ? 0.15 : 0.08),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: Icon(
+                      Icons.arrow_forward_rounded,
+                      color: _isHovered ? Colors.white : primaryColor,
+                      size: 15,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
   }
 }
 
@@ -969,6 +1888,36 @@ class _SidebarActions extends StatelessWidget {
             dark: dark,
             onTap: () => RoleSimulatorService.showRoleSelectorModal(context),
           ),
+        if (!((state.widget.userData['role'] ?? '').toString().toLowerCase().contains('madrassa') ||
+              (state.widget.userData['role'] ?? '').toString().toLowerCase().contains('guardian') ||
+              (state.widget.userData['role'] ?? '').toString().toLowerCase().contains('parent') ||
+              (state.widget.userData['role'] ?? '').toString().toLowerCase() == 'teacher'))
+          _ActionTile(
+            icon: Icons.notifications_outlined,
+            label: 'Notifications',
+            accentColor: const Color(0xFFF59E0B),
+            t: t,
+            dark: dark,
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => NotificationScreen(
+                  branchId: (state.widget.userData['branchId'] ?? 'all').toString(),
+                  userId: (state.widget.userData['uid'] ?? state.widget.userData['id'] ?? 'user').toString(),
+                  role: (state.widget.userData['role'] ?? 'admin').toString(),
+                ),
+              ),
+            ),
+          ),
+        if (state._isFullExecutive || state._isGlobalExecutive)
+          _ActionTile(
+            icon: Icons.cloud_upload_rounded,
+            label: 'Force Global Sync',
+            accentColor: const Color(0xFF10B981),
+            t: t,
+            dark: dark,
+            onTap: () => state._confirmAndTriggerForceGlobalSync(context),
+          ),
         _ActionTile(
           icon: Icons.settings_outlined,
           label: 'Settings',
@@ -1182,7 +2131,6 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
-          transform: Matrix4.translationValues(_hov ? 3.5 : 0.0, 0.0, 0.0),
           margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 2.5),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7.5),
           decoration: BoxDecoration(
@@ -1343,7 +2291,6 @@ class _SidebarModuleTileState extends State<_SidebarModuleTile> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
-          transform: Matrix4.translationValues(_hov ? 3.5 : 0.0, 0.0, 0.0),
           margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
@@ -1473,7 +2420,6 @@ class _ActionTileState extends State<_ActionTile> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
           curve: Curves.easeOutCubic,
-          transform: Matrix4.translationValues(_hov ? 2.5 : 0.0, 0.0, 0.0),
           margin: const EdgeInsets.symmetric(vertical: 1.5),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7.5),
           decoration: BoxDecoration(
@@ -1526,233 +2472,155 @@ class _MobileLayout extends StatelessWidget {
     return Scaffold(
       backgroundColor: t.bg,
       appBar: _buildAppBar(context),
-      drawer: _buildDrawer(context),
       body: _MainContent(state: state, t: t, isDesktop: false),
     );
   }
 
   AppBar _buildAppBar(BuildContext context) {
+    final isChairman = state._role == 'chairman';
+    final isCeo = state._role == 'ceo';
+
     return AppBar(
       backgroundColor: _dark ? const Color(0xFF0D1117) : t.bgCard,
       elevation: 0,
       surfaceTintColor: Colors.transparent,
-      leading: Builder(
-        builder: (ctx) => IconButton(
-          icon: Icon(Icons.menu_rounded,
-              color: _dark ? Colors.white : t.textPrimary),
-          onPressed: () => Scaffold.of(ctx).openDrawer(),
-        ),
-      ),
-      title: Row(children: [
-        _LogoPulse(accent: t.accent, pulseAnim: state._logoPulseAnim),
-        const SizedBox(width: 8),
-        Text('GMWF',
-            style: TextStyle(
-                color: _dark ? Colors.white : t.textPrimary,
-                fontWeight: FontWeight.w900,
-                fontSize: 16,
-                letterSpacing: 1)),
-        const SizedBox(width: 6),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-          decoration: BoxDecoration(
-            color: t.accent.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(4),
+      automaticallyImplyLeading: false,
+      titleSpacing: 16,
+      toolbarHeight: 64,
+      title: Row(
+        children: [
+          _LogoPulse(accent: t.accent, pulseAnim: state._logoPulseAnim, size: 36),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'GMWF',
+                      style: TextStyle(
+                        color: _dark ? Colors.white : t.textPrimary,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 16.5,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: t.accent.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: t.accent.withValues(alpha: 0.28), width: 0.6),
+                      ),
+                      child: Text(
+                        'v${AutoUpdateService.currentVersion}',
+                        style: TextStyle(
+                          color: t.accent,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 1.5),
+                Text(
+                  'Healthcare & Community System',
+                  style: TextStyle(
+                    color: _dark ? const Color(0xFF8B949E) : t.textTertiary,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
           ),
-          child: Text('v${AutoUpdateService.currentVersion}',
-              style: TextStyle(
-                  color: t.accent,
-                  fontSize: 9,
-                  fontWeight: FontWeight.bold)),
-        ),
-      ]),
+        ],
+      ),
       actions: [
+        // Role Badge
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          margin: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: (isChairman || isCeo)
+                  ? [
+                      const Color(0xFFF59E0B).withValues(alpha: _dark ? 0.25 : 0.18),
+                      const Color(0xFFD97706).withValues(alpha: _dark ? 0.15 : 0.08),
+                    ]
+                  : [
+                      t.accent.withValues(alpha: _dark ? 0.25 : 0.15),
+                      t.accent.withValues(alpha: _dark ? 0.12 : 0.06),
+                    ],
+            ),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: (isChairman || isCeo)
+                  ? const Color(0xFFF59E0B).withValues(alpha: 0.4)
+                  : t.accent.withValues(alpha: 0.3),
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                (isChairman || isCeo) ? Icons.workspace_premium_rounded : Icons.verified_user_rounded,
+                size: 11,
+                color: (isChairman || isCeo) ? const Color(0xFFF59E0B) : t.accent,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                state._role.toUpperCase(),
+                style: TextStyle(
+                  color: (isChairman || isCeo) ? const Color(0xFFF59E0B) : t.accent,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
+            ],
+          ),
+        ),
         if (RoleSimulatorService.canAccessSimulator(state._role))
           IconButton(
             tooltip: 'Live Role Simulator',
-            icon: const Icon(Icons.preview_rounded, color: Colors.amberAccent, size: 22),
+            icon: const Icon(Icons.preview_rounded, color: Colors.amberAccent, size: 20),
             onPressed: () => RoleSimulatorService.showRoleSelectorModal(context),
           ),
-        IconButton(
-
-          icon: AnimatedSwitcher(
-
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (child, anim) => RotationTransition(
-              turns:
-                  Tween(begin: 0.85, end: 1.0).animate(anim),
-              child: FadeTransition(opacity: anim, child: child),
-            ),
-            child: Icon(
-              state._searchOpen
-                  ? Icons.close_rounded
-                  : Icons.search_rounded,
-              key: ValueKey(state._searchOpen),
-              color: _dark ? Colors.white70 : t.textSecondary,
-            ),
+        if (state._isFullExecutive || state._isGlobalExecutive)
+          IconButton(
+            tooltip: 'Force Global Cloud Sync',
+            icon: const Icon(Icons.cloud_upload_rounded, color: Color(0xFF10B981), size: 21),
+            onPressed: () => state._confirmAndTriggerForceGlobalSync(context),
           ),
-          onPressed: state._toggleSearch,
-        ),
         IconButton(
-          icon: Icon(Icons.notifications_none_rounded,
-              color: _dark ? Colors.white70 : t.textSecondary),
-          onPressed: () {},
+          tooltip: 'Settings',
+          icon: Icon(
+            Icons.settings_outlined,
+            color: _dark ? Colors.white70 : t.textSecondary,
+            size: 20,
+          ),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => SettingsPage(userData: state.widget.userData),
+            ),
+          ).then((_) => state.refresh()),
         ),
-        const SizedBox(width: 4),
+        const SizedBox(width: 8),
       ],
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Divider(
-            height: 1,
-            color: _dark ? const Color(0xFF30363D) : t.bgRule),
-      ),
-    );
-  }
-
-  Widget _buildDrawer(BuildContext context) {
-    return Drawer(
-      backgroundColor: _dark ? const Color(0xFF0D1117) : t.bgCard,
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header
-            Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: t.accent.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(6),
-                        border:
-                            Border.all(color: t.accent.withValues(alpha: 0.3)),
-                      ),
-                      child: Text(
-                        state._role.toUpperCase(),
-                        style: TextStyle(
-                            color: t.accent,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 1.5),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      state._userName,
-                      style: TextStyle(
-                          color: _dark ? Colors.white : t.textPrimary,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800),
-                    ),
-                  ]),
-            ),
-            Divider(
-                color: _dark ? const Color(0xFF30363D) : t.bgRule,
-                height: 1),
-            const SizedBox(height: 8),
-
-            // Scrollable navigation links
-            Expanded(
-              child: SingleChildScrollView(
-                physics: const BouncingScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (state._isSupervisor) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                        child: _NavLabel(
-                            label: 'MY MODULES',
-                            muted: _dark
-                                ? const Color(0xFF8B949E)
-                                : t.textTertiary),
-                      ),
-                      ...state._availableModules.map((m) => ListTile(
-                            dense: true,
-                            leading: Icon(m.icon, color: t.accent, size: 18),
-                            title: Text(m.title,
-                                style: TextStyle(
-                                    color: _dark
-                                        ? const Color(0xFFE6EDF3)
-                                        : t.textPrimary,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600)),
-                            trailing: Icon(Icons.arrow_forward_ios_rounded,
-                                color: t.textTertiary, size: 12),
-                            onTap: () {
-                              Navigator.pop(context);
-                              state._openModule(m);
-                            },
-                          )),
-                    ] else if (state._mobileShowsCategoryChips) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                        child: _NavLabel(
-                            label: 'NAVIGATE',
-                            muted: _dark
-                                ? const Color(0xFF8B949E)
-                                : t.textTertiary),
-                      ),
-                      ...state._visibleCategories.map((cat) => _SidebarCatItem(
-                            cat: cat,
-                            selected: state._selectedCategory == cat,
-                            t: t,
-                            dark: _dark,
-                            onTap: () {
-                              state._changeCategory(cat);
-                              Navigator.pop(context);
-                            },
-                          )),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-
-            Divider(
-                color: _dark ? const Color(0xFF30363D) : t.bgRule,
-                height: 1),
-            _ActionTile(
-              icon: Icons.settings_outlined,
-              label: 'Settings',
-              t: t,
-              dark: _dark,
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => SettingsPage(
-                            userData: state.widget.userData))).then((_) {
-                  state.refresh();
-                });
-              },
-            ),
-            _ActionTile(
-              icon: Icons.help_outline_rounded,
-              label: 'Support',
-              t: t,
-              dark: _dark,
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const SupportPage()));
-              },
-            ),
-            _ActionTile(
-              icon: Icons.logout_rounded,
-              label: 'Sign Out',
-              t: t,
-              dark: _dark,
-              danger: true,
-              onTap: state._logout,
-            ),
-            const SizedBox(height: 8),
-          ],
+          height: 1,
+          color: _dark ? const Color(0xFF30363D) : t.bgRule,
         ),
       ),
     );
@@ -1780,67 +2648,72 @@ class _MainContent extends StatelessWidget {
 
     final showSnapshot = state._selectedCategory == DashboardCategoryFilter.overall && state._searchQuery.isEmpty;
 
-    return CustomScrollView(
-      physics: const BouncingScrollPhysics(),
-      slivers: [
-        SliverToBoxAdapter(
-          child: _HeroHeader(state: state, t: t, isDesktop: isDesktop),
-        ),
-        if (!showSnapshot)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 0),
-              child: _SearchBar(state: state, t: t),
-            ),
-          ),
-        if (_showMobileChips)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding:
-                  EdgeInsets.symmetric(horizontal: hPad, vertical: 12),
-              child: _CategoryChips(state: state, t: t),
-            ),
-          ),
-        if (showSnapshot)
-          SliverPadding(
-            padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 56),
-            sliver: SliverToBoxAdapter(
-              child: HomeSnapshotDashboard(
-                userData: state.widget.userData,
-                t: t,
-                availableModules: state._availableModules,
-                onOpenModule: state._openModule,
-                isDesktop: isDesktop,
-                onViewReports: () {
-                  final reportsModule = state._availableModules.firstWhere(
-                    (m) => m.id == 'executive_dashboard',
-                    orElse: () => ModuleRegistry.allModules.firstWhere((m) => m.id == 'executive_dashboard'),
-                  );
-                  state._openModule(reportsModule);
-                },
-              ),
-            ),
-          )
-        else ...[
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(hPad, 20, hPad, 14),
-              child: _SectionLabel(
-                  state: state, t: t, count: filtered.length, isDesktop: isDesktop),
-            ),
-          ),
-          filtered.isEmpty
-              ? SliverToBoxAdapter(
-                  child: _EmptySearch(state: state, t: t, hPad: hPad))
-              : SliverPadding(
-                  padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 56),
-                  sliver: _ModuleGrid(
-                      state: state,
-                      t: t,
-                      modules: filtered,
-                      isDesktop: isDesktop),
+    return Column(
+      children: [
+        // Built ONCE at the top — never re-animates or rebuilds on category tab changes
+        _HeroHeader(state: state, t: t, isDesktop: isDesktop),
+        Expanded(
+          child: CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              if (!showSnapshot)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 0),
+                    child: _SearchBar(state: state, t: t),
+                  ),
                 ),
-        ],
+              if (_showMobileChips)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding:
+                        EdgeInsets.symmetric(horizontal: hPad, vertical: 12),
+                    child: _CategoryChips(state: state, t: t),
+                  ),
+                ),
+              if (showSnapshot)
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 56),
+                  sliver: SliverToBoxAdapter(
+                    child: HomeSnapshotDashboard(
+                      userData: state.widget.userData,
+                      t: t,
+                      availableModules: state._availableModules,
+                      onOpenModule: state._openModule,
+                      isDesktop: isDesktop,
+                      onViewReports: () {
+                        final reportsModule = state._availableModules.firstWhere(
+                          (m) => m.id == 'branches',
+                          orElse: () => state._availableModules.first,
+                        );
+                        state._openModule(reportsModule);
+                      },
+                    ),
+                  ),
+                )
+              else ...[
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(hPad, 20, hPad, 14),
+                    child: _SectionLabel(
+                        state: state, t: t, count: filtered.length, isDesktop: isDesktop),
+                  ),
+                ),
+                filtered.isEmpty
+                    ? SliverToBoxAdapter(
+                        child: _EmptySearch(state: state, t: t, hPad: hPad))
+                    : SliverPadding(
+                        padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 56),
+                        sliver: _ModuleGrid(
+                            state: state,
+                            t: t,
+                            modules: filtered,
+                            isDesktop: isDesktop),
+                      ),
+              ],
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -1975,22 +2848,19 @@ Widget _buildProfileHeroCard({
   final now = DateTime.now();
   final dateStr = '${_weekdayFull(now.weekday)}, ${now.day} ${_monthFull(now.month)} ${now.year}';
   final hour = now.hour;
-
   final isCeo = state._role == 'ceo';
   final isChairman = state._role == 'chairman';
 
   final timeOfDayUpper = _timeOfDayString(hour).toUpperCase();
   final timeEmoji = (hour >= 18 || hour < 5) ? '🌙' : '☀️';
 
-  final greetingBadgeText = isChairman
-      ? '$timeEmoji GOOD $timeOfDayUpper, CHAIRMAN'
-      : (isCeo
-          ? '$timeEmoji GOOD $timeOfDayUpper, CEO'
-          : '$timeEmoji GOOD $timeOfDayUpper');
-
   final String userPhotoUrl = state._userPhotoUrl;
   final String userName = state._userName;
   final String userRole = state._role.toUpperCase();
+
+  final greetingBadgeText = userRole.isNotEmpty
+      ? '$timeEmoji GOOD $timeOfDayUpper, MR. $userRole'
+      : '$timeEmoji GOOD $timeOfDayUpper';
 
   final avatarSize = isDesktop ? 76.0 : 64.0;
   final primaryThemeColor = t.accent;
@@ -1999,25 +2869,43 @@ Widget _buildProfileHeroCard({
     margin: EdgeInsets.fromLTRB(hPad, isDesktop ? 22 : 16, hPad, 0),
     decoration: BoxDecoration(
       borderRadius: BorderRadius.circular(28.0),
+      color: isDark ? const Color(0xFF1E293B) : Colors.white,
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: isDark
+            ? [
+                const Color(0xFF1E293B),
+                const Color(0xFF0F172A),
+              ]
+            : [
+                const Color(0xFFFFFBEB),
+                const Color(0xFFF8FAFC),
+                Colors.white,
+              ],
+      ),
+      border: Border.all(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.16)
+            : const Color(0xFFF59E0B).withValues(alpha: 0.25),
+        width: 1.2,
+      ),
       boxShadow: [
         BoxShadow(
           color: primaryThemeColor.withValues(alpha: isDark ? 0.25 : 0.12),
-          blurRadius: 36,
-          spreadRadius: 1,
-          offset: const Offset(0, 8),
+          blurRadius: 24,
+          offset: const Offset(0, 6),
         ),
         BoxShadow(
-          color: Colors.black.withValues(alpha: isDark ? 0.40 : 0.05),
-          blurRadius: 14,
-          offset: const Offset(0, 4),
+          color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.04),
+          blurRadius: 10,
+          offset: const Offset(0, 3),
         ),
       ],
     ),
     child: ClipRRect(
       borderRadius: BorderRadius.circular(28.0),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
+      child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28.0),
             gradient: LinearGradient(
@@ -2258,8 +3146,8 @@ Widget _buildProfileHeroCard({
                                         letterSpacing: -0.3,
                                         height: 1.15,
                                       ),
-                                      overflow: TextOverflow.ellipsis,
-                                      maxLines: 1,
+                                      softWrap: true,
+                                      maxLines: 2,
                                     ),
                                     const SizedBox(height: 5),
                                     Row(
@@ -2291,39 +3179,62 @@ Widget _buildProfileHeroCard({
                           ),
                           const SizedBox(height: 18),
 
-                          // Bottom Metadata Badges Row
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              _ExecutiveGlassPill(
-                                label: userRole,
-                                icon: (isChairman || isCeo)
-                                    ? Icons.workspace_premium_rounded
-                                    : Icons.shield_outlined,
-                                accentColor: const Color(0xFFF59E0B),
-                                isDark: isDark,
-                              ),
-                              _ExecutiveGlassPill(
-                                label: '${state._availableModules.length} Modules',
-                                icon: Icons.grid_view_rounded,
-                                accentColor: const Color(0xFF6366F1),
-                                isDark: isDark,
-                              ),
-                              _ExecutiveGlassPill(
-                                label: 'Global Access',
-                                icon: Icons.public_rounded,
-                                accentColor: const Color(0xFF0EA5E9),
-                                isDark: isDark,
-                              ),
-                              _ExecutiveGlassPill(
-                                label: 'Live Network',
-                                icon: Icons.sensors_rounded,
-                                accentColor: const Color(0xFF10B981),
-                                isDark: isDark,
-                                isPulse: true,
-                              ),
-                            ],
+                          // Bottom Metadata Badges Row (Strict Single-Line on Mobile)
+                          FittedBox(
+                            alignment: Alignment.centerLeft,
+                            fit: BoxFit.scaleDown,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _ExecutiveGlassPill(
+                                  label: userRole,
+                                  icon: (isChairman || isCeo)
+                                      ? Icons.workspace_premium_rounded
+                                      : Icons.shield_outlined,
+                                  accentColor: const Color(0xFFF59E0B),
+                                  isDark: isDark,
+                                  isCompact: !isDesktop,
+                                ),
+                                SizedBox(width: isDesktop ? 8 : 5),
+                                _ExecutiveGlassPill(
+                                  label: '${state._availableModules.length} Modules',
+                                  icon: Icons.grid_view_rounded,
+                                  accentColor: const Color(0xFF6366F1),
+                                  isDark: isDark,
+                                  isCompact: !isDesktop,
+                                ),
+                                if (state._isSupervisor) ...[
+                                  if ((state.widget.userData['branchId'] ?? '').toString().isNotEmpty) ...[
+                                    SizedBox(width: isDesktop ? 8 : 5),
+                                    _ExecutiveGlassPill(
+                                      label: (state.widget.userData['branchId'] ?? '').toString().toUpperCase(),
+                                      icon: Icons.storefront_rounded,
+                                      accentColor: const Color(0xFF10B981),
+                                      isDark: isDark,
+                                      isCompact: !isDesktop,
+                                    ),
+                                  ],
+                                ] else ...[
+                                  SizedBox(width: isDesktop ? 8 : 5),
+                                  _ExecutiveGlassPill(
+                                    label: 'Global Access',
+                                    icon: Icons.public_rounded,
+                                    accentColor: const Color(0xFF0EA5E9),
+                                    isDark: isDark,
+                                    isCompact: !isDesktop,
+                                  ),
+                                  SizedBox(width: isDesktop ? 8 : 5),
+                                  _ExecutiveGlassPill(
+                                    label: 'Live Network',
+                                    icon: Icons.sensors_rounded,
+                                    accentColor: const Color(0xFF10B981),
+                                    isDark: isDark,
+                                    isPulse: true,
+                                    isCompact: !isDesktop,
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         ],
                       ),
@@ -2397,7 +3308,6 @@ Widget _buildProfileHeroCard({
           ),
         ),
       ),
-    ),
   );
 }
 
@@ -2407,6 +3317,7 @@ class _ExecutiveGlassPill extends StatefulWidget {
   final Color accentColor;
   final bool isDark;
   final bool isPulse;
+  final bool isCompact;
 
   const _ExecutiveGlassPill({
     required this.label,
@@ -2414,6 +3325,7 @@ class _ExecutiveGlassPill extends StatefulWidget {
     required this.accentColor,
     required this.isDark,
     this.isPulse = false,
+    this.isCompact = false,
   });
 
   @override
@@ -2431,8 +3343,10 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOutCubic,
-        transform: Matrix4.translationValues(0.0, _isHovered ? -2.5 : 0.0, 0.0),
-        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+        padding: EdgeInsets.symmetric(
+          horizontal: widget.isCompact ? 8.5 : 12.0,
+          vertical: widget.isCompact ? 4.5 : 6.0,
+        ),
         decoration: BoxDecoration(
           color: widget.isDark
               ? (_isHovered
@@ -2441,28 +3355,28 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
               : (_isHovered
                   ? widget.accentColor.withValues(alpha: 0.14)
                   : Colors.white.withValues(alpha: 0.92)),
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: _isHovered
                 ? widget.accentColor.withValues(alpha: widget.isDark ? 0.65 : 0.55)
                 : (widget.isDark
                     ? Colors.white.withValues(alpha: 0.12)
                     : widget.accentColor.withValues(alpha: 0.25)),
-            width: 1.0,
+            width: 0.8,
           ),
           boxShadow: _isHovered
               ? [
                   BoxShadow(
                     color: widget.accentColor.withValues(alpha: widget.isDark ? 0.35 : 0.20),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
                   ),
                 ]
               : [
                   BoxShadow(
                     color: widget.accentColor.withValues(alpha: widget.isDark ? 0.15 : 0.06),
-                    blurRadius: 6,
-                    offset: const Offset(0, 2),
+                    blurRadius: 5,
+                    offset: const Offset(0, 1.5),
                   ),
                 ],
         ),
@@ -2471,37 +3385,37 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
           children: [
             // Squircle Micro Icon Container
             Container(
-              padding: const EdgeInsets.all(4),
+              padding: EdgeInsets.all(widget.isCompact ? 3 : 4),
               decoration: BoxDecoration(
                 color: widget.accentColor.withValues(alpha: widget.isDark ? 0.20 : 0.12),
-                borderRadius: BorderRadius.circular(7),
+                borderRadius: BorderRadius.circular(6),
               ),
-              child: Icon(widget.icon, size: 13, color: widget.accentColor),
+              child: Icon(widget.icon, size: widget.isCompact ? 11 : 13, color: widget.accentColor),
             ),
-            const SizedBox(width: 7.5),
+            SizedBox(width: widget.isCompact ? 5.0 : 7.0),
             Text(
               widget.label,
               style: TextStyle(
                 color: widget.isDark
                     ? (_isHovered ? Colors.white : const Color(0xFFE2E8F0))
                     : (_isHovered ? const Color(0xFF0F172A) : const Color(0xFF334155)),
-                fontSize: 11.5,
+                fontSize: widget.isCompact ? 10.0 : 11.5,
                 fontWeight: FontWeight.w800,
                 letterSpacing: 0.2,
               ),
             ),
             if (widget.isPulse) ...[
-              const SizedBox(width: 6),
+              SizedBox(width: widget.isCompact ? 4.5 : 6.0),
               Container(
-                width: 6,
-                height: 6,
+                width: widget.isCompact ? 5 : 6,
+                height: widget.isCompact ? 5 : 6,
                 decoration: BoxDecoration(
                   color: widget.accentColor,
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
                       color: widget.accentColor.withValues(alpha: 0.8),
-                      blurRadius: 6,
+                      blurRadius: 5,
                       spreadRadius: 1,
                     ),
                   ],
@@ -3464,7 +4378,6 @@ class _ModuleCardState extends State<_ModuleCard>
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 260),
             curve: Curves.easeOutCubic,
-            transform: Matrix4.translationValues(0.0, _hov ? -5.0 : 0.0, 0.0),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(26),
               // Ambient outer radial glow shadow

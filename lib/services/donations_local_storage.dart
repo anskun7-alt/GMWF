@@ -25,8 +25,11 @@ import 'package:collection/collection.dart';
 import 'package:uuid/uuid.dart';
 
 import 'local_storage_service.dart';
+import 'sync_service.dart';
 import '../models/donation_models.dart';
 import '../pages/donations/donations_shared.dart';
+import '../realtime/realtime_manager.dart';
+import '../realtime/realtime_events.dart';
 
 class DonationsLocalStorage {
   // ── Box names (public — SubmissionService references donationsBox) ─────────
@@ -180,10 +183,7 @@ class DonationsLocalStorage {
 
   static Future<void> _syncReceiptSequence() async {
     final settings = Hive.box('app_settings');
-    final current = settings.get('receipt_seq_global', defaultValue: 0) as int;
-    
     final box = Hive.box(donationsBox);
-    int maxSeq = current;
     
     for (var val in box.values) {
       if (val is Map) {
@@ -293,15 +293,20 @@ class DonationsLocalStorage {
     final isAnonymous = data['isAnonymous'] as bool? ?? false;
     final bankAcc     = (data['bankAccountNumber'] as String? ?? '').trim();
 
+    final isBox = data['isBoxDonation'] == true ||
+        donorId.contains('_box_') ||
+        (data['boxId'] != null && (data['boxId'] as String).isNotEmpty) ||
+        (data['boxNumber'] != null && (data['boxNumber'] as String).isNotEmpty);
+
     final donorNameNorm = donorName.toLowerCase().trim();
-    final bool isAnonymousEffective = isAnonymous ||
+    final isAnonymousEffective = isAnonymous ||
         donorNameNorm == 'valued donor' ||
         donorNameNorm == 'anonymous' ||
         donorNameNorm == 'walk-in donor';
 
     recordMap['isAnonymous'] = isAnonymousEffective;
 
-    if (!isAnonymousEffective && (phone.isNotEmpty || donorId.isNotEmpty || donorName.isNotEmpty)) {
+    if (!isBox && !isAnonymousEffective && (phone.isNotEmpty || donorId.isNotEmpty || donorName.isNotEmpty)) {
       DonorRecord? active;
 
       // Search GLOBALLY across all branches by donorId first, then phone
@@ -312,8 +317,9 @@ class DonationsLocalStorage {
       if (active == null && phone.isNotEmpty) {
         // Global phone search — ignores branch
         final matches = getDonorsByPhone(phone);
-        if (matches.length == 1) active = matches.first;
-        else if (matches.length > 1) {
+        if (matches.length == 1) {
+          active = matches.first;
+        } else if (matches.length > 1) {
           // Prefer same branch, fall back to first match
           active = matches.firstWhere(
             (d) => d.branchId == branchIdNorm,
@@ -393,6 +399,25 @@ class DonationsLocalStorage {
       'hiveKey':  key,
       'data':     sanitized,
     });
+
+    // Broadcast over LAN so server and peer stations receive the donation receipt immediately
+    try {
+      if (RealtimeManager().isConnected) {
+        RealtimeManager().sendMessage(
+          RealtimeEvents.payload(
+            type: RealtimeEvents.saveDonationReceipt,
+            data: sanitized,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[DonationsLS] Realtime LAN broadcast error: $e');
+    }
+
+    // Immediately trigger cloud upload
+    try {
+      SyncService().triggerUpload(force: true);
+    } catch (_) {}
 
     debugPrint('[DonationsLS] Sync enqueued. Queue size: ${Hive.box(LocalStorageService.syncBox).length}');
 
@@ -603,6 +628,7 @@ class DonationsLocalStorage {
 
   static List<DonationRecord> getDonationsForDate(
       String branchId, String date) {
+    if (!Hive.isBoxOpen(donationsBox)) return [];
     final box = Hive.box(donationsBox);
     return box.keys
         .where((k) {
@@ -630,6 +656,7 @@ class DonationsLocalStorage {
 
   /// All donations for branch, newest first. Credit keys excluded.
   static List<DonationRecord> getAllDonations(String branchIdRaw) {
+    if (!Hive.isBoxOpen(donationsBox)) return [];
     final branchId = branchIdRaw.toLowerCase().trim();
     final box = Hive.box(donationsBox);
     final isGlobal = branchId == 'all' || branchId.isEmpty;
@@ -731,6 +758,9 @@ class DonationsLocalStorage {
 
   static Stream<List<DonationRecord>> streamDonationsForDate(
       String branchId, String date) async* {
+    if (!Hive.isBoxOpen(donationsBox)) {
+      await LocalStorageService.openBoxSafe(donationsBox);
+    }
     yield getDonationsForDate(branchId, date);
     await for (final _ in Hive.box(donationsBox).watch()) {
       yield getDonationsForDate(branchId, date);
@@ -739,6 +769,9 @@ class DonationsLocalStorage {
 
   static Stream<List<DonationRecord>> streamAllDonations(
       String branchId) async* {
+    if (!Hive.isBoxOpen(donationsBox)) {
+      await LocalStorageService.openBoxSafe(donationsBox);
+    }
     yield getAllDonations(branchId);
     await for (final _ in Hive.box(donationsBox).watch()) {
       yield getAllDonations(branchId);
@@ -750,7 +783,7 @@ class DonationsLocalStorage {
   // ══════════════════════════════════════════════════════════════════════════
 
   static List<DonorRecord> getDonorsByPhone(String phone) {
-    if (phone.isEmpty) return [];
+    if (phone.isEmpty || !Hive.isBoxOpen(donorsBox)) return [];
     final box    = Hive.box(donorsBox);
     final pClean = phone.replaceAll(RegExp(r'\D'), '');
 
@@ -767,7 +800,7 @@ class DonationsLocalStorage {
   }
 
   static DonorRecord? getDonorById(String id) {
-    if (id.isEmpty) return null;
+    if (id.isEmpty || !Hive.isBoxOpen(donorsBox)) return null;
     final box = Hive.box(donorsBox);
     final raw = box.get(_donorKey(id));
     if (raw == null) return null;
@@ -890,11 +923,18 @@ class DonationsLocalStorage {
   }
 
   static List<DonorRecord> getAllDonors([String? branchId]) {
+    if (!Hive.isBoxOpen(donorsBox)) return [];
     final box = Hive.box(donorsBox);
     var list = box.values
         .map((v) {
           final m = Map<String, dynamic>.from(v as Map);
           if (m['syncStatus'] == 'deleted') return null;
+          final name = (m['name'] as String? ?? '').toLowerCase();
+          final id = (m['id'] as String? ?? '').toLowerCase();
+          // Filter out donation boxes from donors
+          if (id.contains('_box_') || name.startsWith('box ') || name.startsWith('box-')) {
+            return null;
+          }
           return DonorRecord.fromMap(m);
         })
         .whereType<DonorRecord>();
@@ -908,6 +948,9 @@ class DonationsLocalStorage {
   }
 
   static Stream<List<DonorRecord>> streamAllDonors([String? branchId]) async* {
+    if (!Hive.isBoxOpen(donorsBox)) {
+      await LocalStorageService.openBoxSafe(donorsBox);
+    }
     yield getAllDonors(branchId);
     await for (final _ in Hive.box(donorsBox).watch()) {
       yield getAllDonors(branchId);
@@ -1154,6 +1197,9 @@ class DonationsLocalStorage {
   }
 
   static Future<List<BankSlip>> getBankSlips({required String branchId}) async {
+    if (!Hive.isBoxOpen(bankSlipsBox)) {
+      await LocalStorageService.openBoxSafe(bankSlipsBox);
+    }
     final box = Hive.box(bankSlipsBox);
     return box.values
         .map((e) => BankSlip.fromMap(Map<String, dynamic>.from(e as Map)))

@@ -16,6 +16,7 @@ import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/widgets/patient_audit_history_dialog.dart';
 import 'package:gmwf/utils/formatters.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
+import 'package:gmwf/services/cloud_messaging_service.dart';
 
 class TokenScreen extends StatefulWidget {
   final String branchId;
@@ -59,8 +60,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   bool _isVitalsDialogOpen = false;
 
   StreamSubscription<Map<String, dynamic>>? _realtimeSub;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _exceptionDocSub;
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _branchDocSub;
   
   // ─── HANG FIX: Debounce setState ──────────────────────────────────────
   Timer? _debounceListenerTimer;
@@ -105,6 +104,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    LocalStorageService.ensureBoxOpen(LocalStorageService.patientsBox);
+    LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
     // FIX 5b: capture the camp once at screen start instead of listening to
     // CampSessionService.activeCampNotifier — that listener was exactly the
     // mechanism that let another tab's camp switch retroactively touch this
@@ -118,80 +119,33 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       });
     }
 
-    // ── Firestore branch doc listener (Live Policy Sync) ─────────────────────
-    try {
-      _branchDocSub = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .snapshots()
-          .listen((snap) {
-        if (snap.exists && snap.data() != null) {
-          final data = snap.data()!;
-          if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
-            final box = Hive.box(LocalStorageService.branchesBox);
-            final existing = box.get('branch:${widget.branchId}');
-            final merged = existing is Map ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': widget.branchId};
-            merged.addAll(data);
-            box.put('branch:${widget.branchId}', merged);
-          }
-          if (mounted) {
-            _debounceListenerSetState();  // ← HANG FIX: Debounce
-          }
-        }
-      });
-    } catch (_) {}
-
-    // ── Firestore edit_requests listener (Cloud & Offline Sync) ───────────────
-    try {
-      _exceptionDocSub = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('edit_requests')
-          .where('requestType', isEqualTo: 'token_exception')
-          .where('status', isEqualTo: 'approved')
-          .snapshots()
-          .listen((snap) {
-        bool changed = false;
-        for (final doc in snap.docs) {
-          final d = doc.data();
-          final pId = d['patientId']?.toString();
-          if (pId != null && pId.isNotEmpty) {
-            LocalStorageService.grantTokenException(
-              widget.branchId,
-              pId,
-              reason: d['doctorReason']?.toString() ?? 'Approved by Doctor',
-              approvedBy: d['approvedBy']?.toString() ?? 'Doctor',
-              requestId: doc.id,
-            );
-            changed = true;
-          }
-        }
-        if (changed && mounted && _patientData != null) {
-          final curPid = _patientData!['patientId']?.toString() ?? '';
-          final curClean = _getRestrictionId(_patientData ?? {});
-          if (LocalStorageService.hasApprovedTokenException(widget.branchId, curPid) ||
-              LocalStorageService.hasApprovedTokenException(widget.branchId, curClean)) {
-            _debounceListenerSetState();  // ← HANG FIX: Debounce
-          }
-        }
-      }, onError: (_) {});
-    } catch (_) {}
-
-    _realtimeSub = RealtimeManager().messageStream.listen((message) async {
-      final type = message['event_type'] as String?;
-      final rawData = message['data'];
+    // ── Pure Hive & LAN Realtime Architecture (Zero Firestore Snapshot Listeners) ──
+    _realtimeSub = RealtimeManager().messageStream.listen((event) async {
+      final type = event['event_type'] as String?;
+      final rawData = event['data'];
       final data = (rawData is Map) ? Map<String, dynamic>.from(rawData) : <String, dynamic>{};
       if (!mounted) return;
       final eventBranch = data['branchId']?.toString().toLowerCase().trim();
       final myBranch    = widget.branchId.toLowerCase().trim();
-      if (eventBranch != null && eventBranch != myBranch) return;
+      if (eventBranch != null && eventBranch.isNotEmpty && eventBranch != myBranch) return;
       if (type == RealtimeEvents.saveEntry ||
           type == 'token_created' ||
           type == RealtimeEvents.savePrescription) {
         _instantRefresh();
       } else if (type == 'token_reversal_approved') {
-        if (_patientData?['patientId'] != null) {
-          _checkIfTokenStillExists(_patientData!['patientId'] as String);
+        final tokenSerial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString();
+        if (tokenSerial != null && tokenSerial.isNotEmpty) {
+          await LocalStorageService.deleteLocalEntry(widget.branchId, tokenSerial);
+        }
+        _issuedTokenKeysThisSession.clear();
+        if (_patientData != null) {
+          final pId = _patientData!['patientId']?.toString();
+          if (pId != null && pId.isNotEmpty) {
+            _checkIfTokenStillExists(pId);
+          }
+          setState(() {
+            _hasTokenToday = false;
+          });
         }
         _instantRefresh();
       } else if (type == RealtimeEvents.tokenExceptionApproved || type == 'restriction_removed') {
@@ -284,7 +238,13 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           children: [
             Icon(Icons.shield_outlined, color: Colors.teal),
             SizedBox(width: 10),
-            Text('Dispensary Safety Check'),
+            Expanded(
+              child: Text(
+                'Dispensary Safety Check',
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
           ],
         ),
         content: Text(
@@ -292,19 +252,26 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           style: const TextStyle(fontSize: 15),
         ),
         actions: [
-          OutlinedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _showCampSelector();
-              });
-            },
-            child: const Text('Switch Dispensary'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Confirm'),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              OutlinedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) _showCampSelector();
+                  });
+                },
+                child: const Text('Switch Dispensary'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Confirm'),
+              ),
+            ],
           ),
         ],
       ),
@@ -329,6 +296,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
               ...options.map((c) => ListTile(
                     title: Text(c['label']!),
                     onTap: () async {
+                      Navigator.pop(ctx);
                       await CampSessionService.setActiveCamp(c['id']!);
                       // Deliberate switch from this tab's own selector takes
                       // effect immediately in this tab.
@@ -337,7 +305,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                         setState(() {});
                         _estimateNextSerial();
                       }
-                      Navigator.pop(ctx);
                     },
                   )),
             ],
@@ -352,8 +319,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     _debounceListenerTimer?.cancel();  // ← HANG FIX: Clean up debounce timer
     WidgetsBinding.instance.removeObserver(this);
     _realtimeSub?.cancel();
-    _exceptionDocSub?.cancel();
-    _branchDocSub?.cancel();
     cnicController.dispose();
     _cnicFocusNode.dispose();
     super.dispose();
@@ -409,17 +374,25 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   // ── Refresh ────────────────────────────────────────────────────────────────
   Future<void> _instantRefresh() async {
     if (_isRefreshing) return;
-    setState(() => _isRefreshing = true);
+    if (mounted) setState(() => _isRefreshing = true);
     try {
-      await LocalStorageService.downloadTodayTokens(widget.branchId);
+      await LocalStorageService.downloadTodayTokens(widget.branchId).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => {},
+      );
       // ── FIRESTORE FIX: always refresh restrictions on every update ────────
-      await LocalStorageService.downloadMedicineRestrictions(widget.branchId);
+      await LocalStorageService.downloadMedicineRestrictions(widget.branchId).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => {},
+      );
       _estimateNextSerial();
       if (_patientData?['patientId'] != null) {
         final patientId = _patientData!['patientId'] as String;
         final stillHas = await _tokenExistsToday(patientId);
-        setState(() => _hasTokenToday = stillHas);
-        _checkMedicineRestriction(_patientData!);
+        if (mounted) {
+          setState(() => _hasTokenToday = stillHas);
+          _checkMedicineRestriction(_patientData!);
+        }
       }
       if (mounted) setState(() {});
     } catch (e) {
@@ -463,13 +436,49 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     return LocalStorageService.resolveIndividualPatientId(p);
   }
 
+  bool _isEntryFromToday(Map<dynamic, dynamic> e, {String? targetDateKey}) {
+    final now = CampSessionService.getAuthoritativeTime();
+    final todayDdMmYy = DateFormat('ddMMyy').format(now);
+    final todayYmd = DateFormat('yyyy-MM-dd').format(now);
+    final shiftDateKey = targetDateKey ?? CampSessionService.resolveShiftAndDateKey(now, widget.branchId).dateKey;
+
+    final validDates = <String>{
+      if (shiftDateKey.isNotEmpty) shiftDateKey.toLowerCase().trim(),
+      todayDdMmYy.toLowerCase().trim(),
+      todayYmd.toLowerCase().trim(),
+    };
+
+    final dk = (e['dateKey'] ?? e['date'] ?? '').toString().toLowerCase().trim();
+    if (dk.isNotEmpty && validDates.contains(dk)) return true;
+
+    final serial = (e['serial'] ?? '').toString().toLowerCase().trim();
+    if (serial.isNotEmpty) {
+      for (final vd in validDates) {
+        if (vd.isNotEmpty && serial.startsWith(vd)) return true;
+      }
+    }
+
+    final createdAt = (e['createdAt'] ?? e['timestamp'] ?? '').toString().trim();
+    if (createdAt.isNotEmpty && createdAt.startsWith(todayYmd)) return true;
+
+    return false;
+  }
+
   Map<String, dynamic>? _getPatientTodayToken(Map<String, dynamic> patient, {bool? isVitalsOnly}) {
-    final pId = LocalStorageService.resolveIndividualPatientId(patient);
+    String norm(dynamic v) => (v ?? '').toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').trim();
+
+    final pId = (patient['patientId'] ?? patient['id'] ?? '').toString().trim();
     final cleanId = pId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-    final pName = (patient['patientName'] ?? patient['name'] ?? patient['fullName'] ?? '').toString().trim().toLowerCase();
-    final pCnic = (patient['cnic'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-    final pGuard = (patient['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-    final isChild = pGuard.isNotEmpty || (patient['isAdult'] == false) || pId.contains('_child_');
+    final resolvedPId = LocalStorageService.resolveIndividualPatientId(patient).trim();
+    final cleanResolvedPId = resolvedPId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+
+    final pNameNorm = norm(patient['patientName'] ?? patient['name'] ?? patient['fullName']);
+    final pCnicNorm = norm(patient['cnic'] ?? patient['patientCnic']);
+    final pGuardNorm = norm(patient['guardianCnic']);
+    final pPhoneNorm = norm(patient['phone'] ?? patient['contactPhone']);
+
+    final pAge = (patient['age'] is num) ? (patient['age'] as num).toInt() : (int.tryParse(patient['age']?.toString() ?? '') ?? 0);
+    final isChild = patient['isAdult'] == false || pGuardNorm.isNotEmpty || pId.contains('_child_') || resolvedPId.contains('_child_') || (pAge > 0 && pAge < 20);
 
     final shiftInfo = CampSessionService.resolveShiftAndDateKey(null, widget.branchId);
     final targetDate = shiftInfo.dateKey;
@@ -479,7 +488,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
     // EXCEPTION PASS: If Doctor approved a token exception today, consider patient available
     if (LocalStorageService.hasApprovedTokenException(widget.branchId, pId, dateKey: targetDate) ||
-        LocalStorageService.hasApprovedTokenException(widget.branchId, cleanId, dateKey: targetDate) ||
+        (cleanId.isNotEmpty && LocalStorageService.hasApprovedTokenException(widget.branchId, cleanId, dateKey: targetDate)) ||
+        (cleanResolvedPId.isNotEmpty && LocalStorageService.hasApprovedTokenException(widget.branchId, cleanResolvedPId, dateKey: targetDate)) ||
+        (resolvedPId.isNotEmpty && LocalStorageService.hasApprovedTokenException(widget.branchId, resolvedPId, dateKey: targetDate)) ||
         (cleanRId.isNotEmpty && LocalStorageService.hasApprovedTokenException(widget.branchId, cleanRId, dateKey: targetDate)) ||
         (rId.isNotEmpty && LocalStorageService.hasApprovedTokenException(widget.branchId, rId, dateKey: targetDate))) {
       return null;
@@ -487,11 +498,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
     final entries = LocalStorageService.getLocalEntries(widget.branchId);
     for (final e in entries) {
-      final dk = (e['dateKey'] ?? '').toString();
-      if (dk != targetDate) continue;
+      if (!_isEntryFromToday(e, targetDateKey: targetDate)) continue;
 
-      final status = (e['status'] ?? '').toString().toLowerCase();
-      if (status == 'deleted' || status == 'cancelled' || status == 'skipped' || status == 'expired') {
+      final status = (e['status'] ?? '').toString().toLowerCase().trim();
+      if (status == 'deleted' || status == 'cancelled' || status == 'skipped' || status == 'expired' || status == 'void') {
         continue;
       }
 
@@ -502,32 +512,58 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         continue;
       }
 
-      final resolvedEPid = LocalStorageService.resolveIndividualPatientId(e).replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      final ePid = (e['patientId'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      final eName = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
-      final eCnic = (e['patientCnic'] ?? e['cnic'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      final eGuard = (e['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      final eIsChild = eGuard.isNotEmpty || (e['isAdult'] == false) || ePid.contains('_child_') || resolvedEPid.contains('_child_');
+      final eId = (e['patientId'] ?? e['id'] ?? '').toString().trim();
+      final cleanEId = eId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+      final resolvedEId = LocalStorageService.resolveIndividualPatientId(e).trim();
+      final cleanResolvedEId = resolvedEId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
 
-      // 1. Exact unique patientId match
-      if (cleanId.isNotEmpty && (resolvedEPid == cleanId || ePid == cleanId)) {
+      final eNameNorm = norm(e['patientName'] ?? e['name'] ?? e['fullName']);
+      final eCnicNorm = norm(e['patientCnic'] ?? e['cnic']);
+      final eGuardNorm = norm(e['guardianCnic']);
+      final ePhoneNorm = norm(e['phone'] ?? e['contactPhone']);
+
+      final eAge = (e['age'] is num) ? (e['age'] as num).toInt() : (int.tryParse(e['age']?.toString() ?? '') ?? 0);
+      final eIsChild = (e['isAdult'] == false) || eGuardNorm.isNotEmpty || eId.contains('_child_') || resolvedEId.contains('_child_') || (eAge > 0 && eAge < 20);
+
+      // Rule 0: Adult and Child are strictly distinct entities. Never cross-match!
+      if (isChild != eIsChild) {
+        continue;
+      }
+
+      // Rule 1: Canonical resolved individual patientId match (e.g. '0000000000000_child_02' == '0000000000000_child_02')
+      if (cleanResolvedPId.isNotEmpty && (cleanResolvedPId == cleanResolvedEId || cleanResolvedPId == cleanEId)) {
+        return e;
+      }
+      if (cleanId.isNotEmpty && cleanId.contains('_child_') && (cleanId == cleanEId || cleanId == cleanResolvedEId)) {
         return e;
       }
 
-      // 2. Child patient match: MUST be a child token, matching BOTH guardian CNIC and child name
-      if (isChild) {
-        if (eIsChild && pGuard.isNotEmpty && (eGuard == pGuard || eCnic == pGuard || resolvedEPid.startsWith(pGuard))) {
-          if (pName.isNotEmpty && eName.isNotEmpty && (pName == eName || pName.contains(eName) || eName.contains(pName))) {
+      // Rule 2: Adult match by adult CNIC + exact name match
+      if (!isChild && !eIsChild) {
+        if (pCnicNorm.isNotEmpty && eCnicNorm.isNotEmpty && pCnicNorm == eCnicNorm) {
+          if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty) {
+            if (pNameNorm == eNameNorm) return e;
+          } else {
             return e;
           }
         }
-      } else {
-        // 3. Adult patient match: MUST be an adult token (NOT child), matching patient CNIC AND adult name
-        if (!eIsChild && pCnic.isNotEmpty && eCnic == pCnic && eGuard.isEmpty) {
-          final samePerson = pName.isNotEmpty && eName.isNotEmpty && (pName == eName || pName.contains(eName) || eName.contains(pName));
-          if (samePerson) {
+      }
+
+      // Rule 3: Child match under same guardian CNIC (requires EXACT name match)
+      if (isChild && eIsChild) {
+        final pGuard = pGuardNorm.isNotEmpty ? pGuardNorm : pCnicNorm;
+        final eGuard = eGuardNorm.isNotEmpty ? eGuardNorm : eCnicNorm;
+        if (pGuard.isNotEmpty && eGuard.isNotEmpty && pGuard == eGuard) {
+          if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty && pNameNorm == eNameNorm) {
             return e;
           }
+        }
+      }
+
+      // Rule 4: Phone matching + EXACT name match
+      if (pPhoneNorm.length >= 7 && pPhoneNorm == ePhoneNorm) {
+        if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty && pNameNorm == eNameNorm) {
+          return e;
         }
       }
     }
@@ -563,13 +599,18 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       return false;
     }
 
+    // Check local patient registry first for individual disambiguation
+    final pMap = LocalStorageService.getLocalPatient(patientId);
+    if (pMap != null) {
+      return _getPatientTodayToken(pMap, isVitalsOnly: isVitalsOnly) != null;
+    }
+
     final entries = LocalStorageService.getLocalEntries(widget.branchId);
     return entries.any((e) {
-      final dateKey = (e['dateKey'] ?? '').toString();
-      if (dateKey != targetDate) return false;
+      if (!_isEntryFromToday(e, targetDateKey: targetDate)) return false;
 
       final status = (e['status'] ?? '').toString().toLowerCase();
-      if (status == 'deleted' || status == 'cancelled' || status == 'skipped' || status == 'expired') {
+      if (status == 'deleted' || status == 'cancelled' || status == 'skipped' || status == 'expired' || status == 'void') {
         return false;
       }
 
@@ -582,13 +623,14 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
       final resolvedEPid = LocalStorageService.resolveIndividualPatientId(e).replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
       final ePid   = (e['patientId'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      final eCnic  = (e['patientCnic'] ?? e['cnic'] ?? '').toString().replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-      return cleanId.isNotEmpty && (resolvedEPid == cleanId || ePid == cleanId || eCnic == cleanId);
+      return cleanId.isNotEmpty && (resolvedEPid == cleanId || ePid == cleanId);
     });
   }
 
   Future<void> _estimateNextSerial() async {
-    final datePart   = DateFormat('ddMMyy').format(DateTime.now());
+    final now = CampSessionService.getAuthoritativeTime();
+    final shiftInfo = CampSessionService.resolveShiftAndDateKey(now, widget.branchId);
+    final datePart = shiftInfo.dateKey;
     final activeCamp = _capturedDispensaryId;
     final nextSeq = await LocalStorageService.getNextLocalSerialSequence(
       widget.branchId,
@@ -656,11 +698,16 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       _guardianCnic = null; _guardianPatient = null;
     });
     try {
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.patientsBox);
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
       var localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
           input, branchId: widget.branchId);
       if (localResults.isEmpty) {
         try {
-          await LocalStorageService.downloadAllPatients(widget.branchId);
+          await LocalStorageService.downloadAllPatients(widget.branchId).timeout(
+            const Duration(seconds: 3),
+            onTimeout: () => {},
+          );
           localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
               input, branchId: widget.branchId);
         } catch (e) {
@@ -675,10 +722,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                 .collection('patients');
 
             final normalized = input.replaceAll(RegExp(r'[^0-9]'), '');
-            final cnicQuery = branchRef.where('cnic', isEqualTo: input).limit(10).get();
-            final guardianQuery = branchRef.where('guardianCnic', isEqualTo: input).limit(20).get();
+            final cnicQuery = branchRef.where('cnic', isEqualTo: input).limit(10).get().timeout(const Duration(seconds: 3));
+            final guardianQuery = branchRef.where('guardianCnic', isEqualTo: input).limit(20).get().timeout(const Duration(seconds: 3));
             final phoneQuery = normalized.length >= 6
-                ? branchRef.where('phone', isEqualTo: normalized).limit(1).get()
+                ? branchRef.where('phone', isEqualTo: normalized).limit(1).get().timeout(const Duration(seconds: 3))
                 : Future.value(null);
 
             final results = await Future.wait([cnicQuery, guardianQuery, phoneQuery], eagerError: false);
@@ -703,23 +750,27 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           }
         }
       }
-      setState(() => _patientsList = localResults);
+      if (mounted) {
+        setState(() => _patientsList = localResults);
+      }
       if (localResults.isNotEmpty) {
         if (localResults.length == 1) {
           await _selectPatient(localResults.first);
         } else {
-          setState(() => _patientData = null);
+          if (mounted) setState(() => _patientData = null);
         }
       } else {
         if (looksLikeCnic && widget.onPatientNotFound != null) {
           widget.onPatientNotFound!(input);
         } else {
-          setState(() =>
-              _errorMessage = 'No patient found with this CNIC/phone.');
+          if (mounted) {
+            setState(() =>
+                _errorMessage = 'No patient found with this CNIC/phone.');
+          }
         }
       }
     } catch (e) {
-      setState(() => _errorMessage = 'Search failed: $e');
+      if (mounted) setState(() => _errorMessage = 'Search failed: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -779,32 +830,34 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       throw Exception('Missing patientId');
     }
 
+    final resolvedPid = LocalStorageService.resolveIndividualPatientId(_patientData);
+    final effectivePid = resolvedPid.isNotEmpty ? resolvedPid : patientId;
+    final cleanPid = effectivePid.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+
     final now = CampSessionService.getAuthoritativeTime();
     final shiftInfo = CampSessionService.resolveShiftAndDateKey(now, widget.branchId);
     final dateKey = shiftInfo.dateKey;
     final tokenTypeTag = isVitalsOnly ? 'vitals' : 'regular';
-    final idempotencyKey = '${widget.branchId}_${patientId}_${tokenTypeTag}_$dateKey';
+    final idempotencyKey = '${widget.branchId}_${cleanPid}_${tokenTypeTag}_$dateKey';
 
-    final cleanPid = patientId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
     final hasException = LocalStorageService.hasApprovedTokenException(widget.branchId, patientId, dateKey: dateKey) ||
-        LocalStorageService.hasApprovedTokenException(widget.branchId, cleanPid, dateKey: dateKey);
+        LocalStorageService.hasApprovedTokenException(widget.branchId, cleanPid, dateKey: dateKey) ||
+        LocalStorageService.hasApprovedTokenException(widget.branchId, effectivePid, dateKey: dateKey);
 
     if (hasException) {
       debugPrint('[TokenScreen] 🟢 Authorized token exception active for $patientId ($dateKey)');
       _issuedTokenKeysThisSession.remove(idempotencyKey);
-      try {
-        if (Hive.isBoxOpen('issued_token_keys')) {
-          await Hive.box('issued_token_keys').delete(idempotencyKey);
-        }
-      } catch (_) {}
     } else {
       bool isAlreadyIssued = _issuedTokenKeysThisSession.contains(idempotencyKey);
-      if (!isAlreadyIssued && Hive.isBoxOpen('issued_token_keys')) {
-        isAlreadyIssued = Hive.box('issued_token_keys').containsKey(idempotencyKey);
+      if (!isAlreadyIssued) {
+        final exists = await _tokenExistsToday(effectivePid, patient: _patientData, isVitalsOnly: isVitalsOnly);
+        if (exists) {
+          isAlreadyIssued = true;
+        }
       }
 
       if (isAlreadyIssued) {
-        debugPrint('[TokenScreen] 🛑 Duplicate token issuance blocked by idempotency key: $idempotencyKey');
+        debugPrint('[TokenScreen] 🛑 Duplicate token issuance blocked for: $effectivePid');
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('⚠️ A ${isVitalsOnly ? "Vitals Inspection" : "Regular"} token has already been issued for this patient today!'),
           backgroundColor: Colors.orange,
@@ -815,11 +868,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     }
 
     _issuedTokenKeysThisSession.add(idempotencyKey);
-    try {
-      if (Hive.isBoxOpen('issued_token_keys')) {
-        Hive.box('issued_token_keys').put(idempotencyKey, DateTime.now().toIso8601String());
-      }
-    } catch (_) {}
 
     if (mounted) setState(() => _isLoading = true);
     try {
@@ -933,13 +981,22 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         } catch (_) {}
       }
 
+      final resolvedPidForEntry = LocalStorageService.resolveIndividualPatientId(_patientData);
+      final effectivePidForEntry = resolvedPidForEntry.isNotEmpty ? resolvedPidForEntry : patientId;
+      final isChildPatient = _patientData!['isAdult'] == false ||
+          (_patientData!['guardianCnic']?.toString().trim().isNotEmpty == true) ||
+          effectivePidForEntry.contains('_child_');
+
       final baseData = <String, dynamic>{
         'queueType':     queueType,
         'dateKey':       dateKey,
         'session':       session,
-        'patientId':     patientId,
+        'patientId':     effectivePidForEntry,
         'patientName':   patientName,
         'name':          patientName,
+        'isAdult':       !isChildPatient,
+        'age':           _patientData!['age'] ?? 0,
+        'gender':        _patientData!['gender'] ?? 'Unknown',
         'isVitalsOnly':  isVitalsOnly,
         'vitalsOnly':    isVitalsOnly,
         'visitReason':   isVitalsOnly ? 'Vitals Inspection Only' : 'Regular Visit',
@@ -1054,6 +1111,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           });
         } else {
           final currentQuery = cnicController.text.trim();
+          final refreshedFamily = currentQuery.isNotEmpty
+              ? LocalStorageService.searchPatientsByCnicOrGuardian(currentQuery, branchId: widget.branchId)
+              : <Map<String, dynamic>>[];
           setState(() {
             _patientData = null;
             _hasTokenToday = true;
@@ -1061,12 +1121,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
             _guardianPatient = null;
             _errorMessage = null;
             _isLoading = false;
+            if (refreshedFamily.isNotEmpty) {
+              _patientsList = refreshedFamily;
+            }
           });
-
-          // Re-fetch family patients so remaining available members stay visible
-          if (currentQuery.isNotEmpty) {
-            _searchPatient();
-          }
         }
 
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1292,12 +1350,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                   ),
 
                   // Actions
+                  Divider(height: 1, thickness: 1, color: isDark ? const Color(0xFF334155) : Colors.grey.shade200),
                   Container(
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
                     decoration: BoxDecoration(
                       color: isDark ? const Color(0xFF0F172A) : Colors.grey.shade50,
                       borderRadius: const BorderRadius.vertical(bottom: Radius.circular(24)),
-                      border: Border(top: BorderSide(color: isDark ? const Color(0xFF334155) : Colors.grey.shade200)),
                     ),
                     child: Row(
                       children: [
@@ -1532,6 +1590,15 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         debugPrint('[TokenScreen] Firestore offline — using generated ID: $docId');
       }
 
+      await LocalStorageService.saveLocalEditRequest({
+        ...requestData,
+        'id': docId,
+        'requestId': docId,
+        'branchId': widget.branchId,
+        'status': 'pending',
+        'requestedAt': DateTime.now().toIso8601String(),
+      });
+
       await LocalStorageService.enqueueSync({
         'type':      'save_token_exception_request',
         'branchId':  widget.branchId,
@@ -1555,6 +1622,17 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           },
         ),
       });
+
+      try {
+        CloudMessagingService().notifySupervisorPendingRequests(
+          branchId: widget.branchId,
+          requestType: 'Token Exception',
+          requesterName: widget.receptionistName,
+          details: 'Token exception requested for $patientName',
+        );
+      } catch (e) {
+        debugPrint('[TokenScreen] Supervisor notification error: $e');
+      }
 
       setState(() {
         _isExceptionPending = true;
@@ -1817,7 +1895,11 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   borderRadius: BorderRadius.circular(6),
                                 ),
                                 child: Text(
-                                  _isVitalsTokenAllowed ? '🎟️ Dual Tokens Done' : '🎟️ Completed',
+                                  _isVitalsTokenAllowed
+                                      ? '🎟️ Dual Tokens Done'
+                                      : (regularToken != null && regularToken['serial'] != null
+                                          ? '🎟️ #${regularToken['serial']}'
+                                          : '🎟️ Token Issued'),
                                   style: const TextStyle(
                                       color: Colors.white,
                                       fontSize: 11,
@@ -2086,7 +2168,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   return q;
                                 }()),
                           ]),
-                          if ((hasBothToday && _isVitalsTokenAllowed) || (hasRegularToday && !_isVitalsTokenAllowed)) ...[
+                          if ((hasBothToday && _isVitalsTokenAllowed) || ((hasRegularToday || hasVitalsToday) && !_isVitalsTokenAllowed)) ...[
                             const SizedBox(height: 10),
                             Container(
                               padding: const EdgeInsets.all(12),
@@ -2104,7 +2186,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                     Expanded(child: Text(
                                       _isVitalsTokenAllowed
                                           ? 'Both tokens (Vitals Inspection & Regular Visit) issued today'
-                                          : 'Token (#${regularTodayToken['serial'] ?? 'Issued'}) already issued today',
+                                          : 'Token (#${regularTodayToken?['serial'] ?? vitalsTodayToken?['serial'] ?? 'Issued'}) already issued today',
                                       style: const TextStyle(
                                           color:      Colors.red,
                                           fontWeight: FontWeight.bold,
@@ -2217,7 +2299,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                           ],
                           const SizedBox(height: 12),
                           () {
-                            final cannotIssueToken = _isVitalsTokenAllowed ? hasBothToday : hasRegularToday;
+                            final cannotIssueToken = _isVitalsTokenAllowed ? hasBothToday : (hasRegularToday || hasVitalsToday);
                             return Container(
                               width: double.infinity,
                               height: isMobile ? 48 : 52,
@@ -2508,7 +2590,11 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
         : (systolic.isNotEmpty ? systolic : '');
 
     setState(() => isIssuingInDialog = true);
-    if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    });
 
     widget.onSubmitted(
       bp: bpString,

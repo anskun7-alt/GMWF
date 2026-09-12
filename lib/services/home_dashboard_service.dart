@@ -128,7 +128,8 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
 
           final b = (e['branchId'] as String? ?? '').toLowerCase().trim();
           final dk = e['dateKey']?.toString();
-          if (_isMatchingBranch(b, bId) && dk == dateKeyDmyy) {
+          final rawDate = e['dateKey'] ?? e['date'] ?? e['createdAt'] ?? e['timestamp'] ?? e['serial'];
+          if (_isMatchingBranch(b, bId) && (dk == dateKeyDmyy || _isSameDate(rawDate, dateKeyYmd, dateKeyDmyy))) {
             final rawSerial = (e['serial'] ?? e['id'] ?? e['tokenNumber'] ?? k).toString().trim().toLowerCase();
             final parts = rawSerial.split('-');
             final sNum = parts.length > 1 ? parts.last : rawSerial;
@@ -1139,65 +1140,22 @@ class HomeLineChartPoint {
 }
 
 Future<List<HomeLineChartPoint>> fetchChartPoints(List<String> branchIds, {int months = 5}) async {
-  if (branchIds.isEmpty) return [];
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-
-  final monthFutures = List.generate(months, (i) async {
-    final monthStart = DateTime(today.year, today.month - (months - 1 - i), 1);
-    final nextMonth = DateTime(monthStart.year, monthStart.month + 1, 1);
-    final endOfMonth = nextMonth.subtract(const Duration(days: 1));
-
-    final dayFutures = List.generate(nextMonth.difference(monthStart).inDays, (d) async {
-      final date = monthStart.add(Duration(days: d));
-      final results = await Future.wait(branchIds.map((id) => fetchHistoricalDayStats(id, date)));
-      final combined = combineBranchStats(results);
-
-      int presentEmployees = 0;
-      final dateStr = DateFormat('yyyy-MM-dd').format(date);
-      for (final id in branchIds) {
-        try {
-          final atts = FinanceLocalStorage.getAttendanceForDate(id, dateStr);
-          for (final att in atts) {
-            if (att['status'] == 'present') presentEmployees++;
-          }
-        } catch (_) {}
-      }
-
-      return _DayPointData(
-        revenue: combined.dispensaryRevenue,
-        donations: combined.donations,
-        tokens: combined.zakat + combined.nonZakat + combined.gmwf + combined.dasterkhwaan,
-        employeesPresent: presentEmployees,
-      );
-    });
-
-    final daysData = await Future.wait(dayFutures);
-
-    int totalRevenue = 0, totalDonations = 0, totalTokens = 0, totalEmployeesPresent = 0;
-    for (final dd in daysData) {
-      totalRevenue += dd.revenue;
-      totalDonations += dd.donations;
-      totalTokens += dd.tokens;
-      totalEmployeesPresent += dd.employeesPresent;
-    }
-
-    return HomeLineChartPoint(
-      date: endOfMonth,
-      patientsRevenue: totalRevenue,
-      donations: totalDonations,
-      tokens: totalTokens,
-      employeesPresent: (totalEmployeesPresent / daysData.length).round(),
-    );
-  });
-
-  return await Future.wait(monthFutures);
+  return fetchLocalChartPoints(branchIds, months: months);
 }
+
+final Map<String, (DateTime, List<HomeLineChartPoint>)> _chartPointsMemoryCache = {};
 
 Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {int months = 5}) async {
   if (branchIds.isEmpty) return [];
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
+  final cacheKey = '${(List<String>.from(branchIds)..sort()).join('_')}_$months';
+
+  // 1. Return instantaneous in-memory cached chart data if valid (5 min TTL)
+  final cached = _chartPointsMemoryCache[cacheKey];
+  if (cached != null && now.difference(cached.$1).inMinutes < 5) {
+    return cached.$2;
+  }
 
   final monthFutures = List.generate(months, (i) async {
     final monthStart = DateTime(today.year, today.month - (months - 1 - i), 1);
@@ -1259,11 +1217,13 @@ Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {
       patientsRevenue: totalRevenue,
       donations: totalDonations,
       tokens: totalTokens,
-      employeesPresent: (totalEmployeesPresent / daysData.length).round(),
+      employeesPresent: daysData.isEmpty ? 0 : (totalEmployeesPresent / daysData.length).round(),
     );
   });
 
-  return await Future.wait(monthFutures);
+  final points = await Future.wait(monthFutures);
+  _chartPointsMemoryCache[cacheKey] = (now, points);
+  return points;
 }
 
 Future<Map<String, int>> fetchWeeklyPatientCounts(List<String> branchIds) async {

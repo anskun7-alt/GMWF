@@ -226,7 +226,7 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
                 ),
                 const SizedBox(height: 4),
                 const Text(
-                  'Taleem-o-Tarbiyat Executive School Performance & Academic Monitoring',
+                  'Taleem-wa-Tarbiyat Executive School Performance & Academic Monitoring',
                   style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
                 ),
               ],

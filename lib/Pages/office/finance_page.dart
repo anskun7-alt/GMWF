@@ -15,6 +15,7 @@ import '../../services/local_storage_service.dart';
 import '../../services/sync_service.dart';
 import 'attendance_tab.dart';
 import 'employees_tab.dart';
+import 'employee_management_tab.dart';
 import 'payroll_tab.dart';
 import 'audit_trail_tab.dart';
 import 'expenses_tab.dart';
@@ -263,11 +264,11 @@ class _FinancePageState extends State<FinancePage> {
   }
 
   static const _sectionTitles = [
-    'Treasury & Accounts', 'Employees', 'Employee Attendance', 'Payroll',
+    'Treasury & Accounts', 'Employee Management', 'Employee Management', 'Payroll',
     'Loans & Advances', 'Expenses', 'Audit Trail & Security Logs', 'Reports & Reconcile'
   ];
   static const _sectionIcons = [
-    Icons.account_balance_wallet_outlined, Icons.people_outline, Icons.today_outlined,
+    Icons.account_balance_wallet_outlined, Icons.badge_outlined, Icons.badge_outlined,
     Icons.receipt_long_outlined, Icons.credit_card_outlined, Icons.payments_outlined,
     Icons.history_edu_outlined, Icons.account_balance_outlined
   ];
@@ -626,20 +627,16 @@ class _FinancePageState extends State<FinancePage> {
           onOpenBankAccounts: () => BankAccountsSheet.show(context, onSaved: () => setState(() {})),
         );
       case 1:
-        return EmployeesTab(
+      case 2:
+        return EmployeeManagementTab(
           branchId: _activeBranchId,
           userRole: userRole,
-          openEmployeeForm: _openEmployeeForm,
-          branches: _branches,
-        );
-      case 2:
-        return AttendanceTab(
-          branchId: _activeBranchId,
           date: _attendanceDate,
           onDateChanged: (d) => setState(() => _attendanceDate = d),
           onAddEmployee: () => _openEmployeeForm(context, null),
           onEditEmployee: (ctx, empId) => _openEmployeeForm(ctx, empId),
           departmentFilter: _selectedDeptFilter,
+          branches: _branches,
         );
       case 3:
         return PayrollTab(
@@ -1117,7 +1114,18 @@ class EmployeeAttendancePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FinancePage(branchId: branchId, isAdmin: isAdmin, initialTabIndex: 2);
+    return FinancePage(branchId: branchId, isAdmin: isAdmin, initialTabIndex: 1);
+  }
+}
+
+class EmployeeManagementPage extends StatelessWidget {
+  final String branchId;
+  final bool isAdmin;
+  const EmployeeManagementPage({super.key, required this.branchId, this.isAdmin = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return FinancePage(branchId: branchId, isAdmin: isAdmin, initialTabIndex: 1);
   }
 }
 

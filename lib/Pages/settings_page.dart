@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -226,7 +227,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _buildColorPill(RoleThemeData t, String label, String? hexColor, Color previewColor) {
     final activeHex = _settingsBox.get('custom_accent_color') as String?;
-    final isSelected = (hexColor == null && (activeHex == null || activeHex.isEmpty)) || (hexColor != null && activeHex == hexColor);
+    final isSelected = hexColor == null ? (activeHex == null || activeHex.isEmpty) : (activeHex?.toUpperCase() == hexColor.toUpperCase());
     final isLightColor = previewColor.computeLuminance() > 0.45;
     
     return Tooltip(
@@ -238,6 +239,7 @@ class _SettingsPageState extends State<SettingsPage> {
           } else {
             await _settingsBox.put('custom_accent_color', hexColor);
           }
+          UserThemeService.notifyThemeChanged();
           setState(() {});
         },
         child: Container(
@@ -396,36 +398,39 @@ class _SettingsPageState extends State<SettingsPage> {
     if (result != null && result.isNotEmpty) {
       String cleanHex = result.startsWith('#') ? result : '#$result';
       await _settingsBox.put('custom_accent_color', cleanHex);
+      UserThemeService.notifyThemeChanged();
       setState(() {});
     }
   }
 
   Widget _buildToggleButton(RoleThemeData t, String text, bool isSelected, VoidCallback onTap) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          alignment: Alignment.center,
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            color: isSelected ? t.accent : t.bgCardAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isSelected ? t.accent : t.bgRule,
-            ),
-            boxShadow: isSelected
-                ? [BoxShadow(color: t.accent.withOpacity(0.25), blurRadius: 12, offset: const Offset(0, 4))]
-                : [],
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? t.accent : t.bgCardAlt,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected ? t.accent : t.bgRule,
+            width: isSelected ? 1.5 : 1.0,
           ),
-          child: Text(
-            text,
-            style: TextStyle(
-              color: isSelected ? Colors.white : t.textPrimary,
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-            ),
+          boxShadow: isSelected
+              ? [BoxShadow(color: t.accent.withValues(alpha: 0.25), blurRadius: 10, offset: const Offset(0, 3))]
+              : [],
+        ),
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isSelected ? Colors.white : t.textPrimary,
+            fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+            fontSize: 13,
           ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
       ),
     );
@@ -450,8 +455,8 @@ class _SettingsPageState extends State<SettingsPage> {
           children: options.entries.map((entry) {
             final isSelected = activeValue == entry.key;
             return Expanded(
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 4),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: _buildToggleButton(
                   t, 
                   context.tr(entry.value), 
@@ -530,11 +535,24 @@ class _SettingsPageState extends State<SettingsPage> {
                 userData['nameHistory'] = history;
               }
 
-              setState(() {
-                userData['name'] = newName;
-                userData['username'] = newName;
-                userData['email'] = newEmail;
-              });
+              // Update in-memory state
+              userData['name'] = newName;
+              userData['username'] = newName;
+              userData['email'] = newEmail;
+
+              // Close dialog FIRST to avoid navigator lock
+              if (context.mounted) Navigator.pop(context);
+
+              // Show success snackbar using the outer (parent) context
+              if (this.context.mounted) {
+                setState(() {});  // Trigger rebuild with updated userData
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                  const SnackBar(
+                    content: Text('✅ Profile updated and saved locally!'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
 
               // Save to Hive users database & secure storage credentials cache
               await LocalStorageService.saveLocalUser(userData);
@@ -553,7 +571,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 userData: userData,
               );
 
-              // Sync over LAN Server if connected
+              // Sync over LAN Server if connected (fire-and-forget)
               try {
                 final bId = userData['branchId']?.toString() ?? 'all';
                 RealtimeManager().sendMessage(
@@ -567,7 +585,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 debugPrint('[SettingsPage] Realtime sync error: $e');
               }
 
-              // Update online in Firebase Firestore
+              // Update online in Firebase Firestore (background, non-blocking)
               try {
                 final uid = (FirebaseAuth.instance.currentUser?.uid ?? userData['uid'] ?? userData['id'])?.toString();
                 if (uid != null && uid.isNotEmpty) {
@@ -579,41 +597,34 @@ class _SettingsPageState extends State<SettingsPage> {
                     if (nameChanged) 'nameHistory': userData['nameHistory'],
                   };
 
-                  await FirebaseFirestore.instance.collection('users').doc(uid).set(updateData, SetOptions(merge: true));
+                  unawaited(FirebaseFirestore.instance.collection('users').doc(uid).set(updateData, SetOptions(merge: true)).catchError((_) {}));
 
                   final branchId = userData['branchId']?.toString();
                   if (branchId != null && branchId.isNotEmpty && branchId != 'all' && branchId != 'unknown') {
-                    await FirebaseFirestore.instance
+                    unawaited(FirebaseFirestore.instance
                         .collection('branches')
                         .doc(branchId)
                         .collection('users')
                         .doc(uid)
-                        .set(updateData, SetOptions(merge: true));
+                        .set(updateData, SetOptions(merge: true)).catchError((_) {}));
                   }
 
-                  try {
-                    final cgSnap = await FirebaseFirestore.instance
-                        .collectionGroup('users')
-                        .where('uid', isEqualTo: uid)
-                        .get()
-                        .timeout(const Duration(seconds: 4));
-                    for (final doc in cgSnap.docs) {
-                      await doc.reference.set(updateData, SetOptions(merge: true));
-                    }
-                  } catch (_) {}
+                  // CollectionGroup update in background (can be slow, do not block UI)
+                  unawaited(Future(() async {
+                    try {
+                      final cgSnap = await FirebaseFirestore.instance
+                          .collectionGroup('users')
+                          .where('uid', isEqualTo: uid)
+                          .get()
+                          .timeout(const Duration(seconds: 4));
+                      for (final doc in cgSnap.docs) {
+                        await doc.reference.set(updateData, SetOptions(merge: true));
+                      }
+                    } catch (_) {}
+                  }));
                 }
               } catch (e) {
                 debugPrint('[SettingsPage] Error syncing profile to Firebase: $e');
-              }
-
-              if (context.mounted) {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('✅ Profile updated and saved locally!'),
-                    backgroundColor: Colors.green,
-                  ),
-                );
               }
             },
             style: ElevatedButton.styleFrom(
@@ -912,14 +923,17 @@ class _SettingsPageState extends State<SettingsPage> {
                 backgroundColor: t.bgCard,
                 elevation: 0,
                 surfaceTintColor: Colors.transparent,
-                leading: IconButton(
-                  icon: Icon(
-                    Icons.arrow_back_rounded, 
-                    color: t.textSecondary, 
-                    size: 22
-                  ),
-                  onPressed: () => Navigator.maybePop(context),
-                ),
+                automaticallyImplyLeading: roleStr != 'supervisor' && Navigator.canPop(context),
+                leading: (roleStr == 'supervisor' || !Navigator.canPop(context))
+                    ? null
+                    : IconButton(
+                        icon: Icon(
+                          Icons.arrow_back_rounded, 
+                          color: t.textSecondary, 
+                          size: 22
+                        ),
+                        onPressed: () => Navigator.maybePop(context),
+                      ),
                 title: Text(
                   context.tr('settings'),
                   style: TextStyle(
@@ -956,7 +970,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                     child: Stack(
                                       children: [
                                         Container(
-                                          padding: const EdgeInsets.all(4),
+                                          padding: const EdgeInsets.all(3.5),
                                           decoration: BoxDecoration(
                                             shape: BoxShape.circle,
                                             gradient: LinearGradient(
@@ -967,13 +981,13 @@ class _SettingsPageState extends State<SettingsPage> {
                                             boxShadow: [
                                               BoxShadow(
                                                 color: t.accent.withValues(alpha: 0.35),
-                                                blurRadius: 20,
-                                                offset: const Offset(0, 6),
+                                                blurRadius: 16,
+                                                offset: const Offset(0, 4),
                                               ),
                                             ],
                                           ),
                                           child: CircleAvatar(
-                                            radius: 60,
+                                            radius: isDesktop ? 50 : 42,
                                             backgroundColor: isDarkMode ? const Color(0xFF161B22) : Colors.white,
                                             backgroundImage: profileProvider,
                                             child: profileProvider == null
@@ -982,47 +996,48 @@ class _SettingsPageState extends State<SettingsPage> {
                                                     style: TextStyle(
                                                       color: t.accent,
                                                       fontWeight: FontWeight.w900,
-                                                      fontSize: 36,
+                                                      fontSize: isDesktop ? 28 : 22,
                                                     ),
                                                   )
                                                 : null,
                                           ),
                                         ),
                                         Positioned(
-                                          bottom: 2,
-                                          right: 2,
+                                          bottom: 0,
+                                          right: 0,
                                           child: Container(
-                                            padding: const EdgeInsets.all(7),
+                                            padding: const EdgeInsets.all(6),
                                             decoration: BoxDecoration(
                                               color: t.accent,
                                               shape: BoxShape.circle,
                                               border: Border.all(
                                                 color: isDarkMode ? const Color(0xFF161B22) : Colors.white,
-                                                width: 2.5,
+                                                width: 2.0,
                                               ),
                                               boxShadow: [
                                                 BoxShadow(
                                                   color: t.accent.withValues(alpha: 0.4),
-                                                  blurRadius: 8,
+                                                  blurRadius: 6,
                                                 ),
                                               ],
                                             ),
                                             child: const Icon(
                                               Icons.camera_alt_rounded,
                                               color: Colors.white,
-                                              size: 16,
+                                              size: 13,
                                             ),
                                           ),
                                         ),
                                       ],
                                     ),
                                   ),
-                                  const SizedBox(width: 20),
+                                  const SizedBox(width: 16),
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         Row(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
                                             Expanded(
                                               child: Text(
@@ -1030,23 +1045,29 @@ class _SettingsPageState extends State<SettingsPage> {
                                                 style: TextStyle(
                                                   color: t.textPrimary,
                                                   fontWeight: FontWeight.w900,
-                                                  fontSize: 20,
+                                                  fontSize: isDesktop ? 20 : 17.5,
                                                   letterSpacing: -0.3,
+                                                  height: 1.2,
                                                 ),
-                                                overflow: TextOverflow.ellipsis,
+                                                softWrap: true,
+                                                maxLines: 2,
                                               ),
                                             ),
                                             IconButton(
-                                              icon: Icon(Icons.edit_note_rounded, color: t.accent, size: 26),
+                                              padding: EdgeInsets.zero,
+                                              constraints: const BoxConstraints(),
+                                              icon: Icon(Icons.edit_note_rounded, color: t.accent, size: 24),
                                               onPressed: () => _showEditProfileDialog(context, t, widget.userData, userName, email),
                                               tooltip: 'Edit Profile',
                                             ),
                                           ],
                                         ),
-                                        const SizedBox(height: 2),
+                                        const SizedBox(height: 4),
                                         Text(
                                           email,
-                                          style: TextStyle(color: t.textTertiary, fontSize: 13.5),
+                                          style: TextStyle(color: t.textTertiary, fontSize: 13),
+                                          softWrap: true,
+                                          maxLines: 2,
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ],
@@ -1317,7 +1338,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                     child: Image.asset('assets/logo/twt.webp', fit: BoxFit.contain),
                                   ),
                                   title: Text(
-                                    'Taleem-o-Tarbiyat School System',
+                                    'Taleem-wa-Tarbiyat School System',
                                     style: TextStyle(
                                       color: t.textPrimary,
                                       fontWeight: FontWeight.bold,
@@ -1338,7 +1359,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                   child: ElevatedButton.icon(
                                     icon: const Icon(Icons.info_outline_rounded, size: 18),
                                     label: const Text(
-                                      'About Taleem-o-Tarbiyat School',
+                                      'About Taleem-wa-Tarbiyat School',
                                       style: TextStyle(fontWeight: FontWeight.bold),
                                     ),
                                     style: ElevatedButton.styleFrom(
@@ -1354,7 +1375,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                         MaterialPageRoute(
                                           builder: (_) => Scaffold(
                                             appBar: AppBar(
-                                              title: const Text('About Taleem-o-Tarbiyat School', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                              title: const Text('About Taleem-wa-Tarbiyat School', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                                               leading: const BackButton(),
                                             ),
                                             body: SchoolAboutView(branchId: bId),
@@ -1442,6 +1463,23 @@ class _SettingsPageState extends State<SettingsPage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              // 0. Language Selector (Available for all roles)
+                              _buildSegmentedSelector<String>(
+                                t,
+                                'language',
+                                activeLanguage,
+                                {
+                                  'en': 'English',
+                                  'ur': 'اردو (Urdu)',
+                                },
+                                (lang) async {
+                                  await box.put('language', lang);
+                                  UserThemeService.notifyThemeChanged();
+                                  setState(() {});
+                                },
+                              ),
+                              _divider(t),
+
                               // Advanced Theme Colors & Scaling (Only for Chairman & HQ Manager)
                               if (isChairmanOrHq) ...[
                                 // 1. Accent Color presets
@@ -1497,6 +1535,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                       }, 
                                       (radius) async {
                                         await box.put('card_radius', radius);
+                                        UserThemeService.notifyThemeChanged();
                                         setState(() {});
                                       }
                                     ),
@@ -1561,7 +1600,11 @@ class _SettingsPageState extends State<SettingsPage> {
                                     1.15: 'large',
                                     1.30: 'extra_large',
                                   }, 
-                                  (scale) => box.put('font_scale', scale)
+                                  (scale) async {
+                                    await box.put('font_scale', scale);
+                                    UserThemeService.notifyThemeChanged();
+                                    setState(() {});
+                                  }
                                 ),
                                 _divider(t),
                               ],
@@ -1572,6 +1615,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 activeThumbColor: t.accent,
                                 onChanged: (val) async {
                                   await UserThemeService.setDarkMode(val);
+                                  UserThemeService.notifyThemeChanged();
                                   setState(() {});
                                 },
                                 secondary: Container(
@@ -1706,6 +1750,10 @@ class _LogoutTileState extends State<_LogoutTile> {
     setState(() => _loading = true);
     try {
       await AuthService().signOut();
+      if (mounted) {
+        Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+        return;
+      }
     } catch (e) {
       debugPrint('[SettingsPage] Logout error: $e');
       if (mounted) {

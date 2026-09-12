@@ -207,16 +207,18 @@ class _TemplateScreenState extends State<TemplateScreen> {
     final List<Map<String, dynamic>> items = [];
 
     try {
-      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        final localStock = Hive.box(LocalStorageService.stockBox).values.whereType<Map>();
+      final stockBox = await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
+      final localStock = stockBox.values.whereType<Map>();
         for (final s in localStock) {
           final item = Map<String, dynamic>.from(s);
-          final rawName = (item['name'] ?? '').toString();
-          item['name'] = MasterProformaService.cleanBrandToFormula(rawName);
+          final isCustom = item['isCustomized'] == true || item['userEdited'] == true;
+          if (!isCustom) {
+            final rawName = (item['name'] ?? '').toString();
+            item['name'] = MasterProformaService.cleanBrandToFormula(rawName);
+          }
           item['quantity'] = item['quantity'] ?? item['stock'] ?? 0;
           items.add(item);
         }
-      }
     } catch (_) {}
 
     if (items.isEmpty || items.length < 5) {

@@ -5,8 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:dropdown_button2/dropdown_button2.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
+import 'dart:async';
 import 'package:gmwf/services/firestore_service.dart';
 import 'package:gmwf/services/local_storage_service.dart';
+import 'package:gmwf/realtime/realtime_manager.dart';
+import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/utils/formatters.dart';
 
 class PatientRegisterPage extends StatefulWidget {
@@ -202,12 +205,71 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
         return;
       }
 
+      if (_isChild && _calculatedAge >= 20) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('⚠️ Patient is $_calculatedAge years old. In this age, the person is considered an adult (child limit is under 20). Please bring/register with their own CNIC.'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+
+      final isMinor = _calculatedAge > 0 && _calculatedAge < 20;
+      final effectiveIsChild = _isChild || isMinor;
+
+      if (effectiveIsChild) {
+        if (formattedCnic.isEmpty) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Guardian CNIC is required for child registration!'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+
+        // Limitation: Do not allow registering a child if an adult is not already registered on the CNIC
+        final existingPatients = LocalStorageService.searchPatientsByCnicOrGuardian(
+          formattedCnic,
+          branchId: widget.branchId,
+        );
+
+        // An adult record must be POSITIVELY identified — never inferred from
+        // the absence of guardianCnic, since that's exactly the ambiguous
+        // state Bug 3's legacy/corrupted records are in.
+        final adultExists = existingPatients.any((p) {
+          final pid = (p['patientId'] ?? p['id'] ?? '').toString();
+          final isFlaggedAdult = p['isAdult'] == true;
+          final looksLikeChildRecord = pid.contains('_child_');
+          return isFlaggedAdult && !looksLikeChildRecord;
+        });
+
+        if (!adultExists) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('⚠️ Cannot register child: No adult (guardian) is registered under this CNIC. Please register the adult first.'),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 4),
+              ),
+            );
+          }
+          return;
+        }
+      }
+
       final patientMap = <String, dynamic>{
         'branchId':    widget.branchId,
         'name':        _nameController.text.trim(),
-        'isAdult':     !_isChild,
-        'guardianCnic': _isChild ? formattedCnic : null,
-        'cnic':        _isChild ? null : formattedCnic,
+        'isAdult':     !effectiveIsChild,
+        'guardianCnic': effectiveIsChild ? formattedCnic : null,
+        'cnic':        effectiveIsChild ? null : formattedCnic,
         'dob':         dob,
         'gender':      _selectedGender,
         'bloodGroup':  _selectedBloodGroup ?? 'N/A',
@@ -235,14 +297,40 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
       }
 
       // STEP 1 — Hive first (offline-safe, instant).
-      await LocalStorageService.saveLocalPatient(patientMap);
+      await LocalStorageService.saveLocalPatient(patientMap, recordAudit: true);
       debugPrint('[PatientRegister] ✅ Hive write: $patientId');
 
-      // STEP 2 — FirestoreService handles saving and uploading
-      await FirestoreService().savePatient(
-        branchId:    widget.branchId,
-        patientId:   patientId,
-        patientData: patientMap,
+      // STEP 2 — LAN broadcast
+      try {
+        RealtimeManager().sendMessage({
+          ...RealtimeEvents.payload(
+            type: RealtimeEvents.savePatient,
+            branchId: widget.branchId,
+            data: patientMap,
+          ),
+          'patientId': patientId,
+        });
+      } catch (e) {
+        debugPrint('[PatientRegister] LAN broadcast error: $e');
+      }
+
+      // STEP 3 — Durable background queue & unawaited upload
+      LocalStorageService.enqueueSync({
+        'type': 'save_patient',
+        'branchId': widget.branchId,
+        'patientId': patientId,
+        'data': patientMap,
+        'createdAt': DateTime.now().toIso8601String(),
+      });
+
+      unawaited(
+        FirestoreService().savePatient(
+          branchId:    widget.branchId,
+          patientId:   patientId,
+          patientData: patientMap,
+        ).timeout(const Duration(seconds: 4), onTimeout: () {}).catchError((e) {
+          debugPrint('[PatientRegister] Background Firestore upload notice: $e');
+        }),
       );
 
       final message = _isChild
@@ -290,9 +378,12 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
     try {
       final list = LocalStorageService.searchPatientsByCnicOrGuardian(
           formatted, branchId: widget.branchId);
-      final hasAdult = list.any((p) =>
-          p['isAdult'] == true ||
-          (p['guardianCnic'] == null || (p['guardianCnic'] as String).trim().isEmpty));
+      final hasAdult = list.any((p) {
+        final pid = (p['patientId'] ?? p['id'] ?? '').toString();
+        final isFlaggedAdult = p['isAdult'] == true;
+        final looksLikeChildRecord = pid.contains('_child_');
+        return isFlaggedAdult && !looksLikeChildRecord;
+      });
       if (hasAdult && !_isChild) {
         setState(() {
           _isChild = true;
@@ -523,9 +614,9 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
                       key:        _dobKey,
                       controller: _dobController,
                       focusNode:  _dobNode,
-                      cursorColor: const Color(0xFF004D40),
+                      cursorColor: _isDark ? const Color(0xFF38BDF8) : const Color(0xFF004D40),
                       style: TextStyle(
-                          color: const Color(0xFF004D40), fontSize: fontSize - 2),
+                          color: _isDark ? Colors.white : const Color(0xFF004D40), fontSize: fontSize - 2),
                       decoration: _inputDecoration(
                           '${_isChild ? 'Child ' : ''}Date of Birth (dd-MM-yyyy)',
                           Icons.cake),

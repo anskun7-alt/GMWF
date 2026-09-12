@@ -17,6 +17,11 @@ import 'widgets/stock_dialogs.dart';
 import '../../widgets/global_module_wrapper.dart';
 import '../../services/auth_service.dart';
 import '../../services/local_storage_service.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/camp_session_service.dart';
+import '../../realtime/realtime_manager.dart';
+import '../../realtime/realtime_events.dart';
+import '../../services/sync_service.dart';
 import '../settings_page.dart';
 
 export 'widgets/cook_dialog.dart'
@@ -320,21 +325,82 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
   CollectionReference<Map<String, dynamic>> _cookingCol(String date) =>
       _dayDoc(date).collection('cooking_sessions');
 
-  // ── Token serving ────────────────────────────────────────────────────────
-
-  Future<void> _serveToken(String tokenId, int tokenNumber) async {
+  Future<void> _serveToken(String tokenId, int tokenNumber, {String session = 'evening'}) async {
     HapticFeedback.mediumImpact();
-    final batch = FirebaseFirestore.instance.batch();
-    batch.update(_tokensCol(today).doc(tokenId), {
-      'served':     true,
-      'servedTime': FieldValue.serverTimestamp(),
-    });
-    batch.set(
-      _dayDoc(today),
-      {'servedTokens': FieldValue.increment(1)},
-      SetOptions(merge: true),
-    );
-    await batch.commit();
+
+    // 1. Update local Hive box immediately (zero UI lag, works offline)
+    try {
+      final box = await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+      final localItem = box.get(tokenId);
+      if (localItem is Map) {
+        final updated = Map<String, dynamic>.from(localItem);
+        updated['served'] = true;
+        updated['servedTime'] = DateTime.now().toIso8601String();
+        await box.put(tokenId, updated);
+      }
+    } catch (e) {
+      debugPrint('[Kitchen] Local serve token write error: $e');
+    }
+
+    // 2. Delegate to LAN Server gateway if connected
+    final isLanConnected = RealtimeManager().isConnected;
+    if (isLanConnected) {
+      try {
+        RealtimeManager().sendMessage(
+          RealtimeEvents.payload(
+            type: RealtimeEvents.saveKitchenServeLog,
+            data: {
+              'branchId': _branchId,
+              'dateKey': today,
+              'tokenId': tokenId,
+              'tokenNumber': tokenNumber,
+              'session': session,
+              'servedBy': _username,
+              'timestamp': DateTime.now().toIso8601String(),
+            },
+          ),
+        );
+      } catch (e) {
+        debugPrint('[Kitchen] Realtime LAN broadcast error: $e');
+      }
+    } else {
+      // 3. Fallback: direct Firestore write when no LAN server is available + background sync queue
+      try {
+        await LocalStorageService.enqueueSync({
+          'type': 'serve_dasterkhwan_token',
+          'branchId': _branchId,
+          'dateKey': today,
+          'data': {
+            'branchId': _branchId,
+            'dateKey': today,
+            'tokenId': tokenId,
+            'tokenNumber': tokenNumber,
+            'session': session,
+            'servedBy': _username,
+            'timestamp': DateTime.now().toIso8601String(),
+          },
+        });
+        SyncService().triggerUpload();
+      } catch (_) {}
+
+      try {
+        final batch = FirebaseFirestore.instance.batch();
+        batch.set(_tokensCol(today).doc(tokenId), {
+          'served':     true,
+          'servedTime': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        batch.set(
+          _dayDoc(today),
+          {
+            'servedTokens': FieldValue.increment(1),
+            'session_${session}_served': FieldValue.increment(1),
+          },
+          SetOptions(merge: true),
+        );
+        await batch.commit();
+      } catch (_) {}
+    }
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('Token #$tokenNumber served ✓'),
@@ -580,10 +646,10 @@ class _NavItem {
 // TOKENS TAB
 // ═══════════════════════════════════════════════════════════════════════════
 
-class _TokensTab extends StatelessWidget {
+class _TokensTab extends StatefulWidget {
   final String branchId, today, username;
   final CollectionReference<Map<String, dynamic>> tokensCol;
-  final Function(String, int) serveToken;
+  final Function(String, int, {String session}) serveToken;
   final VoidCallback onLogout;
   final VoidCallback onSettings;
 
@@ -598,83 +664,178 @@ class _TokensTab extends StatelessWidget {
   });
 
   @override
+  State<_TokensTab> createState() => _TokensTabState();
+}
+
+class _TokensTabState extends State<_TokensTab> {
+  String _selectedSessionFilter = 'all';
+
+  @override
+  void initState() {
+    super.initState();
+    final active = CampSessionService.resolveDasterkhwaanSession(null, widget.branchId);
+    _selectedSessionFilter = active;
+    _ensureBox();
+  }
+
+  Future<void> _ensureBox() async {
+    if (!Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
+      await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanTokensBox);
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Column(children: [
       if (!GlobalModuleWrapper.isWrapped(context))
         _buildHeader(context),
       Expanded(
-        child: StreamBuilder<QuerySnapshot>(
-          stream: tokensCol.snapshots(),
-          builder: (_, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(
-                  child: CircularProgressIndicator(
-                      color: kSuccess, strokeWidth: 2));
-            }
-            if (snap.hasError) {
-              return Center(
-                child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+        child: !Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)
+            ? const Center(
+                child: CircularProgressIndicator(
+                    color: kSuccess, strokeWidth: 2))
+            : ValueListenableBuilder<Box>(
+                valueListenable: Hive.box(LocalStorageService.dasterkhwaanTokensBox).listenable(),
+                builder: (_, box, __) {
+                  final allItems = <Map<String, dynamic>>[];
+                  for (final entry in box.toMap().entries) {
+                    if (entry.value is Map) {
+                      final m = Map<String, dynamic>.from(entry.value as Map);
+                      m['id'] ??= entry.key.toString();
+                      allItems.add(m);
+                    }
+                  }
+
+                  final unserved = allItems
+                      .where((d) => d['served'] != true)
+                      .toList();
+
+                  final evePending = unserved
+                      .where((d) =>
+                          ((d['session'] ?? 'evening').toString().toLowerCase()) == 'evening')
+                      .length;
+                  final nightPending = unserved
+                      .where((d) =>
+                          (d['session']?.toString().toLowerCase()) == 'night')
+                      .length;
+
+                  final pending = unserved.where((d) {
+                    if (_selectedSessionFilter == 'all') return true;
+                    final s = ((d['session'] ?? 'evening').toString().toLowerCase());
+                    return s == _selectedSessionFilter;
+                  }).toList()
+                    ..sort((a, b) {
+                      final aNum = (a['number'] as num?)?.toInt() ?? 0;
+                      final bNum = (b['number'] as num?)?.toInt() ?? 0;
+                      return aNum.compareTo(bNum);
+                    });
+
+                  return Column(
                     children: [
-                  Icon(Icons.error_outline,
-                      size: 48, color: Colors.red.withValues(alpha: 0.4)),
-                  const SizedBox(height: 12),
-                  Text('Could not load tokens',
-                      style: TextStyle(color: Colors.grey[500])),
-                  const SizedBox(height: 8),
-                  Text('${snap.error}',
-                      style: TextStyle(
-                          color: Colors.grey[400], fontSize: 11)),
-                ]),
-              );
-            }
-            final allDocs = snap.data?.docs ?? [];
-            final pending = allDocs
-                .where((d) =>
-                    (d.data() as Map<String, dynamic>)['served'] == false)
-                .toList()
-              ..sort((a, b) {
-                final aNum = (a.data() as Map)['number'] as int? ?? 0;
-                final bNum = (b.data() as Map)['number'] as int? ?? 0;
-                return aNum.compareTo(bNum);
-              });
+                      // ── Session Filter Chips ──────────────────────────────────────
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        color: Colors.white,
+                        child: Row(
+                          children: [
+                            _sessionFilterChip('all', 'All (${unserved.length})', null),
+                            const SizedBox(width: 8),
+                            _sessionFilterChip('evening', '🌅 Evening ($evePending)', const Color(0xFFD97706)),
+                            const SizedBox(width: 8),
+                            _sessionFilterChip('night', '🌙 Night ($nightPending)', const Color(0xFF4F46E5)),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1, thickness: 1, color: Color(0xFFE2E8F0)),
 
-            if (pending.isEmpty) {
-              return Center(
-                  child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                Icon(Icons.check_circle_outline,
-                    size: 80, color: kSuccess.withValues(alpha: 0.25)),
-                const SizedBox(height: 16),
-                const Text('All tokens served!',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: kTextLight)),
-                const SizedBox(height: 6),
-                const Text('No pending tokens',
-                    style: TextStyle(fontSize: 14, color: kTextLight)),
-              ]));
-            }
-
-            return ListView.builder(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-              itemCount: pending.length,
-              itemBuilder: (_, i) {
-                final e    = pending[i].data() as Map<String, dynamic>;
-                final time = (e['time'] as Timestamp?)?.toDate() ?? DateTime.now();
-                final number = e['number'] as int? ?? (i + 1);
-                return _TokenCard(
-                    number: number,
-                    time: time,
-                    onServe: () => serveToken(pending[i].id, number));
-              },
-            );
-          },
-        ),
+                      // ── Token List ────────────────────────────────────────────────
+                      Expanded(
+                        child: pending.isEmpty
+                            ? Center(
+                                child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                  Icon(Icons.check_circle_outline,
+                                      size: 80, color: kSuccess.withValues(alpha: 0.25)),
+                                  const SizedBox(height: 16),
+                                  Text(_selectedSessionFilter == 'all'
+                                      ? 'All tokens served!'
+                                      : 'No pending ${_selectedSessionFilter == 'night' ? 'Night (رات)' : 'Evening (شام)'} tokens',
+                                      style: const TextStyle(
+                                          fontSize: 17,
+                                          fontWeight: FontWeight.w700,
+                                          color: kTextLight)),
+                                  const SizedBox(height: 6),
+                                  const Text('Tokens will appear when issued by Office Boy',
+                                      style: TextStyle(fontSize: 13, color: kTextLight)),
+                                ]))
+                            : ListView.builder(
+                                padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
+                                itemCount: pending.length,
+                                itemBuilder: (_, i) {
+                                  final e       = pending[i];
+                                  final rawTime = e['time'] ?? e['timestamp'] ?? e['createdAt'];
+                                  final DateTime time;
+                                  if (rawTime is Timestamp) {
+                                    time = rawTime.toDate();
+                                  } else if (rawTime is String) {
+                                    time = DateTime.tryParse(rawTime) ?? DateTime.now();
+                                  } else if (rawTime is DateTime) {
+                                    time = rawTime;
+                                  } else {
+                                    time = DateTime.now();
+                                  }
+                                  final number  = (e['number'] as num?)?.toInt() ?? (i + 1);
+                                  final session = e['session'] as String? ?? 'evening';
+                                  final tokenId = e['id']?.toString() ?? '';
+                                  return _TokenCard(
+                                      number: number,
+                                      time: time,
+                                      session: session,
+                                      onServe: () => widget.serveToken(tokenId, number, session: session));
+                                },
+                              ),
+                      ),
+                    ],
+                  );
+                },
+              ),
       ),
     ]);
+  }
+
+  Widget _sessionFilterChip(String id, String label, Color? activeColor) {
+    final isSelected = _selectedSessionFilter == id;
+    final color = activeColor ?? kSuccess;
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() => _selectedSessionFilter = id),
+        borderRadius: BorderRadius.circular(10),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: isSelected ? color.withValues(alpha: 0.12) : const Color(0xFFF1F5F9),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected ? color : const Color(0xFFCBD5E1),
+              width: isSelected ? 1.5 : 1,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                color: isSelected ? color : const Color(0xFF475569),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildHeader(BuildContext context) {
@@ -728,7 +889,7 @@ class _TokensTab extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 10),
-                        _UserAvatar(userName: username, onTap: onSettings),
+                        _UserAvatar(userName: widget.username, onTap: widget.onSettings),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
@@ -746,7 +907,7 @@ class _TokensTab extends StatelessWidget {
                                 overflow: TextOverflow.ellipsis,
                               ),
                               Text(
-                                username,
+                                widget.username,
                                 style: const TextStyle(
                                   color: Colors.white70,
                                   fontSize: 13,
@@ -761,24 +922,36 @@ class _TokensTab extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  _settingsBtn(onSettings),
+                  _settingsBtn(widget.onSettings),
                 ],
               ),
               const SizedBox(height: 16),
-            StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('branches')
-                  .doc(branchId)
-                  .collection('dasterkhwaan')
-                  .doc(today)
-                  .collection('tokens')
-                  .snapshots(),
-              builder: (_, snap) {
-                final all     = snap.data?.docs ?? [];
-                final pending = all
-                    .where((d) => (d.data() as Map)['served'] == false)
-                    .length;
+            ValueListenableBuilder(
+              valueListenable: (Hive.isBoxOpen('dasterkhwaan_tokens')
+                      ? Hive.box('dasterkhwaan_tokens')
+                      : Hive.box(LocalStorageService.usersBox))
+                  .listenable(),
+              builder: (_, Box box, __) {
+                final allTokensBox = Hive.isBoxOpen('dasterkhwaan_tokens') ? Hive.box('dasterkhwaan_tokens') : null;
+                final all = (allTokensBox?.values ?? [])
+                    .whereType<Map>()
+                    .map((m) => Map<String, dynamic>.from(m))
+                    .where((m) => (m['dateKey'] == widget.today || m['date'] == widget.today) &&
+                                  (m['branchId'] == null || m['branchId'] == widget.branchId))
+                    .toList();
+                final pending = all.where((d) => d['served'] == false).length;
                 final served  = all.length - pending;
+                final evePending = all
+                    .where((d) =>
+                        d['served'] == false &&
+                        (d['session'] ?? 'evening') == 'evening')
+                    .length;
+                final nightPending = all
+                    .where((d) =>
+                        d['served'] == false &&
+                        d['session'] == 'night')
+                    .length;
+
                 return Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -790,8 +963,12 @@ class _TokensTab extends StatelessWidget {
                   child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                    _statBadge(Icons.hourglass_top_rounded, 'Pending',
-                        '$pending', const Color(0xFFFFD54F)),
+                    _statBadge(
+                      Icons.hourglass_top_rounded,
+                      'Pending (🌅$evePending · 🌙$nightPending)',
+                      '$pending',
+                      const Color(0xFFFFD54F),
+                    ),
                     Container(
                         width: 1,
                         height: 40,
@@ -835,14 +1012,21 @@ class _TokensTab extends StatelessWidget {
 class _TokenCard extends StatelessWidget {
   final int number;
   final DateTime time;
+  final String session;
   final VoidCallback onServe;
-  const _TokenCard(
-      {required this.number,
-      required this.time,
-      required this.onServe});
+  const _TokenCard({
+    required this.number,
+    required this.time,
+    this.session = 'evening',
+    required this.onServe,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final isNight = session == 'night';
+    final sessionColor = isNight ? const Color(0xFF4F46E5) : const Color(0xFFD97706);
+    final sessionBg = isNight ? const Color(0xFFEEF2FF) : const Color(0xFFFFFBEB);
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
@@ -850,7 +1034,7 @@ class _TokenCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-              color: kSuccess.withValues(alpha: 0.1),
+              color: (isNight ? const Color(0xFF4F46E5) : kSuccess).withValues(alpha: 0.1),
               blurRadius: 16,
               offset: const Offset(0, 4))
         ],
@@ -862,10 +1046,15 @@ class _TokenCard extends StatelessWidget {
             width: 58,
             height: 58,
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                  colors: [Color(0xFF16A34A), kSuccess],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight),
+              gradient: isNight
+                  ? const LinearGradient(
+                      colors: [Color(0xFF3730A3), Color(0xFF4F46E5)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight)
+                  : const LinearGradient(
+                      colors: [Color(0xFF16A34A), kSuccess],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Center(
@@ -880,11 +1069,43 @@ class _TokenCard extends StatelessWidget {
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-            const Text('Token Ready',
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: kTextDark)),
+            Row(
+              children: [
+                const Text('Token Ready',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: kTextDark)),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: sessionBg,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: sessionColor.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isNight ? Icons.nightlight_round : Icons.wb_sunny_rounded,
+                        size: 10,
+                        color: sessionColor,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        isNight ? 'Night (رات)' : 'Evening (شام)',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: sessionColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             Row(children: [
               const Icon(Icons.access_time_rounded,
@@ -899,7 +1120,7 @@ class _TokenCard extends StatelessWidget {
           ])),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: kSuccess,
+              backgroundColor: isNight ? const Color(0xFF4F46E5) : kSuccess,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(
                   horizontal: 22, vertical: 14),
@@ -1008,60 +1229,71 @@ class _CookingTab extends StatelessWidget {
                   ]),
                 ]),
                 const SizedBox(height: 14),
-                StreamBuilder<QuerySnapshot>(
-                  stream: cookingCol.snapshots(),
-                  builder: (_, snap) {
-                    final docs = snap.data?.docs ?? [];
+                ValueListenableBuilder<Box>(
+                  valueListenable: Hive.isBoxOpen(LocalStorageService.dasterkhwaanCookingBox)
+                      ? Hive.box(LocalStorageService.dasterkhwaanCookingBox).listenable()
+                      : Hive.box(LocalStorageService.dasterkhwaanTokensBox).listenable(),
+                  builder: (_, snap, __) {
+                    final cookBox = Hive.isBoxOpen(LocalStorageService.dasterkhwaanCookingBox)
+                        ? Hive.box(LocalStorageService.dasterkhwaanCookingBox)
+                        : null;
+                    final tokenBox = Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)
+                        ? Hive.box(LocalStorageService.dasterkhwaanTokensBox)
+                        : null;
+
                     double totalUsed = 0, totalSaved = 0, totalWasted = 0;
-                    for (final d in docs) {
-                      final data = d.data() as Map<String, dynamic>;
-                      totalUsed   += (data['usedKg']   as num? ?? 0).toDouble();
-                      totalSaved  += (data['savedKg']  as num? ?? 0).toDouble();
-                      totalWasted += (data['wastedKg'] as num? ?? 0).toDouble();
+                    if (cookBox != null) {
+                      for (final entry in cookBox.toMap().entries) {
+                        if (entry.value is Map) {
+                          final data = Map<String, dynamic>.from(entry.value as Map);
+                          totalUsed   += (data['usedKg']   as num? ?? 0).toDouble();
+                          totalSaved  += (data['savedKg']  as num? ?? 0).toDouble();
+                          totalWasted += (data['wastedKg'] as num? ?? 0).toDouble();
+                        }
+                      }
                     }
-                    return FutureBuilder<QuerySnapshot>(
-                      future: FirebaseFirestore.instance
-                          .collection('branches')
-                          .doc(branchId)
-                          .collection('dasterkhwaan')
-                          .doc(today)
-                          .collection('tokens')
-                          .where('served', isEqualTo: true)
-                          .get(),
-                      builder: (_, tsnap) {
-                        final totalServedTokens =
-                            tsnap.data?.docs.length ?? 0;
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 14, horizontal: 8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.2)),
-                          ),
-                          child: Row(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.spaceAround,
-                              children: [
-                            _cookStat('Used',
-                                '${totalUsed.toStringAsFixed(1)} kg',
-                                Icons.whatshot_rounded),
-                            _vDiv(),
-                            _cookStat('Served',
-                                '$totalServedTokens tokens',
-                                Icons.confirmation_number_rounded),
-                            _vDiv(),
-                            _cookStat('Saved',
-                                '${totalSaved.toStringAsFixed(1)} kg',
-                                Icons.save_rounded),
-                            _vDiv(),
-                            _cookStat('Wasted',
-                                '${totalWasted.toStringAsFixed(1)} kg',
-                                Icons.delete_outline_rounded),
-                          ]),
-                        );
-                      },
+
+                    int totalServedTokens = 0;
+                    if (tokenBox != null) {
+                      for (final entry in tokenBox.toMap().entries) {
+                        if (entry.value is Map) {
+                          final data = Map<String, dynamic>.from(entry.value as Map);
+                          if (data['served'] == true) {
+                            totalServedTokens++;
+                          }
+                        }
+                      }
+                    }
+
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 14, horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.2)),
+                      ),
+                      child: Row(
+                          mainAxisAlignment:
+                              MainAxisAlignment.spaceAround,
+                          children: [
+                        _cookStat('Used',
+                            '${totalUsed.toStringAsFixed(1)} kg',
+                            Icons.whatshot_rounded),
+                        _vDiv(),
+                        _cookStat('Served',
+                            '$totalServedTokens tokens',
+                            Icons.confirmation_number_rounded),
+                        _vDiv(),
+                        _cookStat('Saved',
+                            '${totalSaved.toStringAsFixed(1)} kg',
+                            Icons.save_rounded),
+                        _vDiv(),
+                        _cookStat('Wasted',
+                            '${totalWasted.toStringAsFixed(1)} kg',
+                            Icons.delete_outline_rounded),
+                      ]),
                     );
                   },
                 ),
@@ -1070,17 +1302,24 @@ class _CookingTab extends StatelessWidget {
           ),
         ),
       Expanded(
-        child: StreamBuilder<QuerySnapshot>(
-          stream: cookingCol
-              .orderBy('createdAt', descending: true)
-              .snapshots(),
-          builder: (_, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(
-                  child: CircularProgressIndicator(
-                      color: kWarning, strokeWidth: 2));
+        child: ValueListenableBuilder<Box>(
+          valueListenable: Hive.isBoxOpen(LocalStorageService.dasterkhwaanCookingBox)
+              ? Hive.box(LocalStorageService.dasterkhwaanCookingBox).listenable()
+              : Hive.box(LocalStorageService.dasterkhwaanTokensBox).listenable(),
+          builder: (_, __, ___) {
+            final cookBox = Hive.isBoxOpen(LocalStorageService.dasterkhwaanCookingBox)
+                ? Hive.box(LocalStorageService.dasterkhwaanCookingBox)
+                : null;
+            final docs = <Map<String, dynamic>>[];
+            if (cookBox != null) {
+              for (final entry in cookBox.toMap().entries) {
+                if (entry.value is Map) {
+                  final data = Map<String, dynamic>.from(entry.value as Map);
+                  data['id'] ??= entry.key.toString();
+                  docs.add(data);
+                }
+              }
             }
-            final docs = snap.data?.docs ?? [];
             if (docs.isEmpty) {
               return Center(
                   child: Column(
@@ -1103,15 +1342,24 @@ class _CookingTab extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
               itemCount: docs.length,
               itemBuilder: (_, i) {
-                final data = docs[i].data() as Map<String, dynamic>;
-                final time =
-                    (data['createdAt'] as Timestamp?)?.toDate() ??
-                        DateTime.now();
+                final data = docs[i];
+                final rawTime = data['createdAt'] ?? data['time'];
+                final DateTime time;
+                if (rawTime is Timestamp) {
+                  time = rawTime.toDate();
+                } else if (rawTime is String) {
+                  time = DateTime.tryParse(rawTime) ?? DateTime.now();
+                } else if (rawTime is DateTime) {
+                  time = rawTime;
+                } else {
+                  time = DateTime.now();
+                }
+                final id = data['id']?.toString() ?? '';
                 return _CookingCard(
                   data:     data,
                   time:     time,
-                  onEdit:   () => onEdit(data, docs[i].id),
-                  onDelete: () => _confirmDelete(context, docs[i].id, data),
+                  onEdit:   () => onEdit(data, id),
+                  onDelete: () => _confirmDelete(context, id, data),
                 );
               },
             );

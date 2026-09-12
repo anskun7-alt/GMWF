@@ -84,6 +84,12 @@ class MadrassaLocale {
   final String yes = 'YES';
   final String no = 'NO';
 
+  final String studentName = 'Student Name';
+  final String activeWorkingDays = 'Academic Days';
+  final String attendanceSavings = 'Attendance Savings';
+  final String uniformSavings = 'Uniform Savings';
+  final String message = 'Message';
+  final String savings = 'Savings';
   final String amountDue = 'Amount Due';
   final String currentMonth = 'Current Month';
   final String attendanceCredits = 'Attendance Credits';
@@ -388,6 +394,18 @@ class MadrassaLocaleUr extends MadrassaLocale {
   @override
   final String no = 'جی نہیں';
 
+  @override
+  final String studentName = 'طالب علم کا نام';
+  @override
+  final String activeWorkingDays = 'تعلیمی دن';
+  @override
+  final String attendanceSavings = 'حاضری بچت';
+  @override
+  final String uniformSavings = 'یونیفارم بچت';
+  @override
+  final String message = 'پیغامات';
+  @override
+  final String savings = 'بچت';
   @override
   final String amountDue = 'واجب الادا رقم';
   @override

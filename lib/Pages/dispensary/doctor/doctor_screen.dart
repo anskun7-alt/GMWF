@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:another_flushbar/flushbar.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:intl/intl.dart';
 
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
@@ -23,6 +24,8 @@ import 'patient_info.dart';
 import 'doctor_right_panel.dart';
 import 'patient_history.dart';
 import 'package:gmwf/pages/dispensary/dispensar/inventory.dart';
+import 'package:gmwf/pages/request.dart';
+import 'package:gmwf/widgets/update_dialog_widget.dart';
 
 class DoctorScreen extends StatefulWidget {
   final String branchId;
@@ -89,6 +92,8 @@ class _DoctorScreenState extends State<DoctorScreen>
     return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
   }
 
+  bool get _canApproveRequests => LocalStorageService.isDoctorInventoryApprovalAllowed(widget.branchId);
+
   // ── Queue-type resolver ────────────────────────────────────────────────────
   String resolveQueueType(String? raw) {
     final s = (raw ?? '').toLowerCase().trim();
@@ -105,6 +110,8 @@ class _DoctorScreenState extends State<DoctorScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+
+    LocalStorageService.ensureDoctorBoxesOpen();
 
     if (!widget.isEmbedded) {
       SyncService().start(widget.branchId);
@@ -134,6 +141,12 @@ class _DoctorScreenState extends State<DoctorScreen>
     }
 
     _realtimeSub = RealtimeManager().messageStream.listen(_handleRealtimeUpdate);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !widget.isEmbedded) {
+        UpdateDialogWidget.showUpdateDialogIfNeeded(context);
+      }
+    });
   }
 
   // [FIX-USERNAME] Resolve doctor name then start/update connection with it.
@@ -246,6 +259,67 @@ class _DoctorScreenState extends State<DoctorScreen>
       _handlePrescriptionUpdate(data);
     } else if (type == 'dispense_completed') {
       _handleDispenseCompleted(data);
+    } else if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered') {
+      // [FIX] RealtimeRouter._handleSaveStockItem already ran (before this
+      // stream listener fires) and correctly persisted the stock change to
+      // Hive — handling both _quantityDelta increments and full-item saves.
+      // The old code here did a raw saveLocalInventoryItem(data) which is a
+      // full overwrite that IGNORES _quantityDelta, clobbering the router's
+      // correct delta-applied value with the SENDER's absolute total.
+      // Now we only trigger the UI rebuild so the right panel re-reads Hive.
+      if (mounted) setState(() => _rightPanelKey++);
+    } else if (type == RealtimeEvents.deleteStockItem || type == 'delete_stock_item') {
+      final mId = (data['id'] ?? data['medicineId'])?.toString();
+      if (mId != null) LocalStorageService.deleteLocalStockItem(mId);
+      if (mounted) setState(() => _rightPanelKey++);
+    } else if (type == RealtimeEvents.saveProformaItem || type == 'save_proforma_item' ||
+               type == RealtimeEvents.proformaItemUpdated || type == 'proforma_item_updated') {
+      // [FIX] Proforma catalog changes (new medicines added/edited in the
+      // master catalog) were completely unhandled — the doctor's medicine
+      // search list never refreshed. Force right panel rebuild so the
+      // updated proforma entries appear in the prescription search.
+      if (mounted) setState(() => _rightPanelKey++);
+    } else if (type == RealtimeEvents.requestApproved || type == 'request_approved') {
+      // [FIX] Request approvals (e.g. stock addition approved by supervisor)
+      // were silently ignored on the doctor screen. Refresh inventory panel
+      // and notify the doctor so approved stock is immediately visible.
+      if (mounted) {
+        setState(() => _rightPanelKey++);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Request approved: ${data['title'] ?? data['requestType'] ?? 'Stock Request'}'),
+            backgroundColor: Colors.green.shade700,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } else if (type == RealtimeEvents.requestRejected || type == 'request_rejected') {
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Request rejected: ${data['title'] ?? data['requestType'] ?? 'Stock Request'}'),
+            backgroundColor: Colors.red.shade700,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } else if (type == RealtimeEvents.tokenReversalApproved || type == 'token_reversal_approved') {
+      final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString();
+      if (serial != null && serial.isNotEmpty && serial == _selectedPatientData?['serial']) {
+        if (mounted) {
+          setState(() {
+            _selectedPatientData = null;
+            _complaintController.clear();
+            _diagnosisController.clear();
+            _prescriptions.clear();
+            _labResults.clear();
+            _rightPanelKey++;
+          });
+        }
+      }
     }
   }
 
@@ -388,6 +462,8 @@ class _DoctorScreenState extends State<DoctorScreen>
           ),
         );
       }
+    }, onError: (e) {
+      debugPrint('[DoctorScreen] Connectivity error ignored: $e');
     });
   }
 
@@ -400,8 +476,8 @@ class _DoctorScreenState extends State<DoctorScreen>
 
       // 2. If online, sync with cloud
       if (_online) {
-        await SyncService().forceFullRefresh(widget.branchId);
-        await LocalStorageService.downloadTodayTokens(widget.branchId);
+        await SyncService().syncTodayOnly(widget.branchId);
+        await SyncService().triggerUpload();
       }
       if (mounted) {
         setState(() {});
@@ -442,6 +518,25 @@ class _DoctorScreenState extends State<DoctorScreen>
     setState(() => _isSaving = true);
     try {
       _selectedPatientData = Map.from(rawEntry);
+      final currentName = (_selectedPatientData!['patientName'] ?? _selectedPatientData!['name'])?.toString().trim();
+      if (currentName == null || currentName.isEmpty || currentName.toLowerCase() == 'unknown' || currentName.toLowerCase() == 'unknown patient') {
+        final pId = (_selectedPatientData!['patientId'] ?? '').toString().trim();
+        final pCnic = (_selectedPatientData!['patientCnic'] ?? _selectedPatientData!['cnic'] ?? _selectedPatientData!['guardianCnic'] ?? '').toString().trim();
+        if (pId.isNotEmpty) {
+          final lp = LocalStorageService.getLocalPatient(pId);
+          final lpName = (lp?['name'] ?? lp?['patientName'] ?? lp?['fullName'])?.toString().trim();
+          if (lpName != null && lpName.isNotEmpty && lpName.toLowerCase() != 'unknown' && lpName.toLowerCase() != 'unknown patient') {
+            _selectedPatientData!['patientName'] = lpName;
+          }
+        }
+        if ((_selectedPatientData!['patientName'] == null || _selectedPatientData!['patientName'] == 'Unknown Patient') && pCnic.isNotEmpty) {
+          final lp = LocalStorageService.getLocalPatientByCnic(pCnic);
+          final lpName = (lp?['name'] ?? lp?['patientName'] ?? lp?['fullName'])?.toString().trim();
+          if (lpName != null && lpName.isNotEmpty && lpName.toLowerCase() != 'unknown' && lpName.toLowerCase() != 'unknown patient') {
+            _selectedPatientData!['patientName'] = lpName;
+          }
+        }
+      }
       final rawPresc = rawEntry['prescription'];
       final prescription = (rawPresc is Map) ? Map<String, dynamic>.from(rawPresc) : null;
 
@@ -525,7 +620,7 @@ class _DoctorScreenState extends State<DoctorScreen>
         } catch (_) {}
       }
 
-      // 1. Save locally in Hive
+      // 1. Save locally in Hive (< 5ms)
       await LocalStorageService.saveEntryLocal(widget.branchId, serial, patient);
 
       // 2. Broadcast via LAN
@@ -539,61 +634,75 @@ class _DoctorScreenState extends State<DoctorScreen>
         debugPrint('[DoctorScreen] Skip LAN broadcast failed: $e');
       }
 
-      // 3. Firestore background sync
+      // 3. Enqueue to sync queue
       try {
-        final dateKey = CampSessionService.getDateKeyFromSerial(serial);
-        final queueType = resolveQueueType(patient['queueType']?.toString() ?? patient['status']?.toString());
-        final campDocKey = CampSessionService.getCampDateDocId(
-          branchId: widget.branchId,
-          dateKey: dateKey,
-          campId: patient['campId']?.toString() ?? patient['dispensaryId']?.toString(),
-          dispensaryTag: patient['dispensaryTag']?.toString(),
-          serial: serial,
-        );
-        await FirebaseFirestore.instance
-            .collection('branches').doc(widget.branchId)
-            .collection('serials').doc(campDocKey)
-            .collection(queueType)
-            .doc(serial)
-            .set({
-          'status': 'skipped',
-          'skippedAt': nowIso,
-          'skippedBy': _username ?? widget.doctorName,
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      } catch (e) {
-        debugPrint('[DoctorScreen] Skip Firestore update deferred: $e');
-      }
+        await LocalStorageService.enqueueSync({
+          'type': 'save_entry',
+          'branchId': widget.branchId,
+          'serial': serial,
+          'dateKey': dateKey,
+          'data': patient,
+        });
+        unawaited(SyncService().triggerUpload());
+      } catch (_) {}
+
+      // 4. Background non-blocking Firestore sync (never freeze UI)
+      final queueType = resolveQueueType(patient['queueType']?.toString() ?? patient['status']?.toString());
+      final campDocKey = CampSessionService.getCampDateDocId(
+        branchId: widget.branchId,
+        dateKey: dateKey,
+        campId: patient['campId']?.toString() ?? patient['dispensaryId']?.toString(),
+        dispensaryTag: patient['dispensaryTag']?.toString(),
+        serial: serial,
+      );
+      unawaited(FirebaseFirestore.instance
+          .collection('branches').doc(widget.branchId)
+          .collection('serials').doc(campDocKey)
+          .collection(queueType)
+          .doc(serial)
+          .set({
+        'status': 'skipped',
+        'skippedAt': nowIso,
+        'skippedBy': _username ?? widget.doctorName,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true)).timeout(const Duration(seconds: 3)).catchError((e) {
+        debugPrint('[DoctorScreen] Skip Firestore deferred: $e');
+      }));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('⏩ Patient #$serial skipped'),
             backgroundColor: Colors.orange.shade800,
-            duration: const Duration(seconds: 3),
+            duration: const Duration(seconds: 2),
             behavior: SnackBarBehavior.floating,
           ),
         );
       }
 
-      // Clear current inputs
+      // Clear current inputs immediately
       _complaintController.clear();
       _diagnosisController.clear();
       _prescriptions.clear();
       _labResults.clear();
       _selectedPatientData = null;
+      _isSaving = false; // Reset so next patient can be selected without being blocked!
 
-      // Auto-select next waiting patient from today's queue
+      // Auto-select next waiting patient from today's queue (including rollover waiting tokens)
       final userDisp = CampSessionService.getActiveCamp(widget.branchId);
-      final todayKey = CampSessionService.resolveShiftAndDateKey().dateKey;
+      final todayKey = CampSessionService.resolveShiftAndDateKey(null, widget.branchId).dateKey;
+      final prevDateKey = DateFormat('ddMMyy').format(DateTime.now().subtract(const Duration(days: 1)));
       final waiting = LocalStorageService.getLocalEntries(
         widget.branchId,
         dispensaryId: userDisp,
         filterByCamp: true,
       ).where((e) {
-        final dk = (e['dateKey'] ?? '').toString();
-        final st = (e['status'] ?? '').toString().toLowerCase();
-        return dk == todayKey && st == 'waiting';
+        final dk = (e['dateKey'] ?? '').toString().trim();
+        final s = (e['serial'] ?? e['id'] ?? '').toString().trim();
+        final serialDk = CampSessionService.getDateKeyFromSerial(s);
+        final st = (e['status'] ?? '').toString().toLowerCase().trim();
+        if (st != 'waiting') return false;
+        return (dk == todayKey || serialDk == todayKey || dk == prevDateKey || serialDk == prevDateKey);
       }).toList();
 
       if (waiting.isNotEmpty) {
@@ -607,7 +716,7 @@ class _DoctorScreenState extends State<DoctorScreen>
         if (mounted) setState(() {});
       }
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted && _isSaving) setState(() => _isSaving = false);
     }
   }
 
@@ -702,6 +811,71 @@ class _DoctorScreenState extends State<DoctorScreen>
       onSync: _forceSync,
       onLogout: _logout,
       extraActions: [
+        if (_canApproveRequests) ...[
+          Tooltip(
+            message: 'Medicine & Stock Requests (Supervisor Approval)',
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => RequestPage(
+                      branchId: widget.branchId,
+                      isSupervisor: true,
+                    ),
+                  ),
+                ),
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1E293B) : Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                      width: 1,
+                    ),
+                  ),
+                    child: Hive.isBoxOpen('local_edit_requests')
+                        ? ValueListenableBuilder<Box>(
+                            valueListenable: Hive.box('local_edit_requests').listenable(),
+                            builder: (context, box, _) {
+                              int count = 0;
+                              final normBranch = widget.branchId.toLowerCase().trim();
+                              for (final v in box.values) {
+                                if (v is Map) {
+                                  final b = (v['branchId'] ?? '').toString().toLowerCase().trim();
+                                  final st = (v['status'] ?? '').toString().toLowerCase().trim();
+                                  if (st == 'pending' && (normBranch.isEmpty || b.isEmpty || b == normBranch)) {
+                                    count++;
+                                  }
+                                }
+                              }
+                              return Badge(
+                                isLabelVisible: count > 0,
+                                label: Text('$count', style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
+                                backgroundColor: Colors.amber.shade800,
+                                child: Icon(
+                                  Icons.approval_rounded,
+                                  size: 18,
+                                  color: isDark ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+                                ),
+                              );
+                            },
+                          )
+                        : Icon(
+                            Icons.approval_rounded,
+                            size: 18,
+                            color: isDark ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+                          ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+        ],
         Tooltip(
           message: 'Medicine Inventory',
           child: Material(
@@ -714,6 +888,7 @@ class _DoctorScreenState extends State<DoctorScreen>
                   builder: (_) => InventoryPage(
                     branchId: widget.branchId,
                     isDoctor: true,
+                    isSupervisor: _canApproveRequests,
                     isDispenser: false,
                   ),
                 ),

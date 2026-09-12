@@ -17,6 +17,7 @@ import 'package:printing/printing.dart';
 import 'package:arabic_reshaper/arabic_reshaper.dart';
 import '../models/madrassa_config.dart';
 import '../models/madrassa_fee_logic.dart';
+import 'madrassa_local_storage.dart';
 import '../../../constants/navigator_key.dart';
 
 class MadrassaReportHelper {
@@ -269,17 +270,30 @@ class MadrassaReportHelper {
         holidays: holidays,
       );
       final acad = getAcademicProgress(studentId: sId, logs: logs);
+      final branchId = (sData['branchId']?.toString() ?? config.id).toLowerCase().trim();
+      final pRec = MadrassaLocalStorage.getFeePaymentCached(branchId, config.year, config.month, sId);
+      final due = (fee['amountDue'] as num).toDouble();
+      final pStatus = pRec?['status']?.toString() ?? (due <= 0 ? 'paid' : 'unpaid');
+      final pPaid = (pRec?['amountPaid'] as num?)?.toDouble() ?? (pStatus == 'paid' ? due : 0.0);
 
       totalAtt += (fee['attSavings'] as num).toDouble();
       totalUni += (fee['uniSavings'] as num).toDouble();
       totalMsg += (fee['msgSavings'] as num).toDouble();
       totalSavings += (fee['totalSavings'] as num).toDouble();
-      totalDue += (fee['amountDue'] as num).toDouble();
+      totalDue += due;
       totalPresent += (fee['present'] as num).toInt();
       totalLeave += (fee['leave'] as num).toInt();
       totalAbsent += (fee['absent'] as num).toInt();
 
-      rows.add({'name': sData['name'] ?? '', 'rollNumber': sData['rollNumber'] ?? '', 'fee': fee, 'acad': acad});
+      rows.add({
+        'name': sData['name'] ?? '',
+        'rollNumber': sData['rollNumber'] ?? '',
+        'fee': fee,
+        'acad': acad,
+        'isPaid': pStatus == 'paid',
+        'status': pStatus,
+        'amountPaid': pPaid,
+      });
     }
 
     pdf.addPage(
@@ -357,7 +371,7 @@ class MadrassaReportHelper {
         build: (pw.Context context) {
           // Column layout (index reference for cellAlignments/columnWidths/decoration):
           // 0 #  1 Student  2 Roll  3 Days  4 P  5 L  6 A  7 Uniform  8 Sabak  9 Sabki  10 Manzil
-          // [If fees enabled: 11 Att.Rs  12 Uni.Rs  13 Msg  14 Msg.Rs  15 PTM  16 Total Rs  17 Due]
+          // [If fees enabled: 11 Att.Rs  12 Uni.Rs  13 Msg  14 Msg.Rs  15 PTM  16 Total Rs  17 Due  18 Status]
           // [If fees disabled: 11 Msg  12 PTM]
           final bool isFeeEnabled = config.enableFees;
           final headers = [
@@ -370,8 +384,9 @@ class MadrassaReportHelper {
             'PTM',
             if (isFeeEnabled) 'Total Rs',
             if (isFeeEnabled) 'Due',
+            if (isFeeEnabled) 'Status',
           ];
-          final int dueColIndex = isFeeEnabled ? (headers.length - 1) : -1;
+          final int dueColIndex = isFeeEnabled ? (headers.length - 2) : -1;
 
           return [
             pw.TableHelper.fromTextArray(
@@ -388,8 +403,6 @@ class MadrassaReportHelper {
                 final manzilPara = acad['manzilPara'] as int;
                 final manzilRatio = acad['manzilRatio'] as String;
 
-                // Cleaner Sabak text: avoid the confusing "+0 (0)" when a
-                // student made no progress this month at all.
                 final String sabakText;
                 if (linesMemorized > 0) {
                   sabakText = '+$linesMemorized ($cumulativeLines)';
@@ -414,8 +427,6 @@ class MadrassaReportHelper {
                   '${fee['present']}',
                   '${fee['leave']}',
                   '${fee['absent']}',
-                  // Uniform clean days — shown the same way as Msg
-                  // ("clean/active") for consistency.
                   '${fee['uniform']}/${fee['activeWorkingDays']}',
                   sabakText,
                   sabkiText,
@@ -427,6 +438,7 @@ class MadrassaReportHelper {
                   fee['ptm'] ? 'Joined' : 'Missed',
                   if (isFeeEnabled) ((fee['totalSavings'] as num).toStringAsFixed(0)),
                   if (isFeeEnabled) ((fee['amountDue'] as num).toStringAsFixed(0)),
+                  if (isFeeEnabled) (row['isPaid'] == true ? 'Paid' : ((fee['amountDue'] as num) <= 0 ? 'Waived' : 'Unpaid')),
                 ];
               }),
               headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: PdfColors.white, letterSpacing: 0.3),
@@ -441,24 +453,25 @@ class MadrassaReportHelper {
               cellPadding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 10),
               columnWidths: isFeeEnabled
                   ? {
-                      0: const pw.FixedColumnWidth(28),
+                      0: const pw.FixedColumnWidth(24),
                       1: const pw.FlexColumnWidth(3),
-                      2: const pw.FixedColumnWidth(30),
-                      3: const pw.FixedColumnWidth(40),
-                      4: const pw.FixedColumnWidth(34),
-                      5: const pw.FixedColumnWidth(34),
-                      6: const pw.FixedColumnWidth(34),
-                      7: const pw.FixedColumnWidth(48),
-                      8: const pw.FixedColumnWidth(42),
-                      9: const pw.FixedColumnWidth(42),
-                      10: const pw.FixedColumnWidth(42),
-                      11: const pw.FixedColumnWidth(40),
-                      12: const pw.FixedColumnWidth(40),
-                      13: const pw.FixedColumnWidth(42),
-                      14: const pw.FixedColumnWidth(44),
-                      15: const pw.FixedColumnWidth(54),
-                      16: const pw.FixedColumnWidth(50),
-                      17: const pw.FixedColumnWidth(46),
+                      2: const pw.FixedColumnWidth(28),
+                      3: const pw.FixedColumnWidth(36),
+                      4: const pw.FixedColumnWidth(30),
+                      5: const pw.FixedColumnWidth(30),
+                      6: const pw.FixedColumnWidth(30),
+                      7: const pw.FixedColumnWidth(44),
+                      8: const pw.FixedColumnWidth(38),
+                      9: const pw.FixedColumnWidth(38),
+                      10: const pw.FixedColumnWidth(38),
+                      11: const pw.FixedColumnWidth(36),
+                      12: const pw.FixedColumnWidth(36),
+                      13: const pw.FixedColumnWidth(38),
+                      14: const pw.FixedColumnWidth(40),
+                      15: const pw.FixedColumnWidth(48),
+                      16: const pw.FixedColumnWidth(46),
+                      17: const pw.FixedColumnWidth(42),
+                      18: const pw.FixedColumnWidth(44),
                     }
                   : {
                       0: const pw.FixedColumnWidth(30),
@@ -792,13 +805,56 @@ class MadrassaReportHelper {
     final currentTotalLines = (studentData['currentLines'] as num?)?.toInt() ?? int.tryParse(studentData['currentLines']?.toString() ?? '') ?? 0;
     final prevHifzLines = int.tryParse(studentData['prevHifzLines']?.toString() ?? '0') ?? 0;
     
-    final joinDate = _parseJoinDate(studentData['joinDate']);
+    final joinDate = MadrassaFeeLogic.parseStudentJoinDate(studentData) ?? _parseJoinDate(studentData['joinDate']);
     final joinDateStr = joinDate != null ? DateFormat('dd MMMM yyyy').format(joinDate) : 'Not Provided';
     
     final joinZero = joinDate != null ? DateTime(joinDate.year, joinDate.month, joinDate.day) : null;
     final now = DateTime.now();
     final nowZero = DateTime(now.year, now.month, now.day);
     final daysEnrolled = joinZero != null ? nowZero.difference(joinZero).inDays.clamp(1, 99999) : 1;
+
+    final branchId = (studentData['branchId']?.toString() ?? config.id).toLowerCase().trim();
+    final paymentRecord = MadrassaLocalStorage.getFeePaymentCached(branchId, config.year, config.month, studentId);
+    final due = (fee['amountDue'] as num).toDouble();
+    final paymentStatus = paymentRecord?['status']?.toString() ?? (due <= 0 ? 'paid' : 'unpaid');
+    final amountPaid = (paymentRecord?['amountPaid'] as num?)?.toDouble() ?? (paymentStatus == 'paid' ? due : 0.0);
+    final isPaid = paymentStatus == 'paid';
+
+    double totalHistoricalPendingDues = 0.0;
+    int unpaidMonthsCount = 0;
+    if (joinDate != null && config.enableFees) {
+      final startMonth = DateTime(joinDate.year, joinDate.month, 1);
+      final endMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+      DateTime iter = DateTime(endMonth.year, endMonth.month, 1);
+      while (!iter.isBefore(startMonth)) {
+        final y = iter.year;
+        final m = iter.month;
+        final pRec = MadrassaLocalStorage.getFeePaymentCached(branchId, y, m, studentId);
+        final mConf = config.copyWith(year: y, month: m);
+        final mWorkingDays = MadrassaFeeLogic.getWorkingDaysCount(y, m, holidays);
+        final mLogs = MadrassaLocalStorage.getLogsForMonthCached(branchId, y, m);
+        final mFee = MadrassaFeeLogic.calculateStudentFee(
+          studentId: studentId,
+          studentData: studentData,
+          logs: mLogs,
+          config: mConf,
+          totalWorkingDays: mWorkingDays,
+          holidays: holidays,
+        );
+        final mDue = ((mFee['amountDue'] as num?) ?? 0.0).toDouble();
+        final mStatus = pRec?['status']?.toString() ?? (mDue <= 0 ? 'paid' : 'unpaid');
+        final activeDays = (mFee['activeWorkingDays'] as num?)?.toInt() ?? 0;
+        if (activeDays > 0 && mStatus != 'paid' && mDue > 0) {
+          totalHistoricalPendingDues += mDue;
+          unpaidMonthsCount++;
+        }
+        if (iter.month == 1) {
+          iter = DateTime(iter.year - 1, 12, 1);
+        } else {
+          iter = DateTime(iter.year, iter.month - 1, 1);
+        }
+      }
+    }
     
     final acad = getAcademicProgress(studentId: studentId, logs: logs);
     final linesMemorized = acad['linesMemorized'] as int;
@@ -1014,20 +1070,29 @@ class MadrassaReportHelper {
                   pw.Container(
                     padding: const pw.EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                     decoration: pw.BoxDecoration(
-                      color: due <= 0 ? const PdfColor.fromInt(0xFFDFF5E1) : const PdfColor.fromInt(0xFFFBE0E0),
+                      color: isPaid || due <= 0 ? const PdfColor.fromInt(0xFFDFF5E1) : const PdfColor.fromInt(0xFFFBE0E0),
                       borderRadius: pw.BorderRadius.circular(8),
                     ),
                     child: pw.Column(
                       crossAxisAlignment: pw.CrossAxisAlignment.end,
                       children: [
-                        pw.Text('AMOUNT DUE', style: pw.TextStyle(fontSize: 7, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF0F766E))),
+                        pw.Text(
+                          isPaid ? 'STATUS: PAID' : (due <= 0 ? 'STATUS: WAIVED' : 'STATUS: UNPAID'),
+                          style: pw.TextStyle(
+                            fontSize: 7,
+                            fontWeight: pw.FontWeight.bold,
+                            color: isPaid || due <= 0 ? const PdfColor.fromInt(0xFF0F766E) : const PdfColor.fromInt(0xFF991B1B),
+                          ),
+                        ),
                         pw.SizedBox(height: 2),
                         pw.Text(
-                          'Rs. ${due.toStringAsFixed(0)}',
+                          isPaid
+                              ? 'Rs. ${amountPaid.toStringAsFixed(0)} (Paid)'
+                              : (due <= 0 ? 'Rs. 0 (Waived)' : 'Rs. ${due.toStringAsFixed(0)} Due'),
                           style: pw.TextStyle(
-                            fontSize: 16,
+                            fontSize: 14,
                             fontWeight: pw.FontWeight.bold,
-                            color: due <= 0 ? const PdfColor.fromInt(0xFF166534) : const PdfColor.fromInt(0xFFB91C1C),
+                            color: isPaid || due <= 0 ? const PdfColor.fromInt(0xFF166534) : const PdfColor.fromInt(0xFFB91C1C),
                           ),
                         ),
                       ],
@@ -1101,7 +1166,14 @@ class MadrassaReportHelper {
                     _row('Attendance Savings (${fee['present'] + fee['leave']}/${fee['activeWorkingDays']} present/leave)', '- Rs. ${fee['attSavings'].toStringAsFixed(0)}'),
                     _row('Uniform Savings (${fee['uniform']}/${fee['activeWorkingDays']} clean)', '- Rs. ${fee['uniSavings'].toStringAsFixed(0)}'),
                     _row('Message Savings (${fee['message']}/${fee['activeWorkingDays']} replied)', '- Rs. ${fee['msgSavings'].toStringAsFixed(0)}'),
-                    _row('PTM Savings (${fee['ptm'] ? 'Attended' : 'Missed'})', '- Rs. ${fee['ptmSavings'].toStringAsFixed(0)}', isLast: true),
+                    _row('PTM Savings (${fee['ptm'] ? 'Attended' : 'Missed'})', '- Rs. ${fee['ptmSavings'].toStringAsFixed(0)}'),
+                    _row(
+                      'Payment Status',
+                      isPaid
+                          ? 'PAID (Rs. ${amountPaid.toStringAsFixed(0)})'
+                          : (due <= 0 ? 'WAIVED (Rs. 0)' : 'UNPAID (Pending Rs. ${due.toStringAsFixed(0)})'),
+                      isLast: true,
+                    ),
                   ],
                 ),
               ),
@@ -1117,11 +1189,30 @@ class MadrassaReportHelper {
                 child: pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
-                    pw.Text('TOTAL AMOUNT DUE', style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF0F766E))),
+                    pw.Text('MONTH NET AMOUNT DUE', style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF0F766E))),
                     pw.Text('Rs. ${due.toStringAsFixed(0)}', style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF004D40))),
                   ],
                 ),
               ),
+              if (totalHistoricalPendingDues > 0) ...[
+                pw.SizedBox(height: 8),
+                pw.Container(
+                  width: double.infinity,
+                  padding: const pw.EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  decoration: pw.BoxDecoration(
+                    color: const PdfColor.fromInt(0xFFFEF2F2),
+                    borderRadius: pw.BorderRadius.circular(8),
+                    border: pw.Border.all(color: const PdfColor.fromInt(0xFFEF4444), width: 0.75),
+                  ),
+                  child: pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                    children: [
+                      pw.Text('TOTAL OUTSTANDING PENDING DUES (ALL MONTHS)', style: pw.TextStyle(fontSize: 8.5, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF991B1B))),
+                      pw.Text('Rs. ${totalHistoricalPendingDues.toStringAsFixed(0)} ($unpaidMonthsCount Unpaid Month(s))', style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFFDC2626))),
+                    ],
+                  ),
+                ),
+              ],
             ],
             // Attendance & Compliance Details section removed from the PDF
             // per request — it's still available in the Excel export via

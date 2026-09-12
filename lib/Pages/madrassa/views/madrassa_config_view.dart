@@ -810,19 +810,22 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
             isPtmDay: true,
             prefixIcon: Icons.event_rounded,
           ),
-          StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('branches')
-                .doc(widget.branchId)
-                .collection('madrassa_holidays')
-                .snapshots(),
+          StreamBuilder<List<Map<String, dynamic>>>(
+            stream: MadrassaLocalStorage.streamHolidaysCached(widget.branchId),
             builder: (context, snapshot) {
               if (!snapshot.hasData) return const SizedBox.shrink();
               final ptmDate = getPtmDate();
-              final hasHoliday = snapshot.data!.docs.any((doc) {
-                final dateObj = doc.get('date');
+              final hasHoliday = snapshot.data!.any((doc) {
+                final dateObj = doc['date'];
+                DateTime? d;
                 if (dateObj is Timestamp) {
-                  final d = dateObj.toDate();
+                  d = dateObj.toDate();
+                } else if (dateObj is String) {
+                  d = DateTime.tryParse(dateObj);
+                } else if (dateObj is DateTime) {
+                  d = dateObj;
+                }
+                if (d != null) {
                   return d.year == ptmDate.year &&
                       d.month == ptmDate.month &&
                       d.day == ptmDate.day;

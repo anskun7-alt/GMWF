@@ -30,23 +30,57 @@ class MadrassaConfig {
     this.auditLog = const [],
   });
 
-  factory MadrassaConfig.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>? ?? {};
+  MadrassaConfig copyWith({
+    String? id,
+    int? year,
+    int? month,
+    double? baseFee,
+    double? ptmDeduction,
+    double? messageTotalDeduction,
+    double? attendanceMaxDeduction,
+    double? uniformMaxDeduction,
+    int? ptmDay,
+    bool? allowStudentLeave,
+    bool? enableFees,
+    List<Map<String, dynamic>>? auditLog,
+  }) {
+    return MadrassaConfig(
+      id: id ?? this.id,
+      year: year ?? this.year,
+      month: month ?? this.month,
+      baseFee: baseFee ?? this.baseFee,
+      ptmDeduction: ptmDeduction ?? this.ptmDeduction,
+      messageTotalDeduction: messageTotalDeduction ?? this.messageTotalDeduction,
+      attendanceMaxDeduction: attendanceMaxDeduction ?? this.attendanceMaxDeduction,
+      uniformMaxDeduction: uniformMaxDeduction ?? this.uniformMaxDeduction,
+      ptmDay: ptmDay ?? this.ptmDay,
+      allowStudentLeave: allowStudentLeave ?? this.allowStudentLeave,
+      enableFees: enableFees ?? this.enableFees,
+      auditLog: auditLog ?? this.auditLog,
+    );
+  }
+
+  factory MadrassaConfig.fromMap(Map<String, dynamic> data, {String id = 'current'}) {
     final now = DateTime.now();
     return MadrassaConfig(
-      id: doc.id,
-      year: data['year'] ?? now.year,
-      month: data['month'] ?? now.month,
-      baseFee: (data['baseFee'] ?? 3000).toDouble(),
-      ptmDeduction: (data['ptmDeduction'] ?? 700).toDouble(),
-      messageTotalDeduction: (data['messageTotalDeduction'] ?? 1300).toDouble(),
-      attendanceMaxDeduction: (data['attendanceMaxDeduction'] ?? 500).toDouble(),
-      uniformMaxDeduction: (data['uniformMaxDeduction'] ?? 500).toDouble(),
-      ptmDay: data['ptmDay'] ?? 0,
+      id: id,
+      year: (data['year'] as num?)?.toInt() ?? now.year,
+      month: (data['month'] as num?)?.toInt() ?? now.month,
+      baseFee: (data['baseFee'] as num?)?.toDouble() ?? 3000.0,
+      ptmDeduction: (data['ptmDeduction'] as num?)?.toDouble() ?? 700.0,
+      messageTotalDeduction: (data['messageTotalDeduction'] as num?)?.toDouble() ?? 1300.0,
+      attendanceMaxDeduction: (data['attendanceMaxDeduction'] as num?)?.toDouble() ?? 500.0,
+      uniformMaxDeduction: (data['uniformMaxDeduction'] as num?)?.toDouble() ?? 500.0,
+      ptmDay: (data['ptmDay'] as num?)?.toInt() ?? 0,
       allowStudentLeave: data['allowStudentLeave'] == true,
       enableFees: data['enableFees'] != false,
       auditLog: List<Map<String, dynamic>>.from(data['auditLog'] ?? []),
     );
+  }
+
+  factory MadrassaConfig.fromFirestore(DocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>? ?? {};
+    return MadrassaConfig.fromMap(data, id: doc.id);
   }
 
   Map<String, dynamic> toMap() {
@@ -65,10 +99,25 @@ class MadrassaConfig {
     };
   }
 
-  DateTime getPtmDate() {
-    if (ptmDay > 0) return DateTime(year, month, ptmDay);
-    // Find first Friday
-    DateTime date = DateTime(year, month, 1);
+  DateTime getPtmDate({int? targetYear, int? targetMonth}) {
+    final y = targetYear ?? DateTime.now().year;
+    final m = targetMonth ?? DateTime.now().month;
+
+    for (final log in auditLog) {
+      if (log['type'] == 'ptm_reschedule' &&
+          log['year'] == y &&
+          log['month'] == m) {
+        final newVal = int.tryParse(log['newValue']?.toString() ?? '');
+        if (newVal != null && newVal > 0) {
+          return DateTime(y, m, newVal);
+        }
+      }
+    }
+
+    if (ptmDay > 0) return DateTime(y, m, ptmDay);
+
+    // Find first Friday of the month
+    DateTime date = DateTime(y, m, 1);
     while (date.weekday != DateTime.friday) {
       date = date.add(const Duration(days: 1));
     }

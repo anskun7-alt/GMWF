@@ -13,7 +13,7 @@
   <a href="https://firebase.google.com"><img src="https://img.shields.io/badge/Firebase-Firestore-FFA611.svg?style=flat-square&logo=Firebase&logoColor=white" alt="Firebase" /></a>
   <a href="https://hive.dev"><img src="https://img.shields.io/badge/Storage-Hive%20NoSQL-yellowgreen.svg?style=flat-square" alt="Hive DB" /></a>
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Android%20%7C%20Web-blue.svg?style=flat-square" alt="Platforms" />
-  <img src="https://img.shields.io/badge/Version-v1.4.4-emerald.svg?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.7-emerald.svg?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/License-Proprietary-red.svg?style=flat-square" alt="License" />
 </p>
 
@@ -146,8 +146,8 @@ flutter build web --release
 ### Windows Installer Generation
 Compile `GMWFSetup.iss` (x64) or `GMWFSetup_x86.iss` (32-bit) with Inno Setup 6:
 ```text
-installer/GMWF-v1.4.4-x64.exe
-installer/GMWF-v1.4.4-x86.exe
+installer/GMWF-v1.4.7-x64.exe
+installer/GMWF-v1.4.7-x86.exe
 ```
 
 ---

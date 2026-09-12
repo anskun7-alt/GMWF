@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:intl/intl.dart';
 
 import 'dart:async';
+import 'madrassa_local_storage.dart';
 
 enum MadrassaCsvType { students, dailyLogs, auditLog, unknown }
 
@@ -122,6 +123,7 @@ class MadrassaCsvService {
     if (value == null) return '';
     if (value is Timestamp) return value.toDate().toIso8601String();
     if (value is DateTime) return value.toIso8601String();
+    if (value is String) return value;
     return value.toString();
   }
 
@@ -142,28 +144,42 @@ class MadrassaCsvService {
   // ─── Export ────────────────────────────────────────────────────────────────
 
   static Future<Map<String, String>> buildExportFiles(String branchId) async {
-    final studentsSnap = await _studentsRef(branchId).get();
-    final logsSnap = await _logsRef(branchId).get();
+    // 1. Search local storage (Hive) first
+    var localStudents = MadrassaLocalStorage.getAllStudentsCached(branchId);
+    var localLogs = MadrassaLocalStorage.getAllLogsCached(branchId);
+
+    // 2. If local cache has 0 students, fallback download from Firestore
+    if (localStudents.isEmpty) {
+      await MadrassaLocalStorage.downloadStudents(branchId, force: true);
+      localStudents = MadrassaLocalStorage.getAllStudentsCached(branchId);
+    }
+    if (localLogs.isEmpty) {
+      final now = DateTime.now();
+      await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+      localLogs = MadrassaLocalStorage.getAllLogsCached(branchId);
+    }
 
     final studentsById = <String, Map<String, dynamic>>{};
-    for (final doc in studentsSnap.docs) {
-      studentsById[doc.id] = doc.data();
+    for (final s in localStudents) {
+      final id = s['id']?.toString() ?? '';
+      if (id.isNotEmpty) {
+        studentsById[id] = s;
+      }
     }
 
     return {
-      'Student_export.csv': _buildStudentsCsv(studentsSnap.docs),
-      'DailyLog_export.csv': _buildDailyLogsCsv(logsSnap.docs, studentsById),
-      'StudentAuditLog_export.csv': _buildAuditLogCsv(studentsSnap.docs),
+      'Student_export.csv': _buildStudentsCsv(localStudents),
+      'DailyLog_export.csv': _buildDailyLogsCsv(localLogs, studentsById),
+      'StudentAuditLog_export.csv': _buildAuditLogCsv(localStudents),
     };
   }
 
-  static String _buildStudentsCsv(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+  static String _buildStudentsCsv(List<Map<String, dynamic>> students) {
     final sb = StringBuffer();
     sb.writeln(
       'class_section,guardian_name,name,active,photo_url,roll_number,guardian_phone,status,id,student_cnic,guardian_cnic,current_lines,join_date,has_prev_madrassa,prev_madrassa_name,prev_hifz_lines,batch',
     );
-    for (final doc in docs) {
-      final d = doc.data();
+    for (final d in students) {
       var status = (d['status'] ?? '').toString().trim();
       if (status.isEmpty) {
         status = d['active'] == true ? 'active' : 'inactive';
@@ -179,7 +195,7 @@ class MadrassaCsvService {
         _esc(d['rollNumber'] ?? ''),
         _esc(d['contactPhone'] ?? ''),
         _esc(status),
-        _esc(doc.id),
+        _esc(d['id'] ?? ''),
         _esc(d['studentCnic'] ?? ''),
         _esc(d['guardianCnic'] ?? ''),
         _esc(d['currentLines'] ?? 0),
@@ -194,7 +210,7 @@ class MadrassaCsvService {
   }
 
   static String _buildDailyLogsCsv(
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> logDocs,
+    List<Map<String, dynamic>> logDocs,
     Map<String, Map<String, dynamic>> studentsById,
   ) {
     final sb = StringBuffer();
@@ -202,12 +218,12 @@ class MadrassaCsvService {
       'date,student_name,uniform,is_ptm_day,leave,ptm,student_id,present,message,id,current_lines,sabki_para,sabki_ratio,manzil_para,manzil_ratio',
     );
 
-    final sortedDocs = [...logDocs]..sort((a, b) => a.id.compareTo(b.id));
+    final sortedDocs = [...logDocs]..sort((a, b) => (a['id'] ?? a['dateKey'] ?? '').toString().compareTo((b['id'] ?? b['dateKey'] ?? '').toString()));
     for (final doc in sortedDocs) {
-      final date = doc.id;
-      final data = doc.data();
-      data.forEach((studentId, rawLog) {
-        if (studentId.startsWith('_') || rawLog is! Map) return;
+      final date = (doc['id'] ?? doc['dateKey'] ?? '').toString();
+      if (date.isEmpty) continue;
+      doc.forEach((studentId, rawLog) {
+        if (studentId.startsWith('_') || studentId == 'id' || studentId == 'dateKey' || rawLog is! Map) return;
         final log = Map<String, dynamic>.from(rawLog);
         final student = studentsById[studentId];
         final attendance = (log['attendance'] ?? 'absent').toString();
@@ -235,17 +251,18 @@ class MadrassaCsvService {
     return sb.toString();
   }
 
-  static String _buildAuditLogCsv(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+  static String _buildAuditLogCsv(List<Map<String, dynamic>> students) {
     final sb = StringBuffer();
     sb.writeln(
       'student_name,note,event_type,to_status,event_date,student_id,from_status,id',
     );
 
     var rowId = 0;
-    for (final doc in docs) {
-      final d = doc.data();
+    for (final d in students) {
+      final studentId = d['id']?.toString() ?? '';
       final name = d['name']?.toString() ?? '';
-      final auditList = List<Map<String, dynamic>>.from(d['auditLog'] ?? []);
+      final rawAudit = d['auditLog'];
+      final auditList = (rawAudit is List ? rawAudit : []).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
       for (final entry in auditList) {
         final status = entry['status']?.toString() ?? '';
         final type = entry['type']?.toString() ?? 'status_change';
@@ -256,9 +273,9 @@ class MadrassaCsvService {
           _esc(eventType),
           _esc(status),
           _esc(_formatTimestamp(entry['date'])),
-          _esc(doc.id),
+          _esc(studentId),
           _esc(entry['fromStatus'] ?? ''),
-          _esc('audit_${doc.id}_$rowId'),
+          _esc('audit_${studentId}_$rowId'),
         ].join(','));
         rowId++;
       }

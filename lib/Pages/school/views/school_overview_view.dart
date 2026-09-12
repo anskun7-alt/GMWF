@@ -189,7 +189,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                   ),
                                                   const SizedBox(height: 16),
                                                   const Text(
-                                                    'Taleem-o-Tarbiyat School System',
+                                                    'Taleem-wa-Tarbiyat School System',
                                                     style: TextStyle(
                                                       color: Colors.white,
                                                       fontSize: 22,

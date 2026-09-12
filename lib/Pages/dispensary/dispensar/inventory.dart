@@ -107,8 +107,22 @@ class _InventoryPageState extends State<InventoryPage>
     return false;
   }
 
+  bool get _isSupervisorUser {
+    if (widget.isSupervisor) return true;
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final uData = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
+        if (uData is Map) {
+          final r = (uData['role'] ?? uData['userRole'] ?? '').toString().trim().toLowerCase();
+          return r == 'supervisor' || r.contains('supervisor');
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   bool get _isManager => !widget.isAdmin && !widget.isDispenser;
-  bool get _isSupervisorOrReadOnly => widget.isSupervisor || widget.isReadOnly;
+  bool get _isSupervisorOrReadOnly => _isSupervisorUser || widget.isReadOnly;
 
   /// Direct edit is strictly reserved for Doctors, Admins, Global Admins, Chairmen, HQ Managers & Supervisors.
   /// Dispensers are explicitly barred from direct edits and must use "Update Stock" for approval.
@@ -121,25 +135,8 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   bool get _canRegisterMedicine {
-    if (widget.isReadOnly || widget.isDispenser || widget.isDoctor) return false;
-    String r = '';
-    try {
-      if (Hive.isBoxOpen('app_settings')) {
-        final uData = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
-        if (uData is Map) {
-          r = (uData['role'] ?? uData['userRole'] ?? '').toString().trim().toLowerCase();
-        }
-      }
-    } catch (_) {}
-
-    if (r.contains('doctor') || r.contains('dispens') || r.contains('hybrid') || r.contains('reception')) {
-      return false;
-    }
-
-    if (widget.isAdmin || widget.isSupervisor || r.contains('chairman') || r.contains('hqmanager') || r.contains('hq_manager') || r.contains('manager') || r.contains('admin') || r.contains('supervisor') || r.contains('president')) {
-      return true;
-    }
-    return false;
+    if (widget.isReadOnly) return false;
+    return true;
   }
 
   static const _editRequestTypes = {'edit_medicine', 'delete_medicine'};
@@ -224,9 +221,13 @@ class _InventoryPageState extends State<InventoryPage>
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_handleKeyboardShortcuts);
-    final tabCount = _isSupervisorOrReadOnly
-        ? 6
-        : (_canRegisterMedicine ? 8 : 7);
+    int tabCount = 6; // Stock, Proforma, Ledger, Pending, Log, History
+    if (_isSupervisorUser) {
+      tabCount = 1;
+    } else {
+      if (!_isSupervisorOrReadOnly) tabCount++; // Update Stock
+      if (_canRegisterMedicine) tabCount++; // Register Medicine
+    }
     _tabCtrl = TabController(length: tabCount, vsync: this);
     _tabCtrl.addListener(() {
       if (mounted && !_tabCtrl.indexIsChanging) {
@@ -238,17 +239,38 @@ class _InventoryPageState extends State<InventoryPage>
     final isHqOrAdmin = widget.isAdmin || _canDeleteInventoryItem;
     final active = CampSessionService.getActiveCamp(widget.branchId);
     final availableOptions = CampSessionService.getAvailableCampOptions();
-    _selectedCampFilter = (active != null && active.isNotEmpty)
-        ? active
-        : (isHqOrAdmin ? 'all' : (availableOptions.isNotEmpty ? availableOptions.first['id'] : 'all'));
+    final hasCamps = CampSessionService.hasCampsForBranch(widget.branchId) || widget.branchId.toLowerCase().contains('karachi');
+    _selectedCampFilter = !hasCamps
+        ? 'all'
+        : ((active != null && active.isNotEmpty)
+            ? active
+            : (isHqOrAdmin ? 'all' : (availableOptions.isNotEmpty ? availableOptions.first['id'] : 'all')));
 
     CampSessionService.activeCampNotifier.addListener(_onActiveCampChanged);
+    RealtimeManager.isLanHealthyNotifier.addListener(_onLanHealthChanged);
 
     _initSync();
 
     // Cache database loading
-    Hive.box(LocalStorageService.stockBox).listenable().addListener(_debouncedLoadDataFromHive);
-    _loadDataFromHive();
+    if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+      Hive.box(LocalStorageService.stockBox).listenable().addListener(_debouncedLoadDataFromHive);
+      _loadDataFromHive();
+    } else {
+      LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
+        if (mounted && box.isOpen) {
+          box.listenable().addListener(_debouncedLoadDataFromHive);
+          _loadDataFromHive();
+        }
+      });
+    }
+  }
+
+  void _onLanHealthChanged() {
+    if (!mounted) return;
+    debugPrint('[Inventory] LAN Health changed: ${RealtimeManager.isLanHealthyNotifier.value}. Refreshing inventory sync state...');
+    _fireInvSub?.cancel();
+    _logCombinedSub?.cancel();
+    _initSync();
   }
 
   void _onActiveCampChanged() {
@@ -277,70 +299,85 @@ class _InventoryPageState extends State<InventoryPage>
     }
   }
 
-  void _initSync() {
-    final activeCamp = CampSessionService.getActiveCamp();
-    final invCol = CampSessionService.getCampInventoryPath(
-      branchId: widget.branchId,
-      campId: activeCamp,
-    );
-
-    final onLan = RealtimeManager().isConnected;
-    if (onLan) {
-      debugPrint('[Inventory] LAN server connected — running 100% offline from Hive (0 Firestore reads)');
-      final localSyncStream = Hive.box(LocalStorageService.syncBox)
-          .watch()
-          .map((_) => _getPendingLogs());
-      _logCombinedSub = localSyncStream
-          .startWith(_getPendingLogs())
-          .listen((list) => _logState.add(list));
-      return;
-    }
-
-    // 1. Download inventory in background (using cached Hive immediately for 0ms load)
-    LocalStorageService.downloadInventory(widget.branchId, forceFull: false, campId: activeCamp).then((_) {
-      if (mounted) _loadDataFromHive();
-    });
-
-    // 2. Real-time Live Listener: Scoped to updates while view is active (Cloud Fallback)
-    _fireInvSub = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection(invCol)
-        .snapshots()
-        .listen((snap) {
-      for (final change in snap.docChanges) {
-        if (change.type == DocumentChangeType.removed) {
-          LocalStorageService.deleteLocalStockItem(change.doc.id);
-        } else {
-          LocalStorageService.saveLocalInventoryItem(
-              {...change.doc.data() as Map<String, dynamic>, 'id': change.doc.id, 'branchId': widget.branchId, 'campId': activeCamp});
+  String get _effectiveBranchId {
+    final b = widget.branchId.trim().toLowerCase();
+    if (b.isNotEmpty && b != 'all' && b != 'unknown') return b;
+    final active = LocalStorageService.getActiveBranchId();
+    if (active != null && active.isNotEmpty && active != 'all') return active.toLowerCase().trim();
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final saved = Hive.box('app_settings').get('selected_branch');
+        if (saved != null && saved.toString().isNotEmpty && saved != 'all') {
+          return saved.toString().toLowerCase().trim();
         }
       }
-      if (mounted) _loadDataFromHive();
-    });
+    } catch (_) {}
+    return 'karachi';
+  }
 
-    // 2. Merged Log: Combine Cloud Logs + Local Pending Sync items
-    final cloudLogStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('inventory_log')
-        .orderBy('timestamp', descending: true)
-        .limit(50)
-        .snapshots()
-        .map((snap) => snap.docs.map((d) => d.data()).toList());
-
-    final localSyncStream = Hive.box(LocalStorageService.syncBox)
-        .watch()
-        .map((_) => _getPendingLogs());
-
-    _logCombinedSub = Rx.combineLatest2<List<Map<String, dynamic>>, List<Map<String, dynamic>>, List<Map<String, dynamic>>>(
-      cloudLogStream,
-      localSyncStream.startWith(_getPendingLogs()),
-      (cloud, local) {
-        final merged = [...local, ...cloud];
-        return merged;
+  void _initSync() {
+    // Inventory is driven 100% locally from Hive stockBox + LAN sync events.
+    // Zero continuous Firestore listeners.
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.syncBox)) {
+        final localSyncStream = Hive.box(LocalStorageService.syncBox)
+            .watch()
+            .map((_) => _getPendingLogs());
+        _logCombinedSub = localSyncStream
+            .startWith(_getPendingLogs())
+            .listen((list) => _logState.add(list));
       }
-    ).listen((list) => _logState.add(list));
+    } catch (e) {
+      debugPrint('[Inventory] Local pending logs sync error: $e');
+    }
+  }
+
+  // ─── Manual Cloud Recovery Pull (On-Demand with 30s Debounce) ─────────
+  DateTime? _lastCloudPullTime;
+  Future<void> manualCloudPull({bool showToast = true}) async {
+    if (_lastCloudPullTime != null &&
+        DateTime.now().difference(_lastCloudPullTime!) < const Duration(seconds: 30)) {
+      if (showToast && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please wait 30 seconds between cloud syncs.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+    _lastCloudPullTime = DateTime.now();
+
+    final effBranch = _effectiveBranchId;
+    final activeCamp = CampSessionService.getActiveCamp(effBranch);
+
+    if (showToast && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Refreshing inventory from cloud...'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+
+    try {
+      await LocalStorageService.downloadInventory(effBranch, forceFull: true, campId: activeCamp);
+      if (mounted) {
+        _loadDataFromHive();
+        if (showToast) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Inventory cloud sync complete.'),
+              backgroundColor: Color(0xFF00695C),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[Inventory] Manual cloud pull failed: $e');
+    }
   }
 
   List<Map<String, dynamic>> _getPendingLogs() {
@@ -368,7 +405,12 @@ class _InventoryPageState extends State<InventoryPage>
     HardwareKeyboard.instance.removeHandler(_handleKeyboardShortcuts);
     _debounceLoadTimer?.cancel();
     CampSessionService.activeCampNotifier.removeListener(_onActiveCampChanged);
-    Hive.box(LocalStorageService.stockBox).listenable().removeListener(_debouncedLoadDataFromHive);
+    RealtimeManager.isLanHealthyNotifier.removeListener(_onLanHealthChanged);
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+        Hive.box(LocalStorageService.stockBox).listenable().removeListener(_debouncedLoadDataFromHive);
+      }
+    } catch (_) {}
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _fireInvSub?.cancel();
@@ -415,12 +457,15 @@ class _InventoryPageState extends State<InventoryPage>
           m['id'] = kStr.startsWith('stock:') ? kStr.substring(6) : kStr;
         }
 
-        // Auto-normalize medicine name & formula to latest master catalog
-        final rawName = (m['name'] ?? m['formula'] ?? '').toString();
-        final cleanName = MasterProformaService.cleanBrandToFormula(rawName);
-        if (cleanName.isNotEmpty) {
-          m['name'] = cleanName;
-          m['formula'] = cleanName;
+        // Auto-normalize medicine name & formula to latest master catalog for unedited items
+        final isCustom = m['isCustomized'] == true || m['userEdited'] == true;
+        if (!isCustom) {
+          final rawName = (m['name'] ?? m['formula'] ?? '').toString();
+          final cleanName = MasterProformaService.cleanBrandToFormula(rawName);
+          if (cleanName.isNotEmpty) {
+            m['name'] = cleanName;
+            m['formula'] = cleanName;
+          }
         }
 
         // Auto-normalize Kapayya/Kapaya camp to Saddar
@@ -779,10 +824,103 @@ class _InventoryPageState extends State<InventoryPage>
 
   String _getBranchName() {
     final cached = Hive.box(LocalStorageService.branchesBox).get('branch:${widget.branchId}');
+    String bName = 'Branch';
     if (cached is Map) {
-      return (cached['name'] as String?) ?? 'Branch';
+      bName = (cached['name'] as String?) ?? 'Branch';
     }
-    return 'Branch';
+    if (_selectedCampFilter != null && _selectedCampFilter != 'all' && _selectedCampFilter!.isNotEmpty) {
+      final campLabel = CampSessionService.getCampLabel(_selectedCampFilter!, widget.branchId);
+      return '$bName ($campLabel)';
+    }
+    return bName;
+  }
+
+  Widget _buildMobileSubNav(BuildContext context) {
+    final List<Map<String, dynamic>> menuItems = [
+      {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
+      if (!_isSupervisorOrReadOnly) {'label': 'Update Stock', 'icon': Icons.add_box_rounded},
+      if (_canRegisterMedicine) {'label': 'Register Medicine', 'icon': Icons.medication_liquid_rounded},
+      if (!_isSupervisorUser) {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
+      {'label': 'Ledger', 'icon': Icons.receipt_long_rounded},
+      {'label': 'Pending', 'icon': Icons.pending_actions_rounded},
+      {'label': 'Log', 'icon': Icons.history_edu_rounded},
+      {'label': 'History', 'icon': Icons.history_rounded},
+    ];
+
+    final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
+    final hasCamps = (widget.branchId.toLowerCase().contains('karachi') ||
+        CampSessionService.hasCampsForBranch(widget.branchId) ||
+        _canDeleteInventoryItem) && branchCamps.isNotEmpty;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Tabs
+        Container(
+          height: 42,
+          decoration: BoxDecoration(
+            color: _isDark ? const Color(0xFF1E293B) : Colors.white,
+            border: Border(
+              bottom: BorderSide(
+                color: _isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                width: 1,
+              ),
+            ),
+          ),
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            itemCount: menuItems.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 6),
+            itemBuilder: (context, index) {
+              final item = menuItems[index];
+              final isActive = _tabCtrl.index == index;
+              return InkWell(
+                onTap: () {
+                  _tabCtrl.animateTo(index);
+                  setState(() {});
+                },
+                borderRadius: BorderRadius.circular(20),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: isActive
+                        ? (_isDark ? const Color(0xFF0F766E) : _teal)
+                        : (_isDark ? const Color(0xFF334155) : const Color(0xFFF1F5F9)),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: isActive ? (_isDark ? const Color(0xFF14B8A6) : _teal) : Colors.transparent,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        item['icon'] as IconData,
+                        size: 13,
+                        color: isActive ? Colors.white : (_isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        item['label'] as String,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: isActive ? FontWeight.bold : FontWeight.w600,
+                          color: isActive ? Colors.white : (_isDark ? const Color(0xFFE2E8F0) : const Color(0xFF334155)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+
+      ],
+    );
   }
 
   Widget _buildSidebarContent(BuildContext context) {
@@ -790,7 +928,7 @@ class _InventoryPageState extends State<InventoryPage>
       {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
       if (!_isSupervisorOrReadOnly) {'label': 'Update Stock', 'icon': Icons.add_box_rounded},
       if (_canRegisterMedicine) {'label': 'Register Medicine', 'icon': Icons.medication_liquid_rounded},
-      {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
+      if (!_isSupervisorUser) {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
       {'label': 'Ledger', 'icon': Icons.receipt_long_rounded},
       {'label': 'Pending', 'icon': Icons.pending_actions_rounded},
       {'label': 'Log', 'icon': Icons.history_edu_rounded},
@@ -960,6 +1098,14 @@ class _InventoryPageState extends State<InventoryPage>
     final double screenWidth = MediaQuery.of(context).size.width;
     final bool isMobile = screenWidth < 800;
 
+    if (_isSupervisorUser) {
+      return Scaffold(
+        backgroundColor: _isDark ? const Color(0xFF0F172A) : _bg,
+        appBar: (!widget.isEmbedded && !isWrapped) ? _buildAppBar(isMobile: isMobile) : null,
+        body: _stockTab(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _isDark ? const Color(0xFF0F172A) : _bg,
       appBar: (!widget.isEmbedded && !isWrapped) ? _buildAppBar(isMobile: isMobile) : null,
@@ -997,7 +1143,11 @@ class _InventoryPageState extends State<InventoryPage>
               child: _buildSidebarContent(context),
             ),
           Expanded(
-            child: TabBarView(
+            child: Column(
+              children: [
+                if (isMobile) _buildMobileSubNav(context),
+                Expanded(
+                  child: TabBarView(
                     controller: _tabCtrl,
                     children: [
                       _stockTab(),
@@ -1035,6 +1185,9 @@ class _InventoryPageState extends State<InventoryPage>
                     ],
                   ),
                 ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1521,13 +1674,311 @@ class _InventoryPageState extends State<InventoryPage>
   Widget _buildFilterSection() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isCompact = screenWidth < 768;
-    final hasCamps = widget.branchId.toLowerCase().contains('karachi') ||
+    final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
+    final hasCamps = (widget.branchId.toLowerCase().contains('karachi') ||
         CampSessionService.hasCampsForBranch(widget.branchId) ||
-        _canDeleteInventoryItem;
+        _canDeleteInventoryItem) && branchCamps.isNotEmpty;
+
+    if (isCompact) {
+      return Container(
+        color: _isDark ? const Color(0xFF0F172A) : _bg,
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Row 1: Search and Type Dropdown
+            Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: _isDark ? const Color(0xFF334155) : _white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: _isDark ? const Color(0xFF475569) : Colors.grey.shade200, width: 1),
+                    ),
+                    child: TextField(
+                      controller: _searchCtrl,
+                      cursorColor: _isDark ? const Color(0xFF38BDF8) : _teal,
+                      onChanged: (_) => setState(() {
+                        _displayLimit = 50;
+                        _processData();
+                      }),
+                      style: TextStyle(fontSize: 13, color: _isDark ? Colors.white : _textDark),
+                      decoration: InputDecoration(
+                        prefixIcon: Icon(Icons.search_rounded, color: _isDark ? const Color(0xFF94A3B8) : _textLight, size: 18),
+                        hintText: 'Search formula, name or barcode...',
+                        hintStyle: TextStyle(color: _isDark ? const Color(0xFF64748B) : _textLight, fontSize: 11.5),
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: _isDark ? const Color(0xFF334155) : _white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: _isDark ? const Color(0xFF475569) : Colors.grey.shade200, width: 1),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _filterType,
+                      dropdownColor: _isDark ? const Color(0xFF1E293B) : Colors.white,
+                      icon: Icon(Icons.arrow_drop_down, color: _isDark ? const Color(0xFF94A3B8) : _textLight),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            _filterType = val;
+                            _displayLimit = 50;
+                            _processData();
+                          });
+                        }
+                      },
+                      items: _types
+                          .map((t) => DropdownMenuItem(
+                                value: t,
+                                child: Text(t, style: TextStyle(fontSize: 12, color: _isDark ? Colors.white : _textDark)),
+                              ))
+                          .toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+
+            // Row 2: Camp Selection Filter (Desk selector)
+            if (hasCamps && !widget.isDoctor && branchCamps.isNotEmpty) ...[
+              Container(
+                height: 34,
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _isDark ? const Color(0xFF1E293B) : Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _isDark ? const Color(0xFF334155) : Colors.grey.shade300),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.location_on_outlined, size: 14, color: _isDark ? const Color(0xFF38BDF8) : _teal),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Desk:',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _isDark ? Colors.white70 : Colors.black87),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            _buildCampFilterChip('all', '🏥 All'),
+                            for (final camp in branchCamps) ...[
+                              const SizedBox(width: 4),
+                              _buildCampFilterChip(
+                                (camp['id'] ?? '').toString(),
+                                '📍 ${(camp['name'] ?? camp['id'] ?? '').toString()}',
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+            ],
+
+            // Row 3: Action Buttons (Register Med, Proforma Sheet, Proforma PDF, Batch filter)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  // Register Medicine Action
+                  if (_canRegisterMedicine) ...[
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        final regIdx = 2;
+                        if (regIdx < _tabCtrl.length) {
+                          _tabCtrl.animateTo(regIdx);
+                          setState(() {});
+                        } else {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => InventoryUpdatePage(
+                                branchId: widget.branchId,
+                                isAdmin: widget.isAdmin,
+                                isDispenser: widget.isDispenser,
+                                isDoctor: widget.isDoctor,
+                                showMode: 2,
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.add_circle_outline_rounded, color: Colors.white, size: 14),
+                      label: const Text('Register Med', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.teal.shade800,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        minimumSize: const Size(0, 32),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+
+                  // Proforma Sheet Button
+                  if (!_isSupervisorUser) ...[
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _teal,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        minimumSize: const Size(0, 32),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                        elevation: 1,
+                      ),
+                      onPressed: () async {
+                        final res = await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => UniversalProformaSheetPage(
+                              branchId: widget.branchId,
+                              isDispenser: widget.isDispenser,
+                              isAdmin: widget.isAdmin,
+                            ),
+                          ),
+                        );
+                        if (res == true) {
+                          _loadDataFromHive();
+                        }
+                      },
+                      icon: const Icon(FontAwesomeIcons.fileExcel, size: 12, color: Colors.white),
+                      label: const Text(
+                        'Proforma Sheet',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+
+                  // Download Proforma / Inventory Checklist PDF button
+                  _isExportingPdf
+                      ? Container(
+                          height: 32,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: _tealDark,
+                            borderRadius: BorderRadius.circular(7),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              ),
+                              SizedBox(width: 6),
+                              Text('Exporting...', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        )
+                      : ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _tealDark,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            minimumSize: const Size(0, 32),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                            elevation: 1,
+                          ),
+                          onPressed: _exportPdf,
+                          icon: const Icon(Icons.picture_as_pdf_rounded, size: 14, color: Colors.white),
+                          label: const Text(
+                            'Proforma PDF',
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5),
+                          ),
+                        ),
+                  const SizedBox(width: 6),
+
+                  // Batch Dropdown
+                  Container(
+                    height: 32,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: _isDark ? const Color(0xFF334155) : _white,
+                      borderRadius: BorderRadius.circular(7),
+                      border: Border.all(color: _isDark ? const Color(0xFF475569) : Colors.grey.shade200, width: 1),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _filterBatch,
+                        dropdownColor: _isDark ? const Color(0xFF1E293B) : Colors.white,
+                        icon: Icon(Icons.arrow_drop_down, color: _isDark ? const Color(0xFF94A3B8) : _textLight, size: 18),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setState(() {
+                              _filterBatch = val;
+                              _displayLimit = 50;
+                              _processData();
+                            });
+                          }
+                        },
+                        items: _batchKeys
+                            .map((b) => DropdownMenuItem(
+                                  value: b,
+                                  child: Text(b, style: TextStyle(fontSize: 11.5, color: _isDark ? Colors.white : _textDark)),
+                                ))
+                            .toList(),
+                      ),
+                    ),
+                  ),
+
+                  if (_canDeleteInventoryItem && _showRemoveAllMeds) ...[
+                    const SizedBox(width: 6),
+                    ElevatedButton.icon(
+                      onPressed: _confirmRemoveAllMedsFromCurrentCamp,
+                      icon: const Icon(Icons.delete_sweep_rounded, color: Colors.white, size: 14),
+                      label: const Text('Clear Camp', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade800,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 32),
+                      ),
+                    ),
+                  ],
+                  if (_canDeleteInventoryItem) ...[
+                    const SizedBox(width: 6),
+                    ElevatedButton.icon(
+                      onPressed: _syncInventoryFromCloud,
+                      icon: const Icon(Icons.cloud_download_rounded, color: Colors.white, size: 14),
+                      label: const Text('Sync', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueGrey.shade700,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 32),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     final widgets = [
-      Expanded(
-        flex: isCompact ? 1 : 2,
+      SizedBox(
+        width: 320,
         child: Container(
           height: 38,
           decoration: BoxDecoration(
@@ -1617,7 +2068,7 @@ class _InventoryPageState extends State<InventoryPage>
           ),
         ),
       ),
-      if (hasCamps && !widget.isDoctor) ...[
+      if (hasCamps && !widget.isDoctor && branchCamps.isNotEmpty) ...[
         const SizedBox(width: 8),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -1630,48 +2081,53 @@ class _InventoryPageState extends State<InventoryPage>
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildCampFilterChip('all', '🏥 All Camps'),
-              const SizedBox(width: 4),
-              _buildCampFilterChip('saddar', '📍 Saddar'),
-              const SizedBox(width: 4),
-              _buildCampFilterChip('haji_camp', '📍 Haji Camp'),
+              for (final camp in branchCamps) ...[
+                const SizedBox(width: 4),
+                _buildCampFilterChip(
+                  (camp['id'] ?? '').toString(),
+                  '📍 ${(camp['name'] ?? camp['id'] ?? '').toString()}',
+                ),
+              ],
             ],
           ),
         ),
       ],
     ];
 
-    // Universal Proforma Sheet Button
-    widgets.add(const SizedBox(width: 8));
-    widgets.add(
-      ElevatedButton.icon(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: _teal,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          elevation: 2,
-        ),
-        onPressed: () async {
-          final res = await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => UniversalProformaSheetPage(
-                branchId: widget.branchId,
-                isDispenser: widget.isDispenser,
-                isAdmin: widget.isAdmin,
+    // Universal Proforma Sheet Button (Hidden for Supervisor)
+    if (!_isSupervisorUser) {
+      widgets.add(const SizedBox(width: 8));
+      widgets.add(
+        ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _teal,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            elevation: 2,
+          ),
+          onPressed: () async {
+            final res = await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => UniversalProformaSheetPage(
+                  branchId: widget.branchId,
+                  isDispenser: widget.isDispenser,
+                  isAdmin: widget.isAdmin,
+                ),
               ),
-            ),
-          );
-          if (res == true) {
-            _loadDataFromHive();
-          }
-        },
-        icon: const Icon(FontAwesomeIcons.fileExcel, size: 14, color: Colors.white),
-        label: const Text(
-          'Proforma Sheet',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+            );
+            if (res == true) {
+              _loadDataFromHive();
+            }
+          },
+          icon: const Icon(FontAwesomeIcons.fileExcel, size: 14, color: Colors.white),
+          label: const Text(
+            'Proforma Sheet',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+          ),
         ),
-      ),
-    );
+      );
+    }
 
     // Download PDF button
     widgets.add(const SizedBox(width: 8));
@@ -1690,23 +2146,30 @@ class _InventoryPageState extends State<InventoryPage>
               ),
             )
           : Tooltip(
-              message: 'Download Inventory Checklist PDF',
+              message: 'Download Inventory Checklist / Proforma PDF',
               child: InkWell(
                 onTap: _exportPdf,
                 borderRadius: BorderRadius.circular(8),
                 child: Container(
                   height: 38,
-                  width: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
                     color: _tealDark,
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
                         color: _teal.withValues(alpha: 0.3), width: 1),
                   ),
-                  child: const Icon(
-                    Icons.picture_as_pdf_rounded,
-                    color: Colors.white,
-                    size: 18,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.picture_as_pdf_rounded,
+                        color: Colors.white,
+                        size: 16,
+                      ),
+                      SizedBox(width: 6),
+                      Text('PDF', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                    ],
                   ),
                 ),
               ),
@@ -1718,13 +2181,8 @@ class _InventoryPageState extends State<InventoryPage>
       widgets.add(
         ElevatedButton.icon(
           onPressed: () {
-            final menuItems = [
-              {'label': 'Stock'},
-              if (!_isSupervisorOrReadOnly) {'label': 'Update Stock'},
-              if (_canRegisterMedicine) {'label': 'Register Medicine'},
-            ];
-            final regIdx = menuItems.indexWhere((m) => m['label'] == 'Register Medicine');
-            if (regIdx != -1 && regIdx < _tabCtrl.length) {
+            final regIdx = 2;
+            if (regIdx < _tabCtrl.length) {
               _tabCtrl.animateTo(regIdx);
               setState(() {});
             }
@@ -2472,11 +2930,9 @@ class _InventoryPageState extends State<InventoryPage>
                   ? (isWarning ? const Color(0xFF2D1214) : const Color(0xFF1E293B))
                   : (isWarning ? const Color(0xFFFFEBEE) : _white),
               borderRadius: BorderRadius.circular(12),
-              border: Border(
-                top: isWarning ? BorderSide(color: _isDark ? const Color(0xFFFF6B6B) : _red, width: 3) : BorderSide(color: _isDark ? const Color(0xFF334155) : const Color(0xFFE0E0E0), width: 0.8),
-                left: isWarning ? BorderSide(color: _isDark ? const Color(0xFFFF6B6B) : _red, width: 5) : BorderSide(color: _isDark ? const Color(0xFF334155) : const Color(0xFFE0E0E0), width: 0.8),
-                right: isWarning ? BorderSide(color: _isDark ? const Color(0xFFFF6B6B) : _red, width: 1) : BorderSide(color: _isDark ? const Color(0xFF334155) : const Color(0xFFE0E0E0), width: 0.8),
-                bottom: isWarning ? BorderSide(color: _isDark ? const Color(0xFFFF6B6B) : _red, width: 1) : BorderSide(color: _isDark ? const Color(0xFF334155) : const Color(0xFFE0E0E0), width: 0.8),
+              border: Border.all(
+                color: isWarning ? (_isDark ? const Color(0xFFFF6B6B) : _red) : (_isDark ? const Color(0xFF334155) : const Color(0xFFE0E0E0)),
+                width: isWarning ? 2.0 : 0.8,
               ),
               boxShadow: [
                 BoxShadow(
@@ -2507,13 +2963,17 @@ class _InventoryPageState extends State<InventoryPage>
                         child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('${i + 1}. ${b['name']}',
-                            style: TextStyle(
-                                color: _isDark
-                                    ? (isWarning ? const Color(0xFFFF6B6B) : Colors.white)
-                                    : (isWarning ? _red : _textDark),
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13.5)),
+                        Text(
+                          '${i + 1}. ${b['name']}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: _isDark
+                                  ? (isWarning ? const Color(0xFFFF6B6B) : Colors.white)
+                                  : (isWarning ? _red : _textDark),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13.5),
+                        ),
                       ],
                     )),
                     if (_canDeleteInventoryItem)
@@ -2543,8 +3003,8 @@ class _InventoryPageState extends State<InventoryPage>
                       _qtyBadge(qty, lowStock),
                     ],
                   ]),
-                  const SizedBox(height: 10),
-                  Wrap(spacing: 8, runSpacing: 6, children: [
+                  const SizedBox(height: 8),
+                  Wrap(spacing: 6, runSpacing: 4, children: [
                     _typePill(type),
                     if ((b['dose'] ?? '').toString().isNotEmpty)
                       _infoBadge(b['dose'].toString(), _isDark ? const Color(0xFF94A3B8) : _textMid),
@@ -2641,13 +3101,13 @@ class _InventoryPageState extends State<InventoryPage>
 
 
   // ── Pending Tab ───────────────────────────────────────────────────────────
-  Widget _pendingTab() => StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
+  Widget _pendingTab() => FutureBuilder<QuerySnapshot>(
+        future: FirebaseFirestore.instance
             .collection('branches')
             .doc(widget.branchId)
             .collection('edit_requests')
             .where('status', isEqualTo: 'pending')
-            .snapshots(),
+            .get(const GetOptions(source: Source.serverAndCache)),
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(
@@ -2886,13 +3346,13 @@ class _InventoryPageState extends State<InventoryPage>
     );
   }
 
-  Widget _historyList(String status) => StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
+  Widget _historyList(String status) => FutureBuilder<QuerySnapshot>(
+        future: FirebaseFirestore.instance
             .collection('branches')
             .doc(widget.branchId)
             .collection('edit_requests')
             .where('status', isEqualTo: status)
-            .snapshots(),
+            .get(const GetOptions(source: Source.serverAndCache)),
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(
@@ -3778,18 +4238,18 @@ class _InventoryPageState extends State<InventoryPage>
 
   Widget _priceBadge(double price) => Container(
         padding:
-            const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
         decoration: BoxDecoration(
-          color: const Color(0xFFF3FCF4),
-          borderRadius: BorderRadius.circular(7),
+          color: _isDark ? const Color(0xFF14532D).withValues(alpha: 0.35) : const Color(0xFFF3FCF4),
+          borderRadius: BorderRadius.circular(6),
           border: Border.all(
-              color: const Color(0xFF81C784).withValues(alpha: 0.6)),
+              color: _isDark ? const Color(0xFF22C55E).withValues(alpha: 0.5) : const Color(0xFF81C784).withValues(alpha: 0.6)),
         ),
         child: Text('PKR ${_fmtPrice(price)}',
-            style: const TextStyle(
-                color: Color(0xFF2E7D32),
+            style: TextStyle(
+                color: _isDark ? const Color(0xFF4ADE80) : const Color(0xFF2E7D32),
                 fontWeight: FontWeight.w800,
-                fontSize: 12)),
+                fontSize: 11.5)),
       );
 
   Widget _dCell(double w, Widget child) => Container(
@@ -3820,20 +4280,25 @@ class _InventoryPageState extends State<InventoryPage>
         ]),
       );
 
-  Widget _expBadge(String text, bool soon) =>
-      Row(mainAxisSize: MainAxisSize.min, children: [
-        if (soon) ...[
-          const Icon(Icons.access_time_rounded,
-              size: 12, color: _red),
-          const SizedBox(width: 4)
-        ],
-        Text(text,
-            style: TextStyle(
-                color: soon ? _red : _textMid,
-                fontWeight:
-                    soon ? FontWeight.bold : FontWeight.normal,
-                fontSize: 12)),
-      ]);
+  Widget _expBadge(String text, bool soon) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: (soon ? _red : (_isDark ? const Color(0xFF334155) : Colors.grey.shade100)).withValues(alpha: 0.18),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+              color: (soon ? _red : (_isDark ? const Color(0xFF475569) : Colors.grey.shade300)).withValues(alpha: 0.5),
+              width: 0.8),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.calendar_today_rounded, size: 10, color: soon ? _red : (_isDark ? const Color(0xFF94A3B8) : _textMid)),
+          const SizedBox(width: 4),
+          Text(text,
+              style: TextStyle(
+                  color: soon ? _red : (_isDark ? const Color(0xFFCBD5E1) : _textMid),
+                  fontWeight: soon ? FontWeight.bold : FontWeight.normal,
+                  fontSize: 11)),
+        ]),
+      );
 
   Widget _statusDot({required bool lowStock, required bool expSoon}) {
     final Color dotColor = lowStock
@@ -4079,18 +4544,34 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
           'expiryDate': _expiryCtrl.text.trim(),
           'updatedAt': FieldValue.serverTimestamp(),
         };
-        batch.update(ref, uData);
-
         try {
           final stockBox = Hive.box(LocalStorageService.stockBox);
           final existing = stockBox.get('stock:$id') ?? stockBox.get(id);
-          if (existing is Map) {
-            final updated = Map<String, dynamic>.from(existing)..addAll(uData);
-            LocalStorageService.saveLocalInventoryItem(updated);
+          final base = (existing is Map) ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': id, 'docId': id};
+          final updated = base..addAll(uData);
+          LocalStorageService.saveLocalInventoryItem(updated);
+
+          RealtimeManager().sendMessage({
+            'event_type': RealtimeEvents.saveStockItem,
+            'branchId': widget.branchId,
+            'data': updated,
+          });
+
+          if (!RealtimeManager().isConnected) {
+            LocalStorageService.enqueueSync({
+              'type': 'register_medicine',
+              'branchId': widget.branchId,
+              'medicineId': id,
+              'data': updated,
+            });
           }
         } catch (_) {}
       }
-      await batch.commit();
+
+      // Commit to Firestore in background without blocking UI
+      unawaited(batch.commit().catchError((e) {
+        debugPrint('[Inventory] Background batch commit error: $e');
+      }));
 
       if (!mounted) return;
       Navigator.pop(context);

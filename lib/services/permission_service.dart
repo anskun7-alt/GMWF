@@ -113,7 +113,6 @@ class PermissionService {
       AppPermission.reverseTokens, 
       AppPermission.manageInventory, 
       AppPermission.manageStock, 
-      AppPermission.manageFinance,
       AppPermission.manageMadrassaAdmin, // Added for full Madrassa Admin view
       AppPermission.viewPatients,        // Added for Patients list
       AppPermission.registerPatients,    // Added for Registration
@@ -195,6 +194,11 @@ class PermissionService {
     },
     
     'madrassa admin': {
+      AppPermission.manageMadrassa,
+      AppPermission.manageMadrassaAdmin,
+    },
+    
+    'madrassa principal': {
       AppPermission.manageMadrassa,
       AppPermission.manageMadrassaAdmin,
     },

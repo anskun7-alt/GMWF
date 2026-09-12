@@ -8,11 +8,13 @@
 [Setup]
 AppId={{A1B2C3D4-9F23-4C11-8ABC-1234567890AB}
 AppName=GMWF
-AppVersion=1.4.4
-AppPublisher=GMWF Pvt. Ltd
+AppVersion=1.5.0
+AppPublisher=GMWF
 AppPublisherURL=https://gmwf.pk/
 AppSupportURL=https://gmwf.pk/
 AppUpdatesURL=https://gmwf.pk/
+AppComments=Developed by Ans for GMWF
+AppCopyright=Copyright (C) 2026 GMWF. Developed by Ans.
 
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -23,7 +25,7 @@ DefaultGroupName=GMWF
 
 ; Output
 OutputDir=installer
-OutputBaseFilename=GMWF-v1.4.4-x64
+OutputBaseFilename=GMWF-v1.5.0-x64
 SetupIconFile=Installer\gmwf.ico
 
 ; Compression
@@ -76,16 +78,19 @@ Source: "build\windows\x64\runner\Release\*"; \
 
 ; ── Standalone Python Runtime (x64) ──────────────────────────
 ; Bundled with pyzk & firebase-admin pre-installed (Zero setup / 100% offline)
-; Automatically detects if Python already exists in {app}\python and skips extraction without overwriting
 Source: "Installer\python-3.12.10-embed-amd64\*"; \
     DestDir: "{app}\python"; \
-    Check: ShouldInstallPython; \
-    Flags: recursesubdirs createallsubdirs onlyifdoesntexist uninsneveruninstall
+    Flags: recursesubdirs createallsubdirs ignoreversion
 
 ; ── Background Sync Scripts & Configs ────────────────────────
 Source: "scripts\*"; \
     DestDir: "{app}\scripts"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
+
+; ── GMWF Digital Certificate ─────────────────────────────────
+Source: "Installer\gmwf_trusted.cer"; \
+    DestDir: "{tmp}"; \
+    Flags: deleteafterinstall
 
 ; ── VC++ Redistributable ─────────────────────────────────────
 ; Bundled so the app works on clean Windows installs with no
@@ -109,7 +114,13 @@ Name: "{commondesktop}\GMWF";  Filename: "{app}\gmwf.exe"; WorkingDir: "{app}"; 
 Name: "serverautostart"; Description: "Start GMWF automatically when this Windows server user logs in"; GroupDescription: "Server startup:"; Flags: checkedonce
 
 [Run]
-; 1. Install VC++ Runtime silently (skipped if already installed)
+; 1. Trust GMWF Digital Certificate on this PC
+Filename: "{cmd}"; \
+    Parameters: "/c certutil -addstore -f ""Root"" ""{tmp}\gmwf_trusted.cer"" & certutil -addstore -f ""TrustedPublisher"" ""{tmp}\gmwf_trusted.cer"""; \
+    StatusMsg: "Registering GMWF security certificate..."; \
+    Flags: runhidden waituntilterminated
+
+; 2. Install VC++ Runtime silently (skipped if already installed)
 Filename: "{tmp}\vc_redist.x64.exe"; \
     Parameters: "/install /quiet /norestart"; \
     StatusMsg: "Installing Microsoft Visual C++ Runtime..."; \
@@ -120,10 +131,10 @@ Filename: "{cmd}"; \
   Tasks: serverautostart; \
   Flags: runhidden waituntilterminated
 
-; 2. Launch app after install (user can untick this)
+; 3. Launch app after install (user can untick this)
 Filename: "{app}\gmwf.exe"; \
     Description: "Launch GMWF now"; \
-    Flags: nowait postinstall runasoriginaluser
+    Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Kill the app if it is still running when the user uninstalls

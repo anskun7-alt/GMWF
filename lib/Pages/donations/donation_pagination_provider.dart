@@ -83,7 +83,7 @@ class DonationPaginationNotifier
   // ── Private helpers ────────────────────────────────────────────────────────
 
   Query<Map<String, dynamic>> _baseQuery() {
-    if (branchId == 'all') {
+    if (branchId == 'all' || branchId.isEmpty) {
       return FirebaseFirestore.instance
           .collectionGroup('donations')
           .orderBy('date', descending: true);

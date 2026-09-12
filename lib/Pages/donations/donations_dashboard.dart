@@ -13,6 +13,7 @@ import 'package:shimmer/shimmer.dart';
 import 'package:archive/archive.dart';
 import 'package:collection/collection.dart';
 import '../../constants/colors.dart';
+import '../../theme/app_theme.dart';
 import '../../theme/role_theme_provider.dart';
 import 'donations_shared.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -194,11 +195,14 @@ class _DashboardTabState extends ConsumerState<DashboardTab> {
       if (_minAmount != null && amt < _minAmount!) return false;
       if (_maxAmount != null && amt > _maxAmount!) return false;
       // role-based visibility
-      if (widget.role == UserRole.chairman || widget.role == UserRole.hqManager) return true;
-      // Allow records without a collectorId (e.g., imported or anonymous)
-      if (d.collectorId == null || d.collectorId!.isEmpty) return true;
+      if (widget.role == UserRole.chairman || widget.role == UserRole.hqManager || widget.role == UserRole.manager) return true;
+      if (widget.role == UserRole.officeBoy) {
+        final matchesUser = (widget.userId.isNotEmpty && d.collectorId == widget.userId) ||
+            (widget.username.isNotEmpty && d.recordedBy.toLowerCase().trim() == widget.username.toLowerCase().trim()) ||
+            (d.collectorId == null || d.collectorId!.isEmpty);
+        return matchesUser;
+      }
       if (d.collectorId == widget.userId) return true;
-      if (widget.role == UserRole.manager) return true;
       return false;
     }).toList()
       ..sort((a, b) {
@@ -1290,123 +1294,241 @@ class _DashboardTabState extends ConsumerState<DashboardTab> {
         _maxAmount != null ||
         _startDate != null ||
         _endDate != null;
-    final isMobile = MediaQuery.of(context).size.width < 600;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        children: [
-          Expanded(
-            child: Container(
-              height: 50,
+
+    final allCount = _currentDonations.length;
+    final receivedCount = _currentDonations.where((d) => d.status == DonationStatus.received).length;
+    final pendingCount = _currentDonations.where((d) => d.status == DonationStatus.pending).length;
+    final gmwfCount = _currentDonations.where((d) => d.categoryId.toLowerCase().contains('gmwf')).length;
+    final jamiaCount = _currentDonations.where((d) => d.categoryId.toLowerCase().contains('jamia')).length;
+    final boxCount = _currentDonations.where((d) => d.categoryId.toLowerCase().contains('box')).length;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 950;
+        final isMobile = constraints.maxWidth < 600;
+
+        final filterPills = SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          child: Row(
+            children: [
+              _buildStageTabPill("All Records", allCount, widget.selectedCategory == DonationCategory.all && _statusFilter == 'All', () {
+                setState(() {
+                  _statusFilter = 'All';
+                });
+                widget.onCatChanged(DonationCategory.all);
+              }, const Color(0xFF6366F1), t),
+              const SizedBox(width: 8),
+              _buildStageTabPill("Received", receivedCount, _statusFilter == 'Received', () {
+                setState(() {
+                  _statusFilter = 'Received';
+                });
+              }, const Color(0xFF10B981), t),
+              const SizedBox(width: 8),
+              _buildStageTabPill("Pending", pendingCount, _statusFilter == 'Pending', () {
+                setState(() {
+                  _statusFilter = 'Pending';
+                });
+              }, const Color(0xFFF59E0B), t),
+              const SizedBox(width: 8),
+              _buildStageTabPill("GMWF Projects", gmwfCount, widget.selectedCategory == DonationCategory.gmwf, () {
+                widget.onCatChanged(DonationCategory.gmwf);
+              }, const Color(0xFF3B82F6), t),
+              const SizedBox(width: 8),
+              _buildStageTabPill("Jamia / Masjid", jamiaCount, widget.selectedCategory == DonationCategory.jamia, () {
+                widget.onCatChanged(DonationCategory.jamia);
+              }, const Color(0xFF8B5CF6), t),
+              const SizedBox(width: 8),
+              _buildStageTabPill("Donation Boxes", boxCount, _searchCtrl.text.toLowerCase() == 'box', () {
+                setState(() {
+                  _searchCtrl.text = _searchCtrl.text.toLowerCase() == 'box' ? '' : 'Box';
+                });
+              }, const Color(0xFF0D9488), t),
+            ],
+          ),
+        );
+
+        final searchBarAndActions = Row(
+          children: [
+            Expanded(
+              child: Container(
+                height: 44,
+                decoration: BoxDecoration(
+                  color: t.bgCard,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: _searchHasFocus ? t.accent : t.bgRule,
+                    width: _searchHasFocus ? 1.5 : 1.0,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _searchHasFocus
+                          ? t.accent.withValues(alpha: 0.08)
+                          : Colors.black.withValues(alpha: 0.02),
+                      blurRadius: _searchHasFocus ? 12 : 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: TextField(
+                  controller: _searchCtrl,
+                  focusNode: _searchFocusNode,
+                  style: TextStyle(color: t.textPrimary, fontSize: 13.5),
+                  decoration: InputDecoration(
+                    hintText: 'Search by donor, receipt #, or goods...',
+                    hintStyle: TextStyle(fontSize: 13, color: t.textTertiary),
+                    prefixIcon: Icon(Icons.search_rounded, color: t.textTertiary, size: 18),
+                    suffixIcon: _searchCtrl.text.isNotEmpty
+                        ? IconButton(
+                            icon: Icon(Icons.clear_rounded, size: 16, color: t.textTertiary),
+                            onPressed: () => _searchCtrl.clear())
+                        : null,
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            _HeaderActionButton(
+              onTap: _showAdvancedFilterDialog,
+              hasFilters: hasFilters,
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: hasFilters ? t.accent.withValues(alpha: 0.12) : t.bgCardAlt,
+                    ),
+                    child: Icon(
+                      Icons.tune_rounded,
+                      size: 13,
+                      color: hasFilters ? t.accent : t.textSecondary,
+                    ),
+                  ),
+                  if (!isMobile) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      'Filters',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: hasFilters ? t.accent : t.textPrimary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _HeaderActionButton(
+              onTap: _showSortDialog,
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: t.bgCardAlt,
+                    ),
+                    child: Icon(
+                      Icons.swap_vert_rounded,
+                      size: 13,
+                      color: t.textSecondary,
+                    ),
+                  ),
+                  if (!isMobile) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      'Sort',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: t.textPrimary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+
+        if (isNarrow) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              filterPills,
+              const SizedBox(height: 12),
+              searchBarAndActions,
+              const SizedBox(height: 8),
+            ],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: filterPills),
+                const SizedBox(width: 16),
+                SizedBox(width: 380, child: searchBarAndActions),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildStageTabPill(String label, int count, bool isSelected, VoidCallback onTap, Color activeColor, RoleThemeData t) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? activeColor.withValues(alpha: 0.12) : t.bgCard,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isSelected ? activeColor.withValues(alpha: 0.5) : t.bgRule,
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                color: isSelected ? activeColor : t.textSecondary,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: t.bgCard,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: _searchHasFocus
-                      ? t.accent
-                      : t.bgRule,
-                  width: _searchHasFocus ? 1.5 : 1.0,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: _searchHasFocus
-                        ? t.accent.withValues(alpha: 0.08)
-                        : Colors.black.withValues(alpha: 0.02),
-                    blurRadius: _searchHasFocus ? 12 : 8,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
+                color: isSelected ? activeColor.withValues(alpha: 0.2) : t.bgRule.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(6),
               ),
-              child: TextField(
-                controller: _searchCtrl,
-                focusNode: _searchFocusNode,
-                style: TextStyle(color: t.textPrimary, fontSize: 14),
-                decoration: InputDecoration(
-                  hintText: 'Search by donor, receipt #, or goods...',
-                  hintStyle: TextStyle(
-                      fontSize: 14, color: t.textTertiary),
-                  prefixIcon: Icon(Icons.search_rounded,
-                      color: t.textTertiary, size: 20),
-                  suffixIcon: _searchCtrl.text.isNotEmpty
-                      ? IconButton(
-                          icon: Icon(Icons.clear_rounded,
-                              size: 18, color: t.textTertiary),
-                          onPressed: () => _searchCtrl.clear())
-                      : null,
-                  border: InputBorder.none,
-                  contentPadding:
-                      const EdgeInsets.symmetric(vertical: 14),
+              child: Text(
+                "$count",
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: isSelected ? activeColor : t.textTertiary,
                 ),
               ),
             ),
-          ),
-          _HeaderActionButton(
-            onTap: _showAdvancedFilterDialog,
-            hasFilters: hasFilters,
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: hasFilters
-                        ? t.accent.withValues(alpha: 0.12)
-                        : t.bgCardAlt,
-                  ),
-                  child: Icon(
-                    Icons.tune_rounded,
-                    size: 14,
-                    color: hasFilters ? t.accent : t.textSecondary,
-                  ),
-                ),
-                if (!isMobile) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    'Filters',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                      color: hasFilters ? t.accent : t.textPrimary,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          _HeaderActionButton(
-            onTap: _showSortDialog,
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: t.bgCardAlt,
-                  ),
-                  child: Icon(
-                    Icons.swap_vert_rounded,
-                    size: 14,
-                    color: t.textSecondary,
-                  ),
-                ),
-                if (!isMobile) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    'Sort',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                      color: t.textPrimary,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

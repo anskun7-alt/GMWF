@@ -2,7 +2,7 @@ name: gmwf
 description: "A dispensary management app (offline-first with Firebase)"
 publish_to: 'none'
 
-version: 1.4.4
+version: 1.5.0
 
 environment:
   sdk: ">=3.10.1 <4.0.0"
@@ -37,6 +37,8 @@ dependencies:
   firebase_core: ^4.3.0
   firebase_auth: ^6.1.2
   cloud_firestore: ^6.4.1
+  firebase_messaging: ^16.2.2
+  flutter_local_notifications: ^18.0.1
 
   # Local storage
   hive: ^2.2.3
@@ -81,6 +83,7 @@ dependencies:
   flutter_native_splash: any
   arabic_reshaper: ^0.0.1
   motion_tab_bar_v2: ^0.4.0
+  hijri: ^3.0.1
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -138,4 +141,3 @@ flutter:
     - assets/qr/
     - assets/fonts/
     - assets/Banks Logos/
-

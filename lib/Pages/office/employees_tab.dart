@@ -49,6 +49,48 @@ class _EmployeesTabState extends State<EmployeesTab> {
   String _branchFilter = 'All';
   String _enrollmentFilter = 'All'; // 'All', 'Enrolled', 'Not Enrolled'
 
+  // Multi-select state (for batch offboard & delete only)
+  bool _isSelectionMode = false;
+  final Set<String> _selectedEmployeeIds = <String>{};
+
+  void _toggleEmployeeSelection(String empId) {
+    if (empId.isEmpty) return;
+    setState(() {
+      if (_selectedEmployeeIds.contains(empId)) {
+        _selectedEmployeeIds.remove(empId);
+        if (_selectedEmployeeIds.isEmpty) {
+          _isSelectionMode = false;
+        }
+      } else {
+        _selectedEmployeeIds.add(empId);
+        _isSelectionMode = true;
+      }
+    });
+  }
+
+  void _selectAllEmployees(List<Map<String, dynamic>> visibleEmployees) {
+    setState(() {
+      final allIds = visibleEmployees
+          .map((e) => e['localId']?.toString() ?? e['employeeId']?.toString() ?? e['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      if (_selectedEmployeeIds.containsAll(allIds) && allIds.isNotEmpty) {
+        _selectedEmployeeIds.clear();
+        _isSelectionMode = false;
+      } else {
+        _selectedEmployeeIds.addAll(allIds);
+        _isSelectionMode = true;
+      }
+    });
+  }
+
+  void _clearSelection() {
+    setState(() {
+      _selectedEmployeeIds.clear();
+      _isSelectionMode = false;
+    });
+  }
+
   // Defaults used to decide whether a filter counts as "active" for the
   // Filters button badge + removable chip row. See redesign plan §3.C:
   // "only expand to full row width once a filter is actively applied,
@@ -128,8 +170,8 @@ class _EmployeesTabState extends State<EmployeesTab> {
     if (_isBranchScopedUser) {
       _branchFilter = _getEffectiveUserBranch();
     }
-    // Auto-sync users to employee profiles and purge non-user employees
-    FinanceLocalStorage.purgeEmployeesExceptUsers().then((_) {
+    // Sanitize employee profile names and status on startup
+    FinanceLocalStorage.sanitizeEmployeeProfiles().then((_) {
       if (mounted) setState(() {});
     });
   }
@@ -223,10 +265,6 @@ class _EmployeesTabState extends State<EmployeesTab> {
                 if (role.contains('guardian') || role.contains('patient') || dept.contains('guardian') || dept.contains('patient') || emp['isEmployee'] == false) {
                   return false;
                 }
-                final empRawName = (emp['name'] ?? '').toString().trim().toLowerCase();
-                if (empRawName.startsWith('staff (pin') || empRawName == 'employee' || empRawName == '.') {
-                  return false;
-                }
 
                 // Apply role
                 if (_roleFilter != 'All' && emp['role'] != _roleFilter) return false;
@@ -279,7 +317,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
 
               return Column(
                 children: [
-                  _buildFilterBar(t),
+                  _buildFilterBar(t, list),
                   Expanded(
                     child: list.isEmpty
                         ? _buildEmptyState(t)
@@ -346,7 +384,93 @@ class _EmployeesTabState extends State<EmployeesTab> {
     );
   }
 
-  Widget _buildFilterBar(RoleThemeData t) {
+  Widget _buildSelectionBar(RoleThemeData t, List<Map<String, dynamic>> currentFilteredList) {
+    final selectedCount = _selectedEmployeeIds.length;
+    final allIds = currentFilteredList
+        .map((e) => e['localId']?.toString() ?? e['employeeId']?.toString() ?? e['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    final isAllSelected = allIds.isNotEmpty && _selectedEmployeeIds.containsAll(allIds);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: t.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: t.accent.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 20),
+            color: t.textPrimary,
+            tooltip: 'Cancel Selection',
+            onPressed: _clearSelection,
+          ),
+          const SizedBox(width: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: t.accent,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              '$selectedCount Selected',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+          ),
+          const SizedBox(width: 10),
+          TextButton.icon(
+            onPressed: () => _selectAllEmployees(currentFilteredList),
+            icon: Icon(
+              isAllSelected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+              size: 18,
+              color: t.accent,
+            ),
+            label: Text(
+              isAllSelected ? 'Deselect All' : 'Select All (${currentFilteredList.length})',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: t.accent),
+            ),
+          ),
+          const Spacer(),
+          // STRICTLY ONLY OFFBOARD & DELETE BUTTONS (NO EDIT OR OTHER ACTIONS)
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFEA580C),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            icon: const Icon(Icons.person_off_rounded, size: 16),
+            label: Text(
+              'Offboard ($selectedCount)',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+            ),
+            onPressed: selectedCount == 0 ? null : () => _showBatchOffboardDialog(context, t, currentFilteredList),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: Text(
+              'Delete ($selectedCount)',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+            ),
+            onPressed: selectedCount == 0 ? null : () => _showBatchDeleteDialog(context, t),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterBar(RoleThemeData t, List<Map<String, dynamic>> currentFilteredList) {
     final allList = FinanceLocalStorage.getEmployees(widget.branchId).where((emp) {
       final role = (emp['role'] ?? emp['linkedUserRole'] ?? emp['designation'] ?? '').toString().toLowerCase().trim();
       final dept = (emp['department'] ?? emp['linkedDepartment'] ?? '').toString().toLowerCase().trim();
@@ -381,161 +505,185 @@ class _EmployeesTabState extends State<EmployeesTab> {
             ),
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: t.bgCardAlt,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: t.bgRule),
-                  ),
-                  child: TextField(
-                    controller: _searchCtrl,
-                    style: TextStyle(color: t.textPrimary, fontSize: 14),
-                    decoration: InputDecoration(
-                      hintText: 'Search by name, CNIC, phone...',
-                      hintStyle: TextStyle(color: t.textTertiary, fontSize: 13),
-                      prefixIcon: Icon(Icons.search, color: t.textTertiary, size: 20),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+          if (_isSelectionMode)
+            _buildSelectionBar(t, currentFilteredList)
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: t.bgCardAlt,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: t.bgRule),
                     ),
-                    onChanged: (_) => setState(() {}),
+                    child: TextField(
+                      controller: _searchCtrl,
+                      style: TextStyle(color: t.textPrimary, fontSize: 14),
+                      decoration: InputDecoration(
+                        hintText: 'Search by name, CNIC, phone...',
+                        hintStyle: TextStyle(color: t.textTertiary, fontSize: 13),
+                        prefixIcon: Icon(Icons.search, color: t.textTertiary, size: 20),
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              InkWell(
-                onTap: () => _openFiltersSheet(context, t),
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  height: 44,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: _activeFilterCount > 0 ? t.accent.withOpacity(0.12) : t.bgCardAlt,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: _activeFilterCount > 0 ? t.accent.withOpacity(0.5) : t.bgRule),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.tune_rounded, size: 18, color: _activeFilterCount > 0 ? t.accent : t.textSecondary),
-                      const SizedBox(width: 6),
-                      Text('Filters', style: TextStyle(color: _activeFilterCount > 0 ? t.accent : t.textSecondary, fontSize: 13, fontWeight: FontWeight.bold)),
-                      if (_activeFilterCount > 0) ...[
+                const SizedBox(width: 8),
+                InkWell(
+                  onTap: () => _openFiltersSheet(context, t),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    height: 44,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: _activeFilterCount > 0 ? t.accent.withOpacity(0.12) : t.bgCardAlt,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: _activeFilterCount > 0 ? t.accent.withOpacity(0.5) : t.bgRule),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.tune_rounded, size: 18, color: _activeFilterCount > 0 ? t.accent : t.textSecondary),
                         const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                          decoration: BoxDecoration(color: t.accent, borderRadius: BorderRadius.circular(10)),
-                          child: Text('$_activeFilterCount', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
-                        ),
+                        Text('Filters', style: TextStyle(color: _activeFilterCount > 0 ? t.accent : t.textSecondary, fontSize: 13, fontWeight: FontWeight.bold)),
+                        if (_activeFilterCount > 0) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(color: t.accent, borderRadius: BorderRadius.circular(10)),
+                            child: Text('$_activeFilterCount', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-               Tooltip(
-                message: 'Apply Annual Increments',
-                child: Container(
-                  height: 44,
-                  width: 44,
-                  decoration: BoxDecoration(
-                    color: t.accentMuted,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: t.accent.withOpacity(0.3)),
-                  ),
-                  child: IconButton(
-                    icon: Icon(Icons.trending_up, color: t.accent, size: 20),
-                    onPressed: () => _openAnnualIncrementsDialog(context),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Tooltip(
-                message: 'ZKTeco Devices & Fingerprint PINs',
-                child: Container(
-                  height: 44,
-                  width: 44,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFECFDF5),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF10B981).withOpacity(0.3)),
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.fingerprint_rounded, color: Color(0xFF059669), size: 22),
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => BiometricDeviceManagerPage(branchId: widget.branchId),
-                        ),
-                      );
-                    },
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Select Multiple to Offboard / Delete',
+                  child: Container(
+                    height: 44,
+                    width: 44,
+                    decoration: BoxDecoration(
+                      color: t.bgCardAlt,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: t.bgRule),
+                    ),
+                    child: IconButton(
+                      icon: Icon(Icons.checklist_rounded, color: t.accent, size: 22),
+                      onPressed: () {
+                        setState(() {
+                          _isSelectionMode = true;
+                        });
+                      },
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Tooltip(
-                message: 'Merge Duplicate Staff Profiles',
-                child: Container(
-                  height: 44,
-                  width: 44,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF5F3FF),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.3)),
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.merge_type_rounded, color: Color(0xFF7C3AED), size: 20),
-                    onPressed: () => _openMergeStaffDialog(context, t),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Apply Annual Increments',
+                  child: Container(
+                    height: 44,
+                    width: 44,
+                    decoration: BoxDecoration(
+                      color: t.accentMuted,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: t.accent.withOpacity(0.3)),
+                    ),
+                    child: IconButton(
+                      icon: Icon(Icons.trending_up, color: t.accent, size: 20),
+                      onPressed: () => _openAnnualIncrementsDialog(context),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Tooltip(
-                message: 'Clean Up Staff: Keep Real Users Only',
-                child: Container(
-                  height: 44,
-                  width: 44,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFEF2F2),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFEF4444).withOpacity(0.3)),
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.cleaning_services_rounded, color: Color(0xFFDC2626), size: 20),
-                    onPressed: () async {
-                      final retained = await FinanceLocalStorage.purgeEmployeesExceptUsers();
-                      if (mounted) {
-                        setState(() {});
-                        showCustomSnackBar(
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'ZKTeco Devices & Fingerprint PINs',
+                  child: Container(
+                    height: 44,
+                    width: 44,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFECFDF5),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF10B981).withOpacity(0.3)),
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.fingerprint_rounded, color: Color(0xFF059669), size: 22),
+                      onPressed: () {
+                        Navigator.push(
                           context,
-                          '✅ Retained ${retained.length} staff profiles matching active users. All dummy non-user accounts removed.',
+                          MaterialPageRoute(
+                            builder: (_) => BiometricDeviceManagerPage(branchId: widget.branchId),
+                          ),
                         );
-                      }
-                    },
+                      },
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF10B981),
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(0, 44),
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  elevation: 0,
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Merge Duplicate Staff Profiles',
+                  child: Container(
+                    height: 44,
+                    width: 44,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF5F3FF),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF8B5CF6).withOpacity(0.3)),
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.merge_type_rounded, color: Color(0xFF7C3AED), size: 20),
+                      onPressed: () => _openMergeStaffDialog(context, t),
+                    ),
+                  ),
                 ),
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Add', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                onPressed: () => widget.openEmployeeForm(context, null),
-              ),
-            ],
-          ),
-          if (_activeFilterCount > 0) ...[
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Sanitize & Verify Employee Records',
+                  child: Container(
+                    height: 44,
+                    width: 44,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FDF4),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3)),
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.cleaning_services_rounded, color: Color(0xFF059669), size: 20),
+                      onPressed: () async {
+                        final sanitized = await FinanceLocalStorage.sanitizeEmployeeProfiles();
+                        if (mounted) {
+                          setState(() {});
+                          showCustomSnackBar(
+                            context,
+                            '✅ Cleaned and verified ${sanitized.length} employee records.',
+                          );
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF10B981),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(0, 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Add', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  onPressed: () => widget.openEmployeeForm(context, null),
+                ),
+              ],
+            ),
+          if (_activeFilterCount > 0 && !_isSelectionMode) ...[
             const SizedBox(height: 10),
             Wrap(
               spacing: 8,
@@ -834,20 +982,26 @@ class _EmployeesTabState extends State<EmployeesTab> {
       }
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-      itemCount: displayItems.length,
-      itemBuilder: (ctx, i) {
-        final item = displayItems[i];
-        switch (item['type']) {
-          case 'branchHeader':
-            return _buildBranchHeader(item['branchName'] as String, item['count'] as int, t);
-          case 'departmentHeader':
-            return _buildDepartmentHeader(item['departmentName'] as String, item['count'] as int, t);
-          default:
-            return _buildEmployeeRow(t, item['employee'] as Map<String, dynamic>);
-        }
+    return RefreshIndicator(
+      onRefresh: () async {
+        await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
       },
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+        itemCount: displayItems.length,
+        itemBuilder: (ctx, i) {
+          final item = displayItems[i];
+          switch (item['type']) {
+            case 'branchHeader':
+              return _buildBranchHeader(item['branchName'] as String, item['count'] as int, t);
+            case 'departmentHeader':
+              return _buildDepartmentHeader(item['departmentName'] as String, item['count'] as int, t);
+            default:
+              return _buildEmployeeRow(t, item['employee'] as Map<String, dynamic>);
+          }
+        },
+      ),
     );
   }
 
@@ -898,10 +1052,15 @@ class _EmployeesTabState extends State<EmployeesTab> {
 
   Widget _buildDepartmentHeader(String departmentName, int count, RoleThemeData t) {
     final isOffice = departmentName.toUpperCase().contains('OFFICE');
-    final headerBg = isOffice ? const Color(0xFFECFDF5) : t.bgCardAlt;
-    final headerBorder = isOffice ? const Color(0xFFA7F3D0) : t.bgRule;
-    final iconColor = isOffice ? const Color(0xFF059669) : const Color(0xFF064E3B);
-    final titleColor = isOffice ? const Color(0xFF064E3B) : t.textPrimary;
+    final isDark = UserThemeService.isDarkMode();
+    final headerBg = isOffice
+        ? (isDark ? const Color(0xFF064E3B).withValues(alpha: 0.3) : const Color(0xFFECFDF5))
+        : t.bgCardAlt;
+    final headerBorder = isOffice
+        ? (isDark ? const Color(0xFF059669).withValues(alpha: 0.5) : const Color(0xFFA7F3D0))
+        : t.bgRule;
+    final iconColor = isOffice ? (isDark ? const Color(0xFF34D399) : const Color(0xFF059669)) : t.accent;
+    final titleColor = isOffice ? (isDark ? const Color(0xFF6EE7B7) : const Color(0xFF064E3B)) : t.textPrimary;
 
     return Container(
       margin: const EdgeInsets.only(top: 10, bottom: 6),
@@ -910,8 +1069,8 @@ class _EmployeesTabState extends State<EmployeesTab> {
         color: headerBg,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: headerBorder, width: isOffice ? 1.5 : 1.0),
-        boxShadow: isOffice ? const [
-          BoxShadow(color: Color(0x08059669), blurRadius: 8, offset: Offset(0, 2)),
+        boxShadow: isOffice ? [
+          BoxShadow(color: (isDark ? const Color(0xFF10B981) : const Color(0xFF059669)).withValues(alpha: 0.08), blurRadius: 8, offset: const Offset(0, 2)),
         ] : [],
       ),
       child: Row(
@@ -949,16 +1108,16 @@ class _EmployeesTabState extends State<EmployeesTab> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-              color: isOffice ? const Color(0xFF059669).withValues(alpha: 0.12) : t.bgCard,
+              color: isOffice ? (isDark ? const Color(0xFF064E3B).withValues(alpha: 0.4) : const Color(0xFF059669).withValues(alpha: 0.12)) : t.bgCard,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: isOffice ? const Color(0xFFA7F3D0) : t.bgRule),
+              border: Border.all(color: isOffice ? (isDark ? const Color(0xFF059669).withValues(alpha: 0.5) : const Color(0xFFA7F3D0)) : t.bgRule),
             ),
             child: Text(
               '$count EMPLOYEE${count == 1 ? '' : 'S'}',
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: FontWeight.w800,
-                color: isOffice ? const Color(0xFF059669) : t.textSecondary,
+                color: isOffice ? (isDark ? const Color(0xFF34D399) : const Color(0xFF059669)) : t.textSecondary,
               ),
             ),
           ),
@@ -967,12 +1126,9 @@ class _EmployeesTabState extends State<EmployeesTab> {
     );
   }
 
-  // ── Employee row ───────────────────────────────────────────────────────────
-  // Redesign plan §3.C + §4: dense list row, not a boxed/shadowed card.
-  // Salary rate stays as muted secondary text; "Advance" only renders as a
-  // pill when non-zero — a zero balance is a null result and shouldn't
-  // compete for attention with real ones.
+  // ── Employee row (branches.dart aesthetic + 3-dot action menu) ─────────────
   Widget _buildEmployeeRow(RoleThemeData t, Map<String, dynamic> emp) {
+    final isDark = UserThemeService.isDarkMode();
     final rawName = emp['name']?.toString().trim() ?? '';
     final pin = (emp['biometricPin'] ?? emp['pin'] ?? '').toString().trim();
     final name = (rawName.isNotEmpty && rawName != '.' && rawName.toLowerCase() != 'employee')
@@ -984,6 +1140,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
     final role = emp['role']?.toString().trim() ?? '';
     final dept = emp['department']?.toString().trim() ?? '';
     final empId = emp['localId']?.toString() ?? '';
+    final isSelected = _selectedEmployeeIds.contains(empId);
     final isActive = emp['isActive'] as bool? ?? true;
     final status = emp['status'] as String? ?? (isActive ? 'Active' : 'Left');
     final branchName = _getBranchName(emp['branchId']?.toString() ?? '');
@@ -996,191 +1153,392 @@ class _EmployeesTabState extends State<EmployeesTab> {
         ? subtitleParts.join(' • ')
         : (role.isNotEmpty ? role : (dept.isNotEmpty ? dept : (branchName.isNotEmpty ? branchName : 'Staff Member')));
 
-    return Card(
-      color: Colors.white,
-      elevation: 0,
-      shape: RoundedRectangleBorder(
+    final rawCnic = emp['cnic']?.toString().trim() ?? '';
+    final hasCnic = rawCnic.isNotEmpty && rawCnic != '-' && rawCnic != 'N/A';
+    final cleanCnic = rawCnic.replaceAll(RegExp(r'[^0-9]'), '');
+    final formattedCnic = (cleanCnic.length == 13)
+        ? '${cleanCnic.substring(0, 5)}-${cleanCnic.substring(5, 12)}-${cleanCnic.substring(12)}'
+        : rawCnic;
+
+    final rawPhone = emp['phone']?.toString().trim() ?? '';
+    final hasPhone = rawPhone.isNotEmpty && rawPhone != '-' && rawPhone != 'N/A';
+
+    final statusColor = isActive
+        ? (status == 'Temporary Leave' ? const Color(0xFFF59E0B) : const Color(0xFF10B981))
+        : const Color(0xFFEF4444);
+    final statusLabel = status.toUpperCase();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: isSelected ? t.accent.withValues(alpha: isDark ? 0.16 : 0.08) : t.bgCard,
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: t.bgRule, width: 0.75),
-      ),
-      margin: const EdgeInsets.only(bottom: 6),
-      child: InkWell(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => EmployeeDetailPage(
-              employeeId: empId,
-              userRole: widget.userRole,
-              openEmployeeForm: widget.openEmployeeForm,
-            ),
-          ),
+        border: Border.all(
+          color: isSelected ? t.accent : t.bgRule,
+          width: isSelected ? 1.5 : 1.0,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: isSelected
+                ? t.accent.withValues(alpha: 0.18)
+                : Colors.black.withValues(alpha: isDark ? 0.2 : 0.03),
+            blurRadius: isSelected ? 8 : 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: [
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                child: Column(
-                  children: [
-                    Container(width: 4, height: 36, decoration: BoxDecoration(color: _mutedColorForKey(branchName), borderRadius: BorderRadius.circular(2))),
-                  ],
+        child: InkWell(
+          onTap: () {
+            if (_isSelectionMode) {
+              _toggleEmployeeSelection(empId);
+            } else {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => EmployeeDetailPage(
+                    employeeId: empId,
+                    userRole: widget.userRole,
+                    openEmployeeForm: widget.openEmployeeForm,
+                  ),
                 ),
-              ),
-              buildInitialsAvatar(
-                name: name,
-                theme: t,
-                radius: 16,
-                imageUrl: emp['profilePictureUrl']?.toString(),
-                imagePath: emp['profilePicturePath']?.toString(),
-                gender: emp['gender']?.toString(),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              );
+            }
+          },
+          onLongPress: () => _toggleEmployeeSelection(empId),
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Row 1: Top Bar (PIN Badge + Department Pill on Left, Status Pill on Right)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: t.textPrimary), overflow: TextOverflow.ellipsis),
-                        ),
-                        if (!isActive) ...[
-                          const SizedBox(width: 6),
-                          buildStatusPill(theme: t, label: status.toUpperCase(), variant: StatusPillVariant.danger),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: TextStyle(fontSize: 12, color: t.textSecondary),
-                    ),
-                    const SizedBox(height: 4),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        if (branchName.isNotEmpty)
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.location_on_outlined, size: 11, color: t.textTertiary),
-                              const SizedBox(width: 3),
-                              Text(branchName, style: TextStyle(fontSize: 11, color: t.textTertiary)),
-                            ],
-                          ),
-                        Builder(
-                          builder: (_) {
+                    Flexible(
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Builder(builder: (_) {
                             final cred = ZkTecoNetworkService.getCredentialByEntityId(empId);
                             final isEnrolled = cred != null && cred.active && cred.biometricPin.isNotEmpty;
+                            final displayPin = isEnrolled ? cred.biometricPin : (pin.isNotEmpty ? pin : '');
+                            final hasPin = displayPin.isNotEmpty;
+                            final pinColor = hasPin ? const Color(0xFF10B981) : const Color(0xFFF59E0B);
 
-                            if (isEnrolled) {
-                              return InkWell(
-                                onTap: () => _showEditPinDialog(context, empId, name, cred.biometricPin, emp['branchId']?.toString() ?? widget.branchId),
-                                borderRadius: BorderRadius.circular(6),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFECFDF5),
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: const Color(0xFFA7F3D0)),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.fingerprint_rounded, size: 11, color: Color(0xFF059669)),
-                                      const SizedBox(width: 3),
-                                      Text(
-                                        'PIN: ${cred.biometricPin}',
-                                        style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: Color(0xFF065F46)),
+                            return InkWell(
+                              onTap: _isSelectionMode
+                                  ? null
+                                  : () => _showEditPinDialog(
+                                        context,
+                                        empId,
+                                        name,
+                                        displayPin,
+                                        emp['branchId']?.toString() ?? widget.branchId,
                                       ),
+                              borderRadius: BorderRadius.circular(6),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
+                                decoration: BoxDecoration(
+                                  color: pinColor.withValues(alpha: isDark ? 0.2 : 0.1),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: pinColor.withValues(alpha: isDark ? 0.4 : 0.25)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.fingerprint_rounded, size: 12, color: pinColor),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      hasPin ? 'PIN: $displayPin' : 'Set PIN (+)',
+                                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: pinColor),
+                                    ),
+                                    if (!_isSelectionMode) ...[
                                       const SizedBox(width: 3),
-                                      const Icon(Icons.edit_outlined, size: 9, color: Color(0xFF059669)),
+                                      Icon(Icons.edit_outlined, size: 10, color: pinColor),
                                     ],
-                                  ),
+                                  ],
                                 ),
-                              );
-                            } else {
-                              return InkWell(
-                                onTap: () => _showEditPinDialog(context, empId, name, '', emp['branchId']?.toString() ?? widget.branchId),
+                              ),
+                            );
+                          }),
+                          if (dept.isNotEmpty && dept.toLowerCase() != 'unassigned' && dept.toLowerCase() != 'general')
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF6366F1).withValues(alpha: isDark ? 0.2 : 0.12),
                                 borderRadius: BorderRadius.circular(6),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFFFFBEB),
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: const Color(0xFFFDE68A)),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: const [
-                                      Icon(Icons.fingerprint_rounded, size: 11, color: Color(0xFFD97706)),
-                                      SizedBox(width: 3),
-                                      Text(
-                                        'Set PIN (+)',
-                                        style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: Color(0xFF92400E)),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }
-                          },
+                                border: Border.all(color: const Color(0xFF6366F1).withValues(alpha: isDark ? 0.4 : 0.25)),
+                              ),
+                              child: Text(
+                                dept.toUpperCase(),
+                                style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: Color(0xFF818CF8), letterSpacing: 0.3),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      flex: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                        decoration: BoxDecoration(
+                          color: statusColor.withValues(alpha: isDark ? 0.2 : 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: statusColor.withValues(alpha: isDark ? 0.4 : 0.3)),
                         ),
-                      ],
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              statusLabel,
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: statusColor,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              // Quick Actions: Edit & Offboard
-              if (isActive) ...[
-                Tooltip(
-                  message: 'Merge Duplicate Staff Profiles ($name)',
-                  child: IconButton(
-                    icon: const Icon(Icons.merge_type_rounded, size: 18, color: Color(0xFF7C3AED)),
-                    onPressed: () => _showMergeDuplicateStaffDialog(context, emp, t),
-                  ),
-                ),
-                Tooltip(
-                  message: 'Edit Employee',
-                  child: IconButton(
-                    icon: Icon(Icons.edit_outlined, size: 18, color: t.accent),
-                    onPressed: () => widget.openEmployeeForm(context, empId),
-                  ),
-                ),
-                Tooltip(
-                  message: 'View Medical History ($name)',
-                  child: IconButton(
-                    icon: const Icon(Icons.medical_services_outlined, size: 18, color: Colors.teal),
-                    onPressed: () => StaffPatientLinkService.openStaffMedicalHistory(
-                      context,
+                const SizedBox(height: 8),
+
+                // Row 2: Checkbox (if multi-select) + Avatar + Name + Subtitle (Role • Branch) + 3-Dot Actions Menu
+                Row(
+                  children: [
+                    if (_isSelectionMode) ...[
+                      Checkbox(
+                        value: isSelected,
+                        activeColor: t.accent,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        onChanged: (_) => _toggleEmployeeSelection(empId),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    buildInitialsAvatar(
                       name: name,
-                      cnic: emp['cnic']?.toString(),
-                      branchId: emp['branchId']?.toString() ?? widget.branchId,
-                      role: role,
+                      theme: t,
+                      radius: 17,
+                      imageUrl: emp['profilePictureUrl']?.toString(),
+                      imagePath: emp['profilePicturePath']?.toString(),
+                      gender: emp['gender']?.toString(),
                     ),
-                  ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: t.textPrimary),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            style: TextStyle(fontSize: 11.5, color: t.textSecondary),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (!_isSelectionMode)
+                      // 3-dot action menu
+                      PopupMenuButton<String>(
+                        icon: Icon(Icons.more_vert_rounded, size: 20, color: t.textSecondary),
+                        color: t.bgCard,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: t.bgRule)),
+                        onSelected: (val) {
+                          if (val == 'profile') {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => EmployeeDetailPage(
+                                  employeeId: empId,
+                                  userRole: widget.userRole,
+                                  openEmployeeForm: widget.openEmployeeForm,
+                                ),
+                              ),
+                            );
+                          } else if (val == 'edit') {
+                            widget.openEmployeeForm(context, empId);
+                          } else if (val == 'pin') {
+                            final cred = ZkTecoNetworkService.getCredentialByEntityId(empId);
+                            _showEditPinDialog(context, empId, name, cred?.biometricPin ?? pin, emp['branchId']?.toString() ?? widget.branchId);
+                          } else if (val == 'medical') {
+                            StaffPatientLinkService.openStaffMedicalHistory(
+                              context,
+                              name: name,
+                              cnic: emp['cnic']?.toString(),
+                              branchId: emp['branchId']?.toString() ?? widget.branchId,
+                              role: role,
+                            );
+                          } else if (val == 'merge') {
+                            _showMergeDuplicateStaffDialog(context, emp, t);
+                          } else if (val == 'offboard') {
+                            _showOffboardDialog(context, emp);
+                          }
+                        },
+                        itemBuilder: (ctx) => [
+                          PopupMenuItem(
+                            value: 'profile',
+                            child: Row(children: [
+                              Icon(Icons.person_rounded, size: 16, color: t.accent),
+                              const SizedBox(width: 8),
+                              Text('View Profile', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                            ]),
+                          ),
+                          if (isActive) ...[
+                            PopupMenuItem(
+                              value: 'edit',
+                              child: Row(children: [
+                                Icon(Icons.edit_rounded, size: 16, color: t.accent),
+                                const SizedBox(width: 8),
+                                Text('Edit Profile', style: TextStyle(color: t.textPrimary, fontSize: 13)),
+                              ]),
+                            ),
+                            PopupMenuItem(
+                              value: 'pin',
+                              child: Row(children: [
+                                const Icon(Icons.fingerprint_rounded, size: 16, color: Color(0xFF10B981)),
+                                const SizedBox(width: 8),
+                                Text('Set / Edit PIN', style: TextStyle(color: t.textPrimary, fontSize: 13)),
+                              ]),
+                            ),
+                            PopupMenuItem(
+                              value: 'medical',
+                              child: Row(children: [
+                                const Icon(Icons.medical_services_outlined, size: 16, color: Colors.teal),
+                                const SizedBox(width: 8),
+                                Text('Medical History', style: TextStyle(color: t.textPrimary, fontSize: 13)),
+                              ]),
+                            ),
+                            PopupMenuItem(
+                              value: 'merge',
+                              child: Row(children: [
+                                const Icon(Icons.merge_type_rounded, size: 16, color: Color(0xFF7C3AED)),
+                                const SizedBox(width: 8),
+                                Text('Merge Duplicates', style: TextStyle(color: t.textPrimary, fontSize: 13)),
+                              ]),
+                            ),
+                            const PopupMenuDivider(),
+                            PopupMenuItem(
+                              value: 'offboard',
+                              child: const Row(children: [
+                                Icon(Icons.person_off_outlined, size: 16, color: Colors.redAccent),
+                                SizedBox(width: 8),
+                                Text('Offboard Employee', style: TextStyle(color: Colors.redAccent, fontSize: 13)),
+                              ]),
+                            ),
+                          ],
+                        ],
+                      ),
+                  ],
                 ),
-                Tooltip(
-                  message: 'Offboard Employee',
-                  child: IconButton(
-                    icon: const Icon(Icons.person_off_outlined, size: 18, color: Colors.redAccent),
-                    onPressed: () => _showOffboardDialog(context, emp),
-                  ),
+                const SizedBox(height: 8),
+
+                // Row 3: Minimal Meta Badges (Branch, CNIC, Phone)
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (branchName.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: t.bgCardAlt,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: t.bgRule),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.location_on_outlined, size: 11, color: t.textTertiary),
+                            const SizedBox(width: 4),
+                            Text(branchName, style: TextStyle(fontSize: 10.5, color: t.textSecondary)),
+                          ],
+                        ),
+                      ),
+                    if (hasCnic)
+                      InkWell(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: rawCnic));
+                          ScaffoldMessenger.of(context).clearSnackBars();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Copied CNIC: $formattedCnic'), duration: const Duration(seconds: 1), behavior: SnackBarBehavior.floating),
+                          );
+                        },
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: t.bgCardAlt,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: t.bgRule),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.badge_outlined, size: 11, color: t.accent),
+                              const SizedBox(width: 4),
+                              Text(formattedCnic, style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: t.textPrimary)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    if (hasPhone)
+                      InkWell(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: rawPhone));
+                          ScaffoldMessenger.of(context).clearSnackBars();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Copied Phone: $rawPhone'), duration: const Duration(seconds: 1), behavior: SnackBarBehavior.floating),
+                          );
+                        },
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: t.bgCardAlt,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: t.bgRule),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.phone_rounded, size: 11, color: t.textSecondary),
+                              const SizedBox(width: 4),
+                              Text(rawPhone, style: TextStyle(fontSize: 10.5, color: t.textSecondary)),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ],
-              Icon(Icons.chevron_right_rounded, size: 18, color: t.textTertiary),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
-
 
   Widget _buildEmptyState(RoleThemeData t) {
     return Center(
@@ -1209,6 +1567,419 @@ class _EmployeesTabState extends State<EmployeesTab> {
         SnackBar(content: Text('${emp['name'] ?? 'Employee'} has been offboarded.')),
       );
     }
+  }
+
+  // ── Batch Offboard Dialog ──────────────────────────────────────────────────
+  void _showBatchOffboardDialog(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> allEmployees) {
+    final selectedEmployees = allEmployees.where((emp) {
+      final empId = emp['localId']?.toString() ?? emp['employeeId']?.toString() ?? emp['id']?.toString() ?? '';
+      return _selectedEmployeeIds.contains(empId);
+    }).toList();
+
+    if (selectedEmployees.isEmpty) return;
+
+    final isDark = UserThemeService.isDarkMode();
+    final bgDialog = t.bgCard;
+    final bgCard = t.bgCardAlt;
+    final textColor = t.textPrimary;
+    final subtextColor = t.textSecondary;
+    final borderColor = t.bgRule;
+
+    String selectedReason = 'Resigned';
+    final detailedReasonCtrl = TextEditingController();
+    DateTime effectiveDate = DateTime.now();
+    bool isClearanceConfirmed = true;
+
+    final reasonOptions = [
+      'Resigned',
+      'Terminated',
+      'Contract Ended',
+      'Retired',
+      'Suspended',
+      'Disciplinary Action',
+      'Relocated',
+      'Medical Reasons',
+      'Other',
+    ];
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (diagCtx) {
+        bool isProcessing = false;
+        return StatefulBuilder(
+          builder: (ctx, setDiagState) {
+            return Dialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              backgroundColor: bgDialog,
+              insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 620, maxHeight: 720),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Header
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(20, 16, 16, 14),
+                      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: borderColor))),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(Icons.person_off_rounded, color: Colors.deepOrange, size: 22),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Batch Offboard Employees (${selectedEmployees.length})',
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: textColor),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Offboard selected staff and revoke linked system access',
+                                  style: TextStyle(fontSize: 11.5, color: subtextColor),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: isProcessing ? null : () => Navigator.pop(diagCtx),
+                            icon: Icon(Icons.close_rounded, color: subtextColor),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Body
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Selected employee preview chips
+                            Text(
+                              'Selected Staff Members (${selectedEmployees.length}):',
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textColor),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              constraints: const BoxConstraints(maxHeight: 120),
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: bgCard,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: borderColor),
+                              ),
+                              child: SingleChildScrollView(
+                                child: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: selectedEmployees.map((emp) {
+                                    final empName = emp['name']?.toString() ?? 'Staff';
+                                    final empRole = emp['role']?.toString() ?? '';
+                                    return Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(color: borderColor),
+                                      ),
+                                      child: Text(
+                                        empRole.isNotEmpty ? '$empName ($empRole)' : empName,
+                                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: textColor),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+
+                            // Reason Dropdown
+                            Text('Offboarding Reason *', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subtextColor)),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: bgCard,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: borderColor),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: selectedReason,
+                                  dropdownColor: bgDialog,
+                                  isExpanded: true,
+                                  style: TextStyle(fontSize: 13, color: textColor, fontWeight: FontWeight.w600),
+                                  items: reasonOptions.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+                                  onChanged: (val) {
+                                    if (val != null) setDiagState(() => selectedReason = val);
+                                  },
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+
+                            // Detailed remarks
+                            Text('Detailed Remarks / Notes', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subtextColor)),
+                            const SizedBox(height: 6),
+                            TextField(
+                              controller: detailedReasonCtrl,
+                              maxLines: 2,
+                              style: TextStyle(fontSize: 13, color: textColor),
+                              decoration: InputDecoration(
+                                hintText: 'Enter reason or handover details...',
+                                hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
+                                filled: true,
+                                fillColor: bgCard,
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.accent, width: 1.5)),
+                                contentPadding: const EdgeInsets.all(12),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+
+                            // Effective Date
+                            Text('Effective Date *', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subtextColor)),
+                            const SizedBox(height: 6),
+                            InkWell(
+                              onTap: () async {
+                                final picked = await showDatePicker(
+                                  context: context,
+                                  initialDate: effectiveDate,
+                                  firstDate: DateTime(2020),
+                                  lastDate: DateTime(2035),
+                                );
+                                if (picked != null) setDiagState(() => effectiveDate = picked);
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: bgCard,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: borderColor),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(DateFormat('dd MMMM yyyy').format(effectiveDate), style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textColor)),
+                                    Icon(Icons.calendar_today_rounded, size: 16, color: t.accent),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+
+                            // Clearance confirmation
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.red.withValues(alpha: 0.08),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: Colors.redAccent.withValues(alpha: 0.25)),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Checkbox(
+                                    value: isClearanceConfirmed,
+                                    activeColor: Colors.redAccent,
+                                    onChanged: (val) => setDiagState(() => isClearanceConfirmed = val ?? false),
+                                  ),
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: Text(
+                                        'I verify that handover has been completed for all selected employees and active status should be terminated.',
+                                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: textColor),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // Footer
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                      decoration: BoxDecoration(border: Border(top: BorderSide(color: borderColor))),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: isProcessing ? null : () => Navigator.pop(diagCtx),
+                            child: Text('Cancel', style: TextStyle(color: subtextColor, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 12),
+                          ElevatedButton.icon(
+                            onPressed: isProcessing || !isClearanceConfirmed
+                                ? null
+                                : () async {
+                                    setDiagState(() => isProcessing = true);
+                                    int successCount = 0;
+                                    for (final emp in selectedEmployees) {
+                                      try {
+                                        final empId = emp['localId']?.toString() ?? emp['employeeId']?.toString() ?? emp['id']?.toString() ?? '';
+                                        final cnic = emp['cnic']?.toString();
+                                        final userId = emp['linkedUserId']?.toString() ?? emp['uid']?.toString();
+                                        final lastData = FinanceLocalStorage.getLastRecordedDataForEmployee(
+                                          employeeId: empId,
+                                          cnic: cnic,
+                                          userId: userId,
+                                        );
+                                        await FinanceLocalStorage.syncBiDirectionalOffboarding(
+                                          employeeId: empId,
+                                          userId: userId,
+                                          cnic: cnic,
+                                          performedBy: widget.userRole,
+                                          reason: selectedReason,
+                                          detailedReason: detailedReasonCtrl.text.trim(),
+                                          effectiveDate: effectiveDate,
+                                          effectiveTime: DateFormat('hh:mm a').format(DateTime.now()),
+                                          shiftMilestone: 'Immediate',
+                                          lastRecordedData: lastData,
+                                        );
+                                        successCount++;
+                                      } catch (_) {}
+                                    }
+                                    if (mounted) {
+                                      Navigator.pop(diagCtx);
+                                      _clearSelection();
+                                      setState(() {});
+                                      showCustomSnackBar(
+                                        context,
+                                        '✅ Successfully offboarded $successCount employee${successCount == 1 ? '' : 's'}.',
+                                      );
+                                    }
+                                  },
+                            icon: isProcessing
+                                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : const Icon(Icons.person_off_rounded, size: 16),
+                            label: Text(isProcessing ? 'Offboarding...' : 'Confirm Batch Offboard (${selectedEmployees.length})'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFEA580C),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ── Batch Delete Dialog ────────────────────────────────────────────────────
+  void _showBatchDeleteDialog(BuildContext context, RoleThemeData t) {
+    if (_selectedEmployeeIds.isEmpty) return;
+    final count = _selectedEmployeeIds.length;
+
+    showDialog(
+      context: context,
+      builder: (diagCtx) {
+        bool isDeleting = false;
+        return StatefulBuilder(
+          builder: (ctx, setDiagState) {
+            return AlertDialog(
+              backgroundColor: t.bgCard,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.delete_forever_rounded, color: Color(0xFFDC2626), size: 24),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Permanently Delete $count Employee${count == 1 ? '' : 's'}?',
+                      style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                  ),
+                ],
+              ),
+              content: Text(
+                'Are you sure you want to permanently delete $count selected employee profile${count == 1 ? '' : 's'}?\n\n'
+                '• All local and cloud employee records will be deleted.\n'
+                '• Linked login credentials and app access will be permanently revoked.\n'
+                '• This action is irreversible.',
+                style: TextStyle(color: t.textSecondary, fontSize: 13, height: 1.4),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isDeleting ? null : () => Navigator.pop(diagCtx),
+                  child: Text('Cancel', style: TextStyle(color: t.textSecondary, fontWeight: FontWeight.bold)),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFDC2626),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed: isDeleting
+                      ? null
+                      : () async {
+                          setDiagState(() => isDeleting = true);
+                          int deletedCount = 0;
+                          for (final empId in List<String>.from(_selectedEmployeeIds)) {
+                            try {
+                              final emp = FinanceLocalStorage.getEmployee(empId);
+                              final branch = emp?['branchId']?.toString() ?? widget.branchId;
+                              await FinanceLocalStorage.deleteEmployeePermanently(
+                                branchId: branch,
+                                employeeId: empId,
+                                performedBy: widget.userRole,
+                              );
+                              deletedCount++;
+                            } catch (_) {}
+                          }
+                          if (mounted) {
+                            Navigator.pop(diagCtx);
+                            _clearSelection();
+                            setState(() {});
+                            showCustomSnackBar(
+                              context,
+                              '🗑️ Permanently deleted $deletedCount employee${deletedCount == 1 ? '' : 's'}.',
+                            );
+                          }
+                        },
+                  icon: isDeleting
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.delete_forever_rounded, size: 16),
+                  label: Text(isDeleting ? 'Deleting...' : 'Delete Permanently ($count)'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   Map<String, dynamic> _previewProjectedArrears({

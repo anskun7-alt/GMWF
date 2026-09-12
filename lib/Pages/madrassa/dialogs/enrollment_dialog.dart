@@ -5,15 +5,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import '../madrassa_strings.dart';
 import '../widgets/madrassa_common_widgets.dart';
 import '../../../services/auth_service.dart';
 import '../../../../services/image_upload_service.dart';
 import '../../../../services/zkteco_network_service.dart';
+import '../../../../services/local_storage_service.dart';
+import '../../../../realtime/realtime_manager.dart';
+import '../../../../realtime/realtime_events.dart';
 import '../../../../widgets/media_upload_tile.dart';
 import '../../../utils/formatters.dart';
 import '../utils/madrassa_local_storage.dart';
 import '../../../services/user_theme_service.dart';
+import '../../../../services/sync_service.dart';
 
 void showAddStudentDialog(
   BuildContext context,
@@ -96,6 +101,36 @@ void showAddStudentDialog(
           WidgetsBinding.instance.addPostFrameCallback((_) async {
             setDs(() => isSearching = true);
             try {
+              // 1. Check local Hive usersBox first (0ms, 0 quota)
+              if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                final box = Hive.box(LocalStorageService.usersBox);
+                for (final k in box.keys) {
+                  final u = box.get(k);
+                  if (u is Map) {
+                    final uCnic = (u['cnic'] ?? '').toString().trim();
+                    final uPhone = (u['phone'] ?? '').toString().trim();
+                    final uStudentIds = List<String>.from(u['studentIds'] ?? []);
+
+                    final matches = (sId.isNotEmpty && uStudentIds.contains(sId)) ||
+                        (cnic.isNotEmpty && uCnic == cnic) ||
+                        (phone.isNotEmpty && uPhone == phone);
+
+                    if (matches) {
+                      if (ctx.mounted) {
+                        setDs(() {
+                          foundGuardian = {'uid': u['uid']?.toString() ?? k.toString(), ...Map<String, dynamic>.from(u)};
+                          gUsernameCtrl.text = u['username'] ?? '';
+                          gPassCtrl.text = u['password'] ?? '';
+                          isSearching = false;
+                        });
+                      }
+                      return;
+                    }
+                  }
+                }
+              }
+
+              // 2. Online fallback only if not in local cache
               QuerySnapshot? q;
 
               if (sId.isNotEmpty) {
@@ -197,7 +232,7 @@ void showAddStudentDialog(
           }
         }
 
-        // Helper to check username uniqueness
+        // Helper to check username uniqueness (Local Hive first, Firestore optimized)
         void checkUsernameUniqueness(String username) {
           usernameDebounce?.cancel();
           final usernameInput = username.trim().toLowerCase();
@@ -212,6 +247,28 @@ void showAddStudentDialog(
           usernameDebounce = Timer(const Duration(milliseconds: 300), () async {
             setDs(() => isUsernameSearching = true);
             try {
+              // 1. Check local Hive usersBox first
+              if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                final uBox = Hive.box(LocalStorageService.usersBox);
+                for (final key in uBox.keys) {
+                  final val = uBox.get(key);
+                  if (val is Map) {
+                    final map = Map<String, dynamic>.from(val);
+                    final uLower = (map['usernameLower'] ?? map['username'] ?? '').toString().toLowerCase();
+                    final email = (map['email'] ?? '').toString().toLowerCase();
+                    if (uLower == usernameInput || email == '$usernameInput@gmwf.com') {
+                      if (!ctx.mounted) return;
+                      setDs(() {
+                        usernameMatchedGuardian = {'uid': map['uid'] ?? map['id'] ?? key, ...map};
+                        isUsernameSearching = false;
+                      });
+                      return;
+                    }
+                  }
+                }
+              }
+
+              // 2. Query Firestore only if online and not found locally
               final targetEmail = '$usernameInput@gmwf.com';
               var q = await FirebaseFirestore.instance
                   .collection('users')
@@ -222,23 +279,7 @@ void showAddStudentDialog(
               if (q.docs.isEmpty) {
                 q = await FirebaseFirestore.instance
                     .collection('users')
-                    .where('username', isEqualTo: username.trim())
-                    .limit(1)
-                    .get();
-              }
-
-              if (q.docs.isEmpty) {
-                q = await FirebaseFirestore.instance
-                    .collection('users')
                     .where('email', isEqualTo: targetEmail)
-                    .limit(1)
-                    .get();
-              }
-
-              if (q.docs.isEmpty) {
-                q = await FirebaseFirestore.instance
-                    .collectionGroup('users')
-                    .where('usernameLower', isEqualTo: usernameInput)
                     .limit(1)
                     .get();
               }
@@ -247,6 +288,9 @@ void showAddStudentDialog(
               if (q.docs.isNotEmpty) {
                 final doc = q.docs.first;
                 final data = doc.data();
+                if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                  Hive.box(LocalStorageService.usersBox).put('user:${data['email'] ?? usernameInput}', {'uid': doc.id, ...data});
+                }
                 setDs(() {
                   usernameMatchedGuardian = {'uid': doc.id, ...data};
                   isUsernameSearching = false;
@@ -258,7 +302,7 @@ void showAddStudentDialog(
                 });
               }
             } catch (_) {
-              setDs(() => isUsernameSearching = false);
+              if (ctx.mounted) setDs(() => isUsernameSearching = false);
             }
           });
         }
@@ -428,39 +472,84 @@ void showAddStudentDialog(
                       debounce?.cancel();
                       debounce = Timer(const Duration(milliseconds: 300), () async {
                         setDs(() => isSearching = true);
-                        final q = await FirebaseFirestore.instance
-                            .collection('users')
-                            .where('role', isEqualTo: 'Madrassa Guardian')
-                            .where('cnic', isEqualTo: v)
-                            .limit(1)
-                            .get();
-                        
-                         if (q.docs.isNotEmpty) {
-                          final g = q.docs.first;
-                          final data = g.data();
+
+                        // 1. Check local usersBox first
+                        Map<String, dynamic>? localFound;
+                        if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                          final uBox = Hive.box(LocalStorageService.usersBox);
+                          for (final key in uBox.keys) {
+                            final val = uBox.get(key);
+                            if (val is Map) {
+                              final map = Map<String, dynamic>.from(val);
+                              final cnic = map['cnic']?.toString().replaceAll(RegExp(r'\D'), '') ?? '';
+                              final searchCnic = v.replaceAll(RegExp(r'\D'), '');
+                              final role = map['role']?.toString() ?? '';
+                              if (cnic.isNotEmpty && cnic == searchCnic && (role == 'Madrassa Guardian' || role.contains('Guardian'))) {
+                                localFound = {'uid': map['uid'] ?? map['id'] ?? key, ...map};
+                                break;
+                              }
+                            }
+                          }
+                        }
+
+                        if (localFound != null) {
+                          if (!ctx.mounted) return;
                           setDs(() {
-                            foundGuardian = {'uid': g.id, ...data};
-                            // Pre-fill from the matched guardian, but keep fields
-                            // editable so the user can correct/override them.
+                            foundGuardian = localFound;
                             if (guardianNameCtrl.text.trim().isEmpty) {
-                              guardianNameCtrl.text = data['name'] ?? '';
+                              guardianNameCtrl.text = localFound!['name'] ?? '';
                             }
                             if (contactCtrl.text.trim().isEmpty) {
-                              contactCtrl.text = data['phone'] ?? '';
+                              contactCtrl.text = localFound!['phone'] ?? '';
                             }
-                            gUsernameCtrl.text = data['username'] ?? '';
-                            gPassCtrl.text = data['password'] ?? '';
+                            gUsernameCtrl.text = localFound!['username'] ?? '';
+                            gPassCtrl.text = localFound!['password'] ?? '';
                             isSearching = false;
                             guardianNameError = null;
                             contactError = null;
                           });
-                        } else {
-                          setDs(() {
-                            foundGuardian = null;
-                            isSearching = false;
-                            gUsernameCtrl.clear();
-                            gPassCtrl.clear();
-                          });
+                          return;
+                        }
+
+                        try {
+                          final q = await FirebaseFirestore.instance
+                              .collection('users')
+                              .where('role', isEqualTo: 'Madrassa Guardian')
+                              .where('cnic', isEqualTo: v)
+                              .limit(1)
+                              .get();
+                          
+                          if (!ctx.mounted) return;
+                          if (q.docs.isNotEmpty) {
+                            final g = q.docs.first;
+                            final data = g.data();
+                            if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                              Hive.box(LocalStorageService.usersBox).put('user:${data['email'] ?? g.id}', {'uid': g.id, ...data});
+                            }
+                            setDs(() {
+                              foundGuardian = {'uid': g.id, ...data};
+                              if (guardianNameCtrl.text.trim().isEmpty) {
+                                guardianNameCtrl.text = data['name'] ?? '';
+                              }
+                              if (contactCtrl.text.trim().isEmpty) {
+                                contactCtrl.text = data['phone'] ?? '';
+                              }
+                              gUsernameCtrl.text = data['username'] ?? '';
+                              gPassCtrl.text = data['password'] ?? '';
+                              isSearching = false;
+                              guardianNameError = null;
+                              contactError = null;
+                            });
+                          } else {
+                            setDs(() {
+                              foundGuardian = null;
+                              isSearching = false;
+                              gUsernameCtrl.clear();
+                              gPassCtrl.clear();
+                            });
+                          }
+                        } catch (_) {
+                          if (ctx.mounted) setDs(() => isSearching = false);
                         }
                       });
                     } else {
@@ -835,43 +924,100 @@ void showAddStudentDialog(
                     if (foundGuardian != null) {
                       gUid = foundGuardian!['uid'];
                       final gUpdates = <String, dynamic>{
+                        ...foundGuardian!,
+                        'uid': gUid,
                         'phone': contactCtrl.text.trim(),
                         'name': guardianNameCtrl.text.trim(),
                         'cnic': guardianCnicCtrl.text.trim(),
+                        'role': 'Madrassa Guardian',
+                        'branchId': branchId,
                         if (overrideGuardianCredentials) ...{
                           'username': gUsernameCtrl.text.trim(),
                           'usernameLower': gUsernameCtrl.text.trim().toLowerCase(),
                           'password': gPassCtrl.text.trim(),
                         },
-                        if (isEdit) 'studentIds': FieldValue.arrayUnion([studentId]),
+                        if (isEdit) 'studentIds': (foundGuardian!['studentIds'] is List ? List.from(foundGuardian!['studentIds']) : [])..add(studentId),
                       };
-                      await FirebaseFirestore.instance.collection('users').doc(gUid).set(gUpdates, SetOptions(merge: true));
-                      await FirebaseFirestore.instance
-                          .collection('branches')
-                          .doc(branchId)
-                          .collection('users')
-                          .doc(gUid)
-                          .set(gUpdates, SetOptions(merge: true));
+
+                      if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                        final key = gUpdates['email'] != null ? 'user:${gUpdates['email']}' : 'user:$gUid';
+                        await Hive.box(LocalStorageService.usersBox).put(key, gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).flush();
+                      }
+
+                      try {
+                        RealtimeManager().sendMessage(RealtimeEvents.payload(
+                          type: RealtimeEvents.saveUser,
+                          data: gUpdates,
+                          branchId: branchId,
+                        ));
+                      } catch (_) {}
+
+                      await LocalStorageService.enqueueSync({
+                        'type': 'save_user',
+                        'uid': gUid,
+                        'branchId': branchId,
+                        'data': gUpdates,
+                      });
+                      unawaited(SyncService().triggerUpload());
                     } else if (usernameMatchedGuardian != null) {
                       gUid = usernameMatchedGuardian!['uid'];
                       final gUpdates = <String, dynamic>{
+                        ...usernameMatchedGuardian!,
+                        'uid': gUid,
                         'phone': contactCtrl.text.trim(),
                         'name': guardianNameCtrl.text.trim(),
                         'cnic': guardianCnicCtrl.text.trim(),
-                        if (isEdit) 'studentIds': FieldValue.arrayUnion([studentId]),
+                        'role': 'Madrassa Guardian',
+                        'branchId': branchId,
+                        if (isEdit) 'studentIds': (usernameMatchedGuardian!['studentIds'] is List ? List.from(usernameMatchedGuardian!['studentIds']) : [])..add(studentId),
                       };
-                      await FirebaseFirestore.instance.collection('users').doc(gUid).set(gUpdates, SetOptions(merge: true));
-                      await FirebaseFirestore.instance
-                          .collection('branches')
-                          .doc(branchId)
-                          .collection('users')
-                          .doc(gUid)
-                          .set(gUpdates, SetOptions(merge: true));
+
+                      if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                        final key = gUpdates['email'] != null ? 'user:${gUpdates['email']}' : 'user:$gUid';
+                        await Hive.box(LocalStorageService.usersBox).put(key, gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).flush();
+                      }
+
+                      try {
+                        RealtimeManager().sendMessage(RealtimeEvents.payload(
+                          type: RealtimeEvents.saveUser,
+                          data: gUpdates,
+                          branchId: branchId,
+                        ));
+                      } catch (_) {}
+
+                      await LocalStorageService.enqueueSync({
+                        'type': 'save_user',
+                        'uid': gUid,
+                        'branchId': branchId,
+                        'data': gUpdates,
+                      });
+                      unawaited(SyncService().triggerUpload());
                     } else if (linkAccount) {
                       final usernameInput = gUsernameCtrl.text.trim().toLowerCase();
+                      final targetEmail = '$usernameInput@gmwf.com';
+                      gUid = 'guardian_$usernameInput';
+
+                      final gUpdates = <String, dynamic>{
+                        'uid': gUid,
+                        'username': usernameInput,
+                        'usernameLower': usernameInput,
+                        'email': targetEmail,
+                        'password': gPassCtrl.text.trim(),
+                        'role': 'Madrassa Guardian',
+                        'branchId': branchId,
+                        'branchName': 'Madrassa',
+                        'phone': contactCtrl.text.trim(),
+                        'name': guardianNameCtrl.text.trim(),
+                        'cnic': guardianCnicCtrl.text.trim(),
+                        'createdAt': DateTime.now().toIso8601String(),
+                        'studentIds': isEdit ? [studentId] : [],
+                      };
+
                       try {
-                        gUid = await AuthService().signUp(
-                          email: '$usernameInput@gmwf.com',
+                        final createdUid = await AuthService().signUp(
+                          email: targetEmail,
                           password: gPassCtrl.text.trim(),
                           username: usernameInput,
                           role: 'Madrassa Guardian',
@@ -881,66 +1027,36 @@ void showAddStudentDialog(
                           name: guardianNameCtrl.text.trim(),
                           cnic: guardianCnicCtrl.text.trim(),
                           studentIds: isEdit ? [studentId] : [],
-                        );
-                      } catch (e) {
-                        final targetEmail = '$usernameInput@gmwf.com';
-                        try {
-                          var q = await FirebaseFirestore.instance
-                              .collection('users')
-                              .where('usernameLower', isEqualTo: usernameInput)
-                              .limit(1)
-                              .get();
-                          if (q.docs.isEmpty) {
-                            q = await FirebaseFirestore.instance
-                                .collection('users')
-                                .where('username', isEqualTo: usernameInput)
-                                .limit(1)
-                                .get();
-                          }
-                          if (q.docs.isEmpty) {
-                            q = await FirebaseFirestore.instance
-                                .collection('users')
-                                .where('email', isEqualTo: targetEmail)
-                                .limit(1)
-                                .get();
-                          }
-                          if (q.docs.isEmpty) {
-                            q = await FirebaseFirestore.instance
-                                .collectionGroup('users')
-                                .where('usernameLower', isEqualTo: usernameInput)
-                                .limit(1)
-                                .get();
-                          }
-
-                          if (q.docs.isNotEmpty) {
-                            gUid = q.docs.first.id;
-                          } else {
-                            gUid = 'guardian_$usernameInput';
-                          }
-
-                          final gUpdates = <String, dynamic>{
-                            'uid': gUid,
-                            'username': usernameInput,
-                            'usernameLower': usernameInput,
-                            'email': targetEmail,
-                            'role': 'Madrassa Guardian',
-                            'branchId': branchId,
-                            'phone': contactCtrl.text.trim(),
-                            'name': guardianNameCtrl.text.trim(),
-                            'cnic': guardianCnicCtrl.text.trim(),
-                            if (isEdit) 'studentIds': FieldValue.arrayUnion([studentId]),
-                          };
-                          await FirebaseFirestore.instance.collection('users').doc(gUid).set(gUpdates, SetOptions(merge: true));
-                          await FirebaseFirestore.instance
-                              .collection('branches')
-                              .doc(branchId)
-                              .collection('users')
-                              .doc(gUid)
-                              .set(gUpdates, SetOptions(merge: true));
-                        } catch (err) {
-                          debugPrint('Error linking existing parent user: $err');
+                        ).timeout(const Duration(seconds: 3));
+                        if (createdUid.isNotEmpty) {
+                          gUid = createdUid;
+                          gUpdates['uid'] = createdUid;
                         }
+                      } catch (_) {
+                        gUid ??= 'g_${DateTime.now().millisecondsSinceEpoch}';
+                        gUpdates['uid'] = gUid;
                       }
+
+                      if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                        await Hive.box(LocalStorageService.usersBox).put('user:$targetEmail', gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).flush();
+                      }
+
+                      try {
+                        RealtimeManager().sendMessage(RealtimeEvents.payload(
+                          type: RealtimeEvents.saveUser,
+                          data: gUpdates,
+                          branchId: branchId,
+                        ));
+                      } catch (_) {}
+
+                      await LocalStorageService.enqueueSync({
+                        'type': 'save_user',
+                        'uid': gUid,
+                        'branchId': branchId,
+                        'data': gUpdates,
+                      });
+                      unawaited(SyncService().triggerUpload());
                     }
                   }
 
@@ -965,6 +1081,8 @@ void showAddStudentDialog(
                     'prevMadrassaName': prevMadrassaCtrl.text.trim(),
                     'prevHifzLines': int.tryParse(prevHifzCtrl.text.trim()) ?? 0,
                     'photoUrl': photoUrl,
+                    'photoBase64': photoUrl,
+                    'studentPhotoBase64': photoUrl,
                     'bFormUrl': bFormBase64 ?? '',
                     'bFormBase64': bFormBase64 ?? '',
                     'guardianCnicUrl': guardianCnicBase64 ?? '',
@@ -999,8 +1117,8 @@ void showAddStudentDialog(
                     isNew: !isEdit,
                   );
 
-                  // Write central audit log
-                  await MadrassaAuditService.logAction(
+                  // Central audit log - run in background so UI never blocks
+                  unawaited(MadrassaAuditService.logAction(
                     branchId: branchId,
                     editor: username,
                     role: role,
@@ -1010,27 +1128,54 @@ void showAddStudentDialog(
                         : 'Enrolled new student ${finalData['name']} (Roll: ${finalData['rollNumber']})',
                     studentId: finalStudentId,
                     studentName: finalData['name'] as String?,
-                  );
+                  ));
 
                   if (enteredPin.isNotEmpty) {
-                    await ZkTecoNetworkService.assignPinToEntity(
+                    unawaited(ZkTecoNetworkService.assignPinToEntity(
                       entityId: finalStudentId,
                       entityName: nameCtrl.text.trim(),
                       entityType: 'madrassa_student',
                       branchId: branchId,
                       customPin: enteredPin,
-                    );
+                    ));
                   }
 
                   if (gUid != null) {
-                    final linkUpdate = {'studentIds': FieldValue.arrayUnion([finalStudentId])};
-                    await FirebaseFirestore.instance.collection('users').doc(gUid).update(linkUpdate);
-                    await FirebaseFirestore.instance
-                        .collection('branches')
-                        .doc(branchId)
-                        .collection('users')
-                        .doc(gUid)
-                        .set(linkUpdate, SetOptions(merge: true));
+                    if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                      final uBox = Hive.box(LocalStorageService.usersBox);
+                      for (final key in uBox.keys) {
+                        final val = uBox.get(key);
+                        if (val is Map) {
+                          final map = Map<String, dynamic>.from(val);
+                          if ((map['uid'] ?? map['id']) == gUid) {
+                            final studentIds = List<String>.from(map['studentIds'] ?? []);
+                            if (!studentIds.contains(finalStudentId)) {
+                              studentIds.add(finalStudentId);
+                              map['studentIds'] = studentIds;
+                              await uBox.put(key, map);
+                              await uBox.flush();
+
+                              try {
+                                RealtimeManager().sendMessage(RealtimeEvents.payload(
+                                  type: RealtimeEvents.saveUser,
+                                  data: map,
+                                  branchId: branchId,
+                                ));
+                              } catch (_) {}
+
+                              await LocalStorageService.enqueueSync({
+                                'type': 'save_user',
+                                'uid': gUid,
+                                'branchId': branchId,
+                                'data': map,
+                              });
+                              unawaited(SyncService().triggerUpload());
+                            }
+                            break;
+                          }
+                        }
+                      }
+                    }
                   }
 
                   String successMessage = isEdit 

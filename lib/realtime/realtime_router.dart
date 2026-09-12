@@ -15,12 +15,22 @@
 //      Keys are stored as "<timestampMs>_<messageId>" enabling O(1) TTL
 //      pruning by prefix comparison without scanning values.
 //      Call RealtimeRouter.init() at app startup alongside other Hive opens.
+//
+// [FIX] Removed duplicate switch-case values for workflow_request /
+//       workflow_decision (previously appeared both as raw string literals
+//       under the request-event block AND as RealtimeEvents constants under
+//       a second block, then later as a third duplicate block — this caused
+//       a Dart duplicate-case compile error). Each event type now maps to
+//       exactly ONE case clause in routeMessage().
 
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 
 import '../services/local_storage_service.dart';
+import '../services/sync_service.dart';
+import '../services/finance_local_storage.dart';
+import '../services/donations_local_storage.dart';
 import '../services/zkteco_network_service.dart';
 import '../pages/madrassa/utils/madrassa_local_storage.dart';
 import 'realtime_events.dart';
@@ -84,12 +94,12 @@ class RealtimeRouter {
     }
 
     // Generate a collision-resistant message ID
+    final data = message['data'] as Map<String, dynamic>? ?? message;
     final messageId = message['_messageId']?.toString() ??
         '${message['_clientId'] ?? 'client'}_'
-        '${message['_timestamp'] ?? DateTime.now().millisecondsSinceEpoch}_'
+        '${message['_timestamp'] ?? ''}_'
         '${message['event_type'] ?? ''}_'
-        '${message['serial'] ?? ''}_'
-        '${DateTime.now().microsecondsSinceEpoch % 100000}';
+        '${message['serial'] ?? data['serial'] ?? data['id'] ?? data['localId'] ?? ''}';
 
     // O(1) Instant In-memory set lookup
     if (_seenMessageIds.contains(messageId)) {
@@ -99,11 +109,12 @@ class RealtimeRouter {
 
     // Record seen
     _seenMessageIds.add(messageId);
-    final box = Hive.box<String>(_dedupBox);
-    final dedupKey = '${DateTime.now().millisecondsSinceEpoch}_$messageId';
-    await box.put(dedupKey, messageId);
+    if (Hive.isBoxOpen(_dedupBox)) {
+      final box = Hive.box<String>(_dedupBox);
+      final dedupKey = '${DateTime.now().millisecondsSinceEpoch}_$messageId';
+      box.put(dedupKey, messageId);
+    }
 
-    final data = message['data'] as Map<String, dynamic>? ?? message;
     final incomingVersion = (message['version'] is int)
         ? (message['version'] as int)
         : (int.tryParse(message['version']?.toString() ?? '') ?? (data['version'] is int ? data['version'] as int : 0));
@@ -126,6 +137,20 @@ class RealtimeRouter {
     }
 
     final type = message['event_type']?.toString() ?? '';
+
+    // ── LAN Source-Branch Validation (Pillar 5-B / Pillar 2) ──────────────────
+    final incomingBranch = (message['branchId'] ?? data['branchId'] ?? '').toString().toLowerCase().trim();
+    final activeBranch = LocalStorageService.getActiveBranchId();
+    if (activeBranch != null &&
+        activeBranch != 'all' &&
+        incomingBranch.isNotEmpty &&
+        incomingBranch != 'all' &&
+        incomingBranch != activeBranch) {
+      if (kDebugMode) {
+        print('🛑 Cross-branch packet rejected: Inbound branch "$incomingBranch" != active branch "$activeBranch" (type: $type)');
+      }
+      return;
+    }
 
     if (kDebugMode) {
       print('''
@@ -161,6 +186,7 @@ Serial: ${data['serial'] ?? 'N/A'}
       case RealtimeEvents.savePatient:
         await LocalStorageService.saveLocalPatient(
           data['data'] as Map<String, dynamic>? ?? data,
+          isFromSync: true,
         );
         break;
 
@@ -182,6 +208,77 @@ Serial: ${data['serial'] ?? 'N/A'}
         await _handleDeleteEmployee(data, message);
         break;
 
+      case RealtimeEvents.deleteBiometricDevice:
+        final devId = (data['deviceId'] ?? data['id'])?.toString();
+        if (devId != null && devId.isNotEmpty) {
+          await ZkTecoNetworkService.addDeletedDeviceTombstone(devId);
+          if (Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
+            final box = Hive.box(LocalStorageService.biometricDevicesBox);
+            final keysToPrune = <dynamic>[];
+            for (final k in box.keys) {
+              if (k.toString() == devId) {
+                keysToPrune.add(k);
+                continue;
+              }
+              final val = box.get(k);
+              if (val is Map && (val['deviceId']?.toString() == devId)) {
+                keysToPrune.add(k);
+              }
+            }
+            for (final k in keysToPrune) {
+              await box.delete(k);
+            }
+          }
+        }
+        break;
+
+      case RealtimeEvents.saveBiometricDevice:
+        final devData = Map<String, dynamic>.from(data['data'] as Map? ?? data);
+        final devId = (data['deviceId'] ?? devData['deviceId'] ?? '').toString();
+        if (devId.isNotEmpty) {
+          await ZkTecoNetworkService.removeDeletedDeviceTombstone(devId);
+          if (Hive.isBoxOpen(LocalStorageService.biometricDevicesBox)) {
+            final box = Hive.box(LocalStorageService.biometricDevicesBox);
+            await box.put(devId, devData);
+          }
+        }
+        break;
+
+      case RealtimeEvents.saveUser:
+        final userData = Map<String, dynamic>.from(data['data'] as Map? ?? data);
+        final uid = (data['uid'] ?? userData['uid'] ?? userData['id'])?.toString() ?? '';
+        final bId = (data['branchId'] ?? userData['branchId'] ?? '').toString();
+        if (userData['email'] != null && Hive.isBoxOpen(LocalStorageService.usersBox)) {
+          await Hive.box(LocalStorageService.usersBox).put('user:${userData['email']}', userData);
+          await Hive.box(LocalStorageService.usersBox).flush();
+        }
+        if (!RealtimeManager().isConnected && message['_serverPush'] != true) {
+          await LocalStorageService.enqueueSync({
+            'type': 'save_user',
+            'uid': uid,
+            'branchId': bId,
+            'data': userData,
+          });
+        }
+        break;
+
+      case RealtimeEvents.deleteUser:
+        final email = (data['email'] ?? '').toString();
+        final uid = (data['uid'] ?? '').toString();
+        final bId = (data['branchId'] ?? '').toString();
+        if (email.isNotEmpty && Hive.isBoxOpen(LocalStorageService.usersBox)) {
+          await Hive.box(LocalStorageService.usersBox).delete('user:$email');
+        }
+        if (!RealtimeManager().isConnected && message['_serverPush'] != true) {
+          await LocalStorageService.enqueueSync({
+            'type': 'delete_user',
+            'uid': uid,
+            'branchId': bId,
+            'email': email,
+          });
+        }
+        break;
+
       // ── INVENTORY: stock addition or new medicine registration ──────────────
       case RealtimeEvents.saveStockItem:
         await _handleSaveStockItem(data, message);
@@ -189,6 +286,24 @@ Serial: ${data['serial'] ?? 'N/A'}
 
       case RealtimeEvents.deleteStockItem:
         await _handleDeleteStockItem(data);
+        break;
+
+      // ── PROFORMA CATALOG EVENTS ─────────────────────────────────────────────
+      case RealtimeEvents.saveProformaItem:
+      case RealtimeEvents.proformaItemUpdated:
+        await _handleProformaEvent(data);
+        break;
+
+      // ── TOKEN REVERSAL APPROVED ────────────────────────────────────────────
+      case RealtimeEvents.tokenReversalApproved:
+        await _handleTokenReversalApproved(data);
+        break;
+
+      // ── WORKFLOW REQUESTS & APPROVALS (edit-request approval flow) ──────────
+      case RealtimeEvents.requestCreated:
+      case RealtimeEvents.requestApproved:
+      case RealtimeEvents.requestRejected:
+        await _handleRequestEvent(type, data);
         break;
 
       // ── ATTENDANCE EVENTS ──────────────────────────────────────────────────
@@ -203,9 +318,11 @@ Serial: ${data['serial'] ?? 'N/A'}
       case RealtimeEvents.saveMadrassaStudent:
       case RealtimeEvents.saveMadrassaAdmission:
       case RealtimeEvents.saveMadrassaAttendance:
+      case RealtimeEvents.saveMadrassaDailyLog:
       case RealtimeEvents.offboardMadrassaStudent:
       case RealtimeEvents.deleteMadrassaStudent:
       case RealtimeEvents.saveMadrassaFee:
+      case RealtimeEvents.saveMadrassaFeePayment:
       case RealtimeEvents.saveMadrassaHifzProgress:
       case RealtimeEvents.saveExamResult:
         await _handleMadrassaEvent(type, data);
@@ -225,6 +342,12 @@ Serial: ${data['serial'] ?? 'N/A'}
       case RealtimeEvents.saveDonor:
       case RealtimeEvents.saveDonationCollection:
         await _handleDonationEvent(type, data);
+        break;
+
+      // ── EXECUTIVE GLOBAL CLOUD SYNC ────────────────────────────────────────
+      case 'force_all_users_cloud_sync':
+        debugPrint('[RealtimeRouter] ☁️ Received force_all_users_cloud_sync command! Uploading local queues to Firestore...');
+        SyncService().triggerUpload();
         break;
 
       // ── DASTERKHWAAN EVENTS ───────────────────────────────────────────────
@@ -258,6 +381,7 @@ Serial: ${data['serial'] ?? 'N/A'}
         await _handleTokenExceptionApproved(data, message);
         break;
 
+      // ── GENERIC WORKFLOW EVENTS (separate tracking box from edit-requests) ──
       case RealtimeEvents.workflowRequest:
       case RealtimeEvents.workflowDecision:
         await _handleWorkflowEvent(type, data);
@@ -482,7 +606,18 @@ Serial: ${data['serial'] ?? 'N/A'}
         print('╚════════════════════════════════════════════════════════════╝');
       }
     } else {
-      if (kDebugMode) print('⚠️ Entry not found for dispense: $key');
+      final newEntry = {
+        ...data,
+        'branchId': normBranch,
+        'serial': serial.toUpperCase(),
+        'dispenseStatus': 'dispensed',
+        'status': 'completed',
+        'dispensedAt': data['dispensedAt'] ?? DateTime.now().toIso8601String(),
+        'dispensedBy': data['dispensedBy'],
+        'completedAt': data['completedAt'] ?? DateTime.now().toIso8601String(),
+      };
+      await box.put(key, newEntry);
+      if (kDebugMode) print('✅ Created dispensed entry for: $key');
     }
 
     // Also update dispensaryBox so all records screens reflect 'dispensed' instantly
@@ -612,39 +747,45 @@ Serial: ${data['serial'] ?? 'N/A'}
                      data['branchId']?.toString() ??
                      '').toLowerCase().trim();
 
-    final medicineId = (data['id'] ?? data['medicineId'])?.toString().trim();
+    final medicineId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim();
 
     if (medicineId == null || medicineId.isEmpty) {
       if (kDebugMode) print('❌ save_stock_item missing medicineId');
       return;
     }
 
+    await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
+
     // Check whether this is a quantity-only delta update or a full item save
     final rawDelta = data['_quantityDelta'];
     final bool isDelta = rawDelta != null;
 
+    final enrichedData = Map<String, dynamic>.from(data);
+    if (branchId.isNotEmpty) {
+      enrichedData['branchId'] ??= branchId;
+    }
+
     if (isDelta) {
-      // ── Case (b): add-stock delta — increment existing Hive quantity ──
+      // ── Case (b): add-stock delta ──
       final delta = rawDelta is num
           ? rawDelta.toDouble()
           : double.tryParse(rawDelta.toString()) ?? 0.0;
 
-      if (delta != 0) {
-        await LocalStorageService.updateLocalStockQuantity(medicineId, delta);
-        if (kDebugMode) {
-          print('✅ STOCK DELTA applied via LAN → $medicineId +$delta');
+      final existing = LocalStorageService.getLocalInventoryItem(medicineId);
+      if (existing != null) {
+        if (delta != 0) {
+          await LocalStorageService.updateLocalStockQuantity(medicineId, delta);
         }
+      } else {
+        // If this machine does not have the medicine yet, save full record with new quantity!
+        LocalStorageService.saveLocalInventoryItem(enrichedData);
       }
-
-      // Note: We DO NOT enqueue `add_inventory_stock` here anymore!
-      // Since it uses `FieldValue.increment` on Firestore, having multiple devices
-      // enqueue the same delta will result in double-counting/duplication.
-      // We rely solely on the originator device (the Dispenser) to sync the increment
-      // to Firestore.
-
+      if (kDebugMode) {
+        print('✅ STOCK DELTA applied via LAN → $medicineId +$delta');
+      }
     } else {
       // ── Case (a): full item (new registration or full replacement) ──
-      LocalStorageService.saveLocalInventoryItem(data);
+      LocalStorageService.saveLocalInventoryItem(enrichedData);
       if (kDebugMode) {
         print('✅ INVENTORY ITEM saved via LAN → $medicineId');
       }
@@ -654,7 +795,7 @@ Serial: ${data['serial'] ?? 'N/A'}
         await LocalStorageService.enqueueSync({
           'type':     'register_medicine',
           'branchId': branchId,
-          'data':     data,
+          'data':     enrichedData,
         });
         if (kDebugMode) print('[Router] Enqueued register_medicine for Firestore sync');
       }
@@ -669,41 +810,119 @@ Serial: ${data['serial'] ?? 'N/A'}
     }
   }
 
+  static Future<void> _handleProformaEvent(Map<String, dynamic> data) async {
+    try {
+      final code = (data['code'] ?? data['barcode'] ?? '').toString().trim();
+      if (code.isEmpty) return;
+      if (!Hive.isBoxOpen(LocalStorageService.masterProformaBox)) {
+        await Hive.openBox(LocalStorageService.masterProformaBox);
+      }
+      final box = Hive.box(LocalStorageService.masterProformaBox);
+      final item = Map<String, dynamic>.from(data);
+      item['isProformaMaster'] = true;
+      await box.put('proforma:$code', LocalStorageService.sanitize(item));
+      if (kDebugMode) print('✅ Master Proforma item saved via LAN → $code');
+    } catch (e) {
+      if (kDebugMode) print('❌ Error handling proforma event via LAN: $e');
+    }
+  }
+
+  static Future<void> _handleTokenReversalApproved(Map<String, dynamic> data) async {
+    try {
+      final branchId = (data['branchId'] ?? '').toString();
+      final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString().trim();
+      if (serial == null || serial.isEmpty) return;
+
+      await LocalStorageService.deleteLocalEntry(branchId, serial);
+      await LocalStorageService.deleteLocalPrescription(serial);
+
+      // Also mark request as approved in local_edit_requests if present
+      final reqId = (data['requestId'] ?? data['id'])?.toString();
+      if (reqId != null && reqId.isNotEmpty) {
+        if (Hive.isBoxOpen('local_edit_requests')) {
+          final box = Hive.box('local_edit_requests');
+          final raw = box.get(reqId);
+          if (raw is Map) {
+            final updated = Map<String, dynamic>.from(raw);
+            updated['status'] = 'approved';
+            await box.put(reqId, updated);
+          }
+        }
+      }
+      if (kDebugMode) print('✅ Token reversal applied via LAN → $serial');
+    } catch (e) {
+      if (kDebugMode) print('❌ Error handling token reversal via LAN: $e');
+    }
+  }
+
+  static Future<void> _handleRequestEvent(String type, Map<String, dynamic> data) async {
+    try {
+      final reqId = (data['requestId'] ?? data['id'] ?? data['docId'])?.toString();
+      if (reqId == null || reqId.isEmpty) return;
+
+      if (!Hive.isBoxOpen('local_edit_requests')) {
+        await LocalStorageService.openBoxSafe('local_edit_requests');
+      }
+      final box = Hive.box('local_edit_requests');
+
+      if (type == RealtimeEvents.requestCreated || type == 'request_created') {
+        final reqMap = Map<String, dynamic>.from(data);
+        reqMap['status'] ??= 'pending';
+        await box.put(reqId, reqMap);
+        if (kDebugMode) print('✅ Local edit request stored via LAN → $reqId');
+      } else if (type == RealtimeEvents.requestApproved || type == 'request_approved') {
+        final existing = box.get(reqId);
+        final map = existing is Map ? Map<String, dynamic>.from(existing) : Map<String, dynamic>.from(data);
+        map['status'] = 'approved';
+        await box.put(reqId, map);
+        if (kDebugMode) print('✅ Local edit request marked approved via LAN → $reqId');
+      } else if (type == RealtimeEvents.requestRejected || type == 'request_rejected') {
+        final existing = box.get(reqId);
+        final map = existing is Map ? Map<String, dynamic>.from(existing) : Map<String, dynamic>.from(data);
+        map['status'] = 'rejected';
+        await box.put(reqId, map);
+        if (kDebugMode) print('✅ Local edit request marked rejected via LAN → $reqId');
+      }
+    } catch (e) {
+      if (kDebugMode) print('❌ Error handling request event via LAN: $e');
+    }
+  }
+
   // ── Module Handlers for Local Hive Tier 1 Save ───────────────────────────
 
   static Future<void> _handleAttendanceEvent(String type, Map<String, dynamic> data) async {
     try {
+      final punchData = data['data'] is Map ? Map<String, dynamic>.from(data['data']) : Map<String, dynamic>.from(data);
+      final branchId = (punchData['branchId'] ?? data['branchId'] ?? '').toString().toLowerCase().trim();
+      final empId = (punchData['employeeId'] ?? punchData['empId'] ?? punchData['userId'] ?? data['employeeId'] ?? punchData['pin'] ?? punchData['localId'] ?? punchData['id'] ?? '').toString();
+      final dt = (punchData['date'] ?? punchData['dateKey'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString();
+
+      // Clock drift check (Pillar 2-E)
+      final punchTimeStr = punchData['timestamp'] ?? punchData['time'] ?? punchData['punchTime'];
+      if (punchTimeStr != null) {
+        final punchTime = DateTime.tryParse(punchTimeStr.toString());
+        if (punchTime != null) {
+          final diff = DateTime.now().difference(punchTime).abs();
+          if (diff.inMinutes > 15) {
+            punchData['clock_drift_warning'] = true;
+            punchData['drift_minutes'] = diff.inMinutes;
+            if (kDebugMode) {
+              print('⚠️ Biometric punch clock drift detected: ${diff.inMinutes} mins for employee $empId');
+            }
+          }
+        }
+      }
+
       final box = await LocalStorageService.openBoxSafe(LocalStorageService.attendanceBox);
-      final employeeId = (data['employeeId'] ?? data['localId'] ?? data['id'])?.toString() ?? '';
-      final dateStr = (data['date'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString();
-      final key = employeeId.isNotEmpty ? '${employeeId}_$dateStr' : (data['id']?.toString() ?? 'att_${DateTime.now().microsecondsSinceEpoch}');
-      await box.put(key, LocalStorageService.sanitize(data));
+      punchData['branchId'] = branchId;
+      final id = punchData['id']?.toString() ?? punchData['logId']?.toString() ?? (empId.isNotEmpty ? 'att_${branchId}_${empId}_$dt' : 'att_${DateTime.now().microsecondsSinceEpoch}');
 
-      final pin = data['pin']?.toString() ?? '';
-      final timeStr = data['timestamp']?.toString() ?? '';
-      final deviceIp = data['deviceIp']?.toString() ?? '192.168.1.150';
-      final source = data['source']?.toString() ?? 'lan_realtime';
+      // Write locally to Hive box (Never re-broadcast on LAN to eliminate LAN Echo Loop - Pillar 2-A)
+      await box.put(id, LocalStorageService.sanitize(punchData));
 
-      if (pin.isNotEmpty && timeStr.isNotEmpty) {
-        final timestamp = DateTime.tryParse(timeStr) ?? DateTime.now();
-        await ZkTecoNetworkService.processIncomingPunch(
-          pin: pin,
-          timestamp: timestamp,
-          deviceIp: deviceIp,
-          source: source,
-        );
+      if (kDebugMode) {
+        print('✅ ATTENDANCE / BIOMETRIC EVENT saved locally via LAN → $type ($id)');
       }
-
-      final branchId = (data['branchId'] ?? '').toString();
-      if (branchId.isNotEmpty) {
-        await LocalStorageService.enqueueSync({
-          'type': type,
-          'branchId': branchId,
-          'data': LocalStorageService.sanitize(data),
-        });
-      }
-
-      if (kDebugMode) print('✅ ATTENDANCE EVENT processed via LAN → $type ($key)');
     } catch (e) {
       if (kDebugMode) print('❌ _handleAttendanceEvent error: $e');
     }
@@ -720,12 +939,40 @@ Serial: ${data['serial'] ?? 'N/A'}
           return;
         }
       }
-      if (type == RealtimeEvents.saveMadrassaAttendance) {
+      if (type == RealtimeEvents.saveMadrassaAttendance || type == RealtimeEvents.saveMadrassaDailyLog) {
         final branchId = data['branchId']?.toString() ?? '';
         final dateKey = data['date']?.toString() ?? data['dateKey']?.toString() ?? DateFormat('yyyy-MM-dd').format(DateTime.now());
+        final logData = data['logData'] is Map
+            ? Map<String, dynamic>.from(data['logData'])
+            : (data['data'] is Map ? Map<String, dynamic>.from(data['data']) : data);
         if (branchId.isNotEmpty) {
-          await MadrassaLocalStorage.cacheDailyLog(branchId, dateKey, data);
-          if (kDebugMode) print('✅ MADRASSA ATTENDANCE cached via LAN → $dateKey');
+          await MadrassaLocalStorage.cacheDailyLog(branchId, dateKey, logData);
+          if (kDebugMode) print('✅ MADRASSA DAILY LOG cached via LAN → $dateKey');
+          return;
+        }
+      }
+      if (type == RealtimeEvents.saveMadrassaFeePayment) {
+        final branchId = data['branchId']?.toString() ?? '';
+        final year = (data['year'] as num?)?.toInt() ?? DateTime.now().year;
+        final month = (data['month'] as num?)?.toInt() ?? DateTime.now().month;
+        final studentId = data['studentId']?.toString() ?? '';
+        final feeData = data['data'] is Map ? Map<String, dynamic>.from(data['data']) : data;
+        if (branchId.isNotEmpty && studentId.isNotEmpty) {
+          await MadrassaLocalStorage.saveFeePaymentLocalAndSync(
+            branchId: branchId,
+            studentId: studentId,
+            studentName: feeData['studentName']?.toString() ?? '',
+            rollNumber: feeData['rollNumber']?.toString() ?? '',
+            year: year,
+            month: month,
+            amountDue: (feeData['amountDue'] as num?)?.toDouble() ?? 0.0,
+            amountPaid: (feeData['amountPaid'] as num?)?.toDouble() ?? 0.0,
+            status: feeData['status']?.toString() ?? 'paid',
+            markedBy: feeData['markedBy']?.toString() ?? 'LAN',
+            markedByRole: feeData['markedByRole']?.toString() ?? 'LAN',
+            note: feeData['note']?.toString(),
+          );
+          if (kDebugMode) print('✅ MADRASSA FEE PAYMENT cached via LAN → $studentId ($year-$month)');
           return;
         }
       }
@@ -781,10 +1028,22 @@ Serial: ${data['serial'] ?? 'N/A'}
 
   static Future<void> _handleDonationEvent(String type, Map<String, dynamic> data) async {
     try {
-      final box = await LocalStorageService.openBoxSafe('donations_box');
-      final id = data['id']?.toString() ?? data['receiptNumber']?.toString() ?? 'don_${DateTime.now().microsecondsSinceEpoch}';
-      await box.put(id, LocalStorageService.sanitize(data));
-      if (kDebugMode) print('✅ DONATION EVENT saved via LAN → $type ($id)');
+      final box = await LocalStorageService.openBoxSafe(DonationsLocalStorage.donationsBox);
+      final id = data['localId']?.toString() ?? data['id']?.toString() ?? data['receiptNoClean']?.toString() ?? 'don_${DateTime.now().microsecondsSinceEpoch}';
+      final branchId = (data['branchId']?.toString() ?? LocalStorageService.getActiveBranchId() ?? '').toLowerCase().trim();
+      final date = data['date']?.toString() ?? DateTime.now().toIso8601String().substring(0, 10);
+      final hiveKey = data['hiveKey']?.toString() ?? '${branchId}_${date}_$id';
+      final sanitized = LocalStorageService.sanitize(data);
+      await box.put(hiveKey, sanitized);
+      await LocalStorageService.enqueueSync({
+        'type': 'save_donation',
+        'branchId': branchId,
+        'localId': id,
+        'hiveKey': hiveKey,
+        'data': sanitized,
+      });
+      SyncService().triggerUpload(force: true);
+      if (kDebugMode) print('✅ DONATION EVENT saved via LAN → $type ($hiveKey)');
     } catch (e) {
       if (kDebugMode) print('❌ _handleDonationEvent error: $e');
     }
@@ -792,6 +1051,69 @@ Serial: ${data['serial'] ?? 'N/A'}
 
   static Future<void> _handleDasterkhwanEvent(String type, Map<String, dynamic> data) async {
     try {
+      if (type == RealtimeEvents.saveOfficeBoyToken) {
+        final tokenBox = await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+        final isReverse = data['action'] == 'reverse';
+        final branchId = data['branchId']?.toString() ?? '';
+        final dateKey = data['dateKey']?.toString() ?? DateTime.now().toIso8601String().substring(0, 10);
+
+        if (isReverse) {
+          final tokenIds = List<String>.from((data['tokenIds'] as List? ?? []).map((e) => e.toString()));
+          for (final tid in tokenIds) {
+            await tokenBox.delete(tid);
+          }
+          await LocalStorageService.enqueueSync({
+            'type': 'reverse_dasterkhwan_tokens',
+            'branchId': branchId,
+            'dateKey': dateKey,
+            'data': data,
+          });
+          SyncService().triggerUpload(force: true);
+          if (kDebugMode) print('✅ DASTERKHWAAN TOKENS REVERSED via LAN → ${tokenIds.length} tokens');
+        } else {
+          final tokensList = List<dynamic>.from(data['tokens'] as List? ?? []);
+          for (final t in tokensList) {
+            if (t is Map) {
+              final tMap = Map<String, dynamic>.from(t);
+              final tid = tMap['id']?.toString() ?? 'dst_${DateTime.now().microsecondsSinceEpoch}';
+              await tokenBox.put(tid, LocalStorageService.sanitize(tMap));
+            }
+          }
+          await LocalStorageService.enqueueSync({
+            'type': 'save_dasterkhwan_tokens',
+            'branchId': branchId,
+            'dateKey': dateKey,
+            'data': data,
+          });
+          SyncService().triggerUpload(force: true);
+          if (kDebugMode) print('✅ DASTERKHWAAN TOKENS SAVED via LAN → ${tokensList.length} tokens');
+        }
+        return;
+      }
+
+      if (type == RealtimeEvents.saveKitchenServeLog) {
+        final tokenBox = await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+        final tokenId = data['tokenId']?.toString();
+        if (tokenId != null && tokenId.isNotEmpty) {
+          final existing = tokenBox.get(tokenId);
+          if (existing is Map) {
+            final updated = Map<String, dynamic>.from(existing)
+              ..['served'] = true
+              ..['servedTime'] = data['timestamp'] ?? DateTime.now().toIso8601String();
+            await tokenBox.put(tokenId, updated);
+          }
+        }
+        await LocalStorageService.enqueueSync({
+          'type': 'serve_dasterkhwan_token',
+          'branchId': data['branchId']?.toString() ?? '',
+          'dateKey': data['dateKey']?.toString() ?? DateTime.now().toIso8601String().substring(0, 10),
+          'data': data,
+        });
+        SyncService().triggerUpload(force: true);
+        if (kDebugMode) print('✅ DASTERKHWAAN KITCHEN SERVE LOG saved via LAN → $tokenId');
+        return;
+      }
+
       final box = await LocalStorageService.openBoxSafe('dasterkhwaan_entries');
       final id = data['id']?.toString() ?? 'das_${DateTime.now().microsecondsSinceEpoch}';
       await box.put(id, LocalStorageService.sanitize(data));
@@ -912,6 +1234,9 @@ Serial: ${data['serial'] ?? 'N/A'}
   ) async {
     final localId = data['localId']?.toString() ?? data['id']?.toString();
     if (localId == null || localId.isEmpty) return;
+
+    // Permanently reject placeholder ghost employees received over LAN
+    if (FinanceLocalStorage.isPlaceholderEmployee(data)) return;
 
     try {
       if (!Hive.isBoxOpen(LocalStorageService.employeesBox)) {

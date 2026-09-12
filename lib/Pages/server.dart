@@ -1,4 +1,4 @@
-// lib/pages/server_dashboard_with_sync.dart
+// lib/pages/server.dart
 //
 // [ARCH DECISION] This is the live ServerSyncManager as of 2026-08-27. See Task 0.1 report.
 // The implementation in lib/realtime/server_sync_manager.dart is dead code (only its static initHive helper is called at startup).
@@ -57,6 +57,8 @@ import '../services/python_runner_service.dart';
 import '../services/system_metrics_service.dart';
 import '../services/user_theme_service.dart';
 import '../services/network_health_service.dart';
+import '../services/auto_update_service.dart';
+import '../widgets/update_dialog_widget.dart';
 import 'madrassa/utils/madrassa_local_storage.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,10 +239,12 @@ class _ServerDashboardWithSyncState
 
     _updateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _isRunning) {
-        setState(() {
-          _syncQueueSize = _syncManager?.queueSize ?? 0;
-          _pulseTick += 0.5;
-        });
+        final newQueue = _syncManager?.queueSize ?? 0;
+        if (newQueue != _syncQueueSize) {
+          setState(() {
+            _syncQueueSize = newQueue;
+          });
+        }
       }
     });
 
@@ -268,6 +272,12 @@ class _ServerDashboardWithSyncState
     SystemMetricsService().startMonitoring();
     _metricsSubscription = SystemMetricsService().metricsStream.listen((_) {
       if (mounted) setState(() {});
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        UpdateDialogWidget.showUpdateDialogIfNeeded(context, isServerMode: true);
+      }
     });
   }
 
@@ -321,6 +331,15 @@ class _ServerDashboardWithSyncState
         'action=allow',
         'protocol=UDP',
         'localport=4370',
+      ]);
+      // 5. GMWF LAN UDP Broadcast Discovery Port (53280)
+      await io.Process.run('netsh', [
+        'advfirewall', 'firewall', 'add', 'rule',
+        'name=GMWF_LAN_UDP_53280',
+        'dir=in',
+        'action=allow',
+        'protocol=UDP',
+        'localport=53280',
       ]);
       await io.Process.run('netsh', [
         'advfirewall', 'firewall', 'add', 'rule',
@@ -575,30 +594,54 @@ class _ServerDashboardWithSyncState
     }
   }
 
-  void _startUdpBroadcast() {
+  io.RawDatagramSocket? _serverUdpSocket;
+
+  void _startUdpBroadcast() async {
     _udpBroadcastTimer?.cancel();
-    _udpBroadcastTimer =
-        Timer.periodic(const Duration(seconds: 5), (_) async {
-      if (!_isRunning) return;
+    try {
+      _serverUdpSocket?.close();
+    } catch (_) {}
+    _serverUdpSocket = null;
+
+    try {
+      _serverUdpSocket = await io.RawDatagramSocket.bind(io.InternetAddress.anyIPv4, 0);
+      _serverUdpSocket?.broadcastEnabled = true;
+    } catch (e) {
+      _addLog('⚠️ UDP broadcast socket bind error: $e');
+    }
+
+    _udpBroadcastTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (!_isRunning || _serverIp == null || _serverIp!.isEmpty) return;
       try {
-        final socket =
-            await io.RawDatagramSocket.bind(io.InternetAddress.anyIPv4, 0);
-        socket.broadcastEnabled = true;
+        if (_serverUdpSocket == null) {
+          _serverUdpSocket = await io.RawDatagramSocket.bind(io.InternetAddress.anyIPv4, 0);
+          _serverUdpSocket?.broadcastEnabled = true;
+        }
         final message = utf8.encode(
             '${AppNetwork.udpMessagePrefix}'
             '$_serverIp:${AppNetwork.websocketPort}');
-        socket.send(message, io.InternetAddress('255.255.255.255'),
-            AppNetwork.udpBroadcastPort);
-        socket.close();
-      } catch (e) {
-        // Silent fail
-      }
+        
+        // 1. Global broadcast
+        _serverUdpSocket?.send(message, io.InternetAddress('255.255.255.255'), AppNetwork.udpBroadcastPort);
+
+        // 2. Broadcast across all active local subnets
+        final localSubnets = await getAllLanSubnets();
+        for (final sub in localSubnets) {
+          try {
+            _serverUdpSocket?.send(message, io.InternetAddress('$sub.255'), AppNetwork.udpBroadcastPort);
+          } catch (_) {}
+        }
+      } catch (_) {}
     });
   }
 
   Future<void> _stopServer() async {
     try {
       _udpBroadcastTimer?.cancel();
+      try {
+        _serverUdpSocket?.close();
+      } catch (_) {}
+      _serverUdpSocket = null;
       await MultiServerService().stopHeartbeat(widget.branchId);
       await _syncManager?.stop();
       await _server?.stop();
@@ -668,30 +711,73 @@ class _ServerDashboardWithSyncState
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFF59E0B).withOpacity(0.15),
+                      color: const Color(0xFF10B981).withValues(alpha: 0.15),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(Icons.cloud_sync_outlined, color: Color(0xFFF59E0B), size: 22),
+                    child: const Icon(Icons.auto_awesome, color: Color(0xFF10B981), size: 22),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: Text(
-                      'Sync Queue Management',
-                      style: GoogleFonts.outfit(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                        color: isDark ? Colors.white : const Color(0xFF0F172A),
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Autonomous Sync Engine',
+                          style: GoogleFonts.outfit(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                            color: isDark ? Colors.white : const Color(0xFF0F172A),
+                          ),
+                        ),
+                        Text(
+                          'Zero-maintenance background synchronization & self-healing',
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            color: isDark ? Colors.white60 : Colors.black54,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
               content: SizedBox(
-                width: 480,
+                width: 520,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Autonomous engine status banner
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF0F291E) : const Color(0xFFECFDF5),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.verified_user_rounded, color: Color(0xFF10B981), size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Smart Auto-Healing Active',
+                                  style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 12, color: const Color(0xFF10B981)),
+                                ),
+                                Text(
+                                  'Heartbeats and noise are automatically dropped. Duplicate token updates are auto-compacted into the latest state without manual intervention.',
+                                  style: GoogleFonts.inter(fontSize: 11, color: isDark ? Colors.white70 : const Color(0xFF065F46)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       decoration: BoxDecoration(
@@ -701,18 +787,30 @@ class _ServerDashboardWithSyncState
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Pending Operations In Queue:', style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: isDark ? Colors.white70 : Colors.black87)),
-                          Text('$total items', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.bold, color: total > 0 ? const Color(0xFFF59E0B) : const Color(0xFF10B981))),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Queued For Cloud Sync:', style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: isDark ? Colors.white70 : Colors.black87)),
+                              Text('Legitimate offline operations buffered for Firestore', style: GoogleFonts.inter(fontSize: 11, color: isDark ? Colors.white38 : Colors.black45)),
+                            ],
+                          ),
+                          Text('$total items', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.bold, color: total > 0 ? const Color(0xFF38BDF8) : const Color(0xFF10B981))),
                         ],
                       ),
                     ),
                     const SizedBox(height: 12),
-                    Text('Queue Operations Breakdown:', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? Colors.white60 : Colors.black54)),
+                    Text('Buffered Operations Breakdown:', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? Colors.white60 : Colors.black54)),
                     const SizedBox(height: 6),
                     if (breakdown.isEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text('✅ No pending sync operations in queue.', style: GoogleFonts.inter(fontSize: 13, color: Colors.green)),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 16),
+                            const SizedBox(width: 6),
+                            Text('All local operations are synchronized with the cloud.', style: GoogleFonts.inter(fontSize: 13, color: const Color(0xFF10B981))),
+                          ],
+                        ),
                       )
                     else
                       ConstrainedBox(
@@ -720,7 +818,6 @@ class _ServerDashboardWithSyncState
                         child: ListView(
                           shrinkWrap: true,
                           children: breakdown.entries.map((e) {
-                            final isStale = ['activity', 'status_update', 'heartbeat', 'unknown', 'echo', 'broadcast'].contains(e.key);
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 3),
                               child: Row(
@@ -728,7 +825,7 @@ class _ServerDashboardWithSyncState
                                 children: [
                                   Row(
                                     children: [
-                                      Icon(isStale ? Icons.cleaning_services : Icons.sync, size: 14, color: isStale ? Colors.amber : Colors.blueAccent),
+                                      const Icon(Icons.sync_rounded, size: 14, color: Color(0xFF38BDF8)),
                                       const SizedBox(width: 6),
                                       Text(
                                         e.key,
@@ -748,22 +845,22 @@ class _ServerDashboardWithSyncState
               ),
               actions: [
                 TextButton.icon(
-                  icon: const Icon(Icons.cleaning_services_outlined, size: 16, color: Colors.amber),
-                  label: const Text('Purge Stale Items', style: TextStyle(color: Colors.amber)),
+                  icon: const Icon(Icons.auto_fix_high_rounded, size: 16, color: Color(0xFF10B981)),
+                  label: const Text('Auto-Optimize Queue', style: TextStyle(color: Color(0xFF10B981))),
                   onPressed: () {
                     final removed = _syncManager!.purgeInvalidQueue();
-                    _addLog('🧹 Cleaned $removed stale/no-op items from sync queue');
+                    _addLog('🧹 Auto-compacted & cleaned $removed stale/redundant items from sync queue');
                     setDialogState(() {});
                     setState(() => _syncQueueSize = _syncManager!.queueSize);
-                    _showSuccess('Purged $removed stale items. Clean queue size: ${_syncManager!.queueSize}');
+                    _showSuccess('Queue optimized. Clean queue size: ${_syncManager!.queueSize}');
                   },
                 ),
                 ElevatedButton.icon(
                   icon: const Icon(Icons.cloud_upload_outlined, size: 16, color: Colors.white),
-                  label: const Text('Force Fast Sync', style: TextStyle(color: Colors.white)),
+                  label: const Text('Force Cloud Sync', style: TextStyle(color: Colors.white)),
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF3B82F6)),
                   onPressed: () async {
-                    _addLog('🚀 Triggered Force Fast Sync from Queue Manager');
+                    _addLog('🚀 Triggered Cloud Sync from Queue Manager');
                     _syncManager!.triggerSync(force: true);
                     Navigator.of(ctx).pop();
                     _showSuccess('Sync in progress in background');
@@ -956,21 +1053,32 @@ class _ServerDashboardWithSyncState
   }
 
   Future<void> _logout() async {
-    if (_isRunning) await _stopServer();
+    if (_isRunning) {
+      try {
+        await _stopServer().timeout(const Duration(seconds: 2));
+      } catch (e) {
+        debugPrint('[Server] Stop server timeout during logout: $e');
+      }
+    }
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final box = Hive.box('app_settings');
         await box.delete('server_authenticated');
+        await box.delete('user_data');
+        await box.delete('currentUser');
+        await box.delete('user');
+        await box.delete('role');
+        await box.delete('auth_token');
         await box.flush();
       }
       await AuthService().signOut();
+    } catch (e) {
+      debugPrint('[Server] Logout error: $e');
+    } finally {
       if (mounted) {
-        Navigator.of(context)
+        Navigator.of(context, rootNavigator: true)
             .pushNamedAndRemoveUntil('/login', (route) => false);
       }
-    } catch (e) {
-      debugPrint('Logout error: $e');
-      _showError('Failed to logout: $e');
     }
   }
 
@@ -1021,18 +1129,10 @@ class _ServerDashboardWithSyncState
             ),
           ),
           child: Scaffold(
-            extendBodyBehindAppBar: true,
             appBar: AppBar(
-              backgroundColor: Colors.transparent,
+              backgroundColor: isDark ? const Color(0xFF080E1A) : Colors.white,
               elevation: 0,
-              flexibleSpace: ClipRect(
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                  child: Container(
-                    color: isDark ? const Color(0xFF070D18).withOpacity(0.92) : Colors.white.withOpacity(0.95),
-                  ),
-                ),
-              ),
+              scrolledUnderElevation: 0,
               title: Row(
                 children: [
                   Image.asset('assets/logo/gmwf-1.webp', height: 38, fit: BoxFit.contain),
@@ -1060,6 +1160,37 @@ class _ServerDashboardWithSyncState
               actions: [
                 _buildStatusBadge(),
                 const SizedBox(width: 10),
+                // App Version Badge
+                FutureBuilder<String>(
+                  future: AutoUpdateService.getAppVersion(),
+                  builder: (context, snap) {
+                    final ver = snap.data ?? AutoUpdateService.currentVersion;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.verified_rounded, size: 14, color: isDark ? const Color(0xFF10B981) : const Color(0xFF0F766E)),
+                          const SizedBox(width: 5),
+                          Text(
+                            'v$ver',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(width: 10),
                 // Dark / Light Mode Toggle Button
                 Container(
                   decoration: BoxDecoration(
@@ -1082,66 +1213,6 @@ class _ServerDashboardWithSyncState
                   ),
                 ),
                 const SizedBox(width: 10),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (context) => BiometricDeviceManagerPage(branchId: widget.branchId),
-                    ));
-                  },
-                  icon: const Icon(Icons.fingerprint_rounded, size: 16, color: Color(0xFF10B981)),
-                  label: Text(
-                    'Biometric Devices',
-                    style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A)),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
-                    elevation: 0,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (context) => const PythonTerminalScreen(),
-                    ));
-                  },
-                  icon: const Icon(Icons.terminal_rounded, size: 16, color: Color(0xFF38BDF8)),
-                  label: Text(
-                    'Python Terminal',
-                    style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A)),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
-                    elevation: 0,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (context) => ServerDataViewer(branchId: widget.branchId),
-                    ));
-                  },
-                  icon: Icon(Icons.lock_outline_rounded, size: 15, color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF475569)),
-                  label: Text(
-                    'Data Vault',
-                    style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A)),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
-                    elevation: 0,
-                  ),
-                ),
-                const SizedBox(width: 10),
                 Container(
                   decoration: BoxDecoration(
                     color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
@@ -1158,6 +1229,43 @@ class _ServerDashboardWithSyncState
                 ),
                 const SizedBox(width: 20),
               ],
+              bottom: !_isRunning
+                  ? null
+                  : PreferredSize(
+                      preferredSize: const Size.fromHeight(48),
+                      child: Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: isDark ? const Color(0xFF080E1A) : Colors.white,
+                          border: Border(
+                            top: BorderSide(color: isDark ? const Color(0xFF1E293B).withOpacity(0.6) : const Color(0xFFE2E8F0), width: 0.8),
+                            bottom: BorderSide(color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0), width: 1.0),
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          child: Row(
+                            children: [
+                              _navTabChip(0, 'Command Matrix', Icons.dashboard_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(1, 'Multi-Server Cluster', Icons.hub_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(2, 'Department Progress', Icons.domain_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(3, 'LAN Hardware & Devices', Icons.hardware_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(4, 'Biometric Devices', Icons.fingerprint_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(5, 'Python Terminal', Icons.terminal_rounded, isDark),
+                              const SizedBox(width: 8),
+                              _navTabChip(6, 'Data Vault', Icons.lock_outline_rounded, isDark),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
             ),
             body: Container(
               decoration: BoxDecoration(
@@ -1166,49 +1274,28 @@ class _ServerDashboardWithSyncState
               child: SafeArea(
                 child: !_isRunning
                     ? _buildStoppedView(isDark)
-                    : Column(
+                    : IndexedStack(
+                        index: _selectedTab,
                         children: [
-                          // Sub-navigation Tab Bar
-                          Container(
-                            decoration: BoxDecoration(
-                              color: isDark ? const Color(0xFF0B1324) : Colors.white,
-                              border: Border(bottom: BorderSide(color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0))),
-                            ),
-                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                            child: SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: Row(
-                                children: [
-                                  _navTabChip(0, 'Command Matrix', Icons.dashboard_rounded, isDark),
-                                  const SizedBox(width: 8),
-                                  _navTabChip(1, 'Multi-Server Cluster', Icons.hub_rounded, isDark),
-                                  const SizedBox(width: 8),
-                                  _navTabChip(2, 'Department Progress', Icons.domain_rounded, isDark),
-                                  const SizedBox(width: 8),
-                                  _navTabChip(3, 'Data Archive', Icons.storage_rounded, isDark),
-                                  const SizedBox(width: 8),
-                                  _navTabChip(4, 'LAN Hardware & Devices', Icons.hardware_rounded, isDark),
-                                ],
-                              ),
-                            ),
+                          _buildRunningView(isDark),
+                          MultiServerControlWidget(branchId: widget.branchId, onTriggerSync: _manualSync),
+                          DepartmentActivityWidget(branchId: widget.branchId),
+                          SingleChildScrollView(
+                            padding: const EdgeInsets.all(16),
+                            child: const LanHardwareStatusWidget(),
                           ),
-
-                          // Tab View Content
-                          Expanded(
-                            child: IndexedStack(
-                              index: _selectedTab,
-                              children: [
-                                _buildRunningView(isDark),
-                                MultiServerControlWidget(branchId: widget.branchId, onTriggerSync: _manualSync),
-                                DepartmentActivityWidget(branchId: widget.branchId),
-                                ServerDataViewer(branchId: widget.branchId),
-                                SingleChildScrollView(
-                                  padding: const EdgeInsets.all(16),
-                                  child: const LanHardwareStatusWidget(),
-                                ),
-                              ],
-                            ),
-                          ),
+                          _selectedTab == 4
+                              ? BiometricDeviceManagerPage(
+                                  branchId: widget.branchId,
+                                  onBack: () => setState(() => _selectedTab = 0),
+                                )
+                              : const SizedBox.shrink(),
+                          _selectedTab == 5
+                              ? PythonTerminalScreen(
+                                  onBack: () => setState(() => _selectedTab = 0),
+                                )
+                              : const SizedBox.shrink(),
+                          ServerDataViewer(branchId: widget.branchId),
                         ],
                       ),
               ),
@@ -2204,10 +2291,7 @@ class _ServerDashboardWithSyncState
                 const Spacer(),
                 TextButton(
                   onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => BiometricDeviceManagerPage(branchId: widget.branchId)),
-                    );
+                    setState(() => _selectedTab = 4);
                   },
                   style: TextButton.styleFrom(
                     backgroundColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
@@ -2496,16 +2580,32 @@ class _ServerDashboardWithSyncState
                 const SizedBox(height: 6),
                 Text('Branch ID: ${widget.branchId}', style: GoogleFonts.inter(color: const Color(0xFF94A3B8), fontSize: 13)),
                 const SizedBox(height: 28),
-                ElevatedButton.icon(
-                  onPressed: _startServer,
-                  icon: const Icon(Icons.power_settings_new_rounded, size: 18),
-                  label: const Text('Start LAN Server'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0284C7),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _startServer,
+                      icon: const Icon(Icons.power_settings_new_rounded, size: 18),
+                      label: const Text('Start LAN Server'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF0284C7),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      onPressed: () => _showLogoutDialog(context),
+                      icon: const Icon(Icons.logout_rounded, size: 18, color: Color(0xFFEF4444)),
+                      label: const Text('Logout', style: TextStyle(color: Colors.white70)),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Color(0xFF334155)),
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -2873,6 +2973,8 @@ class ServerSyncManager {
 
   Timer? _syncTimer;
   Timer? _catchUpTimer;
+  Timer? _downloadTimer;
+  Timer? _compactionTimer;
   bool _isSyncing = false;
   int _syncedThisRun = 0;
 
@@ -2905,9 +3007,16 @@ class ServerSyncManager {
     '',
   };
 
-  // ── [CATCH-UP] Per-client seen-serial tracking ─────────────────────────────
+   // ── [CATCH-UP] Per-client seen-serial tracking ─────────────────────────────
   final Map<String, Set<String>> _clientSeenSerials = {};
   static const int _maxSeenPerClient = 2000;
+
+  // ── [INV-CATCHUP] Per-client seen-stock tracking — mirrors seen-serials.
+  // Keyed as "medicineId|version" so a re-restock (new version) is treated
+  // as unseen and gets pushed again, while an already-delivered version is
+  // skipped instead of being re-blasted on every reconnect.
+  final Map<String, Set<String>> _clientSeenStock = {};
+  static const int _maxSeenStockPerClient = 5000;
 
   // ── Saved previous callbacks so the dashboard UI keeps working ─────────────
   Function(String socketId, Map<String, dynamic> info)? _prevOnClientConnected;
@@ -2950,6 +3059,7 @@ class ServerSyncManager {
   /// Purges no-op / heartbeat / invalid entries from the sync queue.
   int purgeInvalidQueue() {
     try {
+      LocalStorageService.purgeBloatedSyncQueue();
       if (!Hive.isBoxOpen(LocalStorageService.syncBox)) return 0;
       final box = Hive.box(LocalStorageService.syncBox);
       final keysToDelete = <dynamic>[];
@@ -2961,7 +3071,7 @@ class ServerSyncManager {
           continue;
         }
         final rawType = (val['type'] ?? val['event_type'] ?? '').toString().toLowerCase().trim();
-        if (_ignoredEventTypes.contains(rawType) || val['data'] == null) {
+        if (_ignoredEventTypes.contains(rawType) || (val['data'] == null && !rawType.startsWith('delete_'))) {
           keysToDelete.add(key);
         }
       }
@@ -3007,26 +3117,47 @@ class ServerSyncManager {
     }
   }
 
+  DateTime? _lastTokenDownloadTime;
+
+  Future<void> _downloadTodayTokens({bool force = false}) async {
+    final now = DateTime.now();
+    if (!force && _lastTokenDownloadTime != null && now.difference(_lastTokenDownloadTime!).inMinutes < 15) {
+      return;
+    }
+    _lastTokenDownloadTime = now;
+    try {
+      await LocalStorageService.downloadTodayTokens(branchId);
+    } catch (e) {
+      debugPrint('[SSM] _downloadTodayTokens error: $e');
+    }
+  }
+
   Future<void> start() async {
     debugPrint('ServerSyncManager: Starting for branch $branchId');
 
     // Clean any dead items on start
     purgeInvalidQueue();
 
+    // Initial sync of today's tokens from Firestore into server local Hive
+    _downloadTodayTokens().ignore();
+
     // ── Chain onClientConnected for catch-up push ────────────────────────────
     _prevOnClientConnected = server.onClientConnected;
     _prevOnClientDisconnected = server.onClientDisconnected;
 
-    server.onClientConnected = (socketId, info) {
+                  server.onClientConnected = (socketId, info) {
       _clientSeenSerials[socketId] = {};
+      _clientSeenStock[socketId] = {};
       _prevOnClientConnected?.call(socketId, info);
-      Future.delayed(const Duration(seconds: 1), () {
+      Future.delayed(const Duration(milliseconds: 500), () async {
         _pushCatchUpToSocket(socketId, Map<String, dynamic>.from(info));
+        _pushInventoryCatchUpToSocket(socketId, Map<String, dynamic>.from(info));
+        _pushPendingRequestsCatchUpToSocket(socketId, Map<String, dynamic>.from(info));
       });
     };
-
     server.onClientDisconnected = (socketId) {
       _clientSeenSerials.remove(socketId);
+      _clientSeenStock.remove(socketId);
       _prevOnClientDisconnected?.call(socketId);
     };
 
@@ -3037,9 +3168,14 @@ class ServerSyncManager {
       _periodicCatchUpAll();
     });
 
-    // ── High-performance periodic sync timer every 5 seconds ───────────────
-    _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    // ── High-performance periodic sync timer every 30 seconds ───────────────
+    _syncTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       triggerSync();
+    });
+
+    // ── Autonomous queue compaction & deduplication every 60 seconds ────────
+    _compactionTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      purgeInvalidQueue();
     });
 
     await triggerSync(force: true);
@@ -3051,15 +3187,21 @@ class ServerSyncManager {
     if (eventType == null) return;
     onMessageReceived(message);
 
-    // ── Handle catch-up / ACK events (do NOT queue for Firestore) ────────────
+        // ── Handle catch-up / ACK events (do NOT queue for Firestore) ────────────
     if (eventType == 'ack_serials') {
       _handleClientAck(message);
       return;
     }
 
-    if (eventType == 'request_catch_up') {
+    if (eventType == 'ack_stock_items') {
+      _handleStockAck(message);
+      return;
+    }
+
+        if (eventType == 'request_catch_up') {
       final socketId = message['_socketId']?.toString();
       if (socketId != null) {
+        _clientSeenSerials.remove(socketId); // Clear seen set so forced catchup works
         final clients = server.getConnectedClients();
         Map<String, dynamic>? info;
         for (final c in clients) {
@@ -3070,7 +3212,10 @@ class ServerSyncManager {
         }
         if (info != null) {
           debugPrint('[SSM] Catch-up requested by $socketId');
-          _pushCatchUpToSocket(socketId, info);
+          _downloadTodayTokens().then((_) {
+            _pushCatchUpToSocket(socketId, info!);
+            _pushInventoryCatchUpToSocket(socketId, info!);
+          });
         }
       }
       return;
@@ -3194,9 +3339,149 @@ class ServerSyncManager {
         case 'save_patient':
           try {
             LocalStorageService.saveLocalPatient(
-                {...data, 'branchId': msgBranch});
+                {...data, 'branchId': msgBranch},
+                isFromSync: true);
             debugPrint('[SSM] ✅ Patient saved locally');
           } catch (_) {}
+          break;
+
+        // [FIX-INV] Handle save_stock_item events so the server's local
+        // Hive stockBox stays up-to-date with inventory from proforma/register.
+        case 'save_stock_item':
+        case 'medicine_registered':
+        case 'add_proforma_stock':
+        case 'add_stock':
+          try {
+            final medData = data['data'] is Map
+                ? Map<String, dynamic>.from(data['data'] as Map)
+                : data;
+            final rawDelta = data['_quantityDelta'] ?? medData['_quantityDelta'];
+            final medId = (medData['id'] ?? medData['medicineId'] ?? medData['docId'])?.toString().trim();
+            if (medId != null && medId.isNotEmpty) {
+              medData['branchId'] ??= msgBranch;
+              medData['id'] ??= medId;
+              medData['medicineId'] ??= medId;
+              medData['docId'] ??= medId;
+              if (rawDelta != null) {
+                final delta = rawDelta is num ? rawDelta.toDouble() : double.tryParse(rawDelta.toString()) ?? 0.0;
+                final existing = LocalStorageService.getLocalInventoryItem(medId);
+                if (existing != null && delta != 0) {
+                  LocalStorageService.updateLocalStockQuantity(medId, delta);
+                } else {
+                  LocalStorageService.saveLocalInventoryItem(medData);
+                }
+              } else {
+                LocalStorageService.saveLocalInventoryItem(medData);
+              }
+              debugPrint('[SSM] ✅ Stock item saved locally on server: $medId');
+            }
+          } catch (e) {
+            debugPrint('[SSM] save_stock_item local save error: $e');
+          }
+          break;
+
+        case 'delete_stock_item':
+          try {
+            final medId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim();
+            if (medId != null && medId.isNotEmpty) {
+              LocalStorageService.deleteLocalStockItem(medId);
+              debugPrint('[SSM] ✅ Stock item deleted locally on server: $medId');
+            }
+          } catch (e) {
+            debugPrint('[SSM] delete_stock_item local error: $e');
+          }
+          break;
+
+        case 'token_reversal_approved':
+        case 'token_reversal':
+        case 'delete_entry':
+          try {
+            final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString().trim();
+            if (serial != null && serial.isNotEmpty) {
+              LocalStorageService.deleteLocalEntry(msgBranch, serial);
+              LocalStorageService.deleteLocalPrescription(serial);
+              for (final seenSet in _clientSeenSerials.values) {
+                seenSet.remove(serial);
+                seenSet.remove(serial.toLowerCase());
+                seenSet.remove(serial.toUpperCase());
+              }
+              final reqId = (data['requestId'] ?? data['id'])?.toString();
+              if (reqId != null && reqId.isNotEmpty) {
+                if (Hive.isBoxOpen('local_edit_requests')) {
+                  final box = Hive.box('local_edit_requests');
+                  final raw = box.get(reqId);
+                  if (raw is Map) {
+                    final updated = Map<String, dynamic>.from(raw);
+                    updated['status'] = 'approved';
+                    await box.put(reqId, updated);
+                  }
+                }
+              }
+              debugPrint('[SSM] ✅ Token reversed locally on server: $msgBranch-$serial');
+            }
+          } catch (e) {
+            debugPrint('[SSM] token_reversal local error: $e');
+          }
+          break;
+
+        case 'save_proforma_item':
+        case 'proforma_item_updated':
+          try {
+            final code = (data['code'] ?? data['barcode'] ?? '').toString().trim();
+            if (code.isNotEmpty) {
+              if (!Hive.isBoxOpen(LocalStorageService.masterProformaBox)) {
+                await Hive.openBox(LocalStorageService.masterProformaBox);
+              }
+              final box = Hive.box(LocalStorageService.masterProformaBox);
+              final item = Map<String, dynamic>.from(data);
+              item['isProformaMaster'] = true;
+              await box.put('proforma:$code', LocalStorageService.sanitize(item));
+              debugPrint('[SSM] ✅ Master Proforma item saved locally on server: $code');
+            }
+            final medId = (data['id'] ?? data['medicineId'] ?? data['docId'] ?? data['code'])?.toString().trim();
+            if (medId != null && medId.isNotEmpty) {
+              final medData = Map<String, dynamic>.from(data);
+              medData['branchId'] ??= msgBranch;
+              medData['id'] ??= medId;
+              LocalStorageService.saveLocalInventoryItem(medData);
+            }
+          } catch (e) {
+            debugPrint('[SSM] proforma save local error: $e');
+          }
+          break;
+
+        case 'request_created':
+        case 'save_inventory_edit_request':
+        case 'save_token_reversal_request':
+        case 'workflow_request':
+          try {
+            final reqMap = Map<String, dynamic>.from(data);
+            reqMap['status'] ??= 'pending';
+            await LocalStorageService.saveLocalEditRequest(reqMap);
+            debugPrint('[SSM] ✅ Edit request saved locally on server: ${reqMap['id'] ?? reqMap['requestId']}');
+          } catch (e) {
+            debugPrint('[SSM] edit request save local error: $e');
+          }
+          break;
+
+        case 'request_approved':
+        case 'request_rejected':
+        case 'workflow_decision':
+          try {
+            final reqId = (data['requestId'] ?? data['id'] ?? data['docId'])?.toString();
+            if (reqId != null && reqId.isNotEmpty) {
+              if (Hive.isBoxOpen('local_edit_requests')) {
+                final box = Hive.box('local_edit_requests');
+                final raw = box.get(reqId);
+                final map = raw is Map ? Map<String, dynamic>.from(raw) : Map<String, dynamic>.from(data);
+                map['status'] = eventType == 'request_rejected' ? 'rejected' : 'approved';
+                await box.put(reqId, map);
+                debugPrint('[SSM] ✅ Request $reqId status updated to ${map['status']} on server');
+              }
+            }
+          } catch (e) {
+            debugPrint('[SSM] request status update local error: $e');
+          }
           break;
 
         case 'save_madrassa_student':
@@ -3301,54 +3586,189 @@ class ServerSyncManager {
         entryCopy['dispenseStatus'] = 'dispensed';
       }
 
-      _sendToSocket(socketId, {
+      // Auto-resolve patient name from local_patients before pushing to client
+      final curPushName = (entryCopy['patientName'] ?? entryCopy['name'] ?? entryCopy['fullName'])?.toString().trim().toLowerCase() ?? '';
+      if (curPushName.isEmpty || curPushName == 'null' || curPushName == 'unknown' || curPushName == 'unknown patient') {
+        final pId = (entryCopy['patientId'] ?? entryCopy['id'] ?? '').toString().trim();
+        final pCnic = (entryCopy['patientCnic'] ?? entryCopy['cnic'] ?? entryCopy['guardianCnic'] ?? '').toString().trim();
+        if (pId.isNotEmpty) {
+          final lp = LocalStorageService.getLocalPatient(pId);
+          final lpName = (lp?['name'] ?? lp?['patientName'] ?? lp?['fullName'])?.toString().trim();
+          if (lpName != null && lpName.isNotEmpty && lpName.toLowerCase() != 'null' && lpName.toLowerCase() != 'unknown' && lpName.toLowerCase() != 'unknown patient') {
+            entryCopy['patientName'] = lpName;
+            entryCopy['name'] = lpName;
+          }
+        }
+        final nameAfterPid = (entryCopy['patientName'] ?? '').toString().trim().toLowerCase();
+        if ((nameAfterPid.isEmpty || nameAfterPid == 'null' || nameAfterPid == 'unknown' || nameAfterPid == 'unknown patient') && pCnic.isNotEmpty) {
+          final lp = LocalStorageService.getLocalPatientByCnic(pCnic);
+          final lpName = (lp?['name'] ?? lp?['patientName'] ?? lp?['fullName'])?.toString().trim();
+          if (lpName != null && lpName.isNotEmpty && lpName.toLowerCase() != 'null' && lpName.toLowerCase() != 'unknown' && lpName.toLowerCase() != 'unknown patient') {
+            entryCopy['patientName'] = lpName;
+            entryCopy['name'] = lpName;
+          }
+        }
+      }
+
+      final entrySent = _sendToSocket(socketId, {
         'event_type': 'save_entry',
         'branchId': branchId,
         'data': entryCopy,
         '_serverPush': true,
       });
 
+      bool allSent = entrySent;
+
       if (presc != null && presc.isNotEmpty) {
-        _sendToSocket(socketId, {
+        final prescSent = _sendToSocket(socketId, {
           'event_type': 'save_prescription',
           'branchId': branchId,
           'data': presc,
           '_serverPush': true,
         });
+        if (!prescSent) allSent = false;
       }
 
       if ((entryCopy['dispenseStatus'] ?? '') == 'dispensed') {
-        _sendToSocket(socketId, {
+        final dispSent = _sendToSocket(socketId, {
           'event_type': 'dispense_completed',
           'branchId': branchId,
           'data': entryCopy,
           '_serverPush': true,
         });
+        if (!dispSent) allSent = false;
       }
 
-      _clientSeenSerials[socketId] ??= {};
-      _clientSeenSerials[socketId]!.add(serial);
+      // [FIX-A] Only mark seen if ALL related messages (entry + presc + dispense)
+      // were confirmed successful on socket. If any failed, retry next sweep.
+      if (allSent) {
+        _clientSeenSerials[socketId] ??= {};
+        _clientSeenSerials[socketId]!.add(serial);
 
-      if (_clientSeenSerials[socketId]!.length > _maxSeenPerClient) {
-        final overflow =
-            _clientSeenSerials[socketId]!.length - _maxSeenPerClient;
-        _clientSeenSerials[socketId]!.removeAll(
-            _clientSeenSerials[socketId]!.take(overflow).toList());
+        if (_clientSeenSerials[socketId]!.length > _maxSeenPerClient) {
+          final overflow =
+              _clientSeenSerials[socketId]!.length - _maxSeenPerClient;
+          _clientSeenSerials[socketId]!.removeAll(
+              _clientSeenSerials[socketId]!.take(overflow).toList());
+        }
       }
 
       await Future.delayed(const Duration(milliseconds: 20));
     }
   }
 
-  void _sendToSocket(String socketId, Map<String, dynamic> payload) {
+  // ── [FIX-INV-CATCHUP] Push full current stock snapshot to a reconnecting
+  // client. Unlike tokens, inventory has no per-item "seen" tracking — we
+  // just replay every non-deleted stock item as a full save_stock_item
+  // (no _quantityDelta), which the existing client-side handler already
+  // treats as an authoritative overwrite via saveLocalInventoryItem. This
+  // guarantees a doctor/dispenser device that was offline during a restock
+  // ends up with correct totals once it reconnects, instead of relying on
+  // having been online for every individual live broadcast.
+   Future<void> _pushInventoryCatchUpToSocket(
+      String socketId, Map<String, dynamic> info) async {
     try {
-      server.sendToSocket(socketId, jsonEncode(payload));
+      if (!Hive.isBoxOpen(LocalStorageService.stockBox)) return;
+      final stockBox = Hive.box(LocalStorageService.stockBox);
+      final targetBranch = branchId.toLowerCase().trim();
+      final seen = _clientSeenStock[socketId] ??= {};
+      int pushed = 0;
+      int skipped = 0;
+
+      for (final k in stockBox.keys) {
+        final val = stockBox.get(k);
+        if (val is! Map) continue;
+        final item = Map<String, dynamic>.from(val);
+        if (item['status'] == 'deleted') continue;
+
+        final itemBranch = (item['branchId'] ?? '').toString().trim().toLowerCase();
+        if (itemBranch.isNotEmpty && itemBranch != targetBranch && itemBranch != 'all') {
+          continue;
+        }
+
+        final medicineId = (item['id'] ?? item['medicineId'] ?? item['docId'] ?? k).toString().trim();
+        if (medicineId.isEmpty) continue;
+
+        // [INV-CATCHUP] version = last-write timestamp on this item. A client
+        // that already acked this exact medicineId+version is skipped — a
+        // fresh restock bumps lastUpdated/updatedAt, producing a new version
+        // string, so it's always treated as unseen and gets pushed again.
+        final version = (item['updatedAt'] ?? item['lastUpdated'] ?? item['createdAt'] ?? '').toString();
+        final seenMarker = '$medicineId|$version';
+        if (seen.contains(seenMarker)) {
+          skipped++;
+          continue;
+        }
+
+        final sent = _sendToSocket(socketId, {
+          'event_type': 'save_stock_item',
+          'branchId': branchId,
+          'data': item,
+          '_serverPush': true,
+          'isCatchUp': true,
+          '_isReplay': true,
+        });
+        if (sent) {
+          pushed++;
+          seen.add(seenMarker);
+          if (seen.length > _maxSeenStockPerClient) {
+            final overflow = seen.length - _maxSeenStockPerClient;
+            seen.removeAll(seen.take(overflow).toList());
+          }
+        }
+        await Future.delayed(const Duration(milliseconds: 10));
+      }
+
+            if (pushed > 0 || skipped > 0) {
+        debugPrint('[SSM] 📦 Inventory catch-up → $socketId: $pushed pushed, $skipped already-seen');
+        onMessageReceived({
+          'event_type': 'inventory_catchup_pushed',
+          '_senderRole': 'server',
+          '_senderUsername': 'Inventory Catch-up',
+          'data': {'socketId': socketId, 'itemsPushed': pushed, 'itemsSkipped': skipped},
+        });
+      }
     } catch (e) {
-      debugPrint('[SSM] sendToSocket failed: $e');
+      debugPrint('[SSM] _pushInventoryCatchUpToSocket error: $e');
     }
   }
 
-  void _handleClientAck(Map<String, dynamic> msg) {
+  Future<void> _pushPendingRequestsCatchUpToSocket(
+      String socketId, Map<String, dynamic> info) async {
+    try {
+      if (!Hive.isBoxOpen('local_edit_requests')) return;
+      final box = Hive.box('local_edit_requests');
+      for (final key in box.keys) {
+        final raw = box.get(key);
+        if (raw is! Map) continue;
+        final reqMap = Map<String, dynamic>.from(raw);
+        final status = (reqMap['status'] ?? 'pending').toString().toLowerCase();
+        if (status != 'pending') continue;
+        final reqBranch = (reqMap['branchId'] ?? '').toString().toLowerCase().trim();
+        if (reqBranch.isNotEmpty && reqBranch != branchId.toLowerCase().trim()) continue;
+        _sendToSocket(socketId, {
+          'event_type': 'request_created',
+          'branchId': branchId,
+          'data': reqMap,
+          '_serverPush': true,
+        });
+        await Future.delayed(const Duration(milliseconds: 20));
+      }
+    } catch (e) {
+      debugPrint('[SSM] _pushPendingRequestsCatchUpToSocket error: $e');
+    }
+  }
+
+  bool _sendToSocket(String socketId, Map<String, dynamic> payload) {
+    try {
+      return server.sendToSocket(socketId, jsonEncode(payload));
+    } catch (e) {
+      debugPrint('[SSM] sendToSocket failed: $e');
+      return false;
+    }
+  }
+
+    void _handleClientAck(Map<String, dynamic> msg) {
     var socketId = (msg['_socketId'] ?? '').toString();
     final clientId = (msg['_clientId'] ?? '').toString();
     if (socketId.isEmpty && clientId.isNotEmpty) {
@@ -3375,15 +3795,50 @@ class ServerSyncManager {
     }
   }
 
+  // ── [INV-CATCHUP] Mirrors _handleClientAck — marks stock items the client
+  // has confirmed receiving so catch-up/periodic sweeps don't re-push them.
+  void _handleStockAck(Map<String, dynamic> msg) {
+    var socketId = (msg['_socketId'] ?? '').toString();
+    final clientId = (msg['_clientId'] ?? '').toString();
+    if (socketId.isEmpty && clientId.isNotEmpty) {
+      for (final client in server.getConnectedClients()) {
+        if (client['clientId']?.toString() == clientId) {
+          socketId = client['socketId']?.toString() ?? '';
+          break;
+        }
+      }
+    }
+    final items = msg['items'];
+    if (socketId.isEmpty || items is! List) return;
+
+    final seen = _clientSeenStock[socketId] ??= {};
+    for (final entry in items) {
+      if (entry is Map) {
+        final medicineId = (entry['medicineId'] ?? '').toString().trim();
+        final version = (entry['version'] ?? '').toString();
+        if (medicineId.isNotEmpty) {
+          seen.add('$medicineId|$version');
+        }
+      }
+    }
+
+    if (seen.length > _maxSeenStockPerClient) {
+      final overflow = seen.length - _maxSeenStockPerClient;
+      seen.removeAll(seen.take(overflow).toList());
+    }
+  }
+
   void pushCatchUpAll() => _periodicCatchUpAll();
 
-  void _periodicCatchUpAll() {
+        void _periodicCatchUpAll() {
     final clients = server.getConnectedClients();
     if (clients.isEmpty) return;
     for (final client in clients) {
       final socketId = client['socketId']?.toString();
       if (socketId == null || socketId.isEmpty) continue;
       _pushCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
+      _pushInventoryCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
+      _pushPendingRequestsCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
     }
   }
 
@@ -3424,7 +3879,8 @@ class ServerSyncManager {
         final bId       = (data['branchId'] as String?)?.trim() ?? branchId;
 
         if (serial.isNotEmpty && dateKey.isNotEmpty) {
-          box.put('${key}_serial', {
+          final serialStatusKey = 'sync_dispense_${bId}_${serial}_status';
+          box.put(serialStatusKey, {
             'type':      'update_serial_status',
             'branchId':  bId,
             'dateKey':   dateKey,
@@ -3458,7 +3914,8 @@ class ServerSyncManager {
                   : double.tryParse(qty.toString()) ?? 0.0;
               if (medicineId.isEmpty || qtyNum <= 0) continue;
 
-              box.put('${key}_inv_$i', {
+              final invKey = 'sync_dispense_${bId}_${serial}_inv_${medicineId.toLowerCase()}';
+              box.put(invKey, {
                 'type':       'update_inventory',
                 'branchId':   bId,
                 'medicineId': medicineId,
@@ -3482,6 +3939,69 @@ class ServerSyncManager {
         return;
       }
 
+            // [FIX-INV] save_stock_item: route delta restocks through update_inventory
+      // (FieldValue.increment), and deltaless full-object saves (new medicine
+      // registrations, edits from the proforma catalog) through register_medicine
+      // (plain set/merge). Without this branch, save_stock_item falls into the
+      // generic else-path below and the delta is lost, causing the server to
+      // treat an absolute quantity as an increment — double-counting stock.
+      if (eventType == 'save_stock_item' ||
+          eventType == 'medicine_registered' ||
+          eventType == 'save_proforma_item' ||
+          eventType == 'proforma_item_updated' ||
+          eventType == 'add_proforma_stock' ||
+          eventType == 'add_stock') {
+        final data = message['data'] is Map
+            ? Map<String, dynamic>.from(message['data'] as Map)
+            : Map<String, dynamic>.from(message);
+
+        final rawDelta = data['_quantityDelta'];
+        final medicineId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim();
+        final bId = (message['branchId'] as String?)?.trim().isNotEmpty == true
+            ? message['branchId'] as String
+            : branchId;
+
+        if (medicineId != null && medicineId.isNotEmpty) {
+          if (rawDelta != null) {
+            final delta = rawDelta is num
+                ? rawDelta.toDouble()
+                : double.tryParse(rawDelta.toString()) ?? 0.0;
+            if (delta != 0) {
+              box.put('sync_stock_delta_${bId}_${medicineId}_${DateTime.now().microsecondsSinceEpoch}', {
+                'type': 'update_inventory',
+                'branchId': bId,
+                'medicineId': medicineId,
+                'delta': delta,
+                'campId': data['campId'],
+                'dispensaryId': data['dispensaryId'],
+                'data': {
+                  'medicineId': medicineId,
+                  'delta': delta,
+                  'campId': data['campId'],
+                  'dispensaryId': data['dispensaryId'],
+                },
+                'createdAt': DateTime.now().toIso8601String(),
+                'attempts': 0,
+                'status': 'pending',
+              });
+            }
+          } else {
+            box.put('sync_stock_full_${bId}_$medicineId', {
+              'type': 'register_medicine',
+              'branchId': bId,
+              'medicineId': medicineId,
+              'campId': data['campId'],
+              'dispensaryId': data['dispensaryId'],
+              'data': data,
+              'createdAt': DateTime.now().toIso8601String(),
+              'attempts': 0,
+              'status': 'pending',
+            });
+          }
+        }
+        return;
+      }
+
       final opQueueType = _resolveQueueType(
           message['queueType'] ?? (message['data'] is Map ? message['data']['queueType'] : null));
 
@@ -3497,30 +4017,30 @@ class ServerSyncManager {
 
       const serialTypes = {'save_entry', 'save_prescription', 'update_serial_status'};
       final mappedType = _mapEventTypeToSyncType(eventType);
-      final isSerialType = serialTypes.contains(mappedType);
-
-      String targetKey = key;
+      final isSerialType = serialTypes.contains(mappedType) || serialTypes.contains(eventType);
       Map<String, dynamic> payloadData = (message['data'] is Map ? Map<String, dynamic>.from(message['data'] as Map) : Map<String, dynamic>.from(message));
 
+      String targetKey;
       if (isSerialType && rawSerial != null && rawSerial.isNotEmpty) {
-        final entityId = '${bId}_$rawSerial';
-        for (final k in box.keys) {
-          final existing = box.get(k);
-          if (existing is Map) {
-            final eType = (existing['type'] ?? '').toString();
-            final eSerial = (existing['serial'] ?? (existing['data'] is Map ? existing['data']['serial'] : ''))?.toString().trim().toUpperCase();
-            final eBranch = (existing['branchId'] ?? '').toString();
-            if (serialTypes.contains(eType) && eBranch == bId && eSerial == rawSerial) {
-              targetKey = k.toString();
-              if (existing['data'] is Map) {
-                payloadData = {
-                  ...Map<String, dynamic>.from(existing['data'] as Map),
-                  ...payloadData,
-                };
-              }
-              break;
-            }
-          }
+        targetKey = 'sync_${bId}_${rawSerial}_$mappedType';
+      } else if (mappedType == 'save_attendance') {
+        final empId = (payloadData['employeeId'] ?? payloadData['entityId'] ?? payloadData['id'] ?? payloadData['pin'] ?? '').toString().trim();
+        final dtKey = (message['dateKey'] ?? payloadData['date'] ?? payloadData['dateKey'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString().trim();
+        targetKey = 'sync_${bId}_att_${empId}_$dtKey';
+      } else if (mappedType == 'save_school_daily_log' || mappedType == 'save_school_teacher_log' || mappedType == 'save_madrassa_daily_log') {
+        final dtKey = (message['dateKey'] ?? payloadData['date'] ?? payloadData['dateKey'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString().trim();
+        targetKey = 'sync_${bId}_${mappedType}_$dtKey';
+      } else {
+        targetKey = key;
+      }
+
+      if (isSerialType && rawSerial != null && rawSerial.isNotEmpty) {
+        final existing = box.get(targetKey);
+        if (existing is Map && existing['data'] is Map) {
+          payloadData = {
+            ...Map<String, dynamic>.from(existing['data'] as Map),
+            ...payloadData,
+          };
         }
       }
 
@@ -3566,12 +4086,21 @@ class ServerSyncManager {
       case 'save_faculty_attendance':
       case 'save_student_attendance':
         return 'save_attendance';
+      // [FIX-INV] Map save_stock_item to register_medicine so _syncToFirestore
+      // routes it to the inventory collection instead of the generic sync_records.
+            case 'save_stock_item':
+      case 'medicine_registered':
+        return 'register_medicine';
+      case 'token_reversal':
+      case 'token_reversal_approved':
+      case 'delete_entry':
+        return eventType;
       default:
         return eventType;
     }
   }
 
-  String _todayKey() => DateFormat('ddMMyy').format(DateTime.now());
+  String _todayKey() => CampSessionService.resolveShiftAndDateKey(null, branchId).dateKey;
 
   /// Fast parallelized sync processor with auto-purging
   Future<void> triggerSync({bool force = false}) async {
@@ -3697,7 +4226,18 @@ class ServerSyncManager {
           updated['attempts'] = attempts;
           updated['lastError'] = e.toString();
           if (attempts >= 5) {
-            debugPrint('[SSM] Dropping unrecoverable item after 5 failures: ${updated['type']} — $e');
+            debugPrint('[SSM] 🛡️ Quarantining unrecoverable item after 5 failures: ${updated['type']} — $e');
+            try {
+              if (!Hive.isBoxOpen('dead_letter_queue')) {
+                await LocalStorageService.openBoxSafe('dead_letter_queue');
+              }
+              final dlq = Hive.box('dead_letter_queue');
+              await dlq.put('dlq_${DateTime.now().millisecondsSinceEpoch}_$key', {
+                ...updated,
+                'fatalError': e.toString(),
+                'quarantinedAt': DateTime.now().toIso8601String(),
+              });
+            } catch (_) {}
             await box.delete(key);
           } else {
             await box.put(key, updated);
@@ -3856,8 +4396,6 @@ class ServerSyncManager {
             .collection(qt).doc(s)
             .set(statusPatch, SetOptions(merge: true));
         debugPrint('✅ update_serial_status → serials/$campDocKey/$qt/$s');
-        break;
-
       // ── Delete patient ───────────────────────────────────────────────────
       case 'delete_patient':
         final pid = (cleanData['patientId'] as String? ?? cleanData['id'] as String? ?? '').trim();
@@ -3869,12 +4407,36 @@ class ServerSyncManager {
         debugPrint('✅ delete_patient → patients/$pid');
         break;
 
-      // ── Fast Atomic Inventory Update ─────────────────────────────────────
+      case 'token_reversal':
+      case 'token_reversal_approved':
+      case 'delete_entry':
+        final s = effectiveSerial;
+        final dk = effectiveDateKey;
+        final qt = _validQueueTypes.contains(effectiveQueueType)
+            ? effectiveQueueType
+            : _resolveQueueType(cleanData['queueType']);
+        if (s.isEmpty) {
+          debugPrint('⚠️ $type: missing serial — skipping');
+          return;
+        }
+        final campDocKey = CampSessionService.getCampDateDocId(
+          branchId: effectiveBranchId,
+          dateKey: dk,
+          campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString(),
+          dispensaryTag: cleanData['dispensaryTag']?.toString(),
+          serial: s,
+        );
+        await db
+            .collection('branches').doc(effectiveBranchId)
+            .collection('serials').doc(campDocKey)
+            .collection(qt).doc(s)
+            .delete();
+        debugPrint('✅ $type → deleted serials/$campDocKey/$qt/$s');
+        break;
+
+      // ── Delta Inventory Update — increments ONLY, never reads 'quantity' as a delta ──
       case 'update_inventory':
       case 'add_inventory_stock':
-      case 'register_medicine':
-      case 'add_stock':
-      case 'add_proforma_stock':
         final mid = medicineId.isNotEmpty
             ? medicineId
             : (cleanData['medicineId'] as String? ?? cleanData['id'] as String? ?? '').trim();
@@ -3882,33 +4444,59 @@ class ServerSyncManager {
           debugPrint('⚠️ update_inventory: missing medicineId — skipping');
           return;
         }
+        // [FIX-INV-2] NEVER fall back to cleanData['quantity'] here — that field
+        // is an absolute total, not a delta. Reading it as a delta was the root
+        // cause of restock double-counting in Firestore. Only an explicit
+        // 'delta' value is ever applied as an increment.
         final d = delta != 0.0
             ? delta
             : (cleanData['delta'] is num
                 ? (cleanData['delta'] as num).toDouble()
-                : double.tryParse(cleanData['delta']?.toString() ?? cleanData['quantity']?.toString() ?? '') ?? 0.0);
+                : double.tryParse(cleanData['delta']?.toString() ?? '') ?? 0.0);
+        if (d == 0.0) {
+          debugPrint('⚠️ update_inventory: zero/missing delta for $mid — skipping (no-op, will not touch quantity)');
+          break;
+        }
         final invCol = CampSessionService.getCampInventoryPath(
           branchId: effectiveBranchId,
           campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString(),
           serial: cleanData['serial']?.toString(),
         );
-
         final docRef = db
             .collection('branches').doc(effectiveBranchId)
             .collection(invCol).doc(mid);
-
-        if (d != 0.0) {
-          await docRef.set({
-            'quantity': FieldValue.increment(d),
-            'lastUpdated': FieldValue.serverTimestamp(),
-            if (cleanData.containsKey('medicineName')) 'medicineName': cleanData['medicineName'],
-            if (cleanData.containsKey('category')) 'category': cleanData['category'],
-            if (cleanData.containsKey('unit')) 'unit': cleanData['unit'],
-          }, SetOptions(merge: true));
-        } else {
-          await docRef.set(cleanData, SetOptions(merge: true));
-        }
+        await docRef.set({
+          'quantity': FieldValue.increment(d),
+          'lastUpdated': FieldValue.serverTimestamp(),
+          if (cleanData.containsKey('medicineName')) 'medicineName': cleanData['medicineName'],
+          if (cleanData.containsKey('category')) 'category': cleanData['category'],
+          if (cleanData.containsKey('unit')) 'unit': cleanData['unit'],
+        }, SetOptions(merge: true));
         debugPrint('✅ update_inventory → $invCol/$mid delta=$d');
+        break;
+
+      // ── Absolute Inventory Object Write — plain set/merge, NEVER FieldValue.increment ──
+      case 'register_medicine':
+      case 'add_stock':
+      case 'add_proforma_stock':
+      case 'save_stock_item':
+        final mid2 = medicineId.isNotEmpty
+            ? medicineId
+            : (cleanData['medicineId'] as String? ?? cleanData['id'] as String? ?? cleanData['docId'] as String? ?? '').trim();
+        if (mid2.isEmpty) {
+          debugPrint('⚠️ register_medicine: missing medicineId — skipping');
+          return;
+        }
+        final invCol2 = CampSessionService.getCampInventoryPath(
+          branchId: effectiveBranchId,
+          campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString(),
+          serial: cleanData['serial']?.toString(),
+        );
+        await db
+            .collection('branches').doc(effectiveBranchId)
+            .collection(invCol2).doc(mid2)
+            .set(cleanData, SetOptions(merge: true));
+        debugPrint('✅ register_medicine → $invCol2/$mid2 (absolute set/merge, no increment)');
         break;
 
       // ── Attendance record sync ────────────────────────────────────────────
@@ -4007,10 +4595,23 @@ class ServerSyncManager {
         }
         break;
 
+      case 'save_madrassa_daily_log':
       case 'save_madrassa_log':
-        final studentId = (cleanData['studentId'] ?? cleanData['id'] ?? '').toString().trim();
-        if (studentId.isNotEmpty) {
-          await db.collection('branches').doc(effectiveBranchId).collection('madrassa_students').doc(studentId).set(cleanData, SetOptions(merge: true));
+      case 'save_madrassa_attendance':
+        final dateKey = (cleanData['dateKey'] ?? cleanData['id'] ?? '').toString().trim();
+        final logData = cleanData['data'] is Map
+            ? Map<String, dynamic>.from(cleanData['data'])
+            : (cleanData['logData'] is Map ? Map<String, dynamic>.from(cleanData['logData']) : cleanData);
+        if (dateKey.isNotEmpty) {
+          await db.collection('branches').doc(effectiveBranchId).collection('madrassa_daily_logs').doc(dateKey).set(logData, SetOptions(merge: true));
+        }
+        break;
+
+      case 'save_madrassa_fee_payment':
+        final docId = (cleanData['id'] ?? '${cleanData['year']}_${cleanData['month']}_${cleanData['studentId']}').toString().trim();
+        final feeData = cleanData['data'] is Map ? Map<String, dynamic>.from(cleanData['data']) : cleanData;
+        if (docId.isNotEmpty) {
+          await db.collection('branches').doc(effectiveBranchId).collection('madrassa_fee_payments').doc(docId).set(feeData, SetOptions(merge: true));
         }
         break;
 
@@ -4052,8 +4653,10 @@ class ServerSyncManager {
   }
 
   Future<void> stop() async {
+    _downloadTimer?.cancel();
     _syncTimer?.cancel();
     _catchUpTimer?.cancel();
+    _compactionTimer?.cancel();
     _clientSeenSerials.clear();
 
     if (_prevOnClientConnected != null) {
@@ -4068,4 +4671,3 @@ class ServerSyncManager {
     debugPrint('ServerSyncManager: Stopped');
   }
 }
-

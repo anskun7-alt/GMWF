@@ -20,6 +20,7 @@ import 'branches_register.dart';
 import 'dispensary/patient_detail_screen.dart';
 import 'settings/biometric_device_manager_page.dart';
 import '../services/local_storage_service.dart';
+import '../services/branch_record_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -27,24 +28,26 @@ import '../services/local_storage_service.dart';
 
 String _resolvePatientCampLabel(Map<String, dynamic> p, String branchId) {
   final parts = <String>[];
+  final hasCamps = CampSessionService.hasCampsForBranch(branchId);
 
-  // 1. Resolve Camp / Facility
-  final cId = (p['dispensaryId'] ?? p['campId'] ?? p['subDispensaryId'])?.toString().trim();
-  if (cId != null && cId.isNotEmpty && cId != 'all' && cId != 'main') {
-    parts.add(CampSessionService.getCampLabel(cId));
-  } else {
-    final serial = (p['serial'] ?? p['id'] ?? '').toString();
-    final sParts = serial.split('-');
-    if (sParts.length > 2) {
-      final tag = sParts[1].toUpperCase();
-      if (tag == 'SADD' || tag == 'SAD' || tag == 'SADDAR' || tag == 'KAP' || tag == 'KAPAYYA') {
-        parts.add('Saddar Dispensary');
-      } else if (tag == 'HC' || tag == 'HAJI' || tag == 'HAJICAMP') {
-        parts.add('Haji Camp Dispensary');
-      } else if (tag == 'GRT' || tag == 'GJT') {
-        parts.add('Gujrat Main');
-      } else if (tag.isNotEmpty) {
-        parts.add(tag);
+  // 1. Resolve Camp / Facility (only for multi-camp branches like Karachi)
+  if (hasCamps) {
+    final cId = (p['dispensaryId'] ?? p['campId'] ?? p['subDispensaryId'])?.toString().trim();
+    if (cId != null && cId.isNotEmpty && cId != 'all' && cId != 'main') {
+      final label = CampSessionService.getCampLabel(cId, branchId);
+      if (label.isNotEmpty) parts.add(label);
+    } else {
+      final serial = (p['serial'] ?? p['id'] ?? '').toString();
+      final sParts = serial.split('-');
+      if (sParts.length > 2) {
+        final tag = sParts[1].toUpperCase();
+        if (tag == 'SADD' || tag == 'SAD' || tag == 'SADDAR' || tag == 'KAP' || tag == 'KAPAYYA') {
+          parts.add('Saddar Dispensary');
+        } else if (tag == 'HC' || tag == 'HAJI' || tag == 'HAJICAMP') {
+          parts.add('Haji Camp Dispensary');
+        } else if (tag.isNotEmpty) {
+          parts.add(tag);
+        }
       }
     }
   }
@@ -173,13 +176,48 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   String _selectedCampFilter = 'all'; // 'all', 'haji', 'saddar'
   final TextEditingController _searchController = TextEditingController();
 
+  @override
+  void initState() {
+    super.initState();
+    final initialId = widget.branchId ?? widget.initialBranchId ?? LocalStorageService.getActiveBranchId();
+    if (initialId != null && initialId.isNotEmpty && initialId != 'all') {
+      _selectedBranchId = initialId;
+    }
+  }
+
+  @override
+  void didUpdateWidget(Branches oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.branchId != oldWidget.branchId || widget.initialBranchId != oldWidget.initialBranchId) {
+      final newId = widget.branchId ?? widget.initialBranchId;
+      if (newId != null && newId.isNotEmpty && newId != 'all') {
+        setState(() {
+          _selectedBranchId = newId;
+          _currentPage = 1;
+        });
+      }
+    }
+  }
+
+  Map<String, dynamic>? _cachedPerfData;
+  String? _cachedPerfKey;
+  DateTime? _lastPerfComputeTime;
+
   Map<String, dynamic> _computeRealPerformanceData(String branchId, String range) {
+    final curKey = '$branchId|$range|$_selectedCampFilter';
+    final now = DateTime.now();
+    if (_cachedPerfKey == curKey &&
+        _cachedPerfData != null &&
+        _lastPerfComputeTime != null &&
+        now.difference(_lastPerfComputeTime!).inSeconds < 30) {
+      return _cachedPerfData!;
+    }
+
     int numDays = 7;
     if (range == '14d') numDays = 14;
     if (range == '30d') numDays = 30;
-    if (range == 'month') numDays = DateTime.now().day.clamp(1, 31);
+    if (range == 'month') numDays = now.day.clamp(1, 31);
 
-    final now = DateTime.now();
     final days = <DateTime>[];
     for (int i = numDays - 1; i >= 0; i--) {
       days.add(DateTime(now.year, now.month, now.day).subtract(Duration(days: i)));
@@ -239,18 +277,16 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
       }
     } catch (_) {}
 
-    return {
+    final result = {
       'tokens': tokensList,
       'prescriptions': prescList,
       'dispensary': dispList,
       'labels': labels,
     };
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedBranchId = widget.branchId ?? widget.initialBranchId;
+    _cachedPerfData = result;
+    _cachedPerfKey = curKey;
+    _lastPerfComputeTime = now;
+    return result;
   }
 
   @override
@@ -500,6 +536,11 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     );
   }
 
+  bool get _isSupervisorUser {
+    final role = LocalStorageService.getActiveUserRole().toLowerCase().trim();
+    return role.contains('supervisor') || widget.isManager == true;
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -534,14 +575,28 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               }
 
               // Resolve active branch
-              var activeId = _selectedBranchId;
+              var activeId = (widget.branchId != null && widget.branchId!.isNotEmpty && widget.branchId != 'all')
+                  ? widget.branchId
+                  : _selectedBranchId;
+              if (activeId == null || activeId.isEmpty || activeId == 'all') {
+                if (widget.initialBranchId != null && widget.initialBranchId!.isNotEmpty && widget.initialBranchId != 'all') {
+                  activeId = widget.initialBranchId;
+                }
+              }
               if (activeId == null || activeId.isEmpty) {
                 final externalTabId = ref.watch(selectedBranchTabIdProvider);
                 if (externalTabId != null && externalTabId.isNotEmpty) {
                   activeId = externalTabId;
-                } else {
-                  activeId = branchMaps.first['id'] as String;
                 }
+              }
+              if (activeId == null || activeId.isEmpty || activeId == 'all') {
+                final localActive = LocalStorageService.getActiveBranchId();
+                if (localActive != null && localActive.isNotEmpty && localActive != 'all') {
+                  activeId = localActive;
+                }
+              }
+              if (activeId == null || activeId.isEmpty) {
+                activeId = branchMaps.first['id'] as String;
               }
 
               final matchIdx = branchMaps.indexWhere((m) {
@@ -550,25 +605,37 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 return id == target || id.contains(target) || target.contains(id);
               });
 
-              final currentBranch = matchIdx != -1 ? branchMaps[matchIdx] : branchMaps.first;
+              final currentBranch = matchIdx != -1
+                  ? branchMaps[matchIdx]
+                  : {'id': activeId, 'name': activeId.toUpperCase()};
               final branchId = currentBranch['id'] as String;
               _selectedBranchName = currentBranch['name'] as String;
 
-              return SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildHeader(context, t, branchMaps, branchId),
-                    const SizedBox(height: 20),
-                    _buildMetricsCards(context, t, branchId),
-                    const SizedBox(height: 20),
-                    _buildMiddleSection(context, t, branchId),
-                    const SizedBox(height: 24),
-                    _buildPatientRecordsSection(context, t, branchId),
-                    const SizedBox(height: 40),
-                  ],
-                ),
+              return LayoutBuilder(
+                builder: (context, constraints) {
+                  final isMobile = constraints.maxWidth < 650;
+                  return SingleChildScrollView(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isMobile ? 12 : 24,
+                      vertical: isMobile ? 14 : 20,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildHeader(context, t, branchMaps, branchId),
+                        const SizedBox(height: 16),
+                        _buildMetricsCards(context, t, branchId),
+                        if (!_isSupervisorUser) ...[
+                          const SizedBox(height: 16),
+                          _buildMiddleSection(context, t, branchId),
+                        ],
+                        const SizedBox(height: 20),
+                        _buildPatientRecordsSection(context, t, branchId),
+                        const SizedBox(height: 36),
+                      ],
+                    ),
+                  );
+                },
               );
             },
           ),
@@ -682,78 +749,92 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildHeaderActionButtons(BuildContext context, RoleThemeData t, String dateRangeLabel) {
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        // Date Range Selector
-        OutlinedButton.icon(
-          onPressed: () => _showDateRangePicker(context, t),
-          icon: Icon(Icons.calendar_today_rounded, size: 14, color: t.textSecondary),
-          label: Text(dateRangeLabel, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary)),
-          style: OutlinedButton.styleFrom(
-            backgroundColor: t.bgCard,
-            side: BorderSide(color: t.bgRule),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        ),
-
-        // + New Branch Button
-        if (widget.showRegisterButton)
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Date Range Selector
           OutlinedButton.icon(
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BranchesRegister())),
-            icon: Icon(Icons.add_business_rounded, size: 16, color: t.accent),
-            label: Text("New Branch", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.accent)),
+            onPressed: () => _showDateRangePicker(context, t),
+            icon: Icon(Icons.calendar_today_rounded, size: 13, color: t.accent),
+            label: Text(dateRangeLabel, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.textPrimary)),
             style: OutlinedButton.styleFrom(
-              backgroundColor: t.accent.withValues(alpha: 0.08),
-              side: BorderSide(color: t.accent.withValues(alpha: 0.3)),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              backgroundColor: t.bgCard,
+              side: BorderSide(color: t.bgRule),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
           ),
+          const SizedBox(width: 8),
 
-        // + New Token Button
-        ElevatedButton.icon(
-          onPressed: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => PatientDetailScreen(
-                patientId: '',
-                isOnline: true,
-                localBox: Hive.box('local_patients'),
-                branchId: _selectedBranchId ?? 'karachi',
-                doctorId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
-                isAdmin: true,
+          // + New Branch Button
+          if (!_isSupervisorUser && widget.showRegisterButton) ...[
+            OutlinedButton.icon(
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BranchesRegister())),
+              icon: Icon(Icons.add_business_rounded, size: 14, color: t.accent),
+              label: Text("New Branch", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.accent)),
+              style: OutlinedButton.styleFrom(
+                backgroundColor: t.accent.withValues(alpha: 0.08),
+                side: BorderSide(color: t.accent.withValues(alpha: 0.25)),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
             ),
-          ),
-          icon: const Icon(Icons.add_rounded, size: 16, color: Colors.white),
-          label: const Text("New Token", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF6366F1),
-            elevation: 0,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        ),
-      ],
+            const SizedBox(width: 8),
+          ],
+
+          // + New Token Button
+          if (!_isSupervisorUser) ...[
+            ElevatedButton.icon(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => PatientDetailScreen(
+                    patientId: '',
+                    isOnline: true,
+                    localBox: Hive.box('local_patients'),
+                    branchId: _selectedBranchId ?? 'karachi',
+                    doctorId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
+                    isAdmin: true,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.add_rounded, size: 15, color: Colors.white),
+              label: const Text("New Token", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF6366F1),
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 2. Top 3 KPI Summary Cards (Tokens, Prescriptions, Dispensary)
+  // 2. Top 4 KPI Summary Cards (Tokens, Prescriptions, Dispensary, Peak Record)
   // ───────────────────────────────────────────────────────────────────────────
 
   Widget _buildMetricsCards(BuildContext context, RoleThemeData t, String branchId) {
     final summaryAsync = ref.watch(serialsSummaryProvider(branchId));
     final data = summaryAsync.value ?? {};
 
-    final totalTokens = data['total'] ?? 0;
-    final zakatTokens = data['v1'] ?? 0;
-    final nonZakatTokens = data['v2'] ?? 0;
-    final gmwfTokens = data['v3'] ?? 0;
+    final totalTokens = (data['total'] ?? 0) as int;
+    final zakatTokens = (data['v1'] ?? 0) as int;
+    final nonZakatTokens = (data['v2'] ?? 0) as int;
+    final gmwfTokens = (data['v3'] ?? 0) as int;
+
+    final zakatAmount = zakatTokens * 20;
+    final nonZakatAmount = nonZakatTokens * 100;
+    final totalAmount = zakatAmount + nonZakatAmount;
+    final fmtTotal = NumberFormat('#,###').format(totalAmount);
+    final fmtZakat = NumberFormat('#,###').format(zakatAmount);
+    final fmtNonZakat = NumberFormat('#,###').format(nonZakatAmount);
 
     final prescribed = data['presc_prescribed'] ?? 0;
     final waitingDoctor = data['presc_waiting'] ?? 0;
@@ -761,66 +842,177 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final dispensed = data['disp_dispensed'] ?? 0;
     final pendingDisp = data['disp_pending'] ?? 0;
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final cardWidth = constraints.maxWidth > 800 ? (constraints.maxWidth - 32) / 3 : constraints.maxWidth;
+    return ValueListenableBuilder<String?>(
+      valueListenable: CampSessionService.activeCampNotifier,
+      builder: (context, activeCamp, _) {
+        final effCamp = activeCamp ?? CampSessionService.getActiveCamp(branchId);
+        final records = BranchRecordService.getBranchRecords(
+          branchId,
+          campId: effCamp,
+          todayCount: totalTokens,
+        );
+        final peakCount = records.peakRecord.count;
+        final peakDate = records.peakRecord.dateFormatted.isNotEmpty
+            ? records.peakRecord.dateFormatted
+            : "No history";
 
-        return Wrap(
-          spacing: 16,
-          runSpacing: 16,
-          children: [
-            SizedBox(
-              width: cardWidth,
-              child: _buildKpiCard(
-                title: "Total Tokens",
-                mainCount: "$totalTokens",
-                trendText: "+12% vs yesterday",
-                isPositiveTrend: true,
-                badgeColor: const Color(0xFF6366F1),
-                badgeIcon: Icons.people_alt_rounded,
-                subItems: [
-                  {'label': 'Zakat', 'val': '$zakatTokens'},
-                  {'label': 'Non-Zakat', 'val': '$nonZakatTokens'},
-                  {'label': 'GMWF', 'val': '$gmwfTokens'},
-                ],
-                t: t,
-              ),
-            ),
-            SizedBox(
-              width: cardWidth,
-              child: _buildKpiCard(
-                title: "Total Prescriptions",
-                mainCount: "$prescribed",
-                trendText: "+8% vs yesterday",
-                isPositiveTrend: true,
-                badgeColor: const Color(0xFF10B981),
-                badgeIcon: Icons.assignment_rounded,
-                subItems: [
-                  {'label': 'Waiting', 'val': '$waitingDoctor'},
-                  {'label': 'Prescribed', 'val': '$prescribed'},
-                ],
-                t: t,
-              ),
-            ),
-            SizedBox(
-              width: cardWidth,
-              child: _buildKpiCard(
-                title: "Total Dispensary",
-                mainCount: "$dispensed",
-                trendText: "+5% vs yesterday",
-                isPositiveTrend: true,
-                badgeColor: const Color(0xFFF59E0B),
-                badgeIcon: Icons.medication_liquid_rounded,
-                subItems: [
-                  {'label': 'Pending', 'val': '$pendingDisp'},
-                  {'label': 'Dispensed', 'val': '$dispensed'},
-                ],
-                t: t,
-              ),
-            ),
-          ],
+        final peakTitle = (effCamp != null && effCamp.isNotEmpty && effCamp != 'all')
+            ? "${CampSessionService.getCampLabel(effCamp)} Peak"
+            : "All-Time Peak";
+
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final isWide = constraints.maxWidth > 1350;
+            final isMedium = constraints.maxWidth > 750;
+            final cardWidth = isWide
+                ? (constraints.maxWidth - 64) / 5
+                : (isMedium ? (constraints.maxWidth - 16) / 2 : constraints.maxWidth);
+
+            return Wrap(
+              spacing: 16,
+              runSpacing: 16,
+              children: [
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: "Total Tokens",
+                    mainCount: NumberFormat('#,###').format(totalTokens),
+                    trendText: "Today",
+                    isPositiveTrend: true,
+                    badgeColor: const Color(0xFF6366F1),
+                    badgeIcon: Icons.people_alt_rounded,
+                    symbolType: MetricSymbolType.tokens,
+                    subItems: [
+                      {'label': 'Zakat (Rs 20)', 'val': NumberFormat('#,###').format(zakatTokens)},
+                      {'label': 'Non-Zakat (Rs 100)', 'val': NumberFormat('#,###').format(nonZakatTokens)},
+                      {'label': 'GMWF (Free)', 'val': NumberFormat('#,###').format(gmwfTokens)},
+                    ],
+                    t: t,
+                  ),
+                ),
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: "Total Token Collection",
+                    mainCount: "PKR $fmtTotal",
+                    trendText: "Revenue",
+                    isPositiveTrend: true,
+                    badgeColor: const Color(0xFF0D9488),
+                    badgeIcon: Icons.account_balance_wallet_rounded,
+                    symbolType: MetricSymbolType.revenue,
+                    subItems: [
+                      {'label': 'Zakat Rec.', 'val': 'Rs $fmtZakat'},
+                      {'label': 'Non-Zakat Rec.', 'val': 'Rs $fmtNonZakat'},
+                      {'label': 'Free Tokens', 'val': 'Rs 0'},
+                    ],
+                    t: t,
+                  ),
+                ),
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: "Total Prescriptions",
+                    mainCount: NumberFormat('#,###').format(prescribed),
+                    trendText: "+8% vs yest",
+                    isPositiveTrend: true,
+                    badgeColor: const Color(0xFF10B981),
+                    badgeIcon: Icons.assignment_rounded,
+                    symbolType: MetricSymbolType.prescriptions,
+                    subItems: [
+                      {'label': 'Waiting', 'val': NumberFormat('#,###').format(waitingDoctor)},
+                      {'label': 'Prescribed', 'val': NumberFormat('#,###').format(prescribed)},
+                    ],
+                    t: t,
+                  ),
+                ),
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: "Total Dispensary",
+                    mainCount: NumberFormat('#,###').format(dispensed),
+                    trendText: "+5% vs yest",
+                    isPositiveTrend: true,
+                    badgeColor: const Color(0xFFF59E0B),
+                    badgeIcon: Icons.medication_liquid_rounded,
+                    symbolType: MetricSymbolType.dispensary,
+                    subItems: [
+                      {'label': 'Pending', 'val': NumberFormat('#,###').format(pendingDisp)},
+                      {'label': 'Dispensed', 'val': NumberFormat('#,###').format(dispensed)},
+                    ],
+                    t: t,
+                  ),
+                ),
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: peakTitle,
+                    mainCount: NumberFormat('#,###').format(peakCount),
+                    trendText: records.isNewRecordToday ? "🔥 Record Broken Today!" : peakDate,
+                    isPositiveTrend: true,
+                    badgeColor: const Color(0xFFD97706),
+                    badgeIcon: Icons.emoji_events_rounded,
+                    symbolType: MetricSymbolType.peak,
+                    subItems: [
+                      {'label': 'Record Date', 'val': peakDate},
+                      {'label': 'Today Dealt', 'val': NumberFormat('#,###').format(totalTokens)},
+                    ],
+                    t: t,
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
+    );
+  }
+
+  Widget _buildMetricAbstractBadge(MetricSymbolType type, Color color, RoleThemeData t) {
+    IconData icon;
+    switch (type) {
+      case MetricSymbolType.tokens:
+        icon = Icons.confirmation_number_rounded;
+        break;
+      case MetricSymbolType.revenue:
+        icon = Icons.account_balance_wallet_rounded;
+        break;
+      case MetricSymbolType.prescriptions:
+        icon = Icons.receipt_long_rounded;
+        break;
+      case MetricSymbolType.dispensary:
+        icon = Icons.medication_rounded;
+        break;
+      case MetricSymbolType.peak:
+        icon = Icons.emoji_events_rounded;
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4.5),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            color.withValues(alpha: 0.15),
+            color.withValues(alpha: 0.05),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.28), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 5),
+          CustomPaint(
+            size: const Size(20, 14),
+            painter: _AbstractGraphicPainter(type: type, color: color),
+          ),
+        ],
+      ),
     );
   }
 
@@ -831,21 +1023,22 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     required bool isPositiveTrend,
     required Color badgeColor,
     required IconData badgeIcon,
+    required MetricSymbolType symbolType,
     required List<Map<String, String>> subItems,
     required RoleThemeData t,
   }) {
     final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
       decoration: BoxDecoration(
         color: t.bgCard,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: t.bgRule, width: 1),
+        border: Border.all(color: t.bgRule.withValues(alpha: 0.8), width: 1),
         boxShadow: [
           BoxShadow(
-            color: isDark ? Colors.black.withValues(alpha: 0.3) : Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
+            color: isDark ? Colors.black.withValues(alpha: 0.25) : badgeColor.withValues(alpha: 0.04),
+            blurRadius: 12,
             offset: const Offset(0, 4),
           ),
         ],
@@ -857,92 +1050,126 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                width: 44,
-                height: 44,
+                width: 42,
+                height: 42,
                 decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha: 0.12),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      badgeColor.withValues(alpha: 0.18),
+                      badgeColor.withValues(alpha: 0.06),
+                    ],
+                  ),
                   borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: badgeColor.withValues(alpha: 0.25), width: 1),
                 ),
-                child: Icon(badgeIcon, color: badgeColor, size: 22),
+                child: Icon(badgeIcon, color: badgeColor, size: 20),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary)),
-                    const SizedBox(height: 4),
+                    Text(
+                      title,
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Text(
-                          mainCount,
-                          style: TextStyle(
-                            fontSize: 26,
-                            fontWeight: FontWeight.w900,
-                            color: t.textPrimary,
-                            letterSpacing: -0.5,
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              mainCount,
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                                color: t.textPrimary,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isPositiveTrend ? const Color(0xFF10B981).withValues(alpha: 0.1) : Colors.red.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                isPositiveTrend ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
-                                size: 10,
-                                color: isPositiveTrend ? const Color(0xFF10B981) : Colors.red,
-                              ),
-                              const SizedBox(width: 2),
-                              Text(
-                                trendText,
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
+                        if (trendText.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: isPositiveTrend ? const Color(0xFF10B981).withValues(alpha: 0.12) : Colors.red.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isPositiveTrend ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                                  size: 10,
                                   color: isPositiveTrend ? const Color(0xFF10B981) : Colors.red,
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 2),
+                                Text(
+                                  trendText,
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                    color: isPositiveTrend ? const Color(0xFF10B981) : Colors.red,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ],
                 ),
               ),
-              SizedBox(
-                width: 50,
-                height: 28,
-                child: CustomPaint(painter: _SparklinePainter(color: badgeColor)),
-              ),
+              const SizedBox(width: 8),
+              _buildMetricAbstractBadge(symbolType, badgeColor, t),
             ],
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 14),
           Container(
-            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
             decoration: BoxDecoration(
-              color: t.bg.withValues(alpha: 0.6),
+              color: t.bg.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: t.bgRule.withValues(alpha: 0.5), width: 0.5),
             ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: subItems.map((item) {
-                return Column(
-                  children: [
-                    Text(item['label'] ?? '', style: TextStyle(fontSize: 11, color: t.textTertiary)),
-                    const SizedBox(height: 2),
-                    Text(
-                      item['val'] ?? '0',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: t.textPrimary),
+                return Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            item['label'] ?? '',
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: t.textTertiary),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            item['val'] ?? '0',
+                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: t.textPrimary),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 );
               }).toList(),
             ),
@@ -1051,12 +1278,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             ],
           ),
           const SizedBox(height: 8),
-          Row(
+          Wrap(
+            spacing: 12,
+            runSpacing: 6,
             children: [
               _buildChartLegend("Tokens: $tokensTotal", const Color(0xFF6366F1), t),
-              const SizedBox(width: 14),
               _buildChartLegend("Prescriptions: $prescTotal", const Color(0xFF10B981), t),
-              const SizedBox(width: 14),
               _buildChartLegend("Dispensed: $dispTotal", const Color(0xFFF59E0B), t),
             ],
           ),
@@ -1403,28 +1630,55 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             builder: (context, constraints) {
               final isNarrow = constraints.maxWidth < 850;
 
-              final filterPills = Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _buildStageTabPill("All Records", allList.length, stageFilter == 'all', () {
-                    ref.read(branchStageFilterProvider.notifier).state = 'all';
-                    setState(() => _currentPage = 1);
-                  }, const Color(0xFF6366F1), t),
-                  _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
-                    ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
-                    setState(() => _currentPage = 1);
-                  }, const Color(0xFFF59E0B), t),
-                  _buildStageTabPill("Waiting for Dispensary", waitingDispCount, stageFilter == 'waiting_dispensary', () {
-                    ref.read(branchStageFilterProvider.notifier).state = 'waiting_dispensary';
-                    setState(() => _currentPage = 1);
-                  }, const Color(0xFF3B82F6), t),
-                  _buildStageTabPill("Dispensed", dispensedCount, stageFilter == 'dispensed', () {
-                    ref.read(branchStageFilterProvider.notifier).state = 'dispensed';
-                    setState(() => _currentPage = 1);
-                  }, const Color(0xFF10B981), t),
-                ],
-              );
+              final filterPills = isNarrow
+                  ? SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildStageTabPill("All Records", allList.length, stageFilter == 'all', () {
+                            ref.read(branchStageFilterProvider.notifier).state = 'all';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFF6366F1), t),
+                          const SizedBox(width: 8),
+                          _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
+                            ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFFF59E0B), t),
+                          const SizedBox(width: 8),
+                          _buildStageTabPill("Waiting for Dispensary", waitingDispCount, stageFilter == 'waiting_dispensary', () {
+                            ref.read(branchStageFilterProvider.notifier).state = 'waiting_dispensary';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFF3B82F6), t),
+                          const SizedBox(width: 8),
+                          _buildStageTabPill("Dispensed", dispensedCount, stageFilter == 'dispensed', () {
+                            ref.read(branchStageFilterProvider.notifier).state = 'dispensed';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFF10B981), t),
+                        ],
+                      ),
+                    )
+                  : Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _buildStageTabPill("All Records", allList.length, stageFilter == 'all', () {
+                          ref.read(branchStageFilterProvider.notifier).state = 'all';
+                          setState(() => _currentPage = 1);
+                        }, const Color(0xFF6366F1), t),
+                        _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
+                          ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
+                          setState(() => _currentPage = 1);
+                        }, const Color(0xFFF59E0B), t),
+                        _buildStageTabPill("Waiting for Dispensary", waitingDispCount, stageFilter == 'waiting_dispensary', () {
+                          ref.read(branchStageFilterProvider.notifier).state = 'waiting_dispensary';
+                          setState(() => _currentPage = 1);
+                        }, const Color(0xFF3B82F6), t),
+                        _buildStageTabPill("Dispensed", dispensedCount, stageFilter == 'dispensed', () {
+                          ref.read(branchStageFilterProvider.notifier).state = 'dispensed';
+                          setState(() => _currentPage = 1);
+                        }, const Color(0xFF10B981), t),
+                      ],
+                    );
 
               final searchBarAndFilters = Row(
                 children: [
@@ -1512,7 +1766,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
           ),
           const SizedBox(height: 18),
 
-          // Records Table
+          // Records Table / Mobile Cards
           if (dispState.isSyncing && allList.isEmpty)
             Center(child: Padding(padding: const EdgeInsets.all(40), child: CircularProgressIndicator(color: t.accent)))
           else if (filtered.isEmpty)
@@ -1529,7 +1783,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               ),
             )
           else
-            _buildRecordsTable(context, t, paginatedList, branchId),
+            LayoutBuilder(
+              builder: (context, tableConstraints) {
+                if (tableConstraints.maxWidth < 750) {
+                  return _buildMobilePatientRecordsList(context, t, paginatedList, branchId);
+                }
+                return _buildRecordsTable(context, t, paginatedList, branchId);
+              },
+            ),
 
           const SizedBox(height: 16),
 
@@ -1937,86 +2198,516 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     );
   }
 
-  Widget _buildPaginationFooter(BuildContext context, RoleThemeData t, int totalRecords, int currentPage, int totalPages, int startIdx, int endIdx) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        // Showing info
-        Text(
-          "Showing ${startIdx + 1} to $endIdx of $totalRecords records",
-          style: TextStyle(fontSize: 12, color: t.textTertiary),
-        ),
+  Widget _buildMobilePatientRecordsList(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId) {
+    return ListView.separated(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: records.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        return _buildMobilePatientCard(context, t, records[index], branchId);
+      },
+    );
+  }
 
-        // Page buttons & Page Size selector
-        Row(
+  Widget _buildMobilePatientCard(BuildContext context, RoleThemeData t, Map<String, dynamic> p, String branchId) {
+    final pid = p['patientId']?.toString() ?? p['id']?.toString() ?? '';
+    final tokenSerial = p['serial']?.toString() ?? p['id']?.toString() ?? 'TK-000';
+    final name = p['name']?.toString() ?? 'Unknown Patient';
+    final age = p['age']?.toString() ?? '';
+    final gender = p['gender']?.toString() ?? '';
+    final rawPhone = (p['phone'] ?? p['patientPhone'] ?? '').toString().trim();
+    final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
+    final stage = _recordStage(p);
+    final statusColor = stage == 'dispensed'
+        ? const Color(0xFF10B981)
+        : stage == 'waiting_dispensary'
+            ? const Color(0xFF3B82F6)
+            : const Color(0xFFF59E0B);
+    final statusLabel = stage == 'dispensed'
+        ? 'Dispensed'
+        : stage == 'waiting_dispensary'
+            ? 'Waiting Dispensary'
+            : 'Waiting Doctor';
+
+    final rawCnic = (p['displayCnic'] ?? p['cnic'] ?? p['patientCnic'] ?? p['guardianCnic'] ?? '').toString().trim();
+    final hasCnic = rawCnic.isNotEmpty && rawCnic != 'N/A' && rawCnic != '0000000000000' && rawCnic != '-';
+    final formattedCnic = hasCnic ? _formatCnic(rawCnic) : '—';
+    final isChild = p['isChild'] == true ||
+        ((p['guardianCnic'] ?? '').toString().isNotEmpty && (p['patientCnic'] ?? p['cnic'] ?? '').toString().isEmpty);
+
+    final type = (p['type'] ?? 'zakat').toString().toLowerCase();
+
+    Color typeColor;
+    if (type == 'zakat') {
+      typeColor = const Color(0xFF6366F1);
+    } else if (type == 'non-zakat') {
+      typeColor = const Color(0xFF3B82F6);
+    } else if (type == 'gmwf') {
+      typeColor = const Color(0xFF10B981);
+    } else {
+      typeColor = t.textSecondary;
+    }
+
+    final campLabel = _resolvePatientCampLabel(p, branchId);
+    final days = (p['daysOfMedicine'] as num?)?.toInt() ?? 1;
+    final visits = (p['totalVisits'] as num?)?.toInt() ?? 1;
+    final isFrequent = p['frequentFlag'] == true;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: t.bg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: t.bgRule),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Page buttons
-            IconButton(
-              icon: const Icon(Icons.chevron_left_rounded, size: 18),
-              onPressed: currentPage > 1 ? () => setState(() => _currentPage--) : null,
-              color: t.textSecondary,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            ),
-            for (int p = 1; p <= totalPages && p <= 5; p++) ...[
-              InkWell(
-                onTap: () => setState(() => _currentPage = p),
-                borderRadius: BorderRadius.circular(6),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: p == currentPage ? t.accent.withValues(alpha: 0.15) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: p == currentPage ? t.accent : Colors.transparent),
+            // Row 1: Token # + Type Badge + Status (Overflow-safe with flexible alignment)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      InkWell(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: tokenSerial));
+                          ScaffoldMessenger.of(context).clearSnackBars();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Copied token: $tokenSerial'),
+                              duration: const Duration(seconds: 1),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: t.accent.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: t.accent.withValues(alpha: 0.3)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                tokenSerial,
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: t.accent),
+                              ),
+                              const SizedBox(width: 4),
+                              Icon(Icons.copy_rounded, size: 11, color: t.accent),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+                        decoration: BoxDecoration(
+                          color: typeColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: typeColor.withValues(alpha: 0.25)),
+                        ),
+                        child: Text(
+                          type.toUpperCase(),
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: typeColor, letterSpacing: 0.3),
+                        ),
+                      ),
+                    ],
                   ),
-                  child: Text(
-                    "$p",
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: p == currentPage ? FontWeight.bold : FontWeight.normal,
-                      color: p == currentPage ? t.accent : t.textSecondary,
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  flex: 0,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: statusColor.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          statusLabel,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: statusColor,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 4),
-            ],
-            IconButton(
-              icon: const Icon(Icons.chevron_right_rounded, size: 18),
-              onPressed: currentPage < totalPages ? () => setState(() => _currentPage++) : null,
-              color: t.textSecondary,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ],
             ),
-            const SizedBox(width: 12),
+            const SizedBox(height: 8),
 
-            // Rows per page selector
-            DropdownButtonHideUnderline(
-              child: DropdownButton<int>(
-                value: _rowsPerPage,
-                dropdownColor: t.bgCard,
-                icon: Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: t.textSecondary),
-                style: TextStyle(fontSize: 11, color: t.textPrimary),
-                items: const [
-                  DropdownMenuItem(value: 10, child: Text("10 / page")),
-                  DropdownMenuItem(value: 25, child: Text("25 / page")),
-                  DropdownMenuItem(value: 50, child: Text("50 / page")),
-                ],
-                onChanged: (val) {
-                  if (val != null) {
-                    setState(() {
-                      _rowsPerPage = val;
-                      _currentPage = 1;
-                    });
-                  }
-                },
-              ),
+            // Row 2: Patient Name & Age/Gender + Profile Navigation
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              name,
+                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: t.textPrimary),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (isFrequent) const Padding(padding: EdgeInsets.only(left: 4), child: Text('🔥', style: TextStyle(fontSize: 12))),
+                        ],
+                      ),
+                      if ((age.isNotEmpty && age != 'N/A') || (gender.isNotEmpty && gender != 'N/A')) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          [
+                            if (age.isNotEmpty && age != 'N/A') '$age yrs',
+                            if (gender.isNotEmpty && gender != 'N/A') gender,
+                          ].join(' • '),
+                          style: TextStyle(fontSize: 11, color: t.textSecondary),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                InkWell(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => PatientDetailScreen(
+                        patientId: pid,
+                        isOnline: true,
+                        localBox: Hive.box('local_patients'),
+                        branchId: branchId,
+                        doctorId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
+                        isAdmin: true,
+                      ),
+                    ),
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: t.accent.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text("Profile", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: t.accent)),
+                        const SizedBox(width: 4),
+                        Icon(Icons.arrow_forward_ios_rounded, size: 10, color: t.accent),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
+            const SizedBox(height: 8),
+
+            // Row 3: CNIC and Phone Badges
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                if (hasCnic)
+                  InkWell(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: rawCnic));
+                      ScaffoldMessenger.of(context).clearSnackBars();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Copied CNIC: $formattedCnic'),
+                          duration: const Duration(seconds: 1),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: t.bgCard,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: t.bgRule),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.badge_outlined, size: 11, color: t.accent),
+                          const SizedBox(width: 4),
+                          Text(
+                            formattedCnic,
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: t.textPrimary),
+                          ),
+                          if (isChild) ...[
+                            const SizedBox(width: 4),
+                            Text('(Guardian)', style: TextStyle(fontSize: 8, color: t.accent, fontWeight: FontWeight.bold)),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                if (hasPhone)
+                  InkWell(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: rawPhone));
+                      ScaffoldMessenger.of(context).clearSnackBars();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Copied Phone: $rawPhone'),
+                          duration: const Duration(seconds: 1),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: t.bgCard,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: t.bgRule),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.phone_rounded, size: 11, color: Color(0xFF10B981)),
+                          const SizedBox(width: 4),
+                          Text(
+                            rawPhone,
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: t.textPrimary),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // Row 4: Facility & Shift info + Course / Visit Tags
+            if (campLabel.isNotEmpty || visits > 1 || days > 1) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: t.bgCard.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  children: [
+                    if (campLabel.isNotEmpty)
+                      Expanded(
+                        child: Text(
+                          campLabel,
+                          style: TextStyle(fontSize: 10, color: t.textSecondary),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    if (visits > 1) ...[
+                      if (campLabel.isNotEmpty) const SizedBox(width: 6),
+                      Text('$visits+ Visits', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: t.textPrimary)),
+                    ],
+                    if (days > 1) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: Colors.deepOrange.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text('$days d course', style: const TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
-      ],
+      ),
+    );
+  }
+
+  Widget _buildPaginationFooter(BuildContext context, RoleThemeData t, int totalRecords, int currentPage, int totalPages, int startIdx, int endIdx) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isMobile = constraints.maxWidth < 600;
+
+        if (isMobile) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "${startIdx + 1}–$endIdx of $totalRecords records",
+                    style: TextStyle(fontSize: 11, color: t.textTertiary, fontWeight: FontWeight.w600),
+                  ),
+                  DropdownButtonHideUnderline(
+                    child: DropdownButton<int>(
+                      value: _rowsPerPage,
+                      dropdownColor: t.bgCard,
+                      icon: Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: t.textSecondary),
+                      style: TextStyle(fontSize: 11, color: t.textPrimary),
+                      items: const [
+                        DropdownMenuItem(value: 10, child: Text("10 / page")),
+                        DropdownMenuItem(value: 25, child: Text("25 / page")),
+                        DropdownMenuItem(value: 50, child: Text("50 / page")),
+                      ],
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            _rowsPerPage = val;
+                            _currentPage = 1;
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.chevron_left_rounded, size: 20),
+                    onPressed: currentPage > 1 ? () => setState(() => _currentPage--) : null,
+                    color: t.textSecondary,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "Page $currentPage of $totalPages",
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: t.textPrimary),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.chevron_right_rounded, size: 20),
+                    onPressed: currentPage < totalPages ? () => setState(() => _currentPage++) : null,
+                    color: t.textSecondary,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  ),
+                ],
+              ),
+            ],
+          );
+        }
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Showing info
+            Text(
+              "Showing ${startIdx + 1} to $endIdx of $totalRecords records",
+              style: TextStyle(fontSize: 12, color: t.textTertiary),
+            ),
+
+            // Page buttons & Page Size selector
+            Row(
+              children: [
+                // Page buttons
+                IconButton(
+                  icon: const Icon(Icons.chevron_left_rounded, size: 18),
+                  onPressed: currentPage > 1 ? () => setState(() => _currentPage--) : null,
+                  color: t.textSecondary,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                for (int p = 1; p <= totalPages && p <= 5; p++) ...[
+                  InkWell(
+                    onTap: () => setState(() => _currentPage = p),
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: p == currentPage ? t.accent.withValues(alpha: 0.15) : Colors.transparent,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: p == currentPage ? t.accent : Colors.transparent),
+                      ),
+                      child: Text(
+                        "$p",
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: p == currentPage ? FontWeight.bold : FontWeight.normal,
+                          color: p == currentPage ? t.accent : t.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+                IconButton(
+                  icon: const Icon(Icons.chevron_right_rounded, size: 18),
+                  onPressed: currentPage < totalPages ? () => setState(() => _currentPage++) : null,
+                  color: t.textSecondary,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                const SizedBox(width: 12),
+
+                // Rows per page selector
+                DropdownButtonHideUnderline(
+                  child: DropdownButton<int>(
+                    value: _rowsPerPage,
+                    dropdownColor: t.bgCard,
+                    icon: Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: t.textSecondary),
+                    style: TextStyle(fontSize: 11, color: t.textPrimary),
+                    items: const [
+                      DropdownMenuItem(value: 10, child: Text("10 / page")),
+                      DropdownMenuItem(value: 25, child: Text("25 / page")),
+                      DropdownMenuItem(value: 50, child: Text("50 / page")),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          _rowsPerPage = val;
+                          _currentPage = 1;
+                        });
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -2063,24 +2754,113 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
 // Custom Painters for Sparklines and Performance Charts
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _SparklinePainter extends CustomPainter {
+enum MetricSymbolType {
+  tokens,
+  revenue,
+  prescriptions,
+  dispensary,
+  peak,
+}
+
+class _AbstractGraphicPainter extends CustomPainter {
+  final MetricSymbolType type;
   final Color color;
-  const _SparklinePainter({required this.color});
+
+  const _AbstractGraphicPainter({required this.type, required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 2
+    final strokePaint = Paint()
+      ..color = color.withValues(alpha: 0.85)
+      ..strokeWidth = 1.4
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
 
-    final path = Path();
-    path.moveTo(0, size.height * 0.7);
-    path.quadraticBezierTo(size.width * 0.3, size.height * 0.8, size.width * 0.5, size.height * 0.4);
-    path.quadraticBezierTo(size.width * 0.7, size.height * 0.1, size.width, size.height * 0.2);
+    final fillPaint = Paint()
+      ..color = color.withValues(alpha: 0.22)
+      ..style = PaintingStyle.fill;
 
-    canvas.drawPath(path, paint);
+    switch (type) {
+      case MetricSymbolType.tokens:
+        // Dual overlapping ticket/token shapes
+        final r1 = RRect.fromRectAndRadius(
+          Rect.fromLTWH(0, 2.5, size.width * 0.65, size.height - 3.5),
+          const Radius.circular(3),
+        );
+        final r2 = RRect.fromRectAndRadius(
+          Rect.fromLTWH(size.width * 0.35, 0, size.width * 0.65, size.height - 3.5),
+          const Radius.circular(3),
+        );
+        canvas.drawRRect(r1, fillPaint);
+        canvas.drawRRect(r1, strokePaint);
+        canvas.drawRRect(r2, fillPaint);
+        canvas.drawRRect(r2, strokePaint);
+        // Perforation indicator dot
+        canvas.drawCircle(Offset(size.width * 0.68, size.height * 0.35), 1.2, Paint()..color = color);
+        break;
+
+      case MetricSymbolType.revenue:
+        // Dual tiered currency coins with spark aura
+        final c1 = Offset(size.width * 0.35, size.height * 0.6);
+        final c2 = Offset(size.width * 0.65, size.height * 0.35);
+        canvas.drawCircle(c1, 4.5, fillPaint);
+        canvas.drawCircle(c1, 4.5, strokePaint);
+        canvas.drawCircle(c2, 5.5, fillPaint);
+        canvas.drawCircle(c2, 5.5, strokePaint);
+        // Trend spark dot
+        canvas.drawCircle(Offset(size.width * 0.9, size.height * 0.15), 1.3, Paint()..color = color);
+        break;
+
+      case MetricSymbolType.prescriptions:
+        // Medical Rx sheet with diagnostic check lines
+        final padRect = RRect.fromRectAndRadius(
+          Rect.fromLTWH(size.width * 0.15, 0.5, size.width * 0.7, size.height - 1.5),
+          const Radius.circular(2.5),
+        );
+        canvas.drawRRect(padRect, fillPaint);
+        canvas.drawRRect(padRect, strokePaint);
+        canvas.drawLine(
+          Offset(size.width * 0.3, size.height * 0.38),
+          Offset(size.width * 0.7, size.height * 0.38),
+          strokePaint..strokeWidth = 1.1,
+        );
+        canvas.drawLine(
+          Offset(size.width * 0.3, size.height * 0.65),
+          Offset(size.width * 0.58, size.height * 0.65),
+          strokePaint..strokeWidth = 1.1,
+        );
+        break;
+
+      case MetricSymbolType.dispensary:
+        // Pharmaceutical split capsule
+        final pillRect = RRect.fromRectAndRadius(
+          Rect.fromLTWH(size.width * 0.1, 1.5, size.width * 0.8, size.height - 3),
+          Radius.circular((size.height - 3) / 2),
+        );
+        canvas.drawRRect(pillRect, fillPaint);
+        canvas.drawRRect(pillRect, strokePaint);
+        canvas.drawLine(
+          Offset(size.width * 0.5, 1.5),
+          Offset(size.width * 0.5, size.height - 1.5),
+          strokePaint..strokeWidth = 1.1,
+        );
+        break;
+
+      case MetricSymbolType.peak:
+        // Radiant 4-point star crest
+        final center = Offset(size.width * 0.5, size.height * 0.5);
+        final starPath = Path();
+        starPath.moveTo(center.dx, center.dy - 6.5);
+        starPath.quadraticBezierTo(center.dx, center.dy, center.dx + 6.5, center.dy);
+        starPath.quadraticBezierTo(center.dx, center.dy, center.dx, center.dy + 6.5);
+        starPath.quadraticBezierTo(center.dx, center.dy, center.dx - 6.5, center.dy);
+        starPath.quadraticBezierTo(center.dx, center.dy, center.dx, center.dy - 6.5);
+        starPath.close();
+        canvas.drawPath(starPath, fillPaint);
+        canvas.drawPath(starPath, strokePaint);
+        break;
+    }
   }
 
   @override

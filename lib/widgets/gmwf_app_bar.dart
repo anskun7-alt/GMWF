@@ -62,7 +62,7 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
 
         return Container(
           color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
-          padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+          padding: EdgeInsets.fromLTRB(isMobile ? 8 : 14, 6, isMobile ? 8 : 14, 4),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -92,167 +92,172 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
                     // Left Green Logo Block
                     _buildLogoBadge(isMobile),
 
-                        const SizedBox(width: 12),
+                    SizedBox(width: isMobile ? 8 : 12),
 
-                        // Vertical Green Accent Divider Line
-                        Container(
-                          width: 2.5,
-                          height: 26,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF10B981),
-                            borderRadius: BorderRadius.circular(2),
+                    // Vertical Green Accent Divider Line
+                    Container(
+                      width: 2.5,
+                      height: isMobile ? 22 : 26,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF10B981),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+
+                    SizedBox(width: isMobile ? 8 : 12),
+
+                    // Title & Subtitle
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          GestureDetector(
+                            onLongPress: onTitleLongPress,
+                            child: Tooltip(
+                              message: titleTooltip ?? '',
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: isMobile ? 14 : 17,
+                                  fontWeight: FontWeight.bold,
+                                  color: isDark
+                                      ? Colors.white
+                                      : const Color(0xFF0F3E34),
+                                  letterSpacing: -0.2,
+                                ),
+                              ),
+                            ),
                           ),
-                        ),
-
-                        const SizedBox(width: 12),
-
-                        // Title & Subtitle
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              GestureDetector(
-                                onLongPress: onTitleLongPress,
-                                child: Tooltip(
-                                  message: titleTooltip ?? '',
+                          if (subtitle != null && subtitle!.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.location_on_outlined,
+                                  size: 13,
+                                  color: isDark
+                                      ? const Color(0xFF94A3B8)
+                                      : const Color(0xFF64748B),
+                                ),
+                                const SizedBox(width: 4),
+                                Flexible(
                                   child: Text(
-                                    title,
+                                    subtitle!.toUpperCase(),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      fontSize: isMobile ? 15 : 17,
-                                      fontWeight: FontWeight.bold,
-                                      color: isDark
-                                          ? Colors.white
-                                          : const Color(0xFF0F3E34),
-                                      letterSpacing: -0.2,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              if (subtitle != null && subtitle!.isNotEmpty) ...[
-                                const SizedBox(height: 2),
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      Icons.location_on_outlined,
-                                      size: 13,
+                                      fontSize: isMobile ? 10.5 : 11.5,
+                                      fontWeight: FontWeight.w600,
                                       color: isDark
                                           ? const Color(0xFF94A3B8)
                                           : const Color(0xFF64748B),
+                                      letterSpacing: 0.7,
                                     ),
-                                    const SizedBox(width: 4),
-                                    Flexible(
-                                      child: Text(
-                                        subtitle!.toUpperCase(),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: isMobile ? 11 : 11.5,
-                                          fontWeight: FontWeight.w600,
-                                          color: isDark
-                                              ? const Color(0xFF94A3B8)
-                                              : const Color(0xFF64748B),
-                                          letterSpacing: 0.7,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
+                                  ),
                                 ),
                               ],
-                            ],
-                          ),
-                        ),
-
-                        // LAN Status Pill
-                        if (connectionStatus != null && !isMobile) ...[
-                          const SizedBox(width: 8),
-                          _buildLanStatusPill(
-                            isDark: isDark,
-                            status: connectionStatus!,
-                            isCompact: isCompact,
-                          ),
-                        ],
-
-                        // Internet Status Pill (no fake dropdown arrow)
-                        if (!isMobile) ...[
-                          const SizedBox(width: 8),
-                          _buildInternetStatusPill(
-                            isDark: isDark,
-                            isCompact: isCompact,
-                          ),
-                        ],
-
-                        // Extra Actions (e.g. Camp Selector, Inventory)
-                        if (extraActions != null && extraActions!.isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          ...extraActions!,
-                        ],
-
-                        // Right Action Controls
-                        const SizedBox(width: 6),
-                        _buildDivider(isDark),
-                        const SizedBox(width: 6),
-
-                        // Sync Button (with standard circular sync icon)
-                        if (onSync != null) ...[
-                          _buildIconButton(
-                            isDark: isDark,
-                            tooltip: 'Force full sync',
-                            onTap: isSyncing ? null : onSync,
-                            child: isSyncing
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Color(0xFF0F5B46),
-                                    ),
-                                  )
-                                : Icon(
-                                    Icons.sync_rounded,
-                                    size: 20,
-                                    color: isDark
-                                        ? const Color(0xFF38BDF8)
-                                        : const Color(0xFF0F5B46),
-                                  ),
-                          ),
-                          const SizedBox(width: 6),
-                        ],
-
-                        // Theme Toggle Button
-                        if (showThemeToggle) ...[
-                          _buildIconButton(
-                            isDark: isDark,
-                            tooltip: isDark
-                                ? 'Switch to Light Mode'
-                                : 'Switch to Dark Mode',
-                            onTap: () async {
-                              await UserThemeService.setDarkMode(!isDark);
-                            },
-                            child: Icon(
-                              isDark
-                                  ? Icons.dark_mode_outlined
-                                  : Icons.wb_sunny_outlined,
-                              size: 18,
-                              color: isDark
-                                  ? const Color(0xFFFBBF24)
-                                  : const Color(0xFF0F5B46),
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                        ],
-
-                          // Logout Button (for Dispensary screens)
-                          if (onLogout != null) ...[
-                            _buildLogoutButton(isDark, isMobile),
-                            const SizedBox(width: 8),
                           ],
                         ],
                       ),
                     ),
+
+                    // LAN Status Pill
+                    if (connectionStatus != null && !isMobile) ...[
+                      const SizedBox(width: 8),
+                      _buildLanStatusPill(
+                        isDark: isDark,
+                        status: connectionStatus!,
+                        isCompact: isCompact,
+                      ),
+                    ],
+
+                    // Internet Status Pill (no fake dropdown arrow)
+                    if (!isMobile) ...[
+                      const SizedBox(width: 8),
+                      _buildInternetStatusPill(
+                        isDark: isDark,
+                        isCompact: isCompact,
+                      ),
+                    ],
+
+                    // Extra Actions (e.g. Camp Selector, Inventory)
+                    if (extraActions != null && extraActions!.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      ...extraActions!,
+                    ],
+
+                    // Right Action Controls
+                    if (!isMobile) ...[
+                      const SizedBox(width: 6),
+                      _buildDivider(isDark),
+                      const SizedBox(width: 6),
+                    ] else
+                      const SizedBox(width: 4),
+
+                    // Sync Button (with standard circular sync icon)
+                    if (onSync != null) ...[
+                      _buildIconButton(
+                        isDark: isDark,
+                        tooltip: 'Force full sync',
+                        onTap: isSyncing ? null : onSync,
+                        isMobile: isMobile,
+                        child: isSyncing
+                            ? SizedBox(
+                                width: isMobile ? 14 : 16,
+                                height: isMobile ? 14 : 16,
+                                child: const CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Color(0xFF0F5B46),
+                                ),
+                              )
+                            : Icon(
+                                Icons.sync_rounded,
+                                size: isMobile ? 17 : 20,
+                                color: isDark
+                                    ? const Color(0xFF38BDF8)
+                                    : const Color(0xFF0F5B46),
+                              ),
+                      ),
+                      SizedBox(width: isMobile ? 4 : 6),
+                    ],
+
+                    // Theme Toggle Button
+                    if (showThemeToggle) ...[
+                      _buildIconButton(
+                        isDark: isDark,
+                        tooltip: isDark
+                            ? 'Switch to Light Mode'
+                            : 'Switch to Dark Mode',
+                        isMobile: isMobile,
+                        onTap: () async {
+                          await UserThemeService.setDarkMode(!isDark);
+                        },
+                        child: Icon(
+                          isDark
+                              ? Icons.dark_mode_outlined
+                              : Icons.wb_sunny_outlined,
+                          size: isMobile ? 16 : 18,
+                          color: isDark
+                              ? const Color(0xFFFBBF24)
+                              : const Color(0xFF0F5B46),
+                        ),
+                      ),
+                      SizedBox(width: isMobile ? 4 : 6),
+                    ],
+
+                    // Logout Button (for Dispensary screens)
+                    if (onLogout != null) ...[
+                      _buildLogoutButton(isDark, isMobile),
+                      SizedBox(width: isMobile ? 4 : 8),
+                    ],
+                  ],
+                ),
+              ),
               if (bottom != null) ...[
                 const SizedBox(height: 6),
                 bottom!,
@@ -266,7 +271,7 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
 
   Widget _buildLogoBadge(bool isMobile) {
     return Container(
-      width: isMobile ? 56 : 70,
+      width: isMobile ? 44 : 70,
       height: double.infinity,
       decoration: const BoxDecoration(
         color: Color(0xFF0F5B46),
@@ -274,12 +279,12 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
       child: Center(
         child: Image.asset(
           'assets/logo/gmwf-1.webp',
-          height: isMobile ? 34 : 42,
+          height: isMobile ? 26 : 42,
           fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => const Icon(
+          errorBuilder: (context, error, stackTrace) => Icon(
             Icons.local_hospital_rounded,
             color: Colors.white,
-            size: 26,
+            size: isMobile ? 20 : 26,
           ),
         ),
       ),
@@ -491,20 +496,22 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     required String tooltip,
     required Widget child,
     VoidCallback? onTap,
+    bool isMobile = false,
   }) {
+    final btnSize = isMobile ? 32.0 : 36.0;
     return Tooltip(
       message: tooltip,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(isMobile ? 8 : 10),
           child: Container(
-            width: 36,
-            height: 36,
+            width: btnSize,
+            height: btnSize,
             decoration: BoxDecoration(
               color: isDark ? const Color(0xFF1E293B) : Colors.white,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(isMobile ? 8 : 10),
               border: Border.all(
                 color:
                     isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
@@ -519,19 +526,20 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
   }
 
   Widget _buildLogoutButton(bool isDark, bool isMobile) {
+    final btnHeight = isMobile ? 32.0 : 36.0;
     if (isLoggingOut) {
       return Container(
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        height: btnHeight,
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 12),
         decoration: BoxDecoration(
           color: const Color(0xFF0F5B46),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(isMobile ? 8 : 10),
         ),
-        child: const Center(
+        child: Center(
           child: SizedBox(
-            width: 15,
-            height: 15,
-            child: CircularProgressIndicator(
+            width: isMobile ? 13 : 15,
+            height: isMobile ? 13 : 15,
+            child: const CircularProgressIndicator(
               strokeWidth: 2,
               color: Colors.white,
             ),
@@ -544,20 +552,20 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onLogout,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(isMobile ? 8 : 10),
         child: Container(
-          height: 36,
-          padding: EdgeInsets.symmetric(horizontal: isMobile ? 10 : 12),
+          height: btnHeight,
+          padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 12),
           decoration: BoxDecoration(
             color: const Color(0xFF0F5B46),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(isMobile ? 8 : 10),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
+              Icon(
                 Icons.logout_rounded,
-                size: 15,
+                size: isMobile ? 14 : 15,
                 color: Colors.white,
               ),
               if (!isMobile) ...[

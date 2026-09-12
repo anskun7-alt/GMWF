@@ -217,42 +217,101 @@ class StudentExportMenu extends StatelessWidget {
   }
 }
 
-Widget buildActivityItem(BuildContext context, String user, String text, String time, IconData icon, Color color) {
+Widget buildActivityItem(BuildContext context, String user, String text, String time, IconData icon, Color color, {String? role}) {
+  final isDark = Theme.of(context).brightness == Brightness.dark;
+  final cleanRole = role ?? '';
+
   return Padding(
-    padding: const EdgeInsets.only(bottom: 16),
+    padding: const EdgeInsets.only(bottom: 12),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(color: color.withValues(alpha: 0.1), shape: BoxShape.circle),
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+            border: Border.all(color: color.withValues(alpha: 0.3), width: 1.2),
+          ),
           child: Icon(icon, color: color, size: 16),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 10),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    user,
-                    style: context.urduStyle(
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                width: 1,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        user,
+                        style: context.urduStyle(
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12.5,
+                            color: isDark ? Colors.white : const Color(0xFF0F172A),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (time.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        time,
+                        style: TextStyle(
+                          color: isDark ? Colors.white54 : const Color(0xFF94A3B8),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                if (cleanRole.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(color: color.withValues(alpha: 0.2), width: 0.6),
+                    ),
+                    child: Text(
+                      cleanRole.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 9.0,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.3,
+                        color: color,
+                      ),
                     ),
                   ),
-                  Text(time, style: TextStyle(color: Colors.grey.shade400, fontSize: 11)),
                 ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                text,
-                style: context.urduStyle(
-                  style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                const SizedBox(height: 5),
+                Text(
+                  text,
+                  style: context.urduStyle(
+                    style: TextStyle(
+                      color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
+                      fontSize: 11.5,
+                      height: 1.38,
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ],

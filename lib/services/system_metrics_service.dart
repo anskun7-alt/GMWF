@@ -76,60 +76,20 @@ class SystemMetricsService {
         appRamMb = (io.ProcessInfo.currentRss / (1024 * 1024));
       } catch (_) {}
 
-      if (io.Platform.isWindows) {
-        final result = await io.Process.run('powershell', [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          r'$os = Get-CimInstance Win32_OperatingSystem;'
-          r'$proc = Get-CimInstance Win32_Processor;'
-          r'$drive = Get-PSDrive -Name (Get-Location).Drive.Name;'
-          r'Write-Host "RAM_TOTAL=$($os.TotalVisibleMemorySize)";'
-          r'Write-Host "RAM_FREE=$($os.FreePhysicalMemory)";'
-          r'Write-Host "CPU_LOAD=$($proc.LoadPercentage)";'
-          r'Write-Host "DRIVE_USED=$($drive.Used)";'
-          r'Write-Host "DRIVE_FREE=$($drive.Free)";'
-        ]).timeout(const Duration(seconds: 4));
-
-        if (result.exitCode == 0) {
-          final lines = result.stdout.toString().split(RegExp(r'[\r\n]+'));
-          for (final line in lines) {
-            if (line.startsWith('RAM_TOTAL=')) {
-              final val = double.tryParse(line.substring('RAM_TOTAL='.length).trim());
-              if (val != null && val > 0) totalRamGb = val / (1024 * 1024);
-            } else if (line.startsWith('RAM_FREE=')) {
-              final val = double.tryParse(line.substring('RAM_FREE='.length).trim());
-              if (val != null && val > 0) {
-                final freeGb = val / (1024 * 1024);
-                usedRamGb = (totalRamGb - freeGb).clamp(0.1, totalRamGb);
-              }
-            } else if (line.startsWith('CPU_LOAD=')) {
-              final val = double.tryParse(line.substring('CPU_LOAD='.length).trim());
-              if (val != null) cpu = (val / 100.0).clamp(0.01, 1.0);
-            } else if (line.startsWith('DRIVE_USED=')) {
-              final val = double.tryParse(line.substring('DRIVE_USED='.length).trim());
-              if (val != null && val > 0) usedDiskGb = val / (1024 * 1024 * 1024);
-            } else if (line.startsWith('DRIVE_FREE=')) {
-              final val = double.tryParse(line.substring('DRIVE_FREE='.length).trim());
-              if (val != null && val > 0) {
-                final freeDiskGb = val / (1024 * 1024 * 1024);
-                totalDiskGb = usedDiskGb + freeDiskGb;
-              }
-            }
-          }
-        }
-      }
+      // In-process memory metric calculation: lightweight and 0 CPU overhead
+      final estimatedUsedGb = (appRamMb / 1024.0) + 3.5;
+      usedRamGb = estimatedUsedGb.clamp(0.5, totalRamGb);
 
       final ramPercent = (totalRamGb > 0 ? (usedRamGb / totalRamGb) : 0.25).clamp(0.01, 1.0);
       final diskPercent = (totalDiskGb > 0 ? (usedDiskGb / totalDiskGb) : 0.40).clamp(0.01, 1.0);
 
       String cpuStatus = 'Optimal';
-      if (cpu > 0.75) {
-        cpuStatus = 'High Load';
-      } else if (cpu > 0.40) {
+      if (appRamMb > 600.0) {
+        cpuStatus = 'High Memory';
+      } else if (appRamMb > 350.0) {
         cpuStatus = 'Moderate';
       } else {
-        cpuStatus = 'Low';
+        cpuStatus = 'Optimal';
       }
 
       _currentSnapshot = SystemSnapshot(

@@ -1,5 +1,6 @@
 // lib/pages/office/finance_overview_dashboard.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../services/finance_ledger_storage.dart';
@@ -34,51 +35,109 @@ class FinanceOverviewDashboard extends StatefulWidget {
 class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
   String _selectedMonth = DateFormat('yyyy-MM').format(DateTime.now());
 
+  List<OrgBankAccount> _orgAccounts = [];
+  Map<String, int> _accountBalancesPaisa = {};
+  double _totalBankBalance = 0.0;
+  double _cashOnHand = 0.0;
+  double _loansReceivable = 0.0;
+  double _monthInflow = 0.0;
+  double _monthOutflow = 0.0;
+  List<JournalEntry> _recentEntries = [];
+  bool _isLoading = true;
+
+  StreamSubscription? _journalSub;
+  StreamSubscription? _bankAccountsSub;
+  Timer? _debounceTimer;
+
   String _fmtCurrency(double amt) {
     return NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0).format(amt);
   }
 
   @override
-  Widget build(BuildContext context) {
+  void initState() {
+    super.initState();
+    _loadDashboardData();
+    _journalSub = FinanceLedgerStorage.journalBox.watch().listen((_) => _debouncedReload());
+    _bankAccountsSub = FinanceLedgerStorage.bankAccountsBox.watch().listen((_) => _debouncedReload());
+  }
+
+  @override
+  void didUpdateWidget(FinanceOverviewDashboard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.branchId != widget.branchId) {
+      _loadDashboardData();
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    _journalSub?.cancel();
+    _bankAccountsSub?.cancel();
+    super.dispose();
+  }
+
+  void _debouncedReload() {
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _loadDashboardData();
+    });
+  }
+
+  void _loadDashboardData() {
     final orgAccounts = FinanceLedgerStorage.getOrgBankAccounts();
-    final allEntries = FinanceLedgerStorage.getAllJournalEntries(branchId: widget.branchId);
+    final metrics = FinanceLedgerStorage.getDashboardMetrics(
+      monthKey: _selectedMonth,
+      branchId: widget.branchId,
+    );
+    final balances = (metrics['balances'] as Map<String, int>?) ?? <String, int>{};
 
-    // Calculate Balances
-    double totalBankBalance = 0.0;
-    double cashOnHand = 0.0;
-    double loansReceivable = 0.0;
-
+    double totalBank = 0.0;
+    double cash = 0.0;
     for (final acc in orgAccounts) {
-      final bal = FinanceLedgerStorage.getBankAccountBalancePKR(acc.accountCode);
+      final balPaisa = balances[acc.accountCode] ?? 0;
+      final balPkr = balPaisa / 100.0;
       if (acc.accountCode == '1030') {
-        cashOnHand += bal;
+        cash += balPkr;
       } else {
-        totalBankBalance += bal;
+        totalBank += balPkr;
       }
     }
 
-    loansReceivable = FinanceLedgerStorage.getBankAccountBalancePKR('1040');
+    final loansPaisa = balances['1040'] ?? 0;
+    final loans = loansPaisa / 100.0;
 
-    // Calculate Inflows and Outflows for selected month
-    double monthInflow = 0.0;
-    double monthOutflow = 0.0;
+    final monthInflow = ((metrics['monthInflowPaisa'] as int? ?? 0) / 100.0);
+    final monthOutflow = ((metrics['monthOutflowPaisa'] as int? ?? 0) / 100.0);
 
-    for (final entry in allEntries) {
-      if (entry.date.startsWith(_selectedMonth)) {
-        for (final line in entry.lines) {
-          // Income Accounts (4000s) increase with Credits
-          if (line.accountCode.startsWith('4')) {
-            monthInflow += (line.credit / 100.0);
-          }
-          // Expense Accounts (5000s) increase with Debits
-          else if (line.accountCode.startsWith('5')) {
-            monthOutflow += (line.debit / 100.0);
-          }
-        }
-      }
+    final recent = FinanceLedgerStorage.getAllJournalEntries(
+      branchId: widget.branchId,
+      limit: 10,
+    );
+
+    if (mounted) {
+      setState(() {
+        _orgAccounts = orgAccounts;
+        _accountBalancesPaisa = balances;
+        _totalBankBalance = totalBank;
+        _cashOnHand = cash;
+        _loansReceivable = loans;
+        _monthInflow = monthInflow;
+        _monthOutflow = monthOutflow;
+        _recentEntries = recent;
+        _isLoading = false;
+      });
     }
+  }
 
-    final recentEntries = allEntries.take(10).toList();
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        backgroundColor: _kBg,
+        body: Center(child: CircularProgressIndicator(color: _kAccent)),
+      );
+    }
 
     return Scaffold(
       backgroundColor: _kBg,
@@ -136,15 +195,15 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                 children: [
                   _buildKpiCard(
                     title: 'Total Bank Balance',
-                    value: _fmtCurrency(totalBankBalance),
-                    subtitle: '${orgAccounts.length - 1} Active Bank Accounts',
+                    value: _fmtCurrency(_totalBankBalance),
+                    subtitle: '${_orgAccounts.where((a) => a.accountCode != '1030').length} Active Bank Accounts',
                     icon: Icons.account_balance_rounded,
                     color: const Color(0xFF0284C7),
                     onTap: () => widget.onNavigateToTab(6), // Reports / Reconcile
                   ),
                   _buildKpiCard(
                     title: 'Cash in Hand (Petty)',
-                    value: _fmtCurrency(cashOnHand),
+                    value: _fmtCurrency(_cashOnHand),
                     subtitle: 'Petty Cash Fund (COA: 1030)',
                     icon: Icons.payments_rounded,
                     color: const Color(0xFF10B981),
@@ -152,7 +211,7 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                   ),
                   _buildKpiCard(
                     title: 'This Month Outflow',
-                    value: _fmtCurrency(monthOutflow),
+                    value: _fmtCurrency(_monthOutflow),
                     subtitle: 'Payroll & Operating Expenses ($_selectedMonth)',
                     icon: Icons.output_rounded,
                     color: const Color(0xFFEF4444),
@@ -160,7 +219,7 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                   ),
                   _buildKpiCard(
                     title: 'Loans Receivable',
-                    value: _fmtCurrency(loansReceivable),
+                    value: _fmtCurrency(_loansReceivable),
                     subtitle: 'Active Staff Advances (COA: 1040)',
                     icon: Icons.credit_card_rounded,
                     color: const Color(0xFFF59E0B),
@@ -198,10 +257,10 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                 crossAxisSpacing: 14,
                 mainAxisSpacing: 14,
               ),
-              itemCount: orgAccounts.length,
+              itemCount: _orgAccounts.length,
               itemBuilder: (context, idx) {
-                final acc = orgAccounts[idx];
-                final balPaisa = FinanceLedgerStorage.getBankAccountBalancePaisa(acc.accountCode);
+                final acc = _orgAccounts[idx];
+                final balPaisa = _accountBalancesPaisa[acc.accountCode] ?? 0;
                 final balStr = _fmtCurrency(balPaisa / 100.0);
 
                 return Container(
@@ -267,7 +326,7 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: _kBorder),
               ),
-              child: recentEntries.isEmpty
+              child: _recentEntries.isEmpty
                   ? const Padding(
                       padding: EdgeInsets.all(32),
                       child: Center(child: Text('No journal entries posted yet.', style: TextStyle(color: _kTextSecondary))),
@@ -275,10 +334,10 @@ class _FinanceOverviewDashboardState extends State<FinanceOverviewDashboard> {
                   : ListView.separated(
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
-                      itemCount: recentEntries.length,
+                      itemCount: _recentEntries.length,
                       separatorBuilder: (_, __) => const Divider(height: 1, color: _kBorder),
                       itemBuilder: (context, idx) {
-                        final entry = recentEntries[idx];
+                        final entry = _recentEntries[idx];
                         final dept = entry.departmentId ?? 'ADMIN';
 
 

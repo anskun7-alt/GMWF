@@ -42,16 +42,17 @@ def main():
             f.write(content)
         log(f"Updated auto_update_service.dart currentVersion to '{clean_ver}'")
 
-    # 3. Update GMWFSetup.iss
-    iss_path = os.path.join(os.getcwd(), 'GMWFSetup.iss')
-    if os.path.exists(iss_path):
-        with open(iss_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        content = re.sub(r'AppVersion=[\d.]+', f'AppVersion={clean_ver}', content)
-        content = re.sub(r'OutputBaseFilename=GMWF-v[\d.]+-x64', f'OutputBaseFilename=GMWF-v{clean_ver}-x64', content)
-        with open(iss_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        log(f"Updated GMWFSetup.iss to version {clean_ver}")
+    # 3. Update GMWFSetup.iss & GMWFSetup_x86.iss
+    for iss_name, arch in [('GMWFSetup.iss', 'x64'), ('GMWFSetup_x86.iss', 'x86')]:
+        iss_path = os.path.join(os.getcwd(), iss_name)
+        if os.path.exists(iss_path):
+            with open(iss_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            content = re.sub(r'AppVersion=[\d.]+', f'AppVersion={clean_ver}', content)
+            content = re.sub(r'OutputBaseFilename=GMWF-v[\d.]+-(' + arch + ')', f'OutputBaseFilename=GMWF-v{clean_ver}-\\1', content)
+            with open(iss_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            log(f"Updated {iss_name} to version {clean_ver}")
 
     # 4. Build Android Release APK with persistent release keystore
     log("Building Android Release APKs (split per ABI)...")

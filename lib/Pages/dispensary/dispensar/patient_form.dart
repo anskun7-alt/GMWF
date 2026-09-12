@@ -1154,18 +1154,52 @@ class _PatientFormState extends State<PatientForm> {
         'daysOfMedicine': days,
       };
 
-      // 1. Update local entries box immediately (preserve existing prescription data)
-      final entryKey = '${widget.branchId}-$serial';
+      // 1. Update local entries box immediately (preserve existing patient & prescription data)
+      final normBranch = widget.branchId.trim().toLowerCase();
+      final normSerial = serial.trim().toUpperCase();
+      final canonicalKey = '$normBranch-$normSerial';
       final entriesBox = Hive.box(LocalStorageService.entriesBox);
-      final currentEntry = entriesBox.get(entryKey) ?? entriesBox.get(serial);
-      if (currentEntry != null && currentEntry is Map) {
-        final updated = Map<String, dynamic>.from(currentEntry)..addAll(minimalUpdate);
-        await entriesBox.put(entryKey, updated);
-        await entriesBox.put(serial, updated);
+
+      Map<String, dynamic>? existingEntry;
+      final direct = entriesBox.get(canonicalKey) ?? entriesBox.get('${widget.branchId}-$serial') ?? entriesBox.get(serial);
+      if (direct is Map) {
+        existingEntry = Map<String, dynamic>.from(direct);
       } else {
-        await entriesBox.put(entryKey, minimalUpdate);
-        await entriesBox.put(serial, minimalUpdate);
+        for (final k in entriesBox.keys) {
+          final kStr = k.toString();
+          if (kStr.toUpperCase() == normSerial || kStr.toUpperCase().endsWith('-$normSerial')) {
+            final val = entriesBox.get(k);
+            if (val is Map) {
+              existingEntry = Map<String, dynamic>.from(val);
+              break;
+            }
+          }
+        }
       }
+
+      final fullEntry = <String, dynamic>{
+        if (existingEntry != null) ...existingEntry,
+        ...Map<String, dynamic>.from(widget.queueEntry),
+        ...Map<String, dynamic>.from(_data),
+        ...minimalUpdate,
+        'doctorName': doctorName,
+        'prescribedBy': doctorName,
+        'tokenBy': tokenBy,
+        'createdByName': tokenBy,
+      };
+
+      await entriesBox.put(canonicalKey, fullEntry);
+      // Clean up legacy non-canonical keys so duplicate records are not kept
+      if (entriesBox.containsKey(serial)) {
+        await entriesBox.delete(serial);
+      }
+      if (entriesBox.containsKey(serial.toUpperCase())) {
+        await entriesBox.delete(serial.toUpperCase());
+      }
+      if (canonicalKey != '${widget.branchId}-$serial' && entriesBox.containsKey('${widget.branchId}-$serial')) {
+        await entriesBox.delete('${widget.branchId}-$serial');
+      }
+
       await LocalStorageService.updateDispenseStatus(widget.branchId, serial, 'dispensed');
 
       // 2. Save dispensary record locally
@@ -1190,8 +1224,7 @@ class _PatientFormState extends State<PatientForm> {
         'createdByName': tokenBy,
         'daysOfMedicine': days,
       };
-      await Hive.box(LocalStorageService.dispensaryBox)
-          .put('${widget.branchId}_${dateKey}_$serial', dispensaryRecord);
+      await LocalStorageService.saveLocalDispensaryRecord(dispensaryRecord);
 
       final allPrescriptions = (_data['prescriptions'] as List?) ?? [];
       final medicines = allPrescriptions

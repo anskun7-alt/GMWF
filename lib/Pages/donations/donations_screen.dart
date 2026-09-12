@@ -137,32 +137,29 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
     _initControllers();
 
     final isGlobal = widget.branchId.isEmpty ||
-        widget.branchId == 'global';
+        widget.branchId == 'global' ||
+        widget.branchId == 'all';
 
-    // Handle global / consolidated view for high-level roles
-    if (widget.branchId == 'all' || (isGlobal && widget.role.canSeeAllBranches)) {
+    // Handle global / consolidated view for high-level roles or unassigned branch
+    if (isGlobal || widget.role.canSeeAllBranches) {
       _viewingBranchId = 'all';
       _viewingBranchName = 'All Branches (Consolidated)';
-    } else if (isGlobal && widget.allBranchIds.isNotEmpty) {
+    } else if (widget.allBranchIds.isNotEmpty) {
       _viewingBranchId   = widget.allBranchIds.first;
       _viewingBranchName = widget.allBranchNames.isNotEmpty
           ? widget.allBranchNames.first
           : _viewingBranchId;
-    } else if (!isGlobal) {
+    } else if (widget.branchId.isNotEmpty && widget.branchId != 'all') {
       _viewingBranchId   = widget.branchId;
       _viewingBranchName = widget.branchName.isNotEmpty
           ? widget.branchName
           : resolveBranchName(widget.branchId);
     } else {
-      // Global role with no pre-passed branches — we will fetch them below
-      _viewingBranchId   = '';
-      _viewingBranchName = 'Loading...';
+      _viewingBranchId   = 'all';
+      _viewingBranchName = 'All Branches (Consolidated)';
     }
 
-    // For global roles (HQ Manager, Chairman) fetch all branches from Firestore
-    if (widget.role.canSeeAllBranches) {
-      _loadAllBranches();
-    }
+    _loadAllBranches();
   }
 
   Future<void> _loadAllBranches() async {
@@ -179,9 +176,9 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
       if (!mounted) return;
       setState(() {
         _fetchedBranches = branches;
-        // If we had no valid branch selected yet, pick the first one
+        // If we had no valid branch selected yet, pick the first one or 'all'
         if (_viewingBranchId.isEmpty || _viewingBranchId == 'global') {
-          if (widget.role.canSeeAllBranches) {
+          if (widget.role.canSeeAllBranches || widget.branchId == 'all' || widget.branchId.isEmpty) {
             _viewingBranchId = 'all';
             _viewingBranchName = 'All Branches (Consolidated)';
           } else if (branches.isNotEmpty) {
@@ -204,7 +201,7 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
   String get _today => DateFormat('yyyy-MM-dd').format(DateTime.now());
 
   dynamic get _col {
-    if (_viewingBranchId == 'all') return 'all';
+    if (_viewingBranchId == 'all' || _viewingBranchId.isEmpty) return 'all';
     return FirebaseFirestore.instance
         .collection('branches')
         .doc(_viewingBranchId)
@@ -301,18 +298,6 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
         final displayUser = _effectiveUsername;
         final displayBranch = _effectiveBranchName;
 
-        if (widget.branchId.isEmpty) {
-          return Scaffold(
-            backgroundColor: t.bg,
-            body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.domain_disabled_rounded, size: 48, color: t.textTertiary),
-              const SizedBox(height: 12),
-              Text('No branch selected',
-                  style: DS.subheading(color: t.textSecondary)),
-            ])),
-          );
-        }
-
         final views = [
           _donationsTab(),
           DonorRegistryWidget(
@@ -331,6 +316,22 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
           return Scaffold(
             backgroundColor: t.bg,
             body: _donationsTab(),
+            floatingActionButton: FloatingActionButton.extended(
+              onPressed: _onAddTap,
+              elevation: 4,
+              highlightElevation: 8,
+              backgroundColor: t.accent,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.add_rounded, size: 22),
+              label: const Text(
+                'New Receipt',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
           );
         }
 
@@ -354,6 +355,22 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
                       ),
               ),
             ],
+          ),
+          floatingActionButton: FloatingActionButton.extended(
+            onPressed: _onAddTap,
+            elevation: 4,
+            highlightElevation: 8,
+            backgroundColor: t.accent,
+            foregroundColor: Colors.white,
+            icon: const Icon(Icons.add_rounded, size: 22),
+            label: const Text(
+              'New Receipt',
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.2,
+              ),
+            ),
           ),
           bottomNavigationBar: (!widget.isEmbedded && isMobile)
               ? MotionTabBar(
@@ -513,31 +530,12 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
                 const SizedBox(width: 10),
                 _RolePill(role: widget.role),
               ],
-            ],
-          ),
-          if (isMobile) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _onAddTap,
-                    icon: const Icon(Icons.add_rounded, size: 18),
-                    label: const Text('New Receipt', style: TextStyle(fontWeight: FontWeight.w700)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: t.accent,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      elevation: 0,
-                    ),
-                  ),
-                ),
+              if (isMobile) ...[
                 const SizedBox(width: 8),
                 _RolePill(role: widget.role),
               ],
-            ),
-          ],
+            ],
+          ),
         ],
       ),
     );
@@ -638,7 +636,7 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
       ),
     );
 
-    if (result != null) {
+    if (result != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Donation recorded: ${result.receiptNo}'),
@@ -647,196 +645,6 @@ class _DonationsScreenState extends State<DonationsScreen> with TickerProviderSt
         ),
       );
     }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PREMIUM HEADER
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _Header extends StatelessWidget {
-  final String   branchName, username, currentBranchId;
-  final UserRole role;
-  final bool     canSwitchBranch;
-  final List<({String id, String name})> branchOptions;
-  final void Function(String id, String name) onBranchSwitch;
-  final int      selectedTabIndex;
-  final void Function(int index)? onTabSelected;
-
-  const _Header({
-    required this.branchName,
-    required this.username,
-    required this.role,
-    required this.canSwitchBranch,
-    required this.branchOptions,
-    required this.currentBranchId,
-    required this.onBranchSwitch,
-    this.selectedTabIndex = 0,
-    this.onTabSelected,
-  });
-
-  static void showBranchPicker(
-    BuildContext context,
-    List<({String id, String name})> options,
-    String currentBranchId,
-    void Function(String id, String name) onSelect,
-    RoleThemeData t,
-  ) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      barrierColor: Colors.black.withValues(alpha: 0.4),
-      builder: (_) => _BranchPickerSheet(
-        options: options,
-        currentBranchId: currentBranchId,
-        onSelect: (id, name) {
-          onSelect(id, name);
-          Navigator.pop(context);
-        },
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = RoleThemeScope.dataOf(context);
-    final rc = role.roleColor;
-
-    final bool showRolePill = username.toLowerCase().trim() != role.displayLabel.toLowerCase().trim();
-
-    final tabs = [
-      (label: 'Donations', icon: Icons.receipt_long_rounded),
-      (label: 'Donors', icon: Icons.people_alt_rounded),
-      (label: 'Donation Boxes', icon: Icons.inventory_2_rounded),
-    ];
-
-    return Container(
-      padding: EdgeInsets.fromLTRB(24, MediaQuery.of(context).padding.top + 16, 24, 16),
-      decoration: BoxDecoration(
-        color: t.bgCard,
-        borderRadius: const BorderRadius.only(
-          bottomLeft: Radius.circular(20),
-          bottomRight: Radius.circular(20),
-        ),
-        border: Border(bottom: BorderSide(color: t.bgRule.withValues(alpha: 0.8), width: 1.5)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 44, height: 44,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
-              ],
-            ),
-            padding: const EdgeInsets.all(4),
-            child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
-          ),
-          const SizedBox(width: 16),
-          _Avatar(username: username, roleColor: rc),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Welcome back,',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: t.textTertiary, letterSpacing: 0.2),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  username,
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: t.textPrimary, letterSpacing: -0.3),
-                ),
-              ],
-            ),
-          ),
-
-          // ── Desktop Navigation Pills ──
-          if (onTabSelected != null) ...[
-            Container(
-              padding: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-                color: t.isDarkCanvas ? const Color(0xFF0D1117) : const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: t.bgRule),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: List.generate(tabs.length, (idx) {
-                  final tab = tabs[idx];
-                  final isSelected = selectedTabIndex == idx;
-                  return GestureDetector(
-                    onTap: () => onTabSelected!(idx),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: isSelected ? t.accent : Colors.transparent,
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: isSelected
-                            ? [
-                                BoxShadow(
-                                  color: t.accent.withValues(alpha: 0.3),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ]
-                            : [],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            tab.icon,
-                            size: 16,
-                            color: isSelected ? Colors.white : t.textSecondary,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            tab.label,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-                              color: isSelected ? Colors.white : t.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                }),
-              ),
-            ),
-            const SizedBox(width: 16),
-          ],
-
-          if (canSwitchBranch) ...[
-            _BranchPicker(
-              branchName: branchName,
-              canSwitchBranch: canSwitchBranch,
-              onTap: () => showBranchPicker(context, branchOptions, currentBranchId, onBranchSwitch, t),
-              t: t,
-            ),
-            const SizedBox(width: 12),
-          ],
-          if (showRolePill) ...[
-            _RolePill(role: role),
-          ],
-        ],
-      ),
-    );
   }
 }
 

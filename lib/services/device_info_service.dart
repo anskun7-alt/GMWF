@@ -163,14 +163,10 @@ class DeviceInfoService {
 
   static Timer? _presenceTimer;
 
-  /// Starts a 2-minute periodic presence heartbeat loop for active user
+  /// Starts a 2-minute periodic presence heartbeat loop for active user (Disabled to save Firestore quota)
   static void startPresenceHeartbeat() {
     _presenceTimer?.cancel();
-    // Immediate initial touch
-    touchPresence();
-    _presenceTimer = Timer.periodic(const Duration(minutes: 2), (_) {
-      touchPresence();
-    });
+    _presenceTimer = null;
   }
 
   /// Stops presence heartbeat loop
@@ -273,16 +269,9 @@ class DeviceInfoService {
     }
   }
 
-  /// Periodically touches user presence timestamp in Firestore
+  /// Periodically touches user presence timestamp in Firestore (No-op to save Firestore quota)
   static Future<void> touchPresence() async {
-    try {
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null || uid.isEmpty) return;
-      await FirebaseFirestore.instance.collection('users').doc(uid).set({
-        'isOnline': true,
-        'lastSeen': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-    } catch (_) {}
+    // Disabled to save Firestore quota
   }
 
   /// Returns whether a user document or session map represents an active online user.

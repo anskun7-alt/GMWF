@@ -482,18 +482,26 @@ class PythonRunnerService extends ChangeNotifier {
 
         // Watchdog: If background daemon was active and not explicitly stopped by user, auto-recover!
         if (wasDaemon && !_isExplicitlyStopped && isAutoStartEnabled) {
-          final backoffSeconds = (_consecutiveCrashes < 3) ? 5 : 15;
           _consecutiveCrashes++;
-          _appendLine(
-            '🔄 [Watchdog] Python daemon exited. Auto-restarting in ${backoffSeconds}s (recovery attempt #$_consecutiveCrashes)...',
-            TerminalLineType.warning,
-          );
-          _watchdogTimer?.cancel();
-          _watchdogTimer = Timer(Duration(seconds: backoffSeconds), () {
-            if (!_isExplicitlyStopped && !isRunning && isAutoStartEnabled) {
-              initAutoStart();
-            }
-          });
+          if (_consecutiveCrashes > 5) {
+            _appendLine(
+              '⚠️ [Watchdog] Python daemon crashed 5 consecutive times. Pausing auto-restart. '
+              'Please check Python installation and required libraries (pyzk, firebase-admin) in Settings.',
+              TerminalLineType.error,
+            );
+          } else {
+            final backoffSeconds = (_consecutiveCrashes < 3) ? 5 : 15;
+            _appendLine(
+              '🔄 [Watchdog] Python daemon exited. Auto-restarting in ${backoffSeconds}s (recovery attempt #$_consecutiveCrashes)...',
+              TerminalLineType.warning,
+            );
+            _watchdogTimer?.cancel();
+            _watchdogTimer = Timer(Duration(seconds: backoffSeconds), () {
+              if (!_isExplicitlyStopped && !isRunning && isAutoStartEnabled) {
+                initAutoStart();
+              }
+            });
+          }
         }
       });
 

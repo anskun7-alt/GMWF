@@ -13,6 +13,7 @@ class BranchFacilityEditorDialog extends StatefulWidget {
   final List<Map<String, dynamic>> initialDasterkhwaans;
   final List<Map<String, dynamic>> initialMadrassas;
   final List<Map<String, dynamic>> initialSchools;
+  final List<Map<String, dynamic>> initialCamps;
   final Map<String, dynamic>? initialSessionsConfig;
 
   const BranchFacilityEditorDialog({
@@ -23,6 +24,7 @@ class BranchFacilityEditorDialog extends StatefulWidget {
     this.initialDasterkhwaans = const [],
     this.initialMadrassas = const [],
     this.initialSchools = const [],
+    this.initialCamps = const [],
     this.initialSessionsConfig,
   });
 
@@ -34,6 +36,7 @@ class BranchFacilityEditorDialog extends StatefulWidget {
     List<Map<String, dynamic>> initialDasterkhwaans = const [],
     List<Map<String, dynamic>> initialMadrassas = const [],
     List<Map<String, dynamic>> initialSchools = const [],
+    List<Map<String, dynamic>> initialCamps = const [],
     Map<String, dynamic>? initialSessionsConfig,
   }) {
     return showDialog<bool>(
@@ -46,6 +49,7 @@ class BranchFacilityEditorDialog extends StatefulWidget {
         initialDasterkhwaans: initialDasterkhwaans,
         initialMadrassas: initialMadrassas,
         initialSchools: initialSchools,
+        initialCamps: initialCamps,
         initialSessionsConfig: initialSessionsConfig,
       ),
     );
@@ -59,11 +63,13 @@ class BranchFacilityEditorDialog extends StatefulWidget {
 class _BranchFacilityEditorDialogState
     extends State<BranchFacilityEditorDialog> {
   late TextEditingController _nameController;
+  late TextEditingController _campInputCtrl;
   late TextEditingController _dispensaryInputCtrl;
   late TextEditingController _dasterkhwaanInputCtrl;
   late TextEditingController _madrassaInputCtrl;
   late TextEditingController _schoolInputCtrl;
 
+  late List<Map<String, dynamic>> _camps;
   late List<Map<String, dynamic>> _dispensaries;
   late List<Map<String, dynamic>> _dasterkhwaans;
   late List<Map<String, dynamic>> _madrassas;
@@ -71,12 +77,15 @@ class _BranchFacilityEditorDialogState
   late Map<String, dynamic> _sessionsConfig;
   late bool _madrassaFeeEnabled;
   late bool _allowVitalsToken;
+  late bool _allowDoctorInventoryApproval;
+  final List<String> _newCampDepts = ['dispensary'];
   bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.currentBranchName);
+    _campInputCtrl = TextEditingController();
     _dispensaryInputCtrl = TextEditingController();
     _dasterkhwaanInputCtrl = TextEditingController();
     _madrassaInputCtrl = TextEditingController();
@@ -94,21 +103,25 @@ class _BranchFacilityEditorDialogState
     // Dispensary Config
     final rawDisp = initSess['dispensary'] is Map ? initSess['dispensary'] as Map : initSess;
     _allowVitalsToken = rawDisp['allowVitalsToken'] ?? initSess['allowVitalsToken'] ?? widget.initialSessionsConfig?['allowVitalsToken'] ?? LocalStorageService.isVitalsTokenAllowed(widget.branchId);
+    _allowDoctorInventoryApproval = rawDisp['allowDoctorInventoryApproval'] ?? initSess['allowDoctorInventoryApproval'] ?? widget.initialSessionsConfig?['allowDoctorInventoryApproval'] ?? LocalStorageService.isDoctorInventoryApprovalAllowed(widget.branchId);
 
     final dispConfig = {
       'morning': Map<String, dynamic>.from(rawDisp['morning'] ?? defaultDisp['morning'] ?? {'enabled': true, 'openTime': '08:00', 'closeTime': '14:00'}),
       'evening': Map<String, dynamic>.from(rawDisp['evening'] ?? defaultDisp['evening'] ?? {'enabled': true, 'openTime': '16:00', 'closeTime': '22:00'}),
       'night':   Map<String, dynamic>.from(rawDisp['night']   ?? defaultDisp['night']   ?? {'enabled': false, 'openTime': '22:00', 'closeTime': '04:00'}),
       'allowVitalsToken': _allowVitalsToken,
+      'allowDoctorInventoryApproval': _allowDoctorInventoryApproval,
     };
 
-    // Dasterkhwaan Config (Morning/Breakfast, Lunch, Dinner, Night)
+    // Dasterkhwaan Config (Evening, Night, Morning, Lunch)
     final rawDast = initSess['dasterkhwaan'] is Map ? initSess['dasterkhwaan'] as Map : {};
+    final eveSource = rawDast['evening'] ?? rawDast['dinner'] ?? defaultDast['evening'] ?? defaultDast['dinner'];
     final dastConfig = {
-      'morning': Map<String, dynamic>.from(rawDast['morning'] ?? defaultDast['morning'] ?? {'enabled': true, 'openTime': '06:00', 'closeTime': '10:00'}),
-      'lunch':   Map<String, dynamic>.from(rawDast['lunch']   ?? defaultDast['lunch']   ?? {'enabled': true, 'openTime': '12:00', 'closeTime': '16:00'}),
-      'dinner':  Map<String, dynamic>.from(rawDast['dinner']  ?? defaultDast['dinner']  ?? {'enabled': true, 'openTime': '18:00', 'closeTime': '22:00'}),
-      'night':   Map<String, dynamic>.from(rawDast['night']   ?? defaultDast['night']   ?? {'enabled': false, 'openTime': '22:00', 'closeTime': '04:00'}),
+      'evening': Map<String, dynamic>.from(eveSource ?? {'enabled': true, 'openTime': '16:00', 'closeTime': '20:00'}),
+      'dinner':  Map<String, dynamic>.from(eveSource ?? {'enabled': true, 'openTime': '16:00', 'closeTime': '20:00'}),
+      'night':   Map<String, dynamic>.from(rawDast['night']   ?? defaultDast['night']   ?? {'enabled': true, 'openTime': '20:00', 'closeTime': '02:00'}),
+      'morning': Map<String, dynamic>.from(rawDast['morning'] ?? defaultDast['morning'] ?? {'enabled': false, 'openTime': '06:00', 'closeTime': '10:00'}),
+      'lunch':   Map<String, dynamic>.from(rawDast['lunch']   ?? defaultDast['lunch']   ?? {'enabled': false, 'openTime': '12:00', 'closeTime': '16:00'}),
     };
 
     // Madrassa Config & Fee Factor
@@ -137,6 +150,7 @@ class _BranchFacilityEditorDialogState
       'school': schConfig,
       'madrassaFeeEnabled': _madrassaFeeEnabled,
       'allowVitalsToken': _allowVitalsToken,
+      'allowDoctorInventoryApproval': _allowDoctorInventoryApproval,
       // Backward-compatible top-level keys
       'morning': dispConfig['morning']!,
       'evening': dispConfig['evening']!,
@@ -158,6 +172,48 @@ class _BranchFacilityEditorDialogState
     _schools = widget.initialSchools.isNotEmpty
         ? widget.initialSchools.map((d) => _normalizeFacility(d, defaultSessions: ['morning', 'evening'])).toList()
         : (defaults['schools'] ?? []).map((d) => _normalizeFacility(d, defaultSessions: ['morning', 'evening'])).toList();
+
+    _camps = widget.initialCamps.isNotEmpty
+        ? widget.initialCamps.map((c) => _normalizeCamp(c)).toList()
+        : CampSessionService.getCampsForBranch(widget.branchId, includeClosed: true).map((c) => _normalizeCamp(c)).toList();
+  }
+
+  Map<String, dynamic> _normalizeCamp(Map c) {
+    final m = Map<String, dynamic>.from(c);
+    final rawDepts = m['departments'];
+    List<String> depts = [];
+    if (rawDepts is List) {
+      depts = rawDepts.map((e) => e.toString().toLowerCase().trim()).where((e) => e.isNotEmpty).toList();
+    }
+    if (depts.isEmpty) {
+      depts = ['dispensary'];
+    }
+    final rawSessions = m['sessions'];
+    List<String> sessions = [];
+    if (rawSessions is List) {
+      sessions = rawSessions.map((e) => e.toString().toLowerCase().trim()).where((e) => e.isNotEmpty).toList();
+    }
+    if (sessions.isEmpty) {
+      sessions = ['morning', 'evening'];
+    }
+    final rawTimings = m['sessionTimings'];
+    Map<String, dynamic> sessionTimings = {};
+    if (rawTimings is Map) {
+      sessionTimings = Map<String, dynamic>.from(rawTimings);
+    }
+    final isClosed = m['isClosed'] == true || m['status'] == 'closed' || m['status'] == 'offboarded';
+
+    return {
+      'id': (m['id'] ?? '').toString().trim().toLowerCase(),
+      'name': (m['name'] ?? m['id'] ?? 'Camp').toString().trim(),
+      'departments': depts,
+      'sessions': sessions,
+      'sessionTimings': sessionTimings,
+      'status': isClosed ? 'closed' : 'active',
+      'isClosed': isClosed,
+      'closedAt': m['closedAt'],
+      'closureReason': m['closureReason'] ?? '',
+    };
   }
 
   Map<String, dynamic> _normalizeFacility(Map d, {required List<String> defaultSessions}) {
@@ -187,11 +243,68 @@ class _BranchFacilityEditorDialogState
   @override
   void dispose() {
     _nameController.dispose();
+    _campInputCtrl.dispose();
     _dispensaryInputCtrl.dispose();
     _dasterkhwaanInputCtrl.dispose();
     _madrassaInputCtrl.dispose();
     _schoolInputCtrl.dispose();
     super.dispose();
+  }
+
+  void _addCamp() {
+    final text = _campInputCtrl.text.trim();
+    if (text.isEmpty) return;
+    final id = text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '_');
+    if (_camps.any((c) => c['id'] == id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Camp with ID "$id" already exists')),
+      );
+      return;
+    }
+    setState(() {
+      _camps.add({
+        'id': id,
+        'name': text,
+        'departments': _newCampDepts.isNotEmpty ? List<String>.from(_newCampDepts) : ['dispensary'],
+        'sessions': ['morning', 'evening'],
+        'sessionTimings': <String, dynamic>{},
+        'status': 'active',
+        'isClosed': false,
+      });
+      _campInputCtrl.clear();
+    });
+  }
+
+  void _toggleCampDept(Map<String, dynamic> camp, String deptKey) {
+    setState(() {
+      final depts = List<String>.from(camp['departments'] as List? ?? []);
+      if (depts.contains(deptKey)) {
+        if (depts.length > 1) {
+          depts.remove(deptKey);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Camp must have at least one active department.')),
+          );
+        }
+      } else {
+        depts.add(deptKey);
+      }
+      camp['departments'] = depts;
+    });
+  }
+
+  void _toggleCampClose(Map<String, dynamic> camp) {
+    setState(() {
+      final currentlyClosed = camp['isClosed'] == true;
+      camp['isClosed'] = !currentlyClosed;
+      camp['status'] = !currentlyClosed ? 'closed' : 'active';
+      if (!currentlyClosed) {
+        camp['closedAt'] = DateTime.now().toIso8601String();
+      } else {
+        camp['closedAt'] = null;
+        camp['reactivatedAt'] = DateTime.now().toIso8601String();
+      }
+    });
   }
 
   void _addDispensary() {
@@ -310,6 +423,13 @@ class _BranchFacilityEditorDialogState
           if (sMap is Map) {
             sMap[timeKey] = '$hh:$mm';
           }
+          if (deptKey == 'dasterkhwaan' && (sessionKey == 'evening' || sessionKey == 'dinner')) {
+            final otherKey = sessionKey == 'evening' ? 'dinner' : 'evening';
+            final otherMap = (_sessionsConfig['dasterkhwaan'] as Map)[otherKey];
+            if (otherMap is Map) {
+              otherMap[timeKey] = '$hh:$mm';
+            }
+          }
         }
         // Mirror to top-level if dispensary
         if (deptKey == 'dispensary') {
@@ -389,6 +509,8 @@ class _BranchFacilityEditorDialogState
         'dasterkhwaans': _dasterkhwaans,
         'madrassas': _madrassas,
         'schools': _schools,
+        'camps': _camps,
+        'campsCount': _camps.length,
         'dispensariesCount': _dispensaries.length,
         'dasterkhwaansCount': _dasterkhwaans.length,
         'madrassasCount': _madrassas.length,
@@ -423,6 +545,8 @@ class _BranchFacilityEditorDialogState
           'dasterkhwaans': _dasterkhwaans,
           'madrassas': _madrassas,
           'schools': _schools,
+          'camps': _camps,
+          'campsCount': _camps.length,
           'dispensariesCount': _dispensaries.length,
           'dasterkhwaansCount': _dasterkhwaans.length,
           'madrassasCount': _madrassas.length,
@@ -536,6 +660,16 @@ class _BranchFacilityEditorDialogState
                     ),
                     const SizedBox(height: 24),
 
+                    // ── Section 0: Camps & Field Sub-Locations ──
+                    _buildCampsCard(
+                      isDark: isDark,
+                      textColor: textColor,
+                      subtextColor: subtextColor,
+                      borderColor: borderColor,
+                      inputBg: inputBg,
+                    ),
+                    const SizedBox(height: 24),
+
                     // ── Section 1: Dispensary Camps & Separate Shift Timings ──
                     _buildFacilityCard(
                       deptKey: 'dispensary',
@@ -573,10 +707,10 @@ class _BranchFacilityEditorDialogState
                       onAdd: _addDasterkhwaan,
                       items: _dasterkhwaans,
                       sessionOptions: const [
-                        {'key': 'morning', 'label': '☀️ Morning / Breakfast', 'icon': Icons.free_breakfast_rounded, 'color': Color(0xFFF59E0B)},
-                        {'key': 'lunch',   'label': '🍲 Lunch / Afternoon',   'icon': Icons.lunch_dining_rounded,   'color': Color(0xFF10B981)},
-                        {'key': 'dinner',  'label': '🍛 Dinner / Evening',    'icon': Icons.dinner_dining_rounded,  'color': Color(0xFF3B82F6)},
-                        {'key': 'night',   'label': '🌙 Night / Sehri',       'icon': Icons.dark_mode_rounded,      'color': Color(0xFF8B5CF6)},
+                        {'key': 'evening', 'label': '🌅 Evening / Dinner (شام)', 'icon': Icons.wb_sunny_rounded,    'color': Color(0xFFEA580C)},
+                        {'key': 'night',   'label': '🌙 Night / Sehri (رات)',     'icon': Icons.dark_mode_rounded,   'color': Color(0xFF8B5CF6)},
+                        {'key': 'morning', 'label': '☀️ Morning / Breakfast',     'icon': Icons.free_breakfast_rounded, 'color': Color(0xFFF59E0B)},
+                        {'key': 'lunch',   'label': '🍲 Lunch / Afternoon',       'icon': Icons.lunch_dining_rounded,   'color': Color(0xFF10B981)},
                       ],
                       onDelete: (id) => setState(() => _dasterkhwaans.removeWhere((i) => i['id'] == id)),
                       isDark: isDark,
@@ -616,7 +750,7 @@ class _BranchFacilityEditorDialogState
                     _buildFacilityCard(
                       deptKey: 'school',
                       title: 'School Wings / Campus (${_schools.length})',
-                      subtitle: 'Taleem-o-Tarbiyat academic classes, faculty & student schedules',
+                      subtitle: 'Taleem-wa-Tarbiyat academic classes, faculty & student schedules',
                       icon: Icons.school_rounded,
                       color: const Color(0xFF4F46E5),
                       ctrl: _schoolInputCtrl,
@@ -928,6 +1062,12 @@ class _BranchFacilityEditorDialogState
               borderColor: borderColor,
               subtextColor: subtextColor,
             ),
+            const SizedBox(height: 14),
+            _buildDoctorInventoryApprovalToggle(
+              isDark: isDark,
+              borderColor: borderColor,
+              subtextColor: subtextColor,
+            ),
           ],
 
           if (deptKey == 'madrassa') ...[
@@ -1184,7 +1324,7 @@ class _BranchFacilityEditorDialogState
                 Row(
                   children: [
                     Text(
-                      'Vitals-Only Token Issuance (Receptionist)',
+                      'Dual Token Feasibility (Vitals + Doctor)',
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.bold,
@@ -1198,10 +1338,9 @@ class _BranchFacilityEditorDialogState
                         color: _allowVitalsToken
                             ? const Color(0xFF10B981).withValues(alpha: 0.15)
                             : const Color(0xFFEF4444).withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
-                        _allowVitalsToken ? 'ALLOWED 🟢' : 'DISALLOWED 🔴',
+                        _allowVitalsToken ? 'DUAL TOKEN ALLOWED 🟢' : 'SINGLE TOKEN ONLY 🔴',
                         style: TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.bold,
@@ -1214,8 +1353,8 @@ class _BranchFacilityEditorDialogState
                 const SizedBox(height: 4),
                 Text(
                   _allowVitalsToken
-                      ? 'Allow vitals token: Receptionist can issue dedicated Vitals-Only inspection tokens in addition to regular tokens.'
-                      : 'Disallow vitals token: The vitals token button will be hidden from the receptionist screen. Only regular visit tokens can be issued.',
+                      ? 'Dual Token Allowed: Receptionist can issue both Vitals-Only and Regular Consultation tokens for the same patient in one day.'
+                      : 'Single Token Only: Strict limit of 1 token per patient per day. Once any token is issued today, no further tokens can be issued without Doctor approval.',
                   style: TextStyle(fontSize: 11, color: subtextColor),
                 ),
               ],
@@ -1234,6 +1373,103 @@ class _BranchFacilityEditorDialogState
                   (_sessionsConfig['dispensary'] as Map)['allowVitalsToken'] = val;
                 }
                 _sessionsConfig['allowVitalsToken'] = val;
+              });
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDoctorInventoryApprovalToggle({
+    required bool isDark,
+    required Color borderColor,
+    required Color subtextColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: _allowDoctorInventoryApproval
+              ? const Color(0xFF0F766E).withValues(alpha: 0.5)
+              : borderColor,
+          width: _allowDoctorInventoryApproval ? 1.2 : 0.8,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _allowDoctorInventoryApproval ? const Color(0xFF0F766E) : const Color(0xFF64748B),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              _allowDoctorInventoryApproval ? Icons.approval_rounded : Icons.lock_outline_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'Doctor Medicine & Request Approvals',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white : const Color(0xFF0F172A),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: _allowDoctorInventoryApproval
+                            ? const Color(0xFF10B981).withValues(alpha: 0.15)
+                            : const Color(0xFF64748B).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        _allowDoctorInventoryApproval ? 'ENABLED 🟢' : 'DISABLED ⚪',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: _allowDoctorInventoryApproval ? const Color(0xFF059669) : const Color(0xFF64748B),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _allowDoctorInventoryApproval
+                      ? 'Doctor panel includes full medicine inventory access and supervisor-level request approval powers (medicine restock, proforma, stock edits).'
+                      : 'Doctor panel is restricted to clinical consultation and prescriptions only.',
+                  style: TextStyle(fontSize: 11, color: subtextColor),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Switch(
+            value: _allowDoctorInventoryApproval,
+            activeColor: const Color(0xFF0F766E),
+            inactiveThumbColor: Colors.grey.shade400,
+            inactiveTrackColor: Colors.grey.shade200,
+            onChanged: (val) {
+              setState(() {
+                _allowDoctorInventoryApproval = val;
+                if (_sessionsConfig['dispensary'] is Map) {
+                  (_sessionsConfig['dispensary'] as Map)['allowDoctorInventoryApproval'] = val;
+                }
+                _sessionsConfig['allowDoctorInventoryApproval'] = val;
               });
             },
           ),
@@ -1334,4 +1570,420 @@ class _BranchFacilityEditorDialogState
       ),
     );
   }
+
+  Widget _buildCampsCard({
+    required bool isDark,
+    required Color textColor,
+    required Color subtextColor,
+    required Color borderColor,
+    required Color inputBg,
+  }) {
+    const color = Color(0xFF0284C7); // Sky blue / Cyan
+
+    const deptDefinitions = [
+      {'key': 'dispensary',   'label': '🏥 Dispensary',   'color': Color(0xFF0D9488)},
+      {'key': 'dasterkhwaan', 'label': '🍽️ Dasterkhwaan', 'color': Color(0xFFEA580C)},
+      {'key': 'madrassa',     'label': '📖 Madrassa',     'color': Color(0xFF059669)},
+      {'key': 'school',       'label': '🏫 School',       'color': Color(0xFF4F46E5)},
+    ];
+
+    const sessionOptions = [
+      {'key': 'morning', 'label': '☀️ Morning', 'color': Color(0xFFF59E0B)},
+      {'key': 'evening', 'label': '🌅 Evening', 'color': Color(0xFF3B82F6)},
+      {'key': 'night',   'label': '🌙 Night',   'color': Color(0xFF8B5CF6)},
+    ];
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF0F9FF),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: isDark ? color.withValues(alpha: 0.3) : const Color(0xFFBAE6FD), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.holiday_village_rounded, color: color, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Camps & Field Sub-Locations (${_camps.length})',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: isDark ? Colors.white : const Color(0xFF0369A1),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: color.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: color.withValues(alpha: 0.3)),
+                          ),
+                          child: Text(
+                            '${_camps.where((c) => c['isClosed'] != true).length} Active',
+                            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: color),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Manage branch camps, assign operational departments (Dispensary, Dasterkhwaan, Madrassa, School), configure timings, and close/reopen camps just like branches.',
+                      style: TextStyle(fontSize: 11, color: subtextColor),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Add New Camp Box
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: borderColor),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Register New Camp / Sub-Facility',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textColor),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _campInputCtrl,
+                        style: TextStyle(color: textColor, fontSize: 13),
+                        decoration: InputDecoration(
+                          hintText: 'e.g. Model Town Camp, DHA Medical Center, Kapayya Desk',
+                          hintStyle: TextStyle(color: subtextColor, fontSize: 12),
+                          filled: true,
+                          fillColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                        ),
+                        onSubmitted: (_) => _addCamp(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      onPressed: _addCamp,
+                      icon: const Icon(Icons.add_location_alt_rounded, size: 16),
+                      label: const Text('Add Camp'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: color,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        elevation: 0,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text('Initial Departments: ', style: TextStyle(fontSize: 11, color: subtextColor, fontWeight: FontWeight.w600)),
+                    ...deptDefinitions.map((d) {
+                      final key = d['key'] as String;
+                      final label = d['label'] as String;
+                      final isSelected = _newCampDepts.contains(key);
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: FilterChip(
+                          label: Text(label, style: TextStyle(fontSize: 11, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                          selected: isSelected,
+                          selectedColor: (d['color'] as Color).withValues(alpha: 0.2),
+                          checkmarkColor: d['color'] as Color,
+                          onSelected: (val) {
+                            setState(() {
+                              if (val) {
+                                _newCampDepts.add(key);
+                              } else if (_newCampDepts.length > 1) {
+                                _newCampDepts.remove(key);
+                              }
+                            });
+                          },
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // Camps List
+          if (_camps.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'No camps registered for this branch yet. Add camps above to enable multi-location operations.',
+                style: TextStyle(fontSize: 12, color: subtextColor, fontStyle: FontStyle.italic),
+              ),
+            )
+          else
+            ..._camps.map((camp) {
+              final id = (camp['id'] ?? '').toString();
+              final name = (camp['name'] ?? id).toString();
+              final isClosed = camp['isClosed'] == true;
+              final depts = List<String>.from(camp['departments'] as List? ?? ['dispensary']);
+              final activeSessions = List<String>.from(camp['sessions'] as List? ?? ['morning', 'evening']);
+              final customTimings = camp['sessionTimings'] as Map<String, dynamic>? ?? {};
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: isClosed
+                      ? (isDark ? const Color(0xFF451A03).withValues(alpha: 0.25) : const Color(0xFFFEF2F2))
+                      : (isDark ? const Color(0xFF1E293B) : Colors.white),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isClosed ? Colors.red.withValues(alpha: 0.35) : borderColor,
+                    width: isClosed ? 1.2 : 1.0,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Camp Header Row
+                    Row(
+                      children: [
+                        Icon(
+                          isClosed ? Icons.location_off_rounded : Icons.location_on_rounded,
+                          color: isClosed ? Colors.redAccent : color,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          name,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: isClosed ? (isDark ? Colors.white60 : Colors.black54) : textColor,
+                            decoration: isClosed ? TextDecoration.lineThrough : null,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: isClosed ? Colors.red.withValues(alpha: 0.12) : Colors.green.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: isClosed ? Colors.red.withValues(alpha: 0.3) : Colors.green.withValues(alpha: 0.3)),
+                          ),
+                          child: Text(
+                            isClosed ? '🔴 CLOSED / ARCHIVED' : '🟢 ACTIVE',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: isClosed ? Colors.redAccent : Colors.green,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text('ID: $id', style: TextStyle(fontSize: 11, color: subtextColor)),
+                        const Spacer(),
+
+                        // Close / Reopen Toggle Button
+                        OutlinedButton.icon(
+                          onPressed: () => _toggleCampClose(camp),
+                          icon: Icon(
+                            isClosed ? Icons.published_with_changes_rounded : Icons.archive_rounded,
+                            size: 14,
+                            color: isClosed ? Colors.green : Colors.orange.shade800,
+                          ),
+                          label: Text(
+                            isClosed ? 'Reopen Camp' : 'Close Camp',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: isClosed ? Colors.green : Colors.orange.shade800,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            side: BorderSide(color: isClosed ? Colors.green : Colors.orange.shade800),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 18),
+                          tooltip: 'Remove Camp',
+                          onPressed: () {
+                            setState(() {
+                              _camps.removeWhere((c) => c['id'] == id);
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Included Departments Row
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            'Active Departments: ',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: subtextColor),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: deptDefinitions.map((d) {
+                              final dKey = d['key'] as String;
+                              final dLabel = d['label'] as String;
+                              final dColor = d['color'] as Color;
+                              final isSelected = depts.contains(dKey);
+
+                              return FilterChip(
+                                label: Text(dLabel),
+                                selected: isSelected,
+                                selectedColor: dColor.withValues(alpha: 0.22),
+                                checkmarkColor: isDark ? Colors.white : dColor,
+                                labelStyle: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                  color: isSelected ? (isDark ? Colors.white : dColor) : subtextColor,
+                                ),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                side: BorderSide(
+                                  color: isSelected ? dColor : borderColor,
+                                  width: isSelected ? 1.2 : 0.8,
+                                ),
+                                onSelected: (_) => _toggleCampDept(camp, dKey),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Active Sessions Row
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            'Active Shifts: ',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: subtextColor),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: sessionOptions.map((opt) {
+                              final sKey = opt['key'] as String;
+                              final sLabel = opt['label'] as String;
+                              final sColor = opt['color'] as Color;
+                              final isSelected = activeSessions.contains(sKey);
+
+                              final customSess = customTimings[sKey] as Map<String, dynamic>? ?? {};
+                              final effOpen = customSess['openTime']?.toString() ?? (sKey == 'morning' ? '08:00' : (sKey == 'evening' ? '16:00' : '22:00'));
+                              final effClose = customSess['closeTime']?.toString() ?? (sKey == 'morning' ? '14:00' : (sKey == 'evening' ? '22:00' : '04:00'));
+
+                              return FilterChip(
+                                label: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(sLabel),
+                                    if (isSelected) ...[
+                                      const SizedBox(width: 5),
+                                      InkWell(
+                                        onTap: () async {
+                                          await _pickFacilityCustomTime(context, camp, sKey, 'openTime', effOpen);
+                                          if (mounted) {
+                                            await _pickFacilityCustomTime(context, camp, sKey, 'closeTime', effClose);
+                                          }
+                                        },
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: sColor.withValues(alpha: 0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                '${_formatTimeStr(effOpen)} - ${_formatTimeStr(effClose)}',
+                                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isDark ? Colors.white70 : sColor),
+                                              ),
+                                              const SizedBox(width: 2),
+                                              Icon(Icons.edit_rounded, size: 9, color: isDark ? Colors.white70 : sColor),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                                selected: isSelected,
+                                selectedColor: sColor.withValues(alpha: 0.22),
+                                checkmarkColor: isDark ? Colors.white : sColor,
+                                labelStyle: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                  color: isSelected ? (isDark ? Colors.white : sColor) : subtextColor,
+                                ),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                side: BorderSide(
+                                  color: isSelected ? sColor : borderColor,
+                                  width: isSelected ? 1.2 : 0.8,
+                                ),
+                                onSelected: (_) => _toggleSession(camp, sKey),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
 }
+

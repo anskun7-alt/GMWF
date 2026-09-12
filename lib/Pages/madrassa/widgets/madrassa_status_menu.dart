@@ -7,6 +7,11 @@ import '../../../theme/app_theme.dart';
 import '../dialogs/enrollment_dialog.dart';
 import '../utils/madrassa_local_storage.dart';
 import '../../../widgets/media_upload_tile.dart';
+import '../../../realtime/realtime_manager.dart';
+import '../../../realtime/realtime_events.dart';
+import '../../../services/local_storage_service.dart';
+import '../../../services/sync_service.dart';
+import 'dart:async';
 
 class StatusActionMenu extends StatelessWidget {
   final dynamic student;
@@ -269,20 +274,67 @@ class StatusActionMenu extends StatelessWidget {
         if (requiresDate && dateFieldName != null && selectedDate != null) {
           studentCache[dateFieldName] = selectedDate!.toIso8601String();
         }
+        studentCache['lastUpdatedAt'] = DateTime.now().toIso8601String();
+
+        final auditList = List<Map<String, dynamic>>.from(
+          (studentCache['auditLog'] as List? ?? []).whereType<Map>().map((e) => Map<String, dynamic>.from(e)),
+        );
+        auditList.add({
+          'status': newStatus,
+          'type': 'status_change',
+          'date': (selectedDate ?? DateTime.now()).toIso8601String(),
+          'reason': finalReason,
+        });
+        studentCache['auditLog'] = auditList;
+
         await MadrassaLocalStorage.cacheStudent(branchId, studentId, studentCache);
 
-        // Firestore direct update
+        // Broadcast LAN
         try {
-          final docRef = FirebaseFirestore.instance
-              .collection('branches')
-              .doc(branchId)
-              .collection('madrassa_students')
-              .doc(studentId);
-          await docRef.update(updates);
+          final payload = RealtimeEvents.payload(
+            type: RealtimeEvents.saveMadrassaStudent,
+            data: {
+              ...studentCache,
+              'studentId': studentId,
+            },
+            branchId: branchId,
+          );
+          RealtimeManager().sendMessage(payload);
         } catch (e) {
-          debugPrint('[MadrassaStatusMenu] Firestore status update error: $e');
+          debugPrint('[MadrassaStatusMenu] LAN broadcast error: $e');
+        }
+
+        // Always enqueue sync
+        try {
+          await LocalStorageService.enqueueSync({
+            'type': 'save_madrassa_student',
+            'branchId': branchId,
+            'studentId': studentId,
+            'data': studentCache,
+          });
+          unawaited(SyncService().triggerUpload());
+        } catch (e) {
+          debugPrint('[MadrassaStatusMenu] enqueueSync error: $e');
         }
       }
+
+      // Calculate active tenure duration
+      final joinDate = _parseDateTime(sData['joinDate']);
+      final durationStr = _formatDuration(joinDate, selectedDate ?? DateTime.now());
+      String statusDetail = '';
+      if (newStatus == 'hifz_completed') {
+        statusDetail = 'Hifz Completed in $durationStr';
+      } else if (newStatus == 'archived') {
+        statusDetail = 'Moved to Archive after $durationStr of active study';
+      } else if (newStatus == 'left') {
+        statusDetail = 'Marked as Left after $durationStr';
+      } else if (newStatus == 'dropped') {
+        statusDetail = 'Expelled / Dropped Out after $durationStr';
+      } else if (newStatus == 'active') {
+        statusDetail = 'Reactivated into Active classes';
+      }
+
+      final auditMsg = '${sData['name'] ?? 'Student'} status changed from ${currentStatus.toUpperCase()} to ${newStatus.toUpperCase()} ($statusDetail). Note: $finalReason';
 
       // Centralized Audit Log
       await MadrassaAuditService.logAction(
@@ -290,7 +342,7 @@ class StatusActionMenu extends StatelessWidget {
         editor: username,
         role: role,
         type: 'status_change',
-        message: 'Status of student ${sData['name'] ?? ''} changed from $currentStatus to $newStatus. Reason: $finalReason',
+        message: auditMsg,
         studentId: studentId,
         studentName: sData['name'],
       );
@@ -382,8 +434,7 @@ class StatusActionMenu extends StatelessWidget {
                         final log = auditList[idx];
                         final logStatus = log['status'] ?? 'unknown';
                         final logType = log['type'] ?? 'info';
-                        final logDateTs = log['date'] as Timestamp?;
-                        final logDate = logDateTs?.toDate() ?? DateTime.now();
+                        final logDate = _parseDateTime(log['date']);
                         final logReason = log['reason'] ?? '';
 
                         Color dotColor = Colors.grey;

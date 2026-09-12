@@ -44,8 +44,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-ORPH-PARA-TAB',
-      'name': 'Orphenadrine Citrate + Paracetamol (Norgesic)',
-      'formula': 'Orphenadrine Citrate + Paracetamol (Norgesic)',
+      'name': 'Orphenadrine Citrate + Paracetamol (Nubrul Forte)',
+      'formula': 'Orphenadrine Citrate + Paracetamol (Nubrul Forte)',
       'type': 'Tablet',
       'dose': '35 mg / 450 mg',
       'defaultPrice': 8.00,
@@ -314,8 +314,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-NS-1000',
-      'name': 'Normal Saline (NS)',
-      'formula': 'Normal Saline (NS)',
+      'name': 'Normal Saline (N/S)',
+      'formula': 'Normal Saline (N/S)',
       'type': 'Infusion',
       'dose': '1000 ml',
       'defaultPrice': 120.00,
@@ -323,8 +323,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-DS-1000',
-      'name': 'DexoSaline (DS)',
-      'formula': 'DexoSaline (DS)',
+      'name': 'DexoseSaline (D/S)',
+      'formula': 'DexoseSaline (D/S)',
       'type': 'Infusion',
       'dose': '1000 ml',
       'defaultPrice': 130.00,
@@ -332,8 +332,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-RL-1000',
-      'name': 'Ringer Solution',
-      'formula': 'Ringer Solution',
+      'name': 'Ringer Lactate (R/L)',
+      'formula': 'Ringer Lactate (R/L)',
       'type': 'Infusion',
       'dose': '1000 ml',
       'defaultPrice': 135.00,
@@ -713,17 +713,17 @@ class MasterProformaService {
     // ── Additional Requested Proforma Items ──────────────────────────────
     {
       'code': 'MED-CPM-4',
-      'name': 'Chlorpheniramine Maleate (CPM)',
-      'formula': 'Chlorpheniramine Maleate (CPM)',
+      'name': 'Chloropheniramine Maleate (CPM)',
+      'formula': 'Chloropheniramine Maleate (CPM)',
       'type': 'Tablet',
       'dose': '4 mg',
       'defaultPrice': 2.00,
       'isProformaMaster': true,
     },
     {
-      'code': 'MED-CPM-SYR',
-      'name': 'Chlorpheniramine Maleate (CPM)',
-      'formula': 'Chlorpheniramine Maleate (CPM)',
+      'code': 'MED-CPM-SYP',
+      'name': 'Chloropheniramine Maleate (CPM)',
+      'formula': 'Chloropheniramine Maleate (CPM)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 60.00,
@@ -757,9 +757,27 @@ class MasterProformaService {
       'isProformaMaster': true,
     },
     {
+      'code': 'MED-MET-DIL-TAB',
+      'name': 'Metronidazole + Diloxanide (Entamezole DS)',
+      'formula': 'Metronidazole + Diloxanide (Entamezole DS)',
+      'type': 'Tablet',
+      'dose': 'Standard',
+      'defaultPrice': 12.00,
+      'isProformaMaster': true,
+    },
+    {
+      'code': 'MED-MET-DIL-SYR',
+      'name': 'Metronidazole + Diloxanide (Entamezole DS)',
+      'formula': 'Metronidazole + Diloxanide (Entamezole DS)',
+      'type': 'Syrup',
+      'dose': '15 ml',
+      'defaultPrice': 85.00,
+      'isProformaMaster': true,
+    },
+    {
       'code': 'MED-VBC-TAB',
-      'name': 'Vitamin B Complex (Polybion)',
-      'formula': 'Vitamin B Complex (Polybion)',
+      'name': 'Vitamin B-complex (BC)',
+      'formula': 'Vitamin B-complex (BC)',
       'type': 'Tablet',
       'dose': 'Standard',
       'defaultPrice': 4.00,
@@ -767,8 +785,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-VBC-SYR',
-      'name': 'Vitamin B Complex (Polybion)',
-      'formula': 'Vitamin B Complex (Polybion)',
+      'name': 'Vitamin B-complex (BC)',
+      'formula': 'Vitamin B-complex (BC)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 70.00,
@@ -884,8 +902,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-ANT-SYR',
-      'name': 'Antacid',
-      'formula': 'Antacid',
+      'name': 'Antacid (Trisil)',
+      'formula': 'Antacid (Trisil)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 85.00,
@@ -893,8 +911,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-AMC-SYR',
-      'name': 'Ammonium Chloride (Hydryllin)',
-      'formula': 'Ammonium Chloride (Hydryllin)',
+      'name': 'Amonium Chloride (Cough Syrup)',
+      'formula': 'Amonium Chloride (Cough Syrup)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 75.00,
@@ -902,8 +920,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-CRM-SYR',
-      'name': 'Carminative Mixture (Cholic Syrup)',
-      'formula': 'Carminative Mixture (Cholic Syrup)',
+      'name': 'Carminative Mixture (Colic Syrup)',
+      'formula': 'Carminative Mixture (Colic Syrup)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 65.00,
@@ -925,6 +943,15 @@ class MasterProformaService {
       'type': 'Injection',
       'dose': '2 cc',
       'defaultPrice': 35.00,
+      'isProformaMaster': true,
+    },
+    {
+      'code': 'MED-B12-INJ',
+      'name': 'B-12 (Cynocobalmin)',
+      'formula': 'B-12 (Cynocobalmin)',
+      'type': 'Injection',
+      'dose': '1 cc',
+      'defaultPrice': 40.00,
       'isProformaMaster': true,
     },
     {
@@ -992,8 +1019,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-NS-100',
-      'name': 'Normal Saline (NS)',
-      'formula': 'Normal Saline (NS)',
+      'name': 'Normal Saline (N/S)',
+      'formula': 'Normal Saline (N/S)',
       'type': 'Infusion',
       'dose': '100 ml',
       'defaultPrice': 60.00,
@@ -1001,8 +1028,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-NS-500',
-      'name': 'Normal Saline (NS)',
-      'formula': 'Normal Saline (NS)',
+      'name': 'Normal Saline (N/S)',
+      'formula': 'Normal Saline (N/S)',
       'type': 'Infusion',
       'dose': '500 ml',
       'defaultPrice': 110.00,
@@ -1010,8 +1037,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-DS-500',
-      'name': 'DexoSaline (DS)',
-      'formula': 'DexoSaline (DS)',
+      'name': 'DexoseSaline (D/S)',
+      'formula': 'DexoseSaline (D/S)',
       'type': 'Infusion',
       'dose': '500 ml',
       'defaultPrice': 115.00,
@@ -1027,9 +1054,27 @@ class MasterProformaService {
       'isProformaMaster': true,
     },
     {
+      'code': 'MED-CIP-250-TAB',
+      'name': 'Ciprofloxacin (Novidat)',
+      'formula': 'Ciprofloxacin (Novidat)',
+      'type': 'Tablet',
+      'dose': '250 mg',
+      'defaultPrice': 15.00,
+      'isProformaMaster': true,
+    },
+    {
+      'code': 'MED-CIP-500-TAB',
+      'name': 'Ciprofloxacin (Novidat)',
+      'formula': 'Ciprofloxacin (Novidat)',
+      'type': 'Tablet',
+      'dose': '500 mg',
+      'defaultPrice': 25.00,
+      'isProformaMaster': true,
+    },
+    {
       'code': 'MED-CIP-250',
-      'name': 'Ciprofloxacin',
-      'formula': 'Ciprofloxacin',
+      'name': 'Ciprofloxacin (Novidat)',
+      'formula': 'Ciprofloxacin (Novidat)',
       'type': 'Capsule',
       'dose': '250 mg',
       'defaultPrice': 15.00,
@@ -1037,11 +1082,20 @@ class MasterProformaService {
     },
     {
       'code': 'MED-CIP-500',
-      'name': 'Ciprofloxacin',
-      'formula': 'Ciprofloxacin',
+      'name': 'Ciprofloxacin (Novidat)',
+      'formula': 'Ciprofloxacin (Novidat)',
       'type': 'Capsule',
       'dose': '500 mg',
       'defaultPrice': 25.00,
+      'isProformaMaster': true,
+    },
+    {
+      'code': 'MED-CIP-IV',
+      'name': 'Ciprofloxacin (Novidat)',
+      'formula': 'Ciprofloxacin (Novidat)',
+      'type': 'Infusion',
+      'dose': '100 ml',
+      'defaultPrice': 140.00,
       'isProformaMaster': true,
     },
     {
@@ -1055,8 +1109,8 @@ class MasterProformaService {
     },
     {
       'code': 'MED-RL-500',
-      'name': 'Ringer Lactate',
-      'formula': 'Ringer Lactate',
+      'name': 'Ringer Lactate (R/L)',
+      'formula': 'Ringer Lactate (R/L)',
       'type': 'Infusion',
       'dose': '500 ml',
       'defaultPrice': 130.00,
@@ -1094,7 +1148,7 @@ class MasterProformaService {
             
             final itemCode = (map['code'] as String? ?? '').trim();
             // Filter out duplicate/removed items
-            if (itemCode == 'MED-VITC-500' || itemCode == 'MED-CAL-500' || itemCode == 'MED-METCL-CAP' || itemCode == 'MED-IBU-SYR' || itemCode == 'MED-SRP-10' || itemCode == 'MED-PARA-INJ-2ML' || itemCode == 'MED-ENT-TAB') {
+            if (itemCode == 'MED-VITC-500' || itemCode == 'MED-CAL-500' || itemCode == 'MED-METCL-CAP' || itemCode == 'MED-IBU-SYR' || itemCode == 'MED-SRP-10' || itemCode == 'MED-PARA-INJ-2ML' || itemCode == 'MED-ENT-TAB' || itemCode == 'MED-CPM-SYR') {
               box.delete(key);
               continue;
             }
@@ -1139,10 +1193,10 @@ class MasterProformaService {
                 map['dose'] = '100 ml';
               }
 
-              // Auto-sanitize Metronidazole (flagyl) items
-              if (itemCode == 'MED-FLG-INJ' || itemCode == 'MED-FLG-400' || itemCode == 'MED-FLG-SYR' || formulaLower.contains('metronidazole') || formulaLower.contains('flagyl') || nameLower.contains('flagyl')) {
-                map['name'] = 'Metronidazole (flagyl)';
-                map['formula'] = 'Metronidazole (flagyl)';
+              // Auto-sanitize Metronidazole (Flagyl) items
+              if (itemCode == 'MED-FLG-INJ' || itemCode == 'MED-FLG-400' || itemCode == 'MED-FLG-SYR' || (formulaLower.contains('metronidazole') && !formulaLower.contains('diloxanide') && !formulaLower.contains('entam')) || (nameLower.contains('flagyl') && !nameLower.contains('entam'))) {
+                map['name'] = 'Metronidazole (Flagyl)';
+                map['formula'] = 'Metronidazole (Flagyl)';
                 final rawType = (map['type'] as String? ?? '').trim().toLowerCase();
                 if (itemCode == 'MED-FLG-INJ' || rawType == 'infusion' || rawType == 'drip' || rawType == 'injection') {
                   map['type'] = 'Infusion';
@@ -1154,6 +1208,12 @@ class MasterProformaService {
                   map['type'] = 'Syrup';
                   map['dose'] = '15 ml';
                 }
+              }
+
+              // Auto-sanitize Metronidazole + Diloxanide
+              if (itemCode == 'MED-MET-DIL-TAB' || itemCode == 'MED-MET-DIL-SYR' || (formulaLower.contains('metronidazole') && (formulaLower.contains('diloxanide') || formulaLower.contains('entam')))) {
+                map['name'] = 'Metronidazole + Diloxanide (Entamezole DS)';
+                map['formula'] = 'Metronidazole + Diloxanide (Entamezole DS)';
               }
 
               final type = (map['type'] as String? ?? '').trim().toLowerCase();
@@ -1395,7 +1455,7 @@ class MasterProformaService {
 
       await box.put('proforma:$code', LocalStorageService.sanitize(sanitizedItem));
 
-      // Save to local inventory audit logs
+            // Save to local inventory audit logs
       await LocalStorageService.saveLocalInventoryLog({
         ...auditLog,
         'action': auditLog['action'] ?? 'add_proforma_medicine',
@@ -1404,6 +1464,14 @@ class MasterProformaService {
         'medicineFormula': cleanFormula,
         'savedAt': DateTime.now().toIso8601String(),
       });
+
+      try {
+        RealtimeManager().sendMessage({
+          'event_type': RealtimeEvents.saveProformaItem,
+          'data': sanitizedItem,
+          'auditLog': auditLog,
+        });
+      } catch (_) {}
 
       return true;
     } catch (e) {
@@ -1583,8 +1651,26 @@ class MasterProformaService {
         debugPrint('[MasterProformaService] Error updating matching stock: $e');
       }
 
+      // Broadcast updated proforma item and audit log over LAN
+      try {
+        RealtimeManager().sendMessage({
+          'event_type': 'proforma_item_updated',
+          'data': updated,
+          'auditLog': fullAuditEntry,
+        });
+      } catch (_) {}
+
       // Save to local inventory audit logs
       await LocalStorageService.saveLocalInventoryLog(fullAuditEntry);
+
+      // Enqueue sync for proforma item so server and Firestore get the update
+      try {
+        await LocalStorageService.enqueueSync({
+          'type': 'edit_proforma_medicine',
+          'data': updated,
+          'auditLog': fullAuditEntry,
+        });
+      } catch (_) {}
 
       return true;
     } catch (e) {
@@ -1682,8 +1768,8 @@ class MasterProformaService {
     if (lower.contains('amoxicillin') || lower.contains('amoxil')) {
       return 'Amoxicillin (Amoxil)';
     }
-    if (lower.contains('orphnadrin') || lower.contains('orphenadrine') || lower.contains('norgesic') || lower.contains('muscadol') || (lower.contains('paracetamol') && lower.contains('citr'))) {
-      return 'Orphenadrine Citrate + Paracetamol (Norgesic)';
+    if (lower.contains('orphnadrin') || lower.contains('orphenadrine') || lower.contains('norgesic') || lower.contains('nubrul') || (lower.contains('paracetamol') && lower.contains('citr'))) {
+      return 'Orphenadrine Citrate + Paracetamol (Nubrul Forte)';
     }
     if ((lower.contains('paracetamol') || lower.contains('panadol')) && (lower.contains('dextromethorphan') || lower.contains('dextromethor') || lower.contains('chlorpheramine') || lower.contains('chlorpheniramine') || lower.contains('cf') || lower.contains('t-day') || lower.contains('tday'))) {
       return 'Paracetamol + Chlorpheniramine + Dextromethorphan (Panadol CF / T-Day)';
@@ -1695,13 +1781,13 @@ class MasterProformaService {
       return 'Paracetamol (Panadol)';
     }
     if (lower.contains('metronidazole') || lower.contains('flagyl')) {
-      if (lower.contains('diloxanide') || lower.contains('entamizole')) {
-        return 'Metronidazole + Diloxanide (Entamizole)';
+      if (lower.contains('diloxanide') || lower.contains('entamizole') || lower.contains('entamezole')) {
+        return 'Metronidazole + Diloxanide (Entamezole DS)';
       }
       return 'Metronidazole (Flagyl)';
     }
-    if (lower.contains('chlorpheniramine') || lower.contains('cpm')) {
-      return 'Chlorpheniramine Maleate (CPM)';
+    if (lower.contains('chlorpheniramine') || lower.contains('chloropheniramine') || lower.contains('cpm')) {
+      return 'Chloropheniramine Maleate (CPM)';
     }
     if (lower.contains('pheniramine') || lower.contains('avil')) {
       return 'Pheniramine Maleate (Avil)';
@@ -1775,11 +1861,14 @@ class MasterProformaService {
     if (lower.contains('salbutamol') || lower.contains('ventolin')) {
       return 'Salbutamol (Ventolin)';
     }
-    if (lower.contains('nacl') || lower.contains('normal saline') || lower.contains('(ns)')) {
-      return 'Normal Saline (NS)';
+    if (lower.contains('nacl') || lower.contains('normal saline') || lower.contains('(ns)') || lower.contains('(n/s)')) {
+      return 'Normal Saline (N/S)';
     }
-    if (lower.contains('dexosaline') || (lower.contains('dextrose') && lower.contains('nacl')) || lower.contains('(ds)')) {
-      return 'DexoSaline (DS)';
+    if (lower.contains('dexosaline') || lower.contains('dexosesaline') || (lower.contains('dextrose') && lower.contains('nacl')) || lower.contains('(ds)') || lower.contains('(d/s)')) {
+      return 'DexoseSaline (D/S)';
+    }
+    if (lower.contains('ringer') || lower.contains('(rl)') || lower.contains('(r/l)')) {
+      return 'Ringer Lactate (R/L)';
     }
     if (lower.contains('trisil')) {
       return 'Antacid (Trisil)';
@@ -1791,13 +1880,13 @@ class MasterProformaService {
       return 'Mefenamic Acid (Ponstan)';
     }
     if (lower.contains('antacid') || lower.contains('mucaine') || lower.contains('digas') || lower.contains('simeco') || lower.contains('aluminium') || lower.contains('magnesium hydroxide')) {
-      return 'Antacid';
+      return 'Antacid (Trisil)';
     }
-    if (lower.contains('ammonium chloride') || lower.contains('hydryllin')) {
-      return 'Ammonium Chloride (Hydryllin)';
+    if (lower.contains('ammonium chloride') || lower.contains('amonimum chloride') || lower.contains('hydryllin') || lower.contains('hydrin') || lower.contains('cough syrup')) {
+      return 'Amonium Chloride (Cough Syrup)';
     }
-    if (lower.contains('carminative') || lower.contains('gripe water') || lower.contains('grape water') || lower.contains('cholic')) {
-      return 'Carminative Mixture (Cholic Syrup)';
+    if (lower.contains('carminative') || lower.contains('gripe water') || lower.contains('grape water') || lower.contains('cholic') || lower.contains('colic')) {
+      return 'Carminative Mixture (Colic Syrup)';
     }
     if (lower.contains('dexamethasone') || lower.contains('decadron')) {
       return 'Dexamethasone (Decadron)';
@@ -1806,7 +1895,7 @@ class MasterProformaService {
       return 'Ondansetron (Onset)';
     }
     if (lower.contains('folic acid') || lower.contains('folvite')) {
-      return 'Folic Acid (Folvite)';
+      return 'Folic Acid';
     }
     if (lower.contains('sunny') || lower.contains('adhesive') || lower.contains('first aid bandage')) {
       return 'Adhesive First Aid Bandage (Sunny Plast)';
@@ -1817,11 +1906,14 @@ class MasterProformaService {
     if (lower.contains('surbex') || (lower.contains('multivitamin') && lower.contains('zinc'))) {
       return 'Multivitamin + Zinc (Surbex-Z)';
     }
-    if (lower.contains('neurobion') || lower.contains('cyanocobalamin') || (lower.contains('b-complex') && (lower.contains('inj') || lower.contains('injection')))) {
+    if (lower.contains('b-12') || lower.contains('b12') || lower.contains('cynocobalmin') || (lower.contains('cyanocobalamin') && (lower.contains('1cc') || lower.contains('1 cc')))) {
+      return 'B-12 (Cynocobalmin)';
+    }
+    if (lower.contains('neurobion') || (lower.contains('cyanocobalamin') && !lower.contains('1cc')) || (lower.contains('b-complex') && (lower.contains('inj') || lower.contains('injection')))) {
       return 'B-Complex (Neurobion)';
     }
-    if (lower.contains('polybion') || lower.contains('vitamin b complex') || lower.contains('becosules')) {
-      return 'Vitamin B Complex (Polybion)';
+    if (lower.contains('polybion') || lower.contains('vitamin b complex') || lower.contains('vitamin b-complex') || lower.contains('(bc)') || lower.contains('becosules')) {
+      return 'Vitamin B-complex (BC)';
     }
     if (lower.contains('ca-c') || lower.contains('cac-1000') || (lower.contains('calcium') && lower.contains('vitamin c'))) {
       return 'Calcium + Vitamin C + Vitamin D (Ca-C 1000)';

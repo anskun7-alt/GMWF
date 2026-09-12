@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
-import '../models/madrassa_config.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../../services/local_storage_service.dart';
 import '../widgets/student_progress_dialog.dart';
@@ -9,6 +8,7 @@ import 'audit_log_view.dart';
 import '../madrassa_strings.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/madrassa_providers.dart';
+import '../utils/madrassa_local_storage.dart';
 
 // Breakpoints for responsive dashboard sizing
 const double kMobileBreakpoint = 600.0;
@@ -28,6 +28,7 @@ class MadrassaOverviewView extends ConsumerWidget {
 
   double _calculateRecentPace(String studentId, String branchId, double overallAvg) {
     try {
+      if (!Hive.isBoxOpen(LocalStorageService.madrassaLogsBox)) return overallAvg;
       final box = Hive.box(LocalStorageService.madrassaLogsBox);
       final prefix = '${branchId.toLowerCase().trim()}__log__';
       final now = DateTime.now();
@@ -196,79 +197,117 @@ class MadrassaOverviewView extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final isNarrow = constraints.maxWidth < 420;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF10B981).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF10B981), size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Text(
-                        context.isUrdu ? 'روزانہ کی کارکردگی کا خلاصہ' : 'Daily Progress Summary',
-                        style: context.urduStyle(
-                          style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.bold,
-                            color: isDark ? Colors.white : const Color(0xFF0F172A),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF10B981), size: 20),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              context.isUrdu ? 'روزانہ کی کارکردگی کا خلاصہ' : 'Daily Progress Summary',
+                              overflow: TextOverflow.ellipsis,
+                              style: context.urduStyle(
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: isDark ? Colors.white : const Color(0xFF0F172A),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              context.isUrdu ? 'حاضری اور آج کے اسباق کی تازہ ترین تفصیلات' : 'Live attendance & memorization progress for today',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: isDark ? Colors.white60 : const Color(0xFF64748B),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (totalLinesToday > 0 && !isNarrow) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.bolt_rounded, color: Color(0xFF10B981), size: 14),
+                              const SizedBox(width: 4),
+                              Text(
+                                context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF047857),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        context.isUrdu ? 'حاضری اور آج کے اسباق کی تازہ ترین تفصیلات' : 'Live attendance & memorization progress for today',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: isDark ? Colors.white60 : const Color(0xFF64748B),
-                        ),
-                      ),
+                      ],
                     ],
                   ),
+                  if (totalLinesToday > 0 && isNarrow) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.bolt_rounded, color: Color(0xFF10B981), size: 14),
+                          const SizedBox(width: 4),
+                          Text(
+                            context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines today',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF047857),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
-              ),
-              if (totalLinesToday > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF10B981).withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.bolt_rounded, color: Color(0xFF10B981), size: 16),
-                      const SizedBox(width: 4),
-                      Text(
-                        context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines today',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF047857),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
+              );
+            },
           ),
-          const SizedBox(height: 18),
-          Row(
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
-              _pillIndicator(context, context.isUrdu ? 'حاضر: $present' : 'Present: $present', const Color(0xFF10B981), const Color(0xFFD1FAE5)),
-              const SizedBox(width: 8),
-              _pillIndicator(context, context.isUrdu ? 'غیر حاضر: $absent' : 'Absent: $absent', const Color(0xFFEF4444), const Color(0xFFFEE2E2)),
-              const SizedBox(width: 8),
-              _pillIndicator(context, context.isUrdu ? 'رخصت: $leave' : 'Leave: $leave', const Color(0xFFF59E0B), const Color(0xFFFEF3C7)),
+              _pillIndicator(context, context.isUrdu ? 'حاضر: $present' : 'Present: $present', const Color(0xFF10B981), const Color(0xFFD1FAE5), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              _pillIndicator(context, context.isUrdu ? 'غیر حاضر: $absent' : 'Absent: $absent', const Color(0xFFEF4444), const Color(0xFFFEE2E2), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              _pillIndicator(context, context.isUrdu ? 'رخصت: $leave' : 'Leave: $leave', const Color(0xFFF59E0B), const Color(0xFFFEF3C7), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
             ],
           ),
           const SizedBox(height: 20),
@@ -378,39 +417,47 @@ class MadrassaOverviewView extends ConsumerWidget {
     );
   }
 
-  Widget _pillIndicator(BuildContext context, String text, Color color, Color bg) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: bg,
+  Widget _pillIndicator(BuildContext context, String text, Color color, Color bg, {VoidCallback? onTap}) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(20),
           ),
-          const SizedBox(width: 6),
-          Text(
-            text,
-            style: context.urduStyle(
-              style: TextStyle(
-                color: color,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
-            ),
+              const SizedBox(width: 6),
+              Text(
+                text,
+                style: context.urduStyle(
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 
   int _getPreviousLines(String studentId, DateTime today, int currentLinesToday) {
     try {
+      if (!Hive.isBoxOpen(LocalStorageService.madrassaLogsBox)) return currentLinesToday;
       final box = Hive.box(LocalStorageService.madrassaLogsBox);
       for (int i = 1; i <= 7; i++) {
         final date = today.subtract(Duration(days: i));
@@ -795,23 +842,35 @@ class MadrassaOverviewView extends ConsumerWidget {
                     final worstStudents = List<Map<String, dynamic>>.from(processedStudents)
                       ..sort((a, b) => (a['calculatedProgress'] as int).compareTo(b['calculatedProgress'] as int));
 
-                    return SingleChildScrollView(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildWelcomeHeader(context),
-                          const SizedBox(height: 24),
-                          _buildRealtimeStatGrid(context, ref),
-                          const SizedBox(height: 24),
-                          _buildDailyProgressSummary(context, activeStudents, logData),
-                          const SizedBox(height: 24),
-                          _buildInsightsGrid(context, bestStudents, worstStudents),
-                          const SizedBox(height: 24),
-                          _buildQuickActions(context),
-                          const SizedBox(height: 24),
-                          _buildRecentActivity(context),
-                        ],
+                    return RefreshIndicator(
+                      onRefresh: () async {
+                        await MadrassaLocalStorage.downloadStudents(branchId, force: true);
+                        final now = DateTime.now();
+                        await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+                        await MadrassaLocalStorage.downloadHolidays(branchId);
+                        ref.invalidate(madrassaStudentsProvider(branchId));
+                        ref.invalidate(madrassaAllLogsProvider(branchId));
+                        ref.invalidate(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
+                      },
+                      child: SingleChildScrollView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildWelcomeHeader(context),
+                            const SizedBox(height: 24),
+                            _buildRealtimeStatGrid(context, ref),
+                            const SizedBox(height: 24),
+                            _buildDailyProgressSummary(context, activeStudents, logData),
+                            const SizedBox(height: 24),
+                            _buildInsightsGrid(context, bestStudents, worstStudents),
+                            const SizedBox(height: 24),
+                            _buildQuickActions(context),
+                            const SizedBox(height: 24),
+                            _buildRecentActivity(context),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -895,12 +954,15 @@ class MadrassaOverviewView extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                'Principal Executive Dashboard • Branch Overview',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.white.withValues(alpha: 0.9),
+              Expanded(
+                child: Text(
+                  'Principal Executive Dashboard • Branch Overview',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white.withValues(alpha: 0.9),
+                  ),
                 ),
               ),
             ],
@@ -1031,7 +1093,7 @@ class MadrassaOverviewView extends ConsumerWidget {
 
          if (width < kMobileBreakpoint) {
            crossAxisCount = 2;
-           childAspectRatio = 1.4;
+           childAspectRatio = 1.15;
          } else if (width < kTabletBreakpoint) {
            crossAxisCount = 3;
            childAspectRatio = 1.3;
@@ -1042,21 +1104,30 @@ class MadrassaOverviewView extends ConsumerWidget {
 
          final studentsAsync = ref.watch(madrassaStudentsProvider(branchId));
          final configAsync = ref.watch(madrassaConfigProvider(branchId));
-         final dateKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+         final now = DateTime.now();
+         final dateKey = DateFormat('yyyy-MM-dd').format(now);
          final dailyLogAsync = ref.watch(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
 
          return GridView.count(
            crossAxisCount: crossAxisCount,
            shrinkWrap: true,
            physics: const NeverScrollableScrollPhysics(),
-           mainAxisSpacing: 16,
-           crossAxisSpacing: 16,
+           mainAxisSpacing: 14,
+           crossAxisSpacing: 14,
            childAspectRatio: childAspectRatio,
            children: [
-             // Students Card
+             // 1. Students Card -> Navigates to Students tab
              studentsAsync.when(
                loading: () => placeholderCard(context.l.totalStudents),
-               error: (_, __) => _statCard(context, context.l.totalStudents, '0', Icons.people_alt_rounded, 210, badge: 'Active'),
+               error: (_, __) => _statCard(
+                 context,
+                 context.l.totalStudents,
+                 '0',
+                 Icons.people_alt_rounded,
+                 210,
+                 badge: 'Active',
+                 onTap: () => onAction?.call(isAdmin ? 2 : 1),
+               ),
                data: (students) {
                  final activeCount = students.where((d) {
                    final statusVal = d['status'];
@@ -1071,13 +1142,22 @@ class MadrassaOverviewView extends ConsumerWidget {
                    Icons.people_alt_rounded,
                    210,
                    badge: '$activeCount Enrolled',
+                   onTap: () => onAction?.call(isAdmin ? 2 : 1),
                  );
                },
              ),
-             // Attendance/Daily Log Card
+             // 2. Attendance / Daily Log Card -> Navigates to Daily Log tab
              dailyLogAsync.when(
                loading: () => placeholderCard(context.l.dailyLogTitle),
-               error: (_, __) => _statCard(context, context.l.dailyLogTitle, '0 / 0', Icons.edit_calendar_rounded, 160, badge: 'Today'),
+               error: (_, __) => _statCard(
+                 context,
+                 context.l.dailyLogTitle,
+                 '0 / 0',
+                 Icons.edit_calendar_rounded,
+                 160,
+                 badge: 'Today',
+                 onTap: () => onAction?.call(isAdmin ? 1 : 0),
+               ),
                data: (logData) {
                  final totalActive = studentsAsync.value?.where((d) {
                    final statusVal = d['status'];
@@ -1098,27 +1178,48 @@ class MadrassaOverviewView extends ConsumerWidget {
                    Icons.edit_calendar_rounded,
                    160,
                    badge: '$pct% Present',
+                   onTap: () => onAction?.call(isAdmin ? 1 : 0),
                  );
                },
              ),
-             // PTM Card
+             // 3. PTM Card -> Accurate Current Month PTM & Navigates to Daily Log
              configAsync.when(
                loading: () => placeholderCard(context.l.ptmDay),
-               error: (_, __) => _statCard(context, context.l.ptmDay, '-', Icons.event_available_rounded, 280, badge: 'Event'),
-               data: (config) => _statCard(
+               error: (_, __) => _statCard(
                  context,
                  context.l.ptmDay,
-                 DateFormat('MMM d').format(config.getPtmDate()),
+                 '-',
                  Icons.event_available_rounded,
                  280,
-                 badge: 'Scheduled',
+                 badge: 'Event',
+                 onTap: () => onAction?.call(isAdmin ? 1 : 0),
                ),
+               data: (config) {
+                 final ptmDate = config.getPtmDate(targetYear: now.year, targetMonth: now.month);
+                 return _statCard(
+                   context,
+                   context.l.ptmDay,
+                   DateFormat('MMM d').format(ptmDate),
+                   Icons.event_available_rounded,
+                   280,
+                   badge: 'Scheduled',
+                   onTap: () => onAction?.call(isAdmin ? 1 : 0),
+                 );
+               },
              ),
-             // Fees Card (only shown when money factor is enabled)
+             // 4. Fees Card -> Navigates to Monthly Report tab
              if (isFeeEnabled)
                configAsync.when(
                  loading: () => placeholderCard(context.l.baseFeeLabel),
-                 error: (_, __) => _statCard(context, context.l.baseFeeLabel, '-', Icons.account_balance_wallet_rounded, 35, badge: 'Base'),
+                 error: (_, __) => _statCard(
+                   context,
+                   context.l.baseFeeLabel,
+                   '-',
+                   Icons.account_balance_wallet_rounded,
+                   35,
+                   badge: 'Base',
+                   onTap: () => onAction?.call(isAdmin ? 4 : 3),
+                 ),
                  data: (config) => _statCard(
                    context,
                    context.l.baseFeeLabel,
@@ -1126,6 +1227,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                    Icons.account_balance_wallet_rounded,
                    35,
                    badge: 'Per Student',
+                   onTap: () => onAction?.call(isAdmin ? 4 : 3),
                  ),
                ),
            ],
@@ -1134,95 +1236,156 @@ class MadrassaOverviewView extends ConsumerWidget {
      );
    }
 
-  Widget _statCard(BuildContext context, String label, String value, IconData icon, double hue, {String? badge}) {
+  Widget _statCard(
+    BuildContext context,
+    String label,
+    String value,
+    IconData icon,
+    double hue, {
+    String? badge,
+    VoidCallback? onTap,
+  }) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final isMobile = MediaQuery.of(context).size.width < kMobileBreakpoint;
 
     // Derived HSL colors
-    final accentColor = HSLColor.fromAHSL(1.0, hue, 0.70, 0.45).toColor();
+    final accentColor = HSLColor.fromAHSL(1.0, hue, 0.75, 0.46).toColor();
     final bgTint = HSLColor.fromAHSL(1.0, hue, 0.70, 0.94).toColor();
 
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: theme.cardColor,
-        borderRadius: BorderRadius.circular(22),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.04),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
-          )
-        ],
-        border: Border.all(color: isDark ? Colors.white10 : const Color(0xFFE2E8F0), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: isDark ? accentColor.withValues(alpha: 0.2) : bgTint,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(icon, color: accentColor, size: 22),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        splashColor: accentColor.withValues(alpha: 0.12),
+        highlightColor: accentColor.withValues(alpha: 0.06),
+        child: Ink(
+          padding: EdgeInsets.all(isMobile ? 12 : 18),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF131B2E) : Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.04),
+                blurRadius: 14,
+                offset: const Offset(0, 4),
               ),
-              if (badge != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: isDark ? Colors.white10 : const Color(0xFFF1F5F9),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    badge,
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? Colors.white70 : const Color(0xFF64748B),
-                    ),
-                  ),
+              if (onTap != null)
+                BoxShadow(
+                  color: accentColor.withValues(alpha: isDark ? 0.08 : 0.03),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
                 ),
             ],
-          ),
-          const SizedBox(height: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: isDark ? Colors.white : const Color(0xFF0F172A),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.urduStyle(
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isDark ? Colors.white60 : const Color(0xFF64748B),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
+            border: Border.all(
+              color: isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFE2E8F0),
+              width: 1.2,
             ),
           ),
-        ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(isMobile ? 7 : 10),
+                    decoration: BoxDecoration(
+                      color: isDark ? accentColor.withValues(alpha: 0.22) : bgTint,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: accentColor.withValues(alpha: isDark ? 0.4 : 0.2),
+                        width: 1,
+                      ),
+                    ),
+                    child: Icon(icon, color: accentColor, size: isMobile ? 18 : 22),
+                  ),
+                  if (badge != null)
+                    Flexible(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+                        decoration: BoxDecoration(
+                          color: isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFF1F5F9),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: isDark ? Colors.white10 : const Color(0xFFE2E8F0),
+                            width: 0.75,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                badge,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: isMobile ? 9.5 : 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: isDark ? Colors.white70 : const Color(0xFF475569),
+                                ),
+                              ),
+                            ),
+                            if (onTap != null) ...[
+                              const SizedBox(width: 3),
+                              Icon(
+                                Icons.arrow_forward_ios_rounded,
+                                size: isMobile ? 7.5 : 9,
+                                color: isDark ? Colors.white38 : const Color(0xFF94A3B8),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        value,
+                        style: TextStyle(
+                          fontSize: isMobile ? 20 : 23,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.5,
+                          color: isDark ? Colors.white : const Color(0xFF0F172A),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.urduStyle(
+                              style: TextStyle(
+                                fontSize: isMobile ? 11 : 12,
+                                color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1400,57 +1563,41 @@ class MadrassaOverviewView extends ConsumerWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('madrassa_audit_logs')
-          .orderBy('timestamp', descending: true)
-          .limit(10) // Capped at 10 items for comprehensive audit tracking
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: theme.cardColor,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: Colors.grey.withOpacity(0.12)),
-            ),
-            child: Text(
-              'Error loading activity: ${snapshot.error}',
-              style: const TextStyle(color: Colors.red),
-            ),
-          );
+    return ValueListenableBuilder(
+      valueListenable: Hive.box(LocalStorageService.auditLogsBox).listenable(),
+      builder: (context, Box box, _) {
+        final normBranch = branchId.toLowerCase().trim();
+        final List<Map<String, dynamic>> logs = [];
+        for (final val in box.values) {
+          if (val is! Map) continue;
+          final m = Map<String, dynamic>.from(val);
+          final mod = m['module']?.toString().toLowerCase();
+          final b = (m['branchId'] ?? m['branchContext'])?.toString().toLowerCase().trim();
+          if (mod == 'madrassa' || mod == 'education' || m['entityType'] == 'madrassa') {
+            if (b == null || b.isEmpty || b == 'all' || b == normBranch) {
+              logs.add(m);
+            }
+          }
         }
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: theme.cardColor,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: Colors.grey.withOpacity(0.12)),
-            ),
-            child: const Center(
-              child: CircularProgressIndicator(color: Color(0xFF4C4DDC)),
-            ),
-          );
-        }
-
-        final docs = snapshot.data?.docs ?? [];
+        logs.sort((a, b) {
+          final tA = a['timestamp']?.toString() ?? a['date']?.toString() ?? '';
+          final tB = b['timestamp']?.toString() ?? b['date']?.toString() ?? '';
+          return tB.compareTo(tA);
+        });
+        final docs = logs.take(10).toList();
 
         return Container(
           width: double.infinity,
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: theme.cardColor,
+            color: isDark ? const Color(0xFF131B2E) : Colors.white,
             borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.grey.withOpacity(0.12)),
+            border: Border.all(color: isDark ? Colors.white10 : const Color(0xFFE2E8F0)),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF1A1C1E).withOpacity(0.04),
+                color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.04),
                 blurRadius: 16,
-                offset: const Offset(0, 8),
+                offset: const Offset(0, 6),
               ),
             ],
           ),
@@ -1466,32 +1613,38 @@ class MadrassaOverviewView extends ConsumerWidget {
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white : Colors.indigo.shade900,
+                        color: isDark ? Colors.white : const Color(0xFF0F172A),
                       ),
                     ),
                   ),
-                  Icon(Icons.more_horiz, color: isDark ? Colors.white.withOpacity(0.5) : Colors.grey),
+                  Icon(Icons.history_rounded, color: isDark ? Colors.white54 : const Color(0xFF0F766E)),
                 ],
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               if (docs.isEmpty)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 24.0),
                   child: Center(
-                    child: Text(
-                      context.l.noData,
-                      style: context.urduStyle(style: const TextStyle(color: Colors.grey, fontSize: 14)),
+                    child: Column(
+                      children: [
+                        Icon(Icons.event_note_rounded, size: 36, color: Colors.grey.shade400),
+                        const SizedBox(height: 8),
+                        Text(
+                          context.isUrdu ? 'کوئی حالیہ سرگرمی ریکارڈ نہیں ہے' : 'No recent activity logs recorded yet',
+                          style: context.urduStyle(style: TextStyle(color: Colors.grey.shade500, fontSize: 13.5)),
+                        ),
+                      ],
                     ),
                   ),
                 )
               else ...[
                 ...List.generate(docs.length, (index) {
                   final doc = docs[index];
-                  final log = doc.data() as Map<String, dynamic>? ?? {};
-                  final editor = log['editor'] ?? 'System';
-                  final role = log['role'] ?? '';
-                  final message = log['message'] ?? '';
-                  final timestampObj = log['timestamp'];
+                  final log = doc;
+                  final editor = (log['editor'] ?? log['userName'] ?? log['user'] ?? 'System').toString();
+                  final role = (log['role'] ?? log['userRole'] ?? '').toString();
+                  final message = (log['message'] ?? log['action'] ?? log['details'] ?? log['note'] ?? 'Activity recorded').toString();
+                  final timestampObj = log['timestamp'] ?? log['date'] ?? log['createdAt'];
 
                   DateTime? timestamp;
                   if (timestampObj is Timestamp) {
@@ -1504,27 +1657,27 @@ class MadrassaOverviewView extends ConsumerWidget {
 
                   String title = editor;
                   IconData icon = Icons.info_outline;
-                  Color color = Colors.blue;
+                  Color color = const Color(0xFF0F766E);
 
                   final type = log['type'] ?? '';
                   if (type == 'ptm_reschedule') {
                     icon = Icons.notification_important_rounded;
-                    color = Colors.red;
+                    color = const Color(0xFFEF4444);
                   } else if (type == 'daily_log_edit') {
                     icon = Icons.edit_calendar_rounded;
-                    color = Colors.indigo;
+                    color = const Color(0xFF0F766E);
                   } else if (type == 'status_change') {
                     icon = Icons.swap_horiz_rounded;
-                    color = Colors.orange;
+                    color = const Color(0xFFF59E0B);
                   } else if (type == 'config_change') {
                     icon = Icons.settings_rounded;
-                    color = Colors.teal;
+                    color = const Color(0xFF0284C7);
                   } else if (type == 'student_enrollment') {
                     icon = Icons.person_add_rounded;
-                    color = Colors.green;
+                    color = const Color(0xFF10B981);
                   } else if (type == 'student_edit') {
                     icon = Icons.edit_note_rounded;
-                    color = Colors.blueGrey;
+                    color = const Color(0xFF6366F1);
                   }
 
                   final isLast = index == docs.length - 1;
@@ -1553,9 +1706,9 @@ class MadrassaOverviewView extends ConsumerWidget {
                       );
                     },
                     icon: const Icon(Icons.arrow_forward_rounded, size: 14),
-                    label: const Text('View All Logs', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: Text(context.isUrdu ? 'تمام لاگز دیکھیں' : 'View All Logs', style: const TextStyle(fontWeight: FontWeight.bold)),
                     style: TextButton.styleFrom(
-                      foregroundColor: const Color(0xFF4C4DDC),
+                      foregroundColor: const Color(0xFF0F766E),
                     ),
                   ),
                 ),
@@ -1578,143 +1731,114 @@ class MadrassaOverviewView extends ConsumerWidget {
     required bool isLast,
     required String role,
   }) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return IntrinsicHeight(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Left Column: Dot Icon + Vertical Connector Line (via Stack to prevent unbounded constraints)
-          SizedBox(
-            width: 32,
-            child: Stack(
-              alignment: Alignment.topCenter,
-              children: [
-                if (!isLast)
-                  Positioned(
-                    top: 16, // middle of the 32x32 dot
-                    bottom: 0,
-                    width: 2,
-                    child: Container(
-                      color: isDark ? Colors.white24 : Colors.grey.shade200,
-                    ),
-                  ),
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(icon, color: color, size: 16),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 16),
-          // Right Column: Timeline Event Card
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Container(
+          // Left column: Icon and vertical connecting bar
+          Column(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
                 decoration: BoxDecoration(
-                  color: theme.cardColor,
-                  borderRadius: const BorderRadius.only(
-                    topRight: Radius.circular(12),
-                    bottomRight: Radius.circular(12),
-                    topLeft: Radius.circular(4),
-                    bottomLeft: Radius.circular(4),
-                  ),
-                  border: Border(
-                    left: BorderSide(color: color, width: 4),
-                    top: BorderSide(color: Colors.grey.withOpacity(0.1)),
-                    bottom: BorderSide(color: Colors.grey.withOpacity(0.1)),
-                    right: BorderSide(color: Colors.grey.withOpacity(0.1)),
-                  ),
+                  color: color.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: color.withValues(alpha: 0.3), width: 1.2),
                 ),
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  title,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.urduStyle(
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                      color: isDark ? Colors.white : const Color(0xFF1A1C1E),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              if (role.isNotEmpty) ...[
-                                const SizedBox(width: 8),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: color.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text(
-                                    role,
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w600,
-                                      color: color,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ],
+                child: Icon(icon, color: color, size: 16),
+              ),
+              if (!isLast)
+                Container(
+                  width: 2,
+                  height: 38,
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  color: isDark ? Colors.white12 : const Color(0xFFE2E8F0),
+                ),
+            ],
+          ),
+          const SizedBox(width: 10),
+          // Right column: Content card
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                  width: 1,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Header Row: Editor Name & Timestamp
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: context.urduStyle(
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12.5,
+                              color: isDark ? Colors.white : const Color(0xFF0F172A),
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Tooltip(
-                          message: timestamp != null
-                              ? DateFormat('dd MMMM yyyy, hh:mm a').format(timestamp)
-                              : '',
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.access_time_rounded,
-                                size: 12,
-                                color: isDark ? Colors.white.withValues(alpha: 0.5) : Colors.grey.shade400,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                timeStr,
-                                style: TextStyle(
-                                  color: isDark ? Colors.white.withValues(alpha: 0.5) : Colors.grey.shade400,
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ],
+                      ),
+                      if (timeStr.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          timeStr,
+                          style: TextStyle(
+                            color: isDark ? Colors.white54 : const Color(0xFF94A3B8),
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      message,
-                      style: context.urduStyle(
+                    ],
+                  ),
+                  // Role Badge Pill
+                  if (role.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: color.withValues(alpha: 0.2), width: 0.6),
+                      ),
+                      child: Text(
+                        role.toUpperCase(),
                         style: TextStyle(
-                          color: isDark ? Colors.white70 : Colors.grey.shade700,
-                          fontSize: 13,
+                          fontSize: 9.0,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3,
+                          color: color,
                         ),
                       ),
                     ),
                   ],
-                ),
+                  const SizedBox(height: 6),
+                  // Message Body
+                  Text(
+                    message,
+                    style: context.urduStyle(
+                      style: TextStyle(
+                        color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
+                        fontSize: 11.5,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

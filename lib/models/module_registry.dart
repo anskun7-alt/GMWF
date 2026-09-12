@@ -176,34 +176,17 @@ class ModuleRegistry {
       category: ModuleCategory.office,
     ),
 
-    // 5. Employee Management
+    // 5. Employee Management (Unified Directory & Attendance)
     AppModule(
       id: 'employees',
       title: 'Employee Management',
-      description: 'Staff directory, profile management, onboarding, salary history',
+      description: 'Staff directory, profile management, onboarding, calendar attendance & sync',
       icon: Icons.badge_outlined,
       requiredPermission: AppPermission.manageFinance,
       isBranchDependent: true,
       supportsGlobalWrapper: true,
       isFeatured: true,
-      builder: (context, data) => EmployeesPage(
-        branchId: data['branchId'] ?? 'all',
-        isAdmin: true,
-      ),
-      category: ModuleCategory.office,
-    ),
-
-    // 6. Employee Attendance
-    AppModule(
-      id: 'employee_attendance',
-      title: 'Employee Attendance',
-      description: 'Staff daily attendance, check-in/out logs & ZKTeco biometric sync',
-      icon: Icons.fingerprint_rounded,
-      requiredPermission: AppPermission.manageFinance,
-      isBranchDependent: true,
-      supportsGlobalWrapper: true,
-      isFeatured: true,
-      builder: (context, data) => EmployeeAttendancePage(
+      builder: (context, data) => EmployeeManagementPage(
         branchId: data['branchId'] ?? 'all',
         isAdmin: true,
       ),
@@ -222,24 +205,6 @@ class ModuleRegistry {
         return const Register();
       },
       category: ModuleCategory.office,
-    ),
-
-    // 8. Dashboard Overview
-    AppModule(
-      id: 'executive_dashboard',
-      title: 'Dashboard Overview',
-      description: 'Unified high-level metrics and performance tracking',
-      icon: Icons.analytics_rounded,
-      requiredPermission: AppPermission.viewExecutiveDashboard,
-      builder: (context, data) {
-        return OverviewScreen(
-          username: data['name'] ?? 'Executive',
-          initialBranchId: data['branchId'],
-          isEmbedded: true,
-        );
-      },
-      category: ModuleCategory.office,
-      isFeatured: true,
     ),
 
     // 9. Ramadan Rations & Libaas
@@ -276,11 +241,11 @@ class ModuleRegistry {
       category: ModuleCategory.office,
     ),
 
-    // 11. Branch Registration
+    // 11. Branch Registration (Chairman Only)
     AppModule(
       id: 'register_branch',
-      title: 'Branch Registration',
-      description: 'Setup and configure new organizational branches',
+      title: 'Register New Branch',
+      description: 'Setup and configure new organizational branches (Chairman Only)',
       icon: Icons.add_business_rounded,
       requiredPermission: AppPermission.manageBranches,
       isBranchDependent: false,
@@ -382,23 +347,6 @@ class ModuleRegistry {
       supportsGlobalWrapper: true,
       builder: (context, data) => ServerDashboardWithSync(
         branchId: data['branchId'] ?? 'unknown',
-      ),
-      category: ModuleCategory.office,
-    ),
-
-    // 18. Office Boy
-    AppModule(
-      id: 'office_boy',
-      title: 'Office Boy',
-      description: 'Office token issuing and management',
-      icon: Icons.room_service_rounded,
-      requiredPermission: AppPermission.generateFoodTokens,
-      isBranchDependent: true,
-      supportsGlobalWrapper: true,
-      builder: (context, data) => DasterkhwaanOfficeBoy(
-        branchId: data['branchId'] ?? 'unknown',
-        userName: data['name'] ?? 'User',
-        role: data['role'] ?? 'Office Boy',
       ),
       category: ModuleCategory.office,
     ),
@@ -519,6 +467,7 @@ class ModuleRegistry {
       supportsGlobalWrapper: true,
       builder: (context, data) => MedicineLedgerPage(
         branchId: data['branchId'] ?? 'unknown',
+        isEmbedded: true,
       ),
       category: ModuleCategory.dispensary,
     ),
@@ -591,6 +540,22 @@ class ModuleRegistry {
 
     // ── DASTERKHWAAN MODULES ──
     AppModule(
+      id: 'office_boy',
+      title: 'Food Tokens',
+      description: 'Dasterkhwaan food token issuing and meal management',
+      icon: Icons.confirmation_number_rounded,
+      requiredPermission: AppPermission.generateFoodTokens,
+      isBranchDependent: true,
+      supportsGlobalWrapper: true,
+      isFeatured: true,
+      builder: (context, data) => DasterkhwaanOfficeBoy(
+        branchId: data['branchId'] ?? 'unknown',
+        userName: data['name'] ?? 'User',
+        role: data['role'] ?? 'Food Tokens',
+      ),
+      category: ModuleCategory.dasterkhwaan,
+    ),
+    AppModule(
       id: 'kitchen',
       title: 'Kitchen',
       description: 'Monitor kitchen activities and supply status',
@@ -647,6 +612,7 @@ class ModuleRegistry {
         final username = data['name'] ?? data['username'] ?? 'User';
         final role = (data['role'] as String? ?? 'madrassa admin').toLowerCase();
         final isAdmin = role.contains('admin') ||
+            role.contains('principal') ||
             role.contains('chairman') ||
             role.contains('ceo') ||
             role.contains('hq') ||
@@ -675,8 +641,8 @@ class ModuleRegistry {
     // ── SCHOOL MODULES ──
     AppModule(
       id: 'school_module',
-      title: 'Taleem-o-Tarbiyat School',
-      description: 'Taleem-o-Tarbiyat School System dashboard overview, admissions, and analytics (GMWF)',
+      title: 'Taleem-wa-Tarbiyat School',
+      description: 'Taleem-wa-Tarbiyat School System dashboard overview, admissions, and analytics (GMWF)',
       icon: Icons.school_rounded,
       requiredPermission: AppPermission.manageSchool,
       isBranchDependent: true,
@@ -785,7 +751,12 @@ class ModuleRegistry {
       return ps.hasPermission(role, m.requiredPermission!);
     }).toList();
 
-    // 2. HQ Manager specific exclusions: Remove 'server_sync' (Server Control) and 'office_boy' (Office Boy)
+    // 2. Branch Registration restriction: Strictly Chairman only
+    if (normalizedRole != 'chairman') {
+      modules.removeWhere((m) => m.id == 'register_branch');
+    }
+
+    // 3. HQ Manager specific exclusions: Remove 'server_sync' (Server Control) and 'office_boy' (Office Boy)
     final isHqManager = normalizedRole == 'hq manager' ||
         normalizedRole == 'hq_manager' ||
         normalizedRole == 'headquarters manager' ||
@@ -796,7 +767,7 @@ class ModuleRegistry {
     }
 
     // 3. Role-specific strict overrides (Supervisor & Branch Manager)
-    if (normalizedRole == 'supervisor' || normalizedRole == 'branch manager') {
+    if (normalizedRole == 'supervisor' || normalizedRole.contains('supervisor') || normalizedRole == 'branch manager') {
       final isBM = normalizedRole == 'branch manager';
       
       // Define the IDs allowed for each role
@@ -805,10 +776,10 @@ class ModuleRegistry {
         'inventory',
         'pending_requests',
         'inventory_ledger',
-        'finance',
       ];
       
       if (isBM) {
+        allowedIds.add('finance');
         allowedIds.addAll([
           'kitchen',
           'dasterkhwaan_inventory',
@@ -820,7 +791,6 @@ class ModuleRegistry {
           'reports',
           'madrassa',
           'school_module',
-          'employee_attendance',
           'employees',
           'payroll',
           'cash_flow',
@@ -846,8 +816,7 @@ class ModuleRegistry {
         'reports': 'Downloads',
         'madrassa': 'Madrassa',
         'school_module': 'School',
-        'employee_attendance': 'Employee Attendance',
-        'employees': 'Employees',
+        'employees': 'Employee Management',
         'payroll': 'Payroll',
         'cash_flow': 'Cash Flow & Treasury',
         'loans': 'Loans & Advances',

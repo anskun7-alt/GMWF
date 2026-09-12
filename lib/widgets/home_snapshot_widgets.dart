@@ -97,7 +97,6 @@ class _HomeStatTileState extends State<HomeStatTile> with SingleTickerProviderSt
     final tileContent = AnimatedContainer(
       duration: const Duration(milliseconds: 260),
       curve: Curves.easeOutCubic,
-      transform: Matrix4.translationValues(0.0, _hov ? -3.5 : 0.0, 0.0),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(22),
         boxShadow: [
@@ -1065,7 +1064,6 @@ class _HomeBestBranchSpotlightState extends State<HomeBestBranchSpotlight> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 260),
           curve: Curves.easeOutCubic,
-          transform: Matrix4.translationValues(0.0, _hov ? -4.0 : 0.0, 0.0),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(24),
             boxShadow: [
@@ -1430,7 +1428,7 @@ class HomePatientsByCategoryDonut extends StatelessWidget {
               Expanded(
                 child: total == 0
                     ? const Center(
-                        child: Text('No patients today', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
+                        child: Text('No patient data in this period', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
                       )
                     : Row(
                         children: [
@@ -2484,8 +2482,8 @@ class HomeRecentActivityFeed extends StatelessWidget {
               InkWell(
                 onTap: () {
                   final reportsModule = availableModules.firstWhere(
-                    (m) => m.id == 'executive_dashboard',
-                    orElse: () => availableModules.firstWhere((m) => m.id == 'branches'),
+                    (m) => m.id == 'branches',
+                    orElse: () => availableModules.first,
                   );
                   onOpenModule(reportsModule);
                 },
@@ -2528,10 +2526,13 @@ class HomeRecentActivityFeed extends StatelessWidget {
 
                   return InkWell(
                     onTap: () {
-                      final targetModuleId = isDon ? 'donations' : (isToken ? 'token_generation' : 'executive_dashboard');
+                      final targetModuleId = isDon ? 'donations' : (isToken ? 'token_generation' : 'branches');
                       final module = availableModules.firstWhere(
                         (m) => m.id == targetModuleId,
-                        orElse: () => availableModules.firstWhere((m) => m.id == 'executive_dashboard'),
+                        orElse: () => availableModules.firstWhere(
+                          (m) => m.id == 'branches',
+                          orElse: () => availableModules.first,
+                        ),
                       );
                       onOpenModule(module);
                     },
@@ -2613,7 +2614,7 @@ class QuickActionsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final List<Map<String, dynamic>> targetActions = [
       {'id': 'branches', 'label': 'Branches', 'icon': Icons.store_outlined, 'color': const Color(0xFF0D9488)},
-      {'id': 'employee_attendance', 'label': 'Staff Attendance', 'icon': Icons.badge_outlined, 'color': const Color(0xFF6366F1)},
+      {'id': 'employees', 'label': 'Staff Attendance', 'icon': Icons.badge_outlined, 'color': const Color(0xFF6366F1)},
       {'id': 'madrassa_attendance', 'label': 'Madrassa Attend.', 'icon': Icons.how_to_reg_rounded, 'color': const Color(0xFFEC4899)},
       {'id': 'madrassa_students', 'label': 'Madrassa Students', 'icon': Icons.groups_rounded, 'color': const Color(0xFF14B8A6)},
       {'id': 'school_attendance', 'label': 'School Students', 'icon': Icons.school_rounded, 'color': const Color(0xFF10B981)},
@@ -2627,8 +2628,8 @@ class QuickActionsRow extends StatelessWidget {
     ];
 
     final activeActions = targetActions.where((action) {
-      if (action['id'] == 'employee_attendance') {
-        return availableModules.any((m) => m.id == 'finance');
+      if (action['id'] == 'employees') {
+        return availableModules.any((m) => m.id == 'employees' || m.id == 'finance');
       }
       if (action['id'] == 'madrassa_attendance' || action['id'] == 'madrassa_students' || action['id'] == 'add_student' || action['id'] == 'madrassa_report') {
         return availableModules.any((m) => m.id == 'madrassa');
@@ -2679,8 +2680,8 @@ class QuickActionsRow extends StatelessWidget {
                   itemCount: activeActions.length,
                   itemBuilder: (context, index) {
                     final action = activeActions[index];
-                    final mainModuleId = (action['id'] == 'employee_attendance')
-                        ? 'finance'
+                    final mainModuleId = (action['id'] == 'employees')
+                        ? 'employees'
                         : ((action['id'] == 'madrassa_attendance' || action['id'] == 'madrassa_students' || action['id'] == 'add_student' || action['id'] == 'madrassa_report')
                             ? 'madrassa'
                             : ((action['id'] == 'school_attendance' || action['id'] == 'school_teacher_attendance' || action['id'] == 'school')
@@ -2693,10 +2694,10 @@ class QuickActionsRow extends StatelessWidget {
                     
                     // Construct custom copy of the module with modified builder
                     var module = baseModule;
-                    if (action['id'] == 'employee_attendance') {
+                    if (action['id'] == 'employees') {
                       module = baseModule.copyWith(
-                        title: 'Employee Attendance',
-                        builder: (context, data) => EmployeeAttendancePage(
+                        title: 'Employee Management',
+                        builder: (context, data) => EmployeeManagementPage(
                           branchId: data['branchId'] ?? 'all',
                           isAdmin: true,
                         ),
@@ -3252,14 +3253,17 @@ class AppreciationTrophyDialog extends StatelessWidget {
 // 9. Snapshot Dashboard Data Model and Loader
 // ════════════════════════════════════════════════════════════════════════
 
-Map<String, int> _computeLocalDashboardAuxCounts() {
+Map<String, int> _computeLocalDashboardAuxCounts({String? branchId}) {
   final todayDateKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+  final normB = (branchId != null && branchId != 'all' && branchId != 'global') ? branchId.toLowerCase().trim() : null;
   int empPresentCount = 0;
   try {
     if (Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
       final box = Hive.box(LocalStorageService.attendanceBox);
       for (final val in box.values) {
         if (val is Map) {
+          final b = (val['branchId']?.toString() ?? '').toLowerCase().trim();
+          if (normB != null && normB.isNotEmpty && b != normB && !b.contains(normB) && !normB.contains(b)) continue;
           final d = val['date']?.toString();
           if (d == todayDateKey) {
             final status = val['status']?.toString().toLowerCase();
@@ -3276,8 +3280,8 @@ Map<String, int> _computeLocalDashboardAuxCounts() {
   int teacherPresentCount = 0;
   try {
     if (Hive.isBoxOpen(LocalStorageService.schoolLogsBox)) {
-      studentPresentCount = SchoolLocalStorage.getPresentStudentsCount('all', todayDateKey);
-      teacherPresentCount = SchoolLocalStorage.getPresentTeachersCount('all', todayDateKey);
+      studentPresentCount = SchoolLocalStorage.getPresentStudentsCount(normB ?? 'all', todayDateKey);
+      teacherPresentCount = SchoolLocalStorage.getPresentTeachersCount(normB ?? 'all', todayDateKey);
     }
   } catch (_) {}
 
@@ -3617,7 +3621,8 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
     }
     final branchIds = cleanBranchIds.toList();
 
-    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds);
+    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds, allowRemoteFallback: false);
+    final weeklyPatients = await fetchWeeklyPatientCounts(branchIds);
     final List<HomeBranchRow> branchRows = [];
     final List<BranchStats> todayStatsList = [];
     final List<BranchStats> yesterdayStatsList = [];
@@ -3644,11 +3649,16 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
           donations: value.today.donations,
         );
 
+        final karachiWeekly = weeklyPatients['karachi'] ?? 0;
+        final hajiWeekly = (karachiWeekly * 0.4).round();
+        final saddarWeekly = karachiWeekly - hajiWeekly;
+
         branchRows.add(HomeBranchRow(
           id: 'karachi_haji',
           name: 'Karachi — Haji Camp Dispensary',
           today: hajiToday,
           yesterday: value.yesterday,
+          weeklyPatients: hajiWeekly,
         ));
 
         branchRows.add(HomeBranchRow(
@@ -3656,17 +3666,20 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
           name: 'Karachi — Saddar Dispensary',
           today: saddarToday,
           yesterday: value.yesterday,
+          weeklyPatients: saddarWeekly,
         ));
 
         todayStatsList.add(hajiToday);
         todayStatsList.add(saddarToday);
       } else {
         final bName = RecentActivityService.resolveBranchName(bId);
+        final bWeekly = weeklyPatients[bId] ?? 0;
         branchRows.add(HomeBranchRow(
           id: bId,
           name: bName,
           today: value.today,
           yesterday: value.yesterday,
+          weeklyPatients: bWeekly,
         ));
         todayStatsList.add(value.today);
       }
@@ -3744,9 +3757,13 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
       limit: 15,
     );
 
-    final auxCounts = _computeLocalDashboardAuxCounts();
+    final todayCombined = branchRows.isNotEmpty
+        ? combineBranchStats(branchRows.map((r) => r.today).toList())
+        : todayStats;
+
+    final auxCounts = _computeLocalDashboardAuxCounts(branchId: branchId);
     return SnapshotDashboardData(
-      todayCombined: todayStats,
+      todayCombined: todayCombined,
       yesterdayCombined: yesterdayStats,
       branchRows: branchRows,
       chartPoints: chartPoints,
@@ -3810,63 +3827,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
     final userBranchId = (widget.userData['branchId'] ?? widget.userData['branch'] ?? widget.userData['assignedBranch'] ?? widget.userData['branch_id'] ?? '').toString().toLowerCase().trim();
     final userName = (widget.userData['name'] ?? widget.userData['username'] ?? widget.userData['fullName'] ?? '').toString().toLowerCase().trim();
 
-    // 1. Fetch yesterday's branch rankings immediately from local stats (does not wait for heavy charts/snapshots)
-    fetchTodayVsYesterdayPerBranch(['karachi', 'gujrat', 'sialkot', 'jalalpur_jattan', 'rawalpindi']).then((statsMap) {
-      if (!mounted || _shownAppreciationSessionKeys.contains(userKey)) return;
-
-      final qualifying = statsMap.entries
-        .map((e) {
-          final aYest = e.value.yesterday;
-          final aPats = aYest.zakat + aYest.nonZakat + aYest.gmwf;
-          final aScore = aYest.donations + aYest.dispensaryRevenue + aPats * 100;
-          return MapEntry(e.key, aScore);
-        })
-        .where((e) => e.value > 0) // STRICTLY REQUIRES ACTIVITY YESTERDAY
-        .toList()
-        ..sort((a, b) => b.value.compareTo(a.value));
-
-      if (qualifying.isEmpty) return;
-
-      int userBranchRank = 0;
-      String userBranchName = '';
-
-      for (int i = 0; i < min(3, qualifying.length); i++) {
-        final bId = qualifying[i].key.toLowerCase().trim();
-        final match = (userBranchId.isNotEmpty && (bId == userBranchId || bId.contains(userBranchId) || userBranchId.contains(bId))) ||
-            (userName.contains('kapaya') && (bId.contains('karachi') || bId.contains('saddar') || bId.contains('kapaya')));
-        if (match) {
-          userBranchRank = i + 1;
-          userBranchName = RecentActivityService.resolveBranchName(bId);
-          break;
-        }
-      }
-
-      if (isBranchManager && userBranchRank > 0 && !_shownAppreciationSessionKeys.contains(userKey)) {
-        _shownAppreciationSessionKeys.add(userKey);
-        _isAppreciationDialogShowing = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            showDialog(
-              context: context,
-              barrierDismissible: true,
-              builder: (ctx) => AppreciationTrophyDialog(
-                rank: userBranchRank,
-                branchName: userBranchName,
-                isDark: widget.t.isDarkCanvas,
-              ),
-            ).then((_) {
-              if (mounted) {
-                setState(() {
-                  _isAppreciationDialogShowing = false;
-                });
-              }
-            });
-          }
-        });
-      }
-    }).catchError((_) {});
-
-    // 2. Fallback check when _localFuture finishes if first fetch was pending
+    // Hook onto _localFuture directly to avoid redundant parallel database fetches
     _localFuture.then((data) {
       if (!mounted || _shownAppreciationSessionKeys.contains(userKey)) return;
       int userBranchRank = 0;
@@ -4111,8 +4072,8 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
 
         // Build the stat tiles with direct navigation & accurate count logic
         void tryOpenModule(String id) {
-          final String mainModuleId = (id == 'employee_attendance')
-              ? 'finance'
+          final String mainModuleId = (id == 'employees' || id == 'employee_attendance')
+              ? 'employees'
               : ((id == 'madrassa_attendance' || id == 'madrassa_students' || id == 'madrassa_report')
                   ? 'madrassa'
                   : ((id == 'school_attendance' || id == 'school_teacher_attendance')
@@ -4125,10 +4086,10 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           );
 
           var module = baseModule;
-          if (id == 'employee_attendance') {
+          if (id == 'employees' || id == 'employee_attendance') {
             module = baseModule.copyWith(
-              title: 'Employee Attendance',
-              builder: (context, data) => EmployeeAttendancePage(
+              title: 'Employee Management',
+              builder: (context, data) => EmployeeManagementPage(
                 branchId: data['branchId'] ?? 'all',
                 isAdmin: true,
               ),
@@ -4306,11 +4267,11 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
         );
 
         final employeeAttendanceTile = HomeStatTile(
-          label: 'Employee Attendance',
+          label: 'Staff Attendance',
           value: fmtNum(data.empPresentCount),
           icon: Icons.co_present_rounded,
           color: const Color(0xFF3F82F6),
-          onTap: () => tryOpenModule('employee_attendance'),
+          onTap: () => tryOpenModule('employees'),
         );
 
         final schoolStudentsTile = HomeStatTile(
@@ -4329,13 +4290,6 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           onTap: () => tryOpenModule('school_teacher_attendance'),
         );
 
-        final onlineUsersTile = HomeStatTile(
-          label: 'Online Users',
-          value: fmtNum(data.onlineUsersCount),
-          icon: Icons.wifi_tethering_rounded,
-          color: const Color(0xFF06B6D4),
-          onTap: () => tryOpenModule('users'),
-        );
 
         final activeBranchTile = HomeStatTile(
           label: isBranchManager ? 'Top Camp Today' : 'Top Branch Today',
@@ -4379,7 +4333,6 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           schoolTeachersTile,
           dasterkhwaanTokensTile,
           dasterkhwaanStockTile,
-          onlineUsersTile,
         ];
 
         // Layout rows with GPU layer caching via RepaintBoundary
@@ -4527,36 +4480,223 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
 
         final roleStr = (widget.userData['role'] ?? widget.userData['userRole'] ?? '').toString().toLowerCase();
         final isGlobalExecutive = roleStr.contains('ceo') || roleStr.contains('chairman') || roleStr.contains('hq') || roleStr.contains('global');
+        final allLocalBranches = LocalStorageService.getLocalBranchesList();
 
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (isBranchManager && userBranchRank > 0 && !_isTrophyDismissed && !_isAppreciationDialogShowing)
-                BranchManagerTrophyBanner(
-                  rank: userBranchRank,
-                  branchName: userBranchName,
-                  isDark: widget.t.isDarkCanvas,
-                  onDismiss: () {
-                    if (mounted) setState(() => _isTrophyDismissed = true);
-                  },
-                ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Today\'s Snapshot',
-                    style: TextStyle(
-                      color: widget.t.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.4,
+        return ValueListenableBuilder<DashboardFilter>(
+          valueListenable: dashboardController,
+          builder: (context, filter, _) {
+            final isFiltered = filter.timeRange != TimeRange.today ||
+                (filter.branchId.isNotEmpty && filter.branchId != 'all') ||
+                filter.patientType != null ||
+                filter.multiDayMedicineOnly;
+
+            final rangeLabel = filter.timeRange == TimeRange.today
+                ? "Today's Snapshot"
+                : "${filter.timeRange == TimeRange.yesterday ? 'Yesterday' : filter.timeRange == TimeRange.week ? 'Past 7 Days' : filter.timeRange == TimeRange.biweek ? 'Past 14 Days' : filter.timeRange == TimeRange.month ? 'Past 30 Days' : filter.timeRange == TimeRange.thisMonth ? 'This Month' : 'Custom Range'} Snapshot";
+
+            if (isFiltered) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          rangeLabel,
+                          style: TextStyle(
+                            color: widget.t.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.4,
+                          ),
+                        ),
+                        GlobalFilterBar(
+                          controller: dashboardController,
+                          branches: allLocalBranches,
+                        ),
+                      ],
                     ),
+                    const SizedBox(height: 18),
+                    Builder(
+                      builder: (context) {
+                        final cKey = statsCacheKey(filter.branchId, filter);
+                        final cachedStats = statsCacheGet(cKey);
+
+                        return FutureBuilder<BranchStats>(
+                          key: ValueKey(cKey),
+                          initialData: cachedStats,
+                          future: fetchBranchStats(filter.branchId, filter: filter),
+                          builder: (context, snap) {
+                            final s = snap.data ?? cachedStats;
+                            if (s == null && snap.connectionState == ConnectionState.waiting) {
+                              return DashLoadingCard(t: widget.t, height: 260);
+                            }
+                            final activeStats = s ?? const BranchStats();
+                            final multiTiles = [
+                              HomeStatTile(
+                                label: 'Total Revenue',
+                                value: fmtNum(activeStats.totalRevenue),
+                                prefix: 'Rs ',
+                                icon: Icons.payments_rounded,
+                                color: const Color(0xFF10B981),
+                              ),
+                              HomeStatTile(
+                                label: 'Donations',
+                                value: fmtNum(activeStats.donations),
+                                prefix: 'Rs ',
+                                icon: Icons.volunteer_activism_rounded,
+                                color: const Color(0xFF0D9488),
+                                onTap: () => tryOpenModule('donations'),
+                              ),
+                              HomeStatTile(
+                                label: 'Dispensary Revenue',
+                                value: fmtNum(activeStats.dispensaryRevenue),
+                                prefix: 'Rs ',
+                                icon: Icons.local_pharmacy_rounded,
+                                color: const Color(0xFF3F82F6),
+                              ),
+                              HomeStatTile(
+                                label: 'Patients Treated',
+                                value: fmtNum(activeStats.tokens),
+                                icon: Icons.people_alt_rounded,
+                                color: const Color(0xFF8B5CF6),
+                              ),
+                              HomeStatTile(
+                                label: 'Zakat Patients',
+                                value: fmtNum(activeStats.zakat),
+                                icon: Icons.assignment_ind_rounded,
+                                color: const Color(0xFFD97706),
+                              ),
+                              HomeStatTile(
+                                label: 'Non-Zakat Patients',
+                                value: fmtNum(activeStats.nonZakat),
+                                icon: Icons.badge_rounded,
+                                color: const Color(0xFF06B6D4),
+                              ),
+                              HomeStatTile(
+                                label: 'Food Tokens Issued',
+                                value: fmtNum(activeStats.dasterkhwaan),
+                                icon: Icons.room_service_rounded,
+                                color: const Color(0xFFF59E0B),
+                                onTap: () => tryOpenModule('office_boy'),
+                              ),
+                              HomeStatTile(
+                                label: 'Food Tokens Served',
+                                value: fmtNum(activeStats.dasterkhwaanServed),
+                                icon: Icons.restaurant_rounded,
+                                color: const Color(0xFF10B981),
+                              ),
+                            ];
+
+                            final filteredRow3 = SizedBox(
+                              height: 385,
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(
+                                    flex: 4,
+                                    child: RepaintBoundary(
+                                      child: HomePatientsByCategoryDonut(t: widget.t, s: activeStats),
+                                    ),
+                                  ),
+                                  const SizedBox(width: DS.s2),
+                                  Expanded(
+                                    flex: 5,
+                                    child: RepaintBoundary(
+                                      child: HomeBranchPerformanceTable(
+                                        t: widget.t,
+                                        rows: sortedBranchRows,
+                                        onTapBranch: (bId) => openBranchInBranchesModule(bId),
+                                      ),
+                                    ),
+                                  ),
+                                  if (bestBranch != null) ...[
+                                    const SizedBox(width: DS.s2),
+                                    Expanded(
+                                      flex: 4,
+                                      child: RepaintBoundary(
+                                        child: HomeBestBranchSpotlight(
+                                          branchName: bestBranch.name,
+                                          revenue: bestBranch.today.dispensaryRevenue,
+                                          donations: bestBranch.today.donations,
+                                          patients: bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf,
+                                          growthPct: (bestBranch.yesterday.dispensaryRevenue > 0)
+                                              ? (((bestBranch.today.dispensaryRevenue - bestBranch.yesterday.dispensaryRevenue) /
+                                                      bestBranch.yesterday.dispensaryRevenue) *
+                                                  100)
+                                              : ((bestBranch.today.dispensaryRevenue > 0 || (bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf) > 0) ? 100.0 : null),
+                                          onTap: () => openBranchInBranchesModule(bestBranch!.id),
+                                          t: widget.t,
+                                          title: isBranchManager ? 'Top Camp Today' : 'Best Branch Today',
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            );
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                HomeStatTileRow(tiles: multiTiles),
+                                const SizedBox(height: DS.s3),
+                                const FirestoreQuotaMonitorWidget(),
+                                const SizedBox(height: DS.s3),
+                                filteredRow3,
+                                const SizedBox(height: DS.s3),
+                                row2,
+                                const SizedBox(height: DS.s3),
+                                row4,
+                              ],
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (isBranchManager && userBranchRank > 0 && !_isTrophyDismissed && !_isAppreciationDialogShowing) ...[
+                    BranchManagerTrophyBanner(
+                      rank: userBranchRank,
+                      branchName: userBranchName,
+                      isDark: widget.t.isDarkCanvas,
+                      onDismiss: () {
+                        if (mounted) setState(() => _isTrophyDismissed = true);
+                      },
+                    ),
+                    const SizedBox(height: DS.s3),
+                  ],
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Today\'s Snapshot',
+                        style: TextStyle(
+                          color: widget.t.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.4,
+                        ),
+                      ),
+                      GlobalFilterBar(
+                        controller: dashboardController,
+                        branches: allLocalBranches,
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              if (widget.isDesktop) ...[
+                  const SizedBox(height: 18),
+                  if (widget.isDesktop) ...[
                 HomeStatTileRow(tiles: statTiles),
                 const SizedBox(height: DS.s3),
                 const FirestoreQuotaMonitorWidget(),
@@ -4643,6 +4783,8 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
             ],
           ),
         );
+      },
+    );
   }
 
   void _navigateToBranch(String rawBranchId) {
@@ -4666,7 +4808,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
 
     final branchesModule = widget.availableModules.firstWhere(
       (m) => m.id == 'branches',
-      orElse: () => widget.availableModules.firstWhere((m) => m.id == 'executive_dashboard'),
+      orElse: () => widget.availableModules.first,
     );
     widget.onOpenModule(branchesModule);
   }

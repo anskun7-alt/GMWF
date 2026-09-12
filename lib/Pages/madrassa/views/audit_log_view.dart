@@ -149,7 +149,7 @@ class _AuditLogViewState extends State<AuditLogView> {
                     }
 
                     final timeStr = timestamp != null ? _formatRelativeTime(timestamp) : '';
-                    String title = '$editor ($role)';
+                    String title = editor;
                     IconData icon = Icons.info_outline;
                     Color color = Colors.blue;
 
@@ -174,7 +174,7 @@ class _AuditLogViewState extends State<AuditLogView> {
                       color = Colors.blueGrey;
                     }
 
-                    return buildActivityItem(context, title, message, timeStr, icon, color);
+                    return buildActivityItem(context, title, message, timeStr, icon, color, role: role);
                   },
                 ),
     );

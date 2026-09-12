@@ -3,12 +3,16 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart' hide Border, BorderStyle, TextSpan;
 
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../../services/local_storage_service.dart';
+import '../../../services/sync_service.dart';
+import '../../../realtime/realtime_manager.dart';
+import '../../../realtime/realtime_events.dart';
 import '../../../services/user_theme_service.dart';
 import '../../../services/image_upload_service.dart';
 import '../utils/madrassa_local_storage.dart';
@@ -136,16 +140,15 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
       int skippedCount = 0;
       final now = DateTime.now();
 
-      final existingStudents = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .get();
-      final existingRollNumbers = existingStudents.docs
-          .map((d) => d.data()['rollNumber']?.toString().trim())
+      final cachedStudents = MadrassaLocalStorage.getAllStudentsCached(widget.branchId);
+      final existingRollNumbers = cachedStudents
+          .map((d) => d['rollNumber']?.toString().trim())
           .whereType<String>()
           .toSet();
-      final existingIds = existingStudents.docs.map((d) => d.id).toSet();
+      final existingIds = cachedStudents
+          .map((d) => d['id']?.toString().trim())
+          .whereType<String>()
+          .toSet();
 
       for (var s in studentsToImport) {
         final name = s['name']?.toString().trim() ?? '';
@@ -196,43 +199,36 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
           'guardianName': guardianName,
           'guardianCnic': guardianCnic,
           'contactPhone': contactPhone,
-          'joinDate': Timestamp.fromDate(parsedJoinDate),
+          'joinDate': parsedJoinDate.toIso8601String(),
           'hasPrevMadrassa': hasPrevMadrassa || prevMadrassaName.isNotEmpty,
           'prevMadrassaName': prevMadrassaName,
           'prevHifzLines': prevHifzLines,
           'branchId': widget.branchId,
           'status': 'active',
+          'batch': 'active',
           'auditLog': [
             {
               'status': 'active',
               'type': 'enrollment',
-              'date': Timestamp.fromDate(parsedJoinDate),
+              'date': parsedJoinDate.toIso8601String(),
               'reason': 'Bulk Import'
             }
           ],
           'currentLines': lines,
           'enrolledMonth': DateFormat('yyyy-MM').format(parsedJoinDate),
-          'createdAt': FieldValue.serverTimestamp(),
-          'lastUpdatedAt': FieldValue.serverTimestamp(),
+          'createdAt': now.toIso8601String(),
+          'lastUpdatedAt': now.toIso8601String(),
           'photoUrl': '',
         };
 
-        if (docId != null && docId.isNotEmpty) {
-          await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('madrassa_students')
-              .doc(docId)
-              .set(finalData);
-          existingIds.add(docId);
-        } else {
-          final newDoc = await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('madrassa_students')
-              .add(finalData);
-          existingIds.add(newDoc.id);
-        }
+        final savedId = await MadrassaLocalStorage.saveStudentLocalAndSync(
+          branchId: widget.branchId,
+          studentId: (docId != null && docId.isNotEmpty) ? docId : '',
+          data: finalData,
+          isNew: true,
+        );
+
+        existingIds.add(savedId);
         existingRollNumbers.add(rollNumber);
         successCount++;
       }
@@ -392,6 +388,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
 
   double _calculateRecentPace(String studentId, String branchId, double overallAvg) {
     try {
+      if (!Hive.isBoxOpen(LocalStorageService.madrassaLogsBox)) return overallAvg;
       final box = Hive.box(LocalStorageService.madrassaLogsBox);
       final prefix = '${branchId.toLowerCase().trim()}__log__';
       
@@ -889,6 +886,8 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
         final textMuted = isDark ? const Color(0xFF94A3B8) : Colors.grey[600]!;
         final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
 
+        final studentsAsync = ref.watch(madrassaStudentsProvider(widget.branchId));
+
         return Scaffold(
           backgroundColor: scaffoldBg,
           floatingActionButton: null,
@@ -896,9 +895,9 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(context, isDark),
-              _buildPendingRejoinRequests(),
+              _buildPendingRejoinRequests(studentsAsync.valueOrNull ?? []),
               Expanded(
-                child: ref.watch(madrassaStudentsProvider(widget.branchId)).when(
+                child: studentsAsync.when(
                   loading: () => const Center(child: CircularProgressIndicator()),
                   error: (e, st) => Center(child: Text('Error loading students: $e')),
                   data: (studentsList) {
@@ -977,22 +976,35 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                 const batchOrder = ['active', 'left', 'dropped', 'dropped_out', 'hifz_completed', 'hifz_complete', 'archived', 'inactive'];
 
                 if (isMobile) {
-                  return ListView(
-                    padding: const EdgeInsets.only(bottom: 24),
-                    children: [
-                      for (final batch in batchOrder)
-                        if (studentsByBatch.containsKey(batch))
-                          ...[
-                            _buildBatchHeader(context, batch),
-                            ...studentsByBatch[batch]!.map((s) => _buildMobileStudentCard(s, s, isDark)),
-                          ]
-                    ],
+                  return RefreshIndicator(
+                    onRefresh: () async {
+                      await MadrassaLocalStorage.downloadStudents(widget.branchId, force: true);
+                      if (mounted) setState(() {});
+                    },
+                    child: ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.only(bottom: 24),
+                      children: [
+                        for (final batch in batchOrder)
+                          if (studentsByBatch.containsKey(batch))
+                            ...[
+                              _buildBatchHeader(context, batch),
+                              ...studentsByBatch[batch]!.map((s) => _buildMobileStudentCard(s, s, isDark)),
+                            ]
+                      ],
+                    ),
                   );
                 }
 
-                return SingleChildScrollView(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                return RefreshIndicator(
+                  onRefresh: () async {
+                    await MadrassaLocalStorage.downloadStudents(widget.branchId, force: true);
+                    if (mounted) setState(() {});
+                  },
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1094,9 +1106,10 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                                 ),
                               ),
                               ),
-                              const SizedBox(height: 24),
-                            ]
-                      ],
+                                const SizedBox(height: 24),
+                              ],
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -1432,18 +1445,36 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
         return;
       }
 
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .doc(studentId)
-          .update({'photoUrl': b64});
+      final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId) ?? {'id': studentId, 'branchId': widget.branchId};
+      studentCache['photoUrl'] = b64;
+      studentCache['photoBase64'] = b64;
+      studentCache['studentPhotoBase64'] = b64;
+      studentCache['lastUpdatedAt'] = DateTime.now().toIso8601String();
+      await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
 
-      final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId);
-      if (studentCache != null) {
-        studentCache['photoUrl'] = b64;
-        await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
+      // Broadcast to LAN WebSocket
+      try {
+        final payload = RealtimeEvents.payload(
+          type: RealtimeEvents.saveMadrassaStudent,
+          data: {
+            ...studentCache,
+            'studentId': studentId,
+          },
+          branchId: widget.branchId,
+        );
+        RealtimeManager().sendMessage(payload);
+      } catch (e) {
+        debugPrint('[StudentManagementView] LAN broadcast error: $e');
       }
+
+      // Always enqueue sync
+      await LocalStorageService.enqueueSync({
+        'type': 'save_madrassa_student',
+        'branchId': widget.branchId,
+        'studentId': studentId,
+        'data': studentCache,
+      });
+      unawaited(SyncService().triggerUpload());
 
       if (mounted) {
         setState(() {
@@ -1517,142 +1548,167 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
     );
   }
 
-  Widget _buildPendingRejoinRequests() {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_students')
-          .where('rejoinRequestStatus', isEqualTo: 'pending')
-          .snapshots(),
-      builder: (context, snap) {
-        if (!snap.hasData || snap.data!.docs.isEmpty) return const SizedBox.shrink();
+  Widget _buildPendingRejoinRequests(List<Map<String, dynamic>> allStudents) {
+    final docs = allStudents.where((d) => d['rejoinRequestStatus'] == 'pending').toList();
+    if (docs.isEmpty) return const SizedBox.shrink();
 
-        final docs = snap.data!.docs;
-
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFEF3C7), // Light amber
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFFDE68A)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF3C7), // Light amber
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  const Icon(Icons.hail_rounded, color: Color(0xFFD97706), size: 24),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Pending Rejoining Requests (${docs.length})',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF92400E)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: docs.length,
-                separatorBuilder: (_, _) => const Divider(color: Color(0xFFFDE68A)),
-                itemBuilder: (context, i) {
-                  final s = docs[i];
-                  final d = s.data() as Map<String, dynamic>;
-                  final date = d['rejoinRequestDate'] as Timestamp?;
-                  final dateStr = date != null ? DateFormat('yyyy-MM-dd HH:mm').format(date.toDate()) : '';
-
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8.0),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${d['name'] ?? ''} (Roll: ${d['rollNumber'] ?? '?'})',
-                                style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF78350F)),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Reason: "${d['rejoinRequestReason'] ?? 'No reason specified'}"',
-                                style: const TextStyle(fontSize: 12, color: Color(0xFF92400E)),
-                              ),
-                              if (dateStr.isNotEmpty) ...[
-                                const SizedBox(height: 2),
-                                Text(
-                                  'Requested on: $dateStr',
-                                  style: const TextStyle(fontSize: 10, color: Color(0xFFB45309)),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                        ElevatedButton.icon(
-                          onPressed: () => _approveRejoin(s),
-                          icon: const Icon(Icons.check, size: 14),
-                          label: const Text('Approve', style: TextStyle(fontSize: 11)),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            minimumSize: Size.zero,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        TextButton.icon(
-                          onPressed: () => _rejectRejoin(s),
-                          icon: const Icon(Icons.close, size: 14, color: Colors.red),
-                          label: const Text('Reject', style: TextStyle(fontSize: 11, color: Colors.red)),
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            minimumSize: Size.zero,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
+              const Icon(Icons.hail_rounded, color: Color(0xFFD97706), size: 24),
+              const SizedBox(width: 12),
+              Text(
+                'Pending Rejoining Requests (${docs.length})',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF92400E)),
               ),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          ListView.separated(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: docs.length,
+            separatorBuilder: (_, _) => const Divider(color: Color(0xFFFDE68A)),
+            itemBuilder: (context, i) {
+              final d = docs[i];
+              final dynamic dateRaw = d['rejoinRequestDate'];
+              DateTime? date;
+              if (dateRaw is Timestamp) {
+                date = dateRaw.toDate();
+              } else if (dateRaw is String) {
+                date = DateTime.tryParse(dateRaw);
+              }
+              final dateStr = date != null ? DateFormat('yyyy-MM-dd HH:mm').format(date) : '';
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8.0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${d['name'] ?? ''} (Roll: ${d['rollNumber'] ?? '?'})',
+                            style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF78350F)),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Reason: "${d['rejoinRequestReason'] ?? 'No reason specified'}"',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                          ),
+                          if (dateStr.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              'Requested on: $dateStr',
+                              style: const TextStyle(fontSize: 10, color: Color(0xFFB45309)),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    ElevatedButton.icon(
+                      onPressed: () => _approveRejoin(d),
+                      icon: const Icon(Icons.check, size: 14),
+                      label: const Text('Approve', style: TextStyle(fontSize: 11)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton.icon(
+                      onPressed: () => _rejectRejoin(d),
+                      icon: const Icon(Icons.close, size: 14, color: Colors.red),
+                      label: const Text('Reject', style: TextStyle(fontSize: 11, color: Colors.red)),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
+      ),
     );
   }
 
-  Future<void> _approveRejoin(DocumentSnapshot studentDoc) async {
-    final now = Timestamp.now();
-    final sData = studentDoc.data() as Map<String, dynamic>;
+  Future<void> _approveRejoin(Map<String, dynamic> sData) async {
+    final now = DateTime.now();
+    final studentId = sData['id']?.toString() ?? '';
+    if (studentId.isEmpty) return;
+
     final auditReason = 'Rejoin request approved. Notes: ${sData['rejoinRequestReason'] ?? ''}';
+    final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId) ?? Map<String, dynamic>.from(sData);
+    studentCache['status'] = 'active';
+    studentCache['batch'] = 'active';
+    studentCache['rejoinRequestStatus'] = null;
+    studentCache['rejoinRequestReason'] = null;
+    studentCache['rejoinRequestDate'] = null;
+    studentCache['lastUpdatedAt'] = now.toIso8601String();
 
-    await studentDoc.reference.update({
+    final auditList = List<Map<String, dynamic>>.from(
+      (studentCache['auditLog'] as List? ?? []).whereType<Map>().map((e) => Map<String, dynamic>.from(e)),
+    );
+    auditList.add({
       'status': 'active',
-      'rejoinRequestStatus': null,
-      'rejoinRequestReason': null,
-      'rejoinRequestDate': null,
-      'auditLog': FieldValue.arrayUnion([
-        {
-          'status': 'active',
-          'type': 'rejoin_approval',
-          'date': now,
-          'reason': auditReason,
-        }
-      ]),
+      'type': 'rejoin_approval',
+      'date': now.toIso8601String(),
+      'reason': auditReason,
     });
+    studentCache['auditLog'] = auditList;
 
-    // Central Audit Log
-    await MadrassaAuditService.logAction(
+    await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
+
+    // Broadcast LAN
+    try {
+      final payload = RealtimeEvents.payload(
+        type: RealtimeEvents.saveMadrassaStudent,
+        data: {
+          ...studentCache,
+          'studentId': studentId,
+        },
+        branchId: widget.branchId,
+      );
+      RealtimeManager().sendMessage(payload);
+    } catch (e) {
+      debugPrint('[StudentManagementView] LAN broadcast error: $e');
+    }
+
+    // Always enqueue sync
+    await LocalStorageService.enqueueSync({
+      'type': 'save_madrassa_student',
+      'branchId': widget.branchId,
+      'studentId': studentId,
+      'data': studentCache,
+    });
+    unawaited(SyncService().triggerUpload());
+
+    // Central Audit Log in background
+    unawaited(MadrassaAuditService.logAction(
       branchId: widget.branchId,
       editor: widget.username,
       role: widget.role,
       type: 'status_change',
       message: 'Approved rejoining request for student ${sData['name'] ?? ''} (Roll: ${sData['rollNumber'] ?? ''})',
-      studentId: studentDoc.id,
+      studentId: studentId,
       studentName: sData['name'],
-    );
+    ));
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1661,8 +1717,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
     }
   }
 
-  Future<void> _rejectRejoin(DocumentSnapshot studentDoc) async {
-    final sData = studentDoc.data() as Map<String, dynamic>;
+  Future<void> _rejectRejoin(Map<String, dynamic> sData) async {
     final reasonCtrl = TextEditingController();
     String? reasonError;
 
@@ -1736,32 +1791,61 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
     );
 
     if (confirm == true) {
-      final now = Timestamp.now();
+      final now = DateTime.now();
+      final studentId = sData['id']?.toString() ?? '';
+      if (studentId.isEmpty) return;
+
       final customReason = reasonCtrl.text.trim();
       final finalReason = customReason.isEmpty ? 'Rejoin request rejected by teacher.' : 'Rejoin request rejected by teacher. Reason: $customReason';
 
-      await studentDoc.reference.update({
-        'rejoinRequestStatus': 'rejected',
-        'auditLog': FieldValue.arrayUnion([
-          {
-            'status': sData['status'] ?? 'left',
-            'type': 'rejoin_rejection',
-            'date': now,
-            'reason': finalReason,
-          }
-        ]),
-      });
+      final studentCache = MadrassaLocalStorage.getStudentCached(widget.branchId, studentId) ?? Map<String, dynamic>.from(sData);
+      studentCache['rejoinRequestStatus'] = 'rejected';
+      studentCache['lastUpdatedAt'] = now.toIso8601String();
 
-      // Central Audit Log
-      await MadrassaAuditService.logAction(
+      final auditList = List<Map<String, dynamic>>.from(
+        (studentCache['auditLog'] as List? ?? []).whereType<Map>().map((e) => Map<String, dynamic>.from(e)),
+      );
+      auditList.add({
+        'status': sData['status'] ?? 'left',
+        'type': 'rejoin_rejection',
+        'date': now.toIso8601String(),
+        'reason': finalReason,
+      });
+      studentCache['auditLog'] = auditList;
+
+      await MadrassaLocalStorage.cacheStudent(widget.branchId, studentId, studentCache);
+
+      try {
+        final payload = RealtimeEvents.payload(
+          type: RealtimeEvents.saveMadrassaStudent,
+          data: {
+            ...studentCache,
+            'studentId': studentId,
+          },
+          branchId: widget.branchId,
+        );
+        RealtimeManager().sendMessage(payload);
+      } catch (e) {
+        debugPrint('[StudentManagementView] LAN broadcast error: $e');
+      }
+
+      await LocalStorageService.enqueueSync({
+        'type': 'save_madrassa_student',
+        'branchId': widget.branchId,
+        'studentId': studentId,
+        'data': studentCache,
+      });
+      unawaited(SyncService().triggerUpload());
+
+      unawaited(MadrassaAuditService.logAction(
         branchId: widget.branchId,
         editor: widget.username,
         role: widget.role,
         type: 'status_change',
         message: 'Rejected rejoining request for student ${sData['name'] ?? ''} (Roll: ${sData['rollNumber'] ?? ''}). Reason: $customReason',
-        studentId: studentDoc.id,
+        studentId: studentId,
         studentName: sData['name'],
-      );
+      ));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

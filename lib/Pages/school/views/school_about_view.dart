@@ -113,7 +113,7 @@ class SchoolAboutView extends StatelessWidget {
                 ),
                 const SizedBox(height: 20),
                 const Text(
-                  'Taleem-o-Tarbiyat School System',
+                  'Taleem-wa-Tarbiyat School System',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 26,
@@ -265,7 +265,7 @@ class SchoolAboutView extends StatelessWidget {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'Taleem-o-Tarbiyat School System (TWT) is owned, managed, and financially patronized by Gulzar Madina Welfare Foundation (GMWF).\n\n'
+                  'Taleem-wa-Tarbiyat School System (TWT) is owned, managed, and financially patronized by Gulzar Madina Welfare Foundation (GMWF).\n\n'
                   'All educational data, student records, examination archives, faculty profiles, and institutional information are securely encrypted and protected under GMWF IT governance policies.\n\n'
                   '© ${DateTime.now().year} Gulzar Madina Welfare Foundation (GMWF). All Rights Reserved.',
                   style: TextStyle(

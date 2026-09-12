@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'auto_update_service.dart';
+import 'local_storage_service.dart';
 import '../utils/network_utils.dart';
 import '../config/constants.dart';
 
@@ -107,25 +108,7 @@ class MultiServerService {
         'updatedAt': FieldValue.serverTimestamp(),
       };
 
-      // 1. Update Firestore under branches/{branchId}/servers/{serverId}
-      if (branchId.isNotEmpty && branchId != 'all') {
-        await FirebaseFirestore.instance
-            .collection('branches')
-            .doc(branchId)
-            .collection('servers')
-            .doc(serverId)
-            .set(serverData, SetOptions(merge: true));
-
-        // 2. Also keep global branch active server record for clients auto-discovery
-        if (serverRole == 'primary') {
-          await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(branchId)
-              .set({'activeServerIp': ip, 'activeServerPort': AppNetwork.websocketPort}, SetOptions(merge: true));
-        }
-      }
-
-      // 3. Cache locally in Hive
+      // 1. Cache locally in Hive (Pure Local Mode - zero continuous Firestore quota usage)
       final hiveData = Map<String, dynamic>.from(serverData);
       hiveData['lastHeartbeat'] = DateTime.now().toIso8601String();
       hiveData['updatedAt'] = DateTime.now().toIso8601String();
@@ -133,13 +116,25 @@ class MultiServerService {
       final box = await Hive.openBox('branch_servers');
       await box.put(serverId, hiveData);
 
-      debugPrint('[MultiServerService] Node heartbeat recorded for $serverId ($ip:$serverRole)');
+      // 2. Also keep global branch active server record locally in Hive for client auto-discovery
+      if (serverRole == 'primary' && Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+        final branchesBox = Hive.box(LocalStorageService.branchesBox);
+        final branchKey = 'branch:$branchId';
+        final existing = branchesBox.get(branchKey);
+        final map = existing is Map ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': branchId};
+        map['activeServerIp'] = ip;
+        map['activeServerPort'] = AppNetwork.websocketPort;
+        map['serverBranchId'] = branchId;
+        await branchesBox.put(branchKey, map);
+      }
+
+      debugPrint('[MultiServerService] Local node heartbeat recorded for $serverId ($ip:$serverRole)');
     } catch (e) {
       debugPrint('[MultiServerService] Heartbeat recording error: $e');
     }
   }
 
-  /// Starts periodic heartbeat updates (runs every 15 seconds)
+  /// Starts periodic heartbeat updates (pure local Hive & LAN broadcast)
   void startHeartbeatLoop({
     required String branchId,
     required String Function() roleSupplier,
@@ -157,65 +152,86 @@ class MultiServerService {
     });
   }
 
-  /// Stops heartbeat loop and marks node as offline
+  /// Stops heartbeat loop and marks node as offline locally
   Future<void> stopHeartbeat(String branchId) async {
     _heartbeatTimer?.cancel();
     if (_currentServerId != null && branchId.isNotEmpty) {
       try {
-        await FirebaseFirestore.instance
-            .collection('branches')
-            .doc(branchId)
-            .collection('servers')
-            .doc(_currentServerId)
-            .set({'isOnline': false, 'lastHeartbeat': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+        if (Hive.isBoxOpen('branch_servers')) {
+          final box = Hive.box('branch_servers');
+          final raw = box.get(_currentServerId);
+          if (raw is Map) {
+            final data = Map<String, dynamic>.from(raw);
+            data['isOnline'] = false;
+            data['lastHeartbeat'] = DateTime.now().toIso8601String();
+            await box.put(_currentServerId, data);
+          }
+        }
       } catch (e) {
         debugPrint('[MultiServerService] Failed to mark server offline: $e');
       }
     }
   }
 
-  /// Real-time stream of all servers for a specific branch or all branches
-  Stream<List<ServerNodeInfo>> getBranchServersStream(String branchId) {
-    if (branchId.isEmpty || branchId == 'all' || branchId == 'global') {
-      return FirebaseFirestore.instance
-          .collectionGroup('servers')
-          .snapshots()
-          .map((snap) {
-        return snap.docs.map((doc) => ServerNodeInfo.fromMap(doc.data(), doc.id)).toList();
-      });
+  /// Real-time stream of all servers for a specific branch or all branches from local Hive
+  Stream<List<ServerNodeInfo>> getBranchServersStream(String branchId) async* {
+    final box = await Hive.openBox('branch_servers');
+    
+    List<ServerNodeInfo> readCurrent() {
+      final list = <ServerNodeInfo>[];
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map) {
+          final sId = k.toString();
+          final item = Map<String, dynamic>.from(val);
+          final bId = (item['branchId'] ?? '').toString().toLowerCase().trim();
+          if (branchId.isEmpty || branchId == 'all' || branchId == 'global' || bId == branchId.toLowerCase().trim()) {
+            list.add(ServerNodeInfo.fromMap(item, sId));
+          }
+        }
+      }
+      return list;
     }
 
-    return FirebaseFirestore.instance
-        .collection('branches')
-        .doc(branchId)
-        .collection('servers')
-        .snapshots()
-        .map((snap) {
-      return snap.docs.map((doc) => ServerNodeInfo.fromMap(doc.data(), doc.id)).toList();
-    });
+    // Yield initial cached servers
+    yield readCurrent();
+
+    // Stream subsequent local updates
+    await for (final _ in box.watch()) {
+      yield readCurrent();
+    }
   }
 
-  /// Sets a specific server node as the Primary Server for the branch
+  /// Sets a specific server node as the Primary Server for the branch locally
   Future<void> promoteToPrimary(String branchId, String targetServerId, String targetIp) async {
     try {
-      final batch = FirebaseFirestore.instance.batch();
-      final serversRef = FirebaseFirestore.instance.collection('branches').doc(branchId).collection('servers');
-
-      final docs = await serversRef.get();
-      for (final doc in docs.docs) {
-        if (doc.id == targetServerId) {
-          batch.update(doc.reference, {'role': 'primary', 'updatedAt': FieldValue.serverTimestamp()});
-        } else {
-          batch.update(doc.reference, {'role': 'secondary', 'updatedAt': FieldValue.serverTimestamp()});
+      final box = await Hive.openBox('branch_servers');
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map) {
+          final data = Map<String, dynamic>.from(val);
+          if (k.toString() == targetServerId) {
+            data['role'] = 'primary';
+            data['updatedAt'] = DateTime.now().toIso8601String();
+          } else {
+            data['role'] = 'secondary';
+            data['updatedAt'] = DateTime.now().toIso8601String();
+          }
+          await box.put(k, data);
         }
       }
 
-      // Update primary branch active IP pointer
-      final branchRef = FirebaseFirestore.instance.collection('branches').doc(branchId);
-      batch.set(branchRef, {'activeServerIp': targetIp}, SetOptions(merge: true));
+      // Update primary branch active IP pointer locally in Hive
+      if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+        final branchesBox = Hive.box(LocalStorageService.branchesBox);
+        final branchKey = 'branch:$branchId';
+        final existing = branchesBox.get(branchKey);
+        final map = existing is Map ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': branchId};
+        map['activeServerIp'] = targetIp;
+        await branchesBox.put(branchKey, map);
+      }
 
-      await batch.commit();
-      debugPrint('[MultiServerService] Promoted $targetServerId ($targetIp) to Primary Server');
+      debugPrint('[MultiServerService] Promoted $targetServerId ($targetIp) to Primary Server locally');
     } catch (e) {
       debugPrint('[MultiServerService] Failed to promote primary server: $e');
     }

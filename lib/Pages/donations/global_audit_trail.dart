@@ -449,9 +449,149 @@ class _AuditLogCard extends StatelessWidget {
   }
 
   Widget _buildDescription() {
-    final donor = entry.oldData?['donorName'] ?? entry.newData?['donorName'] ?? 'Unknown';
-    final amount = entry.oldData?['amount'] ?? entry.newData?['amount'] ?? 0;
-    
+    final oldD = entry.oldData ?? {};
+    final newD = entry.newData ?? {};
+    final combined = {...oldD, ...newD};
+
+    final collection = entry.collection.toLowerCase();
+    final actionText = entry.action == 'create'
+        ? 'created'
+        : entry.action == 'update'
+            ? 'modified'
+            : 'permanently deleted';
+
+    // 1. Donation Box
+    if (collection.contains('box') || combined.containsKey('boxNumber')) {
+      final boxNo = combined['boxNumber'] ?? entry.documentId;
+      final holder = combined['holderName'] ?? '';
+      final area = combined['area'] ?? '';
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9).withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: RichText(
+          text: TextSpan(
+            style: const TextStyle(fontSize: 14, color: Color(0xFF334155), height: 1.5),
+            children: [
+              const TextSpan(text: 'Donation Box '),
+              TextSpan(text: '#$boxNo', style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A), fontFamily: 'monospace')),
+              if (holder.toString().isNotEmpty) ...[
+                const TextSpan(text: ' for '),
+                TextSpan(text: holder.toString(), style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+              ],
+              if (area.toString().isNotEmpty) ...[
+                TextSpan(text: ' (${area.toString()})'),
+              ],
+              TextSpan(text: ' was $actionText.'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 2. Donation Record
+    if (collection.contains('donation') || combined.containsKey('receiptNo') || combined.containsKey('donorName') || combined.containsKey('amount')) {
+      final donor = combined['donorName'] ?? 'Walk-in / Anonymous Donor';
+      final receipt = cleanReceiptNumber(combined['receiptNo']?.toString() ?? '');
+      final amount = (combined['amount'] as num?)?.toDouble() ?? 0.0;
+      final category = combined['categoryId']?.toString().toUpperCase() ?? '';
+
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9).withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: RichText(
+          text: TextSpan(
+            style: const TextStyle(fontSize: 14, color: Color(0xFF334155), height: 1.5),
+            children: [
+              const TextSpan(text: 'Donation record '),
+              if (receipt.isNotEmpty) ...[
+                TextSpan(text: '($receipt) ', style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF6366F1), fontFamily: 'monospace')),
+              ],
+              const TextSpan(text: 'for '),
+              TextSpan(text: donor.toString(), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+              if (amount > 0) ...[
+                const TextSpan(text: ' with value of '),
+                TextSpan(
+                  text: 'PKR ${NumberFormat('#,###').format(amount)}',
+                  style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF047857), fontFamily: 'monospace'),
+                ),
+              ],
+              if (category.isNotEmpty) ...[
+                TextSpan(text: ' [$category]'),
+              ],
+              TextSpan(text: ' was $actionText.'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 3. Daily Log / Module Log (e.g. Madrassa / School / Dispensary daily log)
+    if (collection.contains('daily_log') || entry.reason?.toLowerCase().contains('daily log') == true || combined.containsKey('dateKey') || combined.containsKey('totalPresent')) {
+      final date = combined['date'] ?? combined['dateKey'] ?? entry.documentId;
+      final branch = entry.branchName.isNotEmpty ? entry.branchName : (combined['branchName'] ?? combined['branchId'] ?? 'Branch');
+      final logType = collection.contains('madrassa')
+          ? 'Madrassa'
+          : (collection.contains('school') ? 'School' : (collection.contains('dispensary') ? 'Dispensary' : 'Daily'));
+
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9).withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: RichText(
+          text: TextSpan(
+            style: const TextStyle(fontSize: 14, color: Color(0xFF334155), height: 1.5),
+            children: [
+              TextSpan(text: '$logType Daily Log ', style: const TextStyle(fontWeight: FontWeight.bold)),
+              const TextSpan(text: 'for '),
+              TextSpan(text: branch.toString(), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+              const TextSpan(text: ' on '),
+              TextSpan(text: date.toString(), style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF6366F1))),
+              TextSpan(text: ' was $actionText.'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 4. Donor Profile
+    if (collection.contains('donor') || combined.containsKey('phones') || combined.containsKey('cnic')) {
+      final name = combined['name'] ?? combined['donorName'] ?? entry.documentId;
+      final phone = (combined['phones'] is List && (combined['phones'] as List).isNotEmpty)
+          ? (combined['phones'] as List).first
+          : (combined['phone'] ?? '');
+
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9).withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: RichText(
+          text: TextSpan(
+            style: const TextStyle(fontSize: 14, color: Color(0xFF334155), height: 1.5),
+            children: [
+              const TextSpan(text: 'Donor Profile for '),
+              TextSpan(text: name.toString(), style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+              if (phone.toString().isNotEmpty) TextSpan(text: ' (${phone.toString()})'),
+              TextSpan(text: ' was $actionText.'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 5. Generic fallback with clean entity identification
+    final identifier = combined['name'] ?? combined['title'] ?? combined['patientName'] ?? combined['serial'] ?? combined['id'] ?? entry.documentId;
+    final collName = collection.isNotEmpty ? collection.replaceAll('_', ' ').toUpperCase() : 'RECORD';
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -462,12 +602,9 @@ class _AuditLogCard extends StatelessWidget {
         text: TextSpan(
           style: const TextStyle(fontSize: 14, color: Color(0xFF334155), height: 1.5),
           children: [
-            const TextSpan(text: 'Donation record for '),
-            TextSpan(text: donor, style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
-            const TextSpan(text: ' with value of '),
-            TextSpan(text: 'PKR ${NumberFormat('#,###').format(amount)}', 
-              style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A), fontFamily: 'DMMono')),
-            TextSpan(text: ' was ${entry.action == 'create' ? 'created' : entry.action == 'update' ? 'modified' : 'permanently deleted'}.'),
+            TextSpan(text: '$collName record '),
+            TextSpan(text: '#$identifier ', style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0F172A))),
+            TextSpan(text: 'was $actionText.'),
           ],
         ),
       ),
@@ -499,14 +636,25 @@ class _AuditLogCard extends StatelessWidget {
   }
 
   Widget _buildDiffView() {
-    final oldData = entry.oldData!;
-    final newData = entry.newData!;
-    final keys = ['amount', 'donorName', 'date', 'status', 'categoryId', 'notes'];
+    final oldData = entry.oldData ?? {};
+    final newData = entry.newData ?? {};
     
+    // Ignore internal keys
+    const ignoredKeys = {
+      'timestamp', 'lastUpdatedAt', 'hiveKey', 'localId', 'id', 'firestoreId',
+      'submissionId', 'syncStatus', 'editHistory', 'searchTokens', 'searchKeywords'
+    };
+
+    final allKeys = {...oldData.keys, ...newData.keys}
+        .where((k) => !ignoredKeys.contains(k))
+        .toList();
+
     final List<Widget> changes = [];
-    for (var k in keys) {
-      if (oldData[k]?.toString() != newData[k]?.toString()) {
-        changes.add(_buildDiffRow(k, oldData[k]?.toString() ?? 'N/A', newData[k]?.toString() ?? 'N/A'));
+    for (var k in allKeys) {
+      final oldVal = oldData[k]?.toString() ?? 'None';
+      final newVal = newData[k]?.toString() ?? 'None';
+      if (oldVal != newVal) {
+        changes.add(_buildDiffRow(_formatFieldLabel(k), oldVal, newVal));
       }
     }
 
@@ -523,13 +671,21 @@ class _AuditLogCard extends StatelessWidget {
     );
   }
 
+  String _formatFieldLabel(String key) {
+    return key
+        .replaceAll('_', ' ')
+        .replaceAllMapped(RegExp(r'([A-Z])'), (m) => ' ${m.group(0)}')
+        .trim()
+        .toUpperCase();
+  }
+
   Widget _buildDiffRow(String field, String oldVal, String newVal) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         children: [
-          SizedBox(width: 80, 
-            child: Text(field.toUpperCase(), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF64748B)))),
+          SizedBox(width: 110, 
+            child: Text(field, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF64748B)), overflow: TextOverflow.ellipsis)),
           Expanded(
             child: Wrap(
               crossAxisAlignment: WrapCrossAlignment.center,

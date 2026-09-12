@@ -46,6 +46,7 @@ class DonationBoxStorage {
   }
 
   static DonationBox? getBox(String id) {
+    if (id.isEmpty || !Hive.isBoxOpen(boxesBoxName)) return null;
     final hiveBox = Hive.box(boxesBoxName);
     final raw = hiveBox.get(id);
     if (raw is Map) {
@@ -54,7 +55,42 @@ class DonationBoxStorage {
     return null;
   }
 
+  /// Get all boxes across the entire system regardless of branch or status
+  static List<DonationBox> getAllBoxes() => getBoxes('all');
+
+  /// Checks if a box number has ever been assigned anywhere in the system.
+  /// An assigned box number can NEVER be reused again under any circumstances.
+  static bool isBoxNumberTaken(String boxNumber, {String? excludeBoxId}) {
+    final clean = boxNumber.trim().toUpperCase();
+    if (clean.isEmpty) return false;
+    final allBoxes = getAllBoxes();
+    return allBoxes.any((b) =>
+        b.boxNumber.trim().toUpperCase() == clean &&
+        (excludeBoxId == null || b.id != excludeBoxId));
+  }
+
+  /// Get the next sequentially unique box number for a branch.
+  /// An assigned box number to a box will NEVER be used again.
+  static String suggestNextBoxNumber([String? branchId, String? baseBoxNumber]) {
+    final allBoxes = getAllBoxes();
+    int maxNum = 0;
+    for (var box in allBoxes) {
+      final match = RegExp(r'BOX-(\d+)', caseSensitive: false).firstMatch(box.boxNumber);
+      if (match != null) {
+        final num = int.tryParse(match.group(1)!) ?? 0;
+        if (num > maxNum) maxNum = num;
+      }
+    }
+    String candidate = 'BOX-${(maxNum + 1).toString().padLeft(3, '0')}';
+    while (isBoxNumberTaken(candidate)) {
+      maxNum++;
+      candidate = 'BOX-${(maxNum + 1).toString().padLeft(3, '0')}';
+    }
+    return candidate;
+  }
+
   static List<DonationBox> getBoxes(String branchId) {
+    if (!Hive.isBoxOpen(boxesBoxName)) return [];
     final hiveBox = Hive.box(boxesBoxName);
     final List<DonationBox> results = [];
     for (var key in hiveBox.keys) {
@@ -83,37 +119,109 @@ class DonationBoxStorage {
     required String branchName,
     String holderPhone = '',
     String holderAddress = '',
+    String area = '',
     String notes = '',
+    String? replacementForBoxId,
   }) {
+    final cleanBoxNum = boxNumber.trim().toUpperCase();
+    if (isBoxNumberTaken(cleanBoxNum)) {
+      throw ArgumentError('Box number "$cleanBoxNum" has already been assigned in the past. Box numbers can never be reused.');
+    }
+
     final id = '${branchId}_box_${const Uuid().v4()}';
     return DonationBox(
       id: id,
-      boxNumber: boxNumber,
+      boxNumber: cleanBoxNum,
       holderName: holderName,
       holderPhone: holderPhone,
       holderAddress: holderAddress,
+      area: area,
       branchId: branchId,
       branchName: branchName,
       registeredDate: DateFormat('yyyy-MM-dd').format(DateTime.now()),
       isActive: true,
       notes: notes,
       syncStatus: 'pending',
+      status: 'active',
+      replacementForBoxId: replacementForBoxId,
     );
   }
 
-  /// Get the next suggested box number for a branch
-  static String suggestNextBoxNumber(String branchId) {
-    final boxes = getBoxes(branchId);
-    int maxNum = 0;
-    for (var box in boxes) {
-      final match = RegExp(r'BOX-(\d+)').firstMatch(box.boxNumber);
-      if (match != null) {
-        final num = int.tryParse(match.group(1)!) ?? 0;
-        if (num > maxNum) maxNum = num;
-      }
-    }
-    return 'BOX-${(maxNum + 1).toString().padLeft(3, '0')}';
+  /// Reports an accident or compromise incident (snatched, stolen, broken) while preserving all historical data
+  static Future<DonationBox> reportIncident({
+    required String boxId,
+    required String incidentType, // 'snatched', 'stolen', 'broken'
+    required String incidentDate,
+    String incidentReportedBy = '',
+    String incidentNotes = '',
+    String policeReportNo = '',
+    double? estimatedCashLost,
+  }) async {
+    final box = getBox(boxId);
+    if (box == null) throw Exception('Box not found: $boxId');
+
+    final updated = box.copyWith(
+      status: incidentType,
+      isActive: false, // Compromised box cannot continue taking cash physically
+      incidentType: incidentType,
+      incidentDate: incidentDate,
+      incidentReportedBy: incidentReportedBy,
+      incidentNotes: incidentNotes,
+      policeReportNo: policeReportNo,
+      estimatedCashLost: estimatedCashLost,
+      syncStatus: 'pending',
+    );
+
+    await saveBox(updated);
+    debugPrint('[DonationBoxStorage] Incident ($incidentType) reported for box ${box.boxNumber}');
+    return updated;
   }
+
+  /// Assigns a brand new replacement box with a never-before-used box number, linking historical chain
+  static Future<DonationBox> assignReplacementBox({
+    required String compromisedBoxId,
+    required String newBoxNumber,
+    String? customHolderName,
+    String? customPhone,
+    String? customAddress,
+    String? customArea,
+    String notes = '',
+  }) async {
+    final oldBox = getBox(compromisedBoxId);
+    if (oldBox == null) throw Exception('Original box not found: $compromisedBoxId');
+
+    final cleanNewNo = newBoxNumber.trim().toUpperCase();
+    if (isBoxNumberTaken(cleanNewNo)) {
+      throw ArgumentError('Box number "$cleanNewNo" has already been assigned in the past. An assigned box number can never be reused.');
+    }
+
+    // 1. Create new replacement box
+    final newBox = createBox(
+      boxNumber: cleanNewNo,
+      holderName: customHolderName ?? oldBox.holderName,
+      holderPhone: customPhone ?? oldBox.holderPhone,
+      holderAddress: customAddress ?? oldBox.holderAddress,
+      area: customArea ?? oldBox.area,
+      branchId: oldBox.branchId,
+      branchName: oldBox.branchName,
+      notes: notes.isNotEmpty
+          ? notes
+          : 'Replacement for ${oldBox.boxNumber} (${oldBox.status.toUpperCase()})',
+      replacementForBoxId: oldBox.id,
+    );
+    await saveBox(newBox);
+
+    // 2. Link old box to the new replacement box
+    final updatedOldBox = oldBox.copyWith(
+      replacedByBoxId: newBox.id,
+      syncStatus: 'pending',
+    );
+    await saveBox(updatedOldBox);
+
+    debugPrint('[DonationBoxStorage] Replaced box ${oldBox.boxNumber} with brand-new box ${newBox.boxNumber}');
+    return newBox;
+  }
+
 
   // ══════════════════════════════════════════════════════════════════════════
   // BOX OPENINGS CRUD
@@ -148,6 +256,7 @@ class DonationBoxStorage {
     required String branchId,
     required String branchName,
     String notes = '',
+    String? physicalReceiptNo,
   }) {
     final parsed = DateTime.tryParse(openDate);
     final today = DateTime.now();
@@ -169,10 +278,112 @@ class DonationBoxStorage {
       notes: notes,
       syncStatus: 'pending',
       timestamp: DateTime.now().toIso8601String(),
+      physicalReceiptNo: physicalReceiptNo,
     );
   }
 
+  /// Generates person-level audit analytics comparing lifetime money output vs accidents/incidents
+  static List<PersonBoxAuditSummary> getPersonAuditSummaries(String branchId) {
+    final allBoxes = getBoxes(branchId);
+    final allOpenings = getOpenings(branchId);
+
+    // Group openings by boxId
+    final Map<String, List<BoxOpening>> openingsByBox = {};
+    for (final op in allOpenings) {
+      openingsByBox.putIfAbsent(op.boxId, () => []).add(op);
+    }
+
+    // Group boxes by person identity (normalized phone if available, else normalized name)
+    final Map<String, List<DonationBox>> boxesByPerson = {};
+    for (final box in allBoxes) {
+      final phoneClean = box.holderPhone.trim().replaceAll(RegExp(r'[^0-9]'), '');
+      final key = phoneClean.isNotEmpty ? phoneClean : box.holderName.trim().toLowerCase();
+      final personKey = key.isNotEmpty ? key : box.holderName.trim().toLowerCase();
+      boxesByPerson.putIfAbsent(personKey, () => []).add(box);
+    }
+
+    final List<PersonBoxAuditSummary> summaries = [];
+
+    for (final entry in boxesByPerson.entries) {
+      final pBoxes = entry.value;
+      if (pBoxes.isEmpty) continue;
+
+      final primary = pBoxes.first;
+      int activeCount = 0;
+      int compromisedCount = 0;
+      int snatchedCount = 0;
+      int stolenCount = 0;
+      int brokenCount = 0;
+      int replacedCount = 0;
+      double totalMoney = 0.0;
+      double totalLoss = 0.0;
+      int openingsCount = 0;
+      String? latestOpenDate;
+
+      for (final b in pBoxes) {
+        if (b.status == 'active' && b.isActive) {
+          activeCount++;
+        } else if (b.status == 'snatched') {
+          compromisedCount++;
+          snatchedCount++;
+        } else if (b.status == 'stolen') {
+          compromisedCount++;
+          stolenCount++;
+        } else if (b.status == 'broken') {
+          compromisedCount++;
+          brokenCount++;
+        } else if (b.status == 'replaced') {
+          replacedCount++;
+        }
+
+        if (b.estimatedCashLost != null) {
+          totalLoss += b.estimatedCashLost!;
+        }
+
+        // Sum openings for this box
+        final boxOps = openingsByBox[b.id] ?? [];
+        for (final op in boxOps) {
+          totalMoney += op.amount;
+          openingsCount++;
+          if (latestOpenDate == null || op.openDate.compareTo(latestOpenDate) > 0) {
+            latestOpenDate = op.openDate;
+          }
+        }
+      }
+
+      summaries.add(PersonBoxAuditSummary(
+        personName: primary.holderName,
+        phone: primary.holderPhone,
+        area: primary.area,
+        branchId: primary.branchId,
+        branchName: primary.branchName,
+        totalBoxesAssigned: pBoxes.length,
+        activeBoxesCount: activeCount,
+        compromisedBoxesCount: compromisedCount,
+        snatchedCount: snatchedCount,
+        stolenCount: stolenCount,
+        brokenCount: brokenCount,
+        replacedCount: replacedCount,
+        totalMoneyOutput: totalMoney,
+        totalEstimatedCashLost: totalLoss,
+        totalOpeningsCount: openingsCount,
+        lastOpenedDate: latestOpenDate,
+        boxes: pBoxes,
+      ));
+    }
+
+    // Default sort: highest accidents/incidents first, then highest money output
+    summaries.sort((a, b) {
+      final incComp = b.totalIncidents.compareTo(a.totalIncidents);
+      if (incComp != 0) return incComp;
+      return b.totalMoneyOutput.compareTo(a.totalMoneyOutput);
+    });
+
+    return summaries;
+  }
+
   static List<BoxOpening> getOpenings(String branchId) {
+    if (!Hive.isBoxOpen(openingsBoxName)) return [];
     final hiveBox = Hive.box(openingsBoxName);
     final List<BoxOpening> results = [];
     for (var key in hiveBox.keys) {
@@ -189,6 +400,7 @@ class DonationBoxStorage {
   }
 
   static List<BoxOpening> getOpeningsForBox(String boxId) {
+    if (boxId.isEmpty || !Hive.isBoxOpen(openingsBoxName)) return [];
     final hiveBox = Hive.box(openingsBoxName);
     final List<BoxOpening> results = [];
     for (var key in hiveBox.keys) {
@@ -274,6 +486,9 @@ class DonationBoxStorage {
     ]);
     sheet.appendRow([
       TextCellValue('Holder: ${box.holderName}'),
+    ]);
+    sheet.appendRow([
+      TextCellValue('Area: ${box.area}'),
     ]);
     sheet.appendRow([
       TextCellValue('Address: ${box.holderAddress}'),
@@ -363,6 +578,7 @@ class DonationBoxStorage {
       'Box #',
       'Holder Name',
       'Phone',
+      'Area',
       'Address',
       'Jan',
       'Feb',
@@ -392,6 +608,7 @@ class DonationBoxStorage {
         TextCellValue(box.boxNumber),
         TextCellValue(box.holderName),
         TextCellValue(box.holderPhone),
+        TextCellValue(box.area),
         TextCellValue(box.holderAddress),
       ];
 

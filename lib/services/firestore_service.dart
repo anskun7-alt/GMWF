@@ -89,11 +89,24 @@ class FirestoreService {
     } else if (data['dob'] is Timestamp) {
       data['dob'] = (data['dob'] as Timestamp).toDate().toIso8601String();
     }
+    // Normalize raw 13-digit CNIC into standardized format: xxxxx-xxxxxxx-x
+    final rawCnic = (data['cnic'] ?? data['patientCnic'])?.toString().trim();
+    if (rawCnic != null && RegExp(r'^\d{13}$').hasMatch(rawCnic)) {
+      final formatted = '${rawCnic.substring(0, 5)}-${rawCnic.substring(5, 12)}-${rawCnic.substring(12, 13)}';
+      data['cnic'] = formatted;
+      if (data.containsKey('patientCnic')) {
+        data['patientCnic'] = formatted;
+      }
+    }
+    final rawGuard = data['guardianCnic']?.toString().trim();
+    if (rawGuard != null && RegExp(r'^\d{13}$').hasMatch(rawGuard)) {
+      data['guardianCnic'] = '${rawGuard.substring(0, 5)}-${rawGuard.substring(5, 12)}-${rawGuard.substring(12, 13)}';
+    }
 
     Logger().d('[FirestoreService] savePatient → $patientId | ${data['name'] ?? 'unknown'}');
 
     // STEP 1 — Hive: always save locally first (works offline, instant)
-    await LocalStorageService.saveLocalPatient(data);
+    await LocalStorageService.saveLocalPatient(data, isFromSync: true);
     Logger().d('[FirestoreService] ✅ Hive write: $patientId');
 
     // STEP 2 — LAN/WebSocket: deliver locally before touching Firestore.
@@ -316,21 +329,7 @@ class FirestoreService {
   }
 
   Stream<List<Map<String, dynamic>>> streamPatientsByBranch(String branchId) async* {
-    if (!await _isFirestoreAvailable()) {
-      yield LocalStorageService.getAllLocalPatients(branchId: branchId);
-      return;
-    }
-
-    yield* _db
-        .collection('branches')
-        .doc(branchId)
-        .collection('patients')
-        .snapshots()
-        .map((s) => s.docs.map((d) {
-              final data = d.data();
-              if (data['dob'] != null) data['dob'] = _toDateTime(data['dob']);
-              return data;
-            }).toList());
+    yield LocalStorageService.getAllLocalPatients(branchId: branchId);
   }
 
   Future<List<Patient>> getAllPatientsForBranch(String branchId) async {
@@ -379,23 +378,7 @@ class FirestoreService {
   }
 
   Stream<List<Map<String, dynamic>>> streamEntriesByBranch(String branchId) async* {
-    if (!await _isFirestoreAvailable()) {
-      yield LocalStorageService.getLocalEntries(branchId);
-      return;
-    }
-
-    yield* _db
-        .collection('branches')
-        .doc(branchId)
-        .collection('serials')
-        .snapshots()
-        .map((s) => s.docs.map((d) {
-              final data = d.data();
-              if (data['timestamp'] != null) {
-                data['timestamp'] = _toDateTime(data['timestamp']);
-              }
-              return data;
-            }).toList());
+    yield LocalStorageService.getLocalEntries(branchId);
   }
 
   Future<void> savePrescription({
@@ -427,15 +410,24 @@ class FirestoreService {
         serial: serial,
       );
 
-      final prescriptionDoc = _db
-          .collection('branches')
-          .doc(branchId)
-          .collection('prescriptions')
-          .doc(patientCnic)
-          .collection('prescriptions')
-          .doc(serial);
+      final serialPayload = <String, dynamic>{
+        'status': 'completed',
+        'completedAt': sanitized['completedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+        'prescription': sanitized,
+        if (sanitized['prescriptions'] != null || sanitized['medicines'] != null)
+          'medicines': sanitized['prescriptions'] ?? sanitized['medicines'],
+        if (sanitized['doctorName'] != null || sanitized['prescribedBy'] != null)
+          'doctorName': sanitized['doctorName'] ?? sanitized['prescribedBy'],
+        if (sanitized['doctorId'] != null) 'doctorId': sanitized['doctorId'],
+        if (sanitized['diagnosis'] != null) 'diagnosis': sanitized['diagnosis'],
+        if (sanitized['complaint'] != null || sanitized['condition'] != null)
+          'complaint': sanitized['complaint'] ?? sanitized['condition'],
+        if (sanitized['daysOfMedicine'] != null) 'daysOfMedicine': sanitized['daysOfMedicine'],
+        if (sanitized['vitals'] != null) 'vitals': sanitized['vitals'],
+        if (sanitized['extraCharge'] != null) 'extraCharge': sanitized['extraCharge'],
+        'dispenseStatus': 'pending',
+      };
 
-      await prescriptionDoc.set(sanitized, SetOptions(merge: true));
       await _db
           .collection('branches')
           .doc(branchId)
@@ -443,10 +435,18 @@ class FirestoreService {
           .doc(campDocKey)
           .collection(queueType)
           .doc(serial)
-          .set({
-            'status': 'completed',
-            'completedAt': sanitized['completedAt'] ?? DateTime.now().toUtc().toIso8601String(),
-          }, SetOptions(merge: true));
+          .set(serialPayload, SetOptions(merge: true));
+
+      // Clean up legacy standalone doc if present
+      _db
+          .collection('branches')
+          .doc(branchId)
+          .collection('prescriptions')
+          .doc(patientCnic)
+          .collection('prescriptions')
+          .doc(serial)
+          .delete()
+          .catchError((_) {});
     } catch (e) {
       Logger().d('Direct prescription write failed ($e) → queue fallback');
     }

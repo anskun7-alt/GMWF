@@ -199,19 +199,10 @@ class ServerSyncManager {
     };
 
     purgeDuplicateServerQueue().ignore();
-    _downloadAllFromFirestore().ignore();
     _uploadQueue().ignore();
 
     _syncTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_running) _uploadQueue().ignore();
-    });
-
-        _downloadTimer = Timer.periodic(const Duration(minutes: 3), (_) {
-      if (_running) _downloadTodayTokens().ignore();
-    });
-
-    _catchUpTimer = Timer.periodic(const Duration(minutes: 15), (_) {
-      if (_running) _periodicCatchUpAll();
     });
 
     _connSub = Connectivity().onConnectivityChanged.listen((results) {
@@ -219,7 +210,6 @@ class ServerSyncManager {
       if (online && _running) {
         retryFailedBox();
         _uploadQueue().ignore();
-        _downloadAllFromFirestore().ignore();
       }
     });
   }
@@ -348,6 +338,12 @@ class ServerSyncManager {
       return;
     }
 
+    if (type == 'force_all_users_cloud_sync') {
+      debugPrint('[SSM] ☁️ Force Global Sync requested: immediately flushing upload queue...');
+      _uploadQueue().ignore();
+      return;
+    }
+
     final user = _resolveUser(msg);
     debugPrint('[SSM] intercept: $type | serial=${data['serial']} | by=${user.username}');
 
@@ -378,8 +374,8 @@ class ServerSyncManager {
 
       case 'save_stock_item':
         final medData = data['data'] is Map ? Map<String, dynamic>.from(data['data']) : data;
-        final medicineId = data['medicineId']?.toString() ?? medData['id']?.toString();
-        final delta = data['_quantityDelta'];
+        final medicineId = data['medicineId']?.toString() ?? medData['id']?.toString() ?? medData['medicineId']?.toString() ?? medData['docId']?.toString();
+        final delta = data['_quantityDelta'] ?? medData['_quantityDelta'];
 
         if (delta != null && medicineId != null) {
           final deltaVal = (delta is num)
@@ -389,7 +385,12 @@ class ServerSyncManager {
           if (deltaVal != 0) {
             debugPrint('[SSM] Intercepted stock addition for $medicineId delta=$deltaVal');
             // Update local Hive for immediate visual consistency on host
-            LocalStorageService.updateLocalStockQuantity(medicineId, deltaVal);
+            final existing = LocalStorageService.getLocalInventoryItem(medicineId);
+            if (existing != null) {
+              LocalStorageService.updateLocalStockQuantity(medicineId, deltaVal);
+            } else {
+              LocalStorageService.saveLocalInventoryItem(medData);
+            }
 
             // Enqueue for Firestore
             _enqueue({
@@ -399,6 +400,7 @@ class ServerSyncManager {
               'quantity': deltaVal,
               'performedBy': data['performedBy'] ?? user.clientId,
               'performedByName': data['performedByName'] ?? user.username,
+              'logData': data['logData'] ?? msg['logData'],
               'createdAt': DateTime.now().toIso8601String(),
             });
           }
@@ -413,6 +415,7 @@ class ServerSyncManager {
             'branchId': data['branchId'] ?? _branchId,
             'medicineId': medicineId,
             'data': medData,
+            'logData': data['logData'] ?? msg['logData'],
             'createdAt': DateTime.now().toIso8601String(),
           });
         }
@@ -441,7 +444,11 @@ class ServerSyncManager {
 
       // ── MADRASSA & SCHOOL ──────────────────────────────────────────────────
       case RealtimeEvents.saveMadrassaAdmission:
+      case RealtimeEvents.saveMadrassaStudent:
+      case RealtimeEvents.saveMadrassaAttendance:
+      case RealtimeEvents.saveMadrassaDailyLog:
       case RealtimeEvents.saveMadrassaFee:
+      case RealtimeEvents.saveMadrassaFeePayment:
       case RealtimeEvents.saveMadrassaHifzProgress:
       case RealtimeEvents.saveExamResult:
         _saveMadrassa(type, data, msg, user: user);
@@ -466,6 +473,8 @@ class ServerSyncManager {
       // ── DASTERKHWAAN ──────────────────────────────────────────────────────
       case RealtimeEvents.saveDasterkhwanEntry:
       case RealtimeEvents.saveDasterkhwanStock:
+      case RealtimeEvents.saveOfficeBoyToken:
+      case RealtimeEvents.saveKitchenServeLog:
         _saveDasterkhwan(type, data, msg, user: user);
         break;
 
@@ -609,17 +618,51 @@ class ServerSyncManager {
     LocalStorageService.saveLocalPrescription(prescWithBranch);
     LocalStorageService.saveLocalPrescription({...prescWithBranch, 'serial': serial});
 
-    final entryKey = '$branchId-$serial';
+    final normBranch = branchId.toLowerCase().trim();
+    final normSerial = serial.toUpperCase();
+    final canonicalKey = '$normBranch-$normSerial';
     final box      = Hive.box(LocalStorageService.entriesBox);
-    final existing = box.get(entryKey);
+
+    Map<String, dynamic>? existing;
+    final direct = box.get(canonicalKey) ?? box.get('$branchId-$serial') ?? box.get(serial);
+    if (direct is Map) {
+      existing = Map<String, dynamic>.from(direct);
+    } else {
+      for (final k in box.keys) {
+        final kStr = k.toString().toUpperCase();
+        if (kStr == normSerial || kStr.endsWith('-$normSerial')) {
+          final val = box.get(k);
+          if (val is Map) {
+            existing = Map<String, dynamic>.from(val);
+            break;
+          }
+        }
+      }
+    }
 
     if (existing != null) {
       final upd = Map<String, dynamic>.from(existing);
       upd['status']      = 'completed';
       upd['completedAt'] = data['completedAt'] ?? DateTime.now().toIso8601String();
       upd['prescription'] = prescWithBranch;
-      if (user != null) upd.addAll(user.toAuditMap());
-      box.put(entryKey, upd);
+      if (data['doctorName'] != null) upd['doctorName'] = data['doctorName'];
+      if (data['doctorId'] != null) upd['doctorId'] = data['doctorId'];
+      if (data['daysOfMedicine'] != null) upd['daysOfMedicine'] = data['daysOfMedicine'];
+      if (user != null) {
+        final audit = user.toAuditMap();
+        audit.forEach((k, v) {
+          if (k != 'createdBy' && k != 'createdByName' && k != 'receptionistId' && k != 'receptionistName') {
+            upd[k] = v;
+          }
+        });
+      }
+      box.put(canonicalKey, upd);
+      if (box.containsKey('$branchId-$serial') && canonicalKey != '$branchId-$serial') {
+        box.delete('$branchId-$serial');
+      }
+      if (box.containsKey(serial)) {
+        box.delete(serial);
+      }
     } else {
       _pendingPrescriptions[serial] = data;
     }
@@ -749,14 +792,7 @@ class ServerSyncManager {
       'branchId': _branchId,
       ...?user?.toAuditMap(),
     };
-    LocalStorageService.saveLocalPatient(patientData);
-
-    _enqueue({
-      'type':      'save_patient',
-      'branchId':  _branchId,
-      'patientId': p['patientId'],
-      'data':      patientData,
-    });
+    LocalStorageService.saveLocalPatient(patientData, isFromSync: true);
   }
 
   void _saveWorkflowEvent(
@@ -828,7 +864,16 @@ class ServerSyncManager {
 
   void _saveMadrassa(String eventType, Map<String, dynamic> data, Map<String, dynamic> full, {_UserContext? user}) {
     final branchId = _field(data, full, 'branchId') ?? _branchId!;
-    final id = data['id']?.toString() ?? data['receiptNo']?.toString() ?? data['admissionNo']?.toString() ?? 'mad_${DateTime.now().microsecondsSinceEpoch}';
+    final String id;
+    if (eventType == RealtimeEvents.saveMadrassaDailyLog || eventType == RealtimeEvents.saveMadrassaAttendance) {
+      id = (data['dateKey'] ?? data['date'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString();
+    } else if (eventType == RealtimeEvents.saveMadrassaStudent || eventType == RealtimeEvents.saveMadrassaAdmission) {
+      id = (data['studentId'] ?? data['id'] ?? 'stu_${DateTime.now().microsecondsSinceEpoch}').toString();
+    } else if (eventType == RealtimeEvents.saveMadrassaFeePayment) {
+      id = (data['id'] ?? '${data['year']}_${data['month']}_${data['studentId']}').toString();
+    } else {
+      id = data['id']?.toString() ?? data['receiptNo']?.toString() ?? data['admissionNo']?.toString() ?? 'mad_${DateTime.now().microsecondsSinceEpoch}';
+    }
     final rec = {...data, 'branchId': branchId, ...?user?.toAuditMap()};
     _enqueue({
       'type': 'save_madrassa',
@@ -1013,24 +1058,16 @@ class ServerSyncManager {
         });
       }
 
-      _clientSeenSerials[socketId] ??= {};
-      _clientSeenSerials[socketId]!.add(serial);
-
-      if (_clientSeenSerials[socketId]!.length > _maxSeenPerClient) {
-        final overflow = _clientSeenSerials[socketId]!.length - _maxSeenPerClient;
-        _clientSeenSerials[socketId]!.removeAll(
-            _clientSeenSerials[socketId]!.take(overflow).toList());
-      }
-
       await Future.delayed(const Duration(milliseconds: 30));
     }
   }
 
-  void _sendToSocket(String socketId, Map<String, dynamic> payload) {
+  bool _sendToSocket(String socketId, Map<String, dynamic> payload) {
     try {
-      _server?.sendToSocket(socketId, jsonEncode(payload));
+      return _server?.sendToSocket(socketId, jsonEncode(payload)) ?? false;
     } catch (e) {
       debugPrint('[SSM] sendToSocket failed: $e');
+      return false;
     }
   }
 
@@ -1239,15 +1276,54 @@ class ServerSyncManager {
 
       case 'save_prescription':
         final serial = op['serial']?.toString();
-        final cnic   = (op['cnic'] ??
-            _cleanCnic(cleanData['patientCnic']?.toString() ?? '')).toString();
         if (serial == null) return;
+        final upperSerial = serial.trim().toUpperCase();
+        cleanData['serial'] = upperSerial;
+
+        String? rawQT   = (op['queueType'] ?? data['queueType'])?.toString();
+        String? dateKey = (op['dateKey']   ?? data['dateKey'])?.toString();
+
+        Map<String, dynamic>? local;
+        if (rawQT == null || dateKey == null) {
+          local = LocalStorageService.getLocalEntry(branchId, serial);
+          rawQT   ??= local?['queueType']?.toString();
+          dateKey ??= local?['dateKey']?.toString() ?? _todayKey();
+        }
+        final queueType = resolveQueueType(rawQT);
+        final campDocKey = CampSessionService.getCampDateDocId(
+          branchId: branchId,
+          dateKey: dateKey,
+          campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString() ?? local?['campId']?.toString() ?? local?['dispensaryId']?.toString(),
+          dispensaryTag: cleanData['dispensaryTag']?.toString() ?? local?['dispensaryTag']?.toString(),
+          serial: upperSerial,
+        );
+
+        final updateMap = <String, dynamic>{
+          'status':         'completed',
+          'completedAt':    cleanData['completedAt'] ?? DateTime.now().toIso8601String(),
+          'dispenseStatus': cleanData['dispenseStatus'] ?? 'pending',
+        };
+        for (final f in ['doctorName', 'doctorId', 'daysOfMedicine', 'extraCharge', 'vitals', 'prescription', 'medicines', 'diagnosis', 'complaints']) {
+          if (cleanData.containsKey(f) && cleanData[f] != null) {
+            updateMap[f] = cleanData[f];
+          }
+        }
 
         await _db
             .collection('branches').doc(branchId)
-            .collection('prescriptions').doc(cnic)
-            .collection('prescriptions').doc(serial)
-            .set(cleanData, SetOptions(merge: true));
+            .collection('serials').doc(campDocKey)
+            .collection(queueType).doc(upperSerial)
+            .set(updateMap, SetOptions(merge: true));
+
+        // Delete any legacy standalone prescription doc if present
+        try {
+          final cnic = (op['cnic'] ?? _cleanCnic(cleanData['patientCnic']?.toString() ?? '')).toString();
+          if (cnic.isNotEmpty) {
+            await _db.collection('branches').doc(branchId)
+                .collection('prescriptions').doc(cnic)
+                .collection('prescriptions').doc(serial).delete();
+          }
+        } catch (_) {}
 
         _handlePrescriptionRestriction(cleanData, op);
         break;
@@ -1285,15 +1361,49 @@ class ServerSyncManager {
         break;
 
       case 'save_dispensary_record':
-        final dateKey = (op['dateKey'] ?? cleanData['dateKey'] ?? _todayKey()).toString();
-        final serial  = op['serial']?.toString();
+        final serial = op['serial']?.toString();
         if (serial == null) return;
+        final upperSerial = serial.trim().toUpperCase();
+        cleanData['serial'] = upperSerial;
+
+        String? rawQT   = (op['queueType'] ?? data['queueType'])?.toString();
+        String? dateKey = (op['dateKey']   ?? data['dateKey'])?.toString();
+
+        Map<String, dynamic>? local;
+        if (rawQT == null || dateKey == null) {
+          local = LocalStorageService.getLocalEntry(branchId, serial);
+          rawQT   ??= local?['queueType']?.toString();
+          dateKey ??= local?['dateKey']?.toString() ?? _todayKey();
+        }
+        final queueType = resolveQueueType(rawQT);
+        final campDocKey = CampSessionService.getCampDateDocId(
+          branchId: branchId,
+          dateKey: dateKey,
+          campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString() ?? local?['campId']?.toString() ?? local?['dispensaryId']?.toString(),
+          dispensaryTag: cleanData['dispensaryTag']?.toString() ?? local?['dispensaryTag']?.toString(),
+          serial: upperSerial,
+        );
+
+        final statusPatch = {
+          'dispenseStatus': cleanData['dispenseStatus'] ?? 'dispensed',
+          'status': 'completed',
+          if (cleanData['dispensedAt'] != null) 'dispensedAt': cleanData['dispensedAt'],
+          if (cleanData['dispensedBy'] != null) 'dispensedBy': cleanData['dispensedBy'],
+          if (cleanData['completedAt'] != null) 'completedAt': cleanData['completedAt'],
+        };
 
         await _db
             .collection('branches').doc(branchId)
-            .collection('dispensary').doc(dateKey)
-            .collection(dateKey).doc(serial)
-            .set(cleanData, SetOptions(merge: true));
+            .collection('serials').doc(campDocKey)
+            .collection(queueType).doc(upperSerial)
+            .set(statusPatch, SetOptions(merge: true));
+
+        // Delete any legacy standalone dispensary doc if present
+        try {
+          await _db.collection('branches').doc(branchId)
+              .collection('dispensary').doc(dateKey)
+              .collection(dateKey).doc(serial).delete();
+        } catch (_) {}
         break;
 
       case 'save_patient':
@@ -1331,14 +1441,10 @@ class ServerSyncManager {
         final docRef = _db
             .collection('branches').doc(branchId)
             .collection(invCol).doc(medicineId);
-        await _db.runTransaction((transaction) async {
-          final snapshot = await transaction.get(docRef);
-          if (snapshot.exists) {
-            final current = (snapshot.data()?['quantity'] as num?)?.toDouble() ?? 0.0;
-            final updated = (current + delta).clamp(0.0, double.infinity);
-            transaction.update(docRef, {'quantity': updated});
-          }
-        });
+        await docRef.set({
+          'quantity': FieldValue.increment(delta),
+          'lastUpdated': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
         break;
 
       case 'approve_token_exception':
@@ -1390,16 +1496,26 @@ class ServerSyncManager {
             .update({'quantity': FieldValue.increment(qtyVal)});
 
         // Log the action
-        await _db
-            .collection('branches').doc(branchId)
-            .collection('inventory_log').add({
-          'action': 'add_stock',
-          'medicineId': medicineId,
-          'quantityAdded': qtyVal,
-          'performedBy': op['performedBy'] ?? '',
-          'performedByName': op['performedByName'] ?? '',
-          'timestamp': FieldValue.serverTimestamp(),
-        });
+        final opLog = op['logData'] != null ? Map<String, dynamic>.from(op['logData']) : null;
+        if (opLog != null) {
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('inventory_log').add({
+            ...opLog,
+            'timestamp': FieldValue.serverTimestamp(),
+          });
+        } else {
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('inventory_log').add({
+            'action': 'add_stock',
+            'medicineId': medicineId,
+            'quantityAdded': qtyVal,
+            'performedBy': op['performedBy'] ?? '',
+            'performedByName': op['performedByName'] ?? '',
+            'timestamp': FieldValue.serverTimestamp(),
+          });
+        }
         break;
 
       case 'register_medicine':
@@ -1475,12 +1591,34 @@ class ServerSyncManager {
       case 'save_madrassa':
         final docId = op['docId']?.toString() ?? 'mad_${DateTime.now().microsecondsSinceEpoch}';
         final subType = op['subType']?.toString() ?? '';
-        final coll = subType == RealtimeEvents.saveMadrassaFee ? 'fees' : 'records';
-        await _db
-            .collection('branches').doc(branchId)
-            .collection('madrassa').doc(coll)
-            .collection('items').doc(docId)
-            .set(cleanData, SetOptions(merge: true));
+        if (subType == RealtimeEvents.saveMadrassaDailyLog || subType == RealtimeEvents.saveMadrassaAttendance) {
+          final logData = cleanData['data'] is Map
+              ? Map<String, dynamic>.from(cleanData['data'])
+              : (cleanData['logData'] is Map ? Map<String, dynamic>.from(cleanData['logData']) : cleanData);
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('madrassa_daily_logs').doc(docId)
+              .set(logData, SetOptions(merge: true));
+        } else if (subType == RealtimeEvents.saveMadrassaStudent || subType == RealtimeEvents.saveMadrassaAdmission) {
+          final studentData = cleanData['data'] is Map ? Map<String, dynamic>.from(cleanData['data']) : cleanData;
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('madrassa_students').doc(docId)
+              .set(studentData, SetOptions(merge: true));
+        } else if (subType == RealtimeEvents.saveMadrassaFeePayment) {
+          final feeData = cleanData['data'] is Map ? Map<String, dynamic>.from(cleanData['data']) : cleanData;
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('madrassa_fee_payments').doc(docId)
+              .set(feeData, SetOptions(merge: true));
+        } else {
+          final coll = subType == RealtimeEvents.saveMadrassaFee ? 'fees' : 'records';
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('madrassa').doc(coll)
+              .collection('items').doc(docId)
+              .set(cleanData, SetOptions(merge: true));
+        }
         break;
 
       case 'save_finance':
@@ -1515,18 +1653,80 @@ class ServerSyncManager {
         final docId = op['docId']?.toString() ?? 'don_${DateTime.now().microsecondsSinceEpoch}';
         await _db
             .collection('branches').doc(branchId)
-            .collection('donations').doc('receipts')
-            .collection('records').doc(docId)
+            .collection('donations').doc(docId)
+            .set(cleanData, SetOptions(merge: true));
+        await _db
+            .collection('donations').doc(docId)
             .set(cleanData, SetOptions(merge: true));
         break;
 
       case 'save_dasterkhwan':
-        final docId = op['docId']?.toString() ?? 'das_${DateTime.now().microsecondsSinceEpoch}';
-        await _db
-            .collection('branches').doc(branchId)
-            .collection('dasterkhwaan').doc('entries')
-            .collection('records').doc(docId)
-            .set(cleanData, SetOptions(merge: true));
+        final subType = op['subType']?.toString() ?? '';
+        if (subType == RealtimeEvents.saveOfficeBoyToken) {
+          final isReverse = cleanData['action'] == 'reverse';
+          final dateKey = cleanData['dateKey']?.toString() ?? DateTime.now().toIso8601String().substring(0, 10);
+          final dayDocRef = _db.collection('branches').doc(branchId).collection('dasterkhwaan').doc(dateKey);
+          final tokensColRef = dayDocRef.collection('tokens');
+
+          if (isReverse) {
+            final tokenIds = List<String>.from((cleanData['tokenIds'] as List? ?? []).map((e) => e.toString()));
+            final qty = (cleanData['quantity'] as num?)?.toInt() ?? tokenIds.length;
+            final batch = _db.batch();
+            for (final tid in tokenIds) {
+              batch.delete(tokensColRef.doc(tid));
+            }
+            batch.set(dayDocRef, {
+              'totalTokens': FieldValue.increment(-qty),
+              'lastUpdated': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+            await batch.commit();
+          } else {
+            final tokensList = List<dynamic>.from(cleanData['tokens'] as List? ?? []);
+            final qty = (cleanData['quantity'] as num?)?.toInt() ?? tokensList.length;
+            final session = cleanData['session']?.toString() ?? 'lunch';
+            final batch = _db.batch();
+            for (final t in tokensList) {
+              if (t is Map) {
+                final tMap = Map<String, dynamic>.from(t);
+                final tid = tMap['id']?.toString() ?? tokensColRef.doc().id;
+                batch.set(tokensColRef.doc(tid), {
+                  'number': tMap['number'] ?? 1,
+                  'served': tMap['served'] == true,
+                  'session': tMap['session'] ?? session,
+                  'time': FieldValue.serverTimestamp(),
+                  'issuedBy': tMap['issuedBy'] ?? '',
+                  'localId': tid,
+                }, SetOptions(merge: true));
+              }
+            }
+            batch.set(dayDocRef, {
+              'totalTokens': FieldValue.increment(qty),
+              'session_${session}_total': FieldValue.increment(qty),
+              'lastUpdated': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+            await batch.commit();
+          }
+        } else if (subType == RealtimeEvents.saveKitchenServeLog) {
+          final dateKey = cleanData['dateKey']?.toString() ?? DateTime.now().toIso8601String().substring(0, 10);
+          final tokenId = cleanData['tokenId']?.toString();
+          if (tokenId != null && tokenId.isNotEmpty) {
+            await _db
+                .collection('branches').doc(branchId)
+                .collection('dasterkhwaan').doc(dateKey)
+                .collection('tokens').doc(tokenId)
+                .set({
+                  'served': true,
+                  'servedTime': FieldValue.serverTimestamp(),
+                }, SetOptions(merge: true));
+          }
+        } else {
+          final docId = op['docId']?.toString() ?? 'das_${DateTime.now().microsecondsSinceEpoch}';
+          await _db
+              .collection('branches').doc(branchId)
+              .collection('dasterkhwaan').doc('entries')
+              .collection('records').doc(docId)
+              .set(cleanData, SetOptions(merge: true));
+        }
         break;
 
       case 'save_supervisor':

@@ -115,6 +115,12 @@ class _DonorRegistryWidgetState extends ConsumerState<DonorRegistryWidget> {
   String _query = '';
 
   @override
+  void initState() {
+    super.initState();
+    DonationsLocalStorage.init();
+  }
+
+  @override
   void dispose() {
     _search.dispose();
     super.dispose();

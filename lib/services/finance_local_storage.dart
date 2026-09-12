@@ -1,5 +1,6 @@
 // lib/services/finance_local_storage.dart
 
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -10,16 +11,16 @@ import 'local_storage_service.dart';
 import 'finance_loans_storage.dart';
 import 'finance_ledger_storage.dart';
 import 'finance_expenses_storage.dart';
+import 'zkteco_network_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/services/sync_service.dart';
-import 'package:gmwf/services/zkteco_network_service.dart';
 
 
 class FinanceLocalStorage {
   static const Uuid _uuid = Uuid();
 
-  // ── Box Accessors ─────────────────────────────────────────────────────────
+  // ── Box Accessors & Pre-loading ──────────────────────────────────────────
   static Box get employeesBox => Hive.box(LocalStorageService.employeesBox);
   static Box get salaryHistoryBox => Hive.box(LocalStorageService.salaryHistoryBox);
   static Box get attendanceBox => Hive.box(LocalStorageService.attendanceBox);
@@ -27,6 +28,69 @@ class FinanceLocalStorage {
   static Box get settingsBox => Hive.box(LocalStorageService.financeSettingsBox);
   static Box get transfersBox => Hive.box(LocalStorageService.branchTransfersBox);
   static Box get auditLogsBox => Hive.box(LocalStorageService.auditLogsBox);
+
+  static Future<void> ensureBoxesOpen() async {
+    final boxes = [
+      LocalStorageService.employeesBox,
+      LocalStorageService.salaryHistoryBox,
+      LocalStorageService.attendanceBox,
+      LocalStorageService.salaryLedgerBox,
+      LocalStorageService.financeSettingsBox,
+      LocalStorageService.branchTransfersBox,
+      LocalStorageService.auditLogsBox,
+      LocalStorageService.financeHolidaysBox,
+      LocalStorageService.financeLoansBox,
+      LocalStorageService.expensesBox,
+      LocalStorageService.biometricDevicesBox,
+      LocalStorageService.biometricCredentialsBox,
+      LocalStorageService.unmappedPunchesBox,
+      LocalStorageService.crossBranchPunchesBox,
+      LocalStorageService.zktecoPunchDedupBox,
+      'payroll_cache',
+      LocalStorageService.chartOfAccountsBox,
+      LocalStorageService.orgBankAccountsBox,
+      LocalStorageService.journalEntriesBox,
+      LocalStorageService.journalIndexBox,
+      LocalStorageService.departmentMapBox,
+    ];
+    for (final b in boxes) {
+      if (!Hive.isBoxOpen(b)) {
+        await LocalStorageService.ensureBoxOpen(b);
+      }
+    }
+    // Self-healing: automatically purge any ghost/placeholder employees from local cache
+    purgeUnknownPlaceholderEmployees().ignore();
+  }
+
+  // ── Deleted Employee Tombstone Helpers ─────────────────────────────────────
+  static Set<String> _getDeletedEmployeeIds() {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        final list = box.get('deleted_employee_ids');
+        if (list is List) {
+          return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toSet();
+        }
+      }
+    } catch (_) {}
+    return <String>{};
+  }
+
+  static Future<void> addDeletedEmployeeTombstone(String empId) async {
+    try {
+      final clean = empId.trim();
+      if (clean.isEmpty) return;
+      final box = await LocalStorageService.ensureBoxOpen('app_settings');
+      final set = _getDeletedEmployeeIds();
+      set.add(clean);
+      await box.put('deleted_employee_ids', set.toList());
+      await box.flush();
+    } catch (_) {}
+  }
+
+  static bool isEmployeeDeleted(String empId) {
+    return _getDeletedEmployeeIds().contains(empId.trim());
+  }
 
   // ── Serialization Helpers ──────────────────────────────────────────────────
   static Map<String, dynamic> _sanitize(Map<String, dynamic> input) {
@@ -423,25 +487,24 @@ class FinanceLocalStorage {
     for (final val in employeesBox.values) {
       if (val is! Map) continue;
       final record = Map<String, dynamic>.from(val);
-      final name = (record['name'] ?? record['employeeName'] ?? '').toString().toLowerCase().trim();
       final role = (record['role'] ?? record['linkedUserRole'] ?? record['designation'] ?? '').toString().toLowerCase().trim();
       final dept = (record['department'] ?? record['linkedDepartment'] ?? '').toString().toLowerCase().trim();
 
-      // Exclude Madrassa Guardians, Patients, System Servers, and non-employee roles from Finance Payroll/Employee list
+      // Exclude Madrassa Guardians, Patients, System Servers, and non-employee system entities
       if (role.contains('guardian') ||
           role.contains('patient') ||
           dept.contains('guardian') ||
           dept.contains('patient') ||
           role.contains('server') ||
           dept.contains('server') ||
-          name.contains('server') ||
           role.contains('terminal') ||
-          role.contains('bot') ||
-          name.startsWith('staff (pin') ||
-          name == 'employee' ||
-          name == '.' ||
           record['isEmployee'] == false ||
           record['isServerAccount'] == true) {
+        continue;
+      }
+
+      // Exclude placeholder/unnamed ghost employees
+      if (isPlaceholderEmployee(record)) {
         continue;
       }
 
@@ -477,6 +540,13 @@ class FinanceLocalStorage {
 
         // Support multi-branch staff (e.g. allowedBranches / branches or branchId == 'all')
         bool matchMulti = empBranch == 'all' || empBranch == 'global';
+        if (!matchMulti) {
+          // Karachi multi-camp family support (Saddar, Haji Camp, Kapaya, Karachi)
+          bool isKarachiFamily(String b) => b.contains('karachi') || b.contains('saddar') || b.contains('haji') || b.contains('kapaya');
+          if (isKarachiFamily(empBranch) && isKarachiFamily(cleanBranch)) {
+            matchMulti = true;
+          }
+        }
         if (!matchMulti) {
           final allowed = record['allowedBranches'] ?? record['branches'];
           final cleanTarget = cleanBranch.replaceAll('branch_', '');
@@ -683,6 +753,28 @@ class FinanceLocalStorage {
       await employeesBox.put(empKey, _sanitize(emp));
       await employeesBox.flush();
 
+      // Automatically unenroll and remove biometric credential for terminated employee
+      unawaited(ZkTecoNetworkService.deleteBiometricCredential(empKey, branchId: emp['branchId']?.toString()));
+
+      // Enqueue sync for Firestore
+      await LocalStorageService.enqueueSync({
+        'type': 'save_employee',
+        'branchId': emp['branchId']?.toString() ?? 'karachi',
+        'localId': empKey,
+        'data': emp,
+      });
+
+      // Broadcast over LAN
+      try {
+        RealtimeManager().sendMessage(RealtimeEvents.payload(
+          type: RealtimeEvents.saveEmployee,
+          branchId: emp['branchId']?.toString() ?? 'karachi',
+          data: emp,
+        ));
+      } catch (_) {}
+
+      SyncService().triggerUpload();
+
       // Log offboarding action
       await logAction(
         branchId: emp['branchId']?.toString() ?? 'main',
@@ -694,51 +786,10 @@ class FinanceLocalStorage {
       );
     }
 
-    // 2. Revoke App Access on System User Account
-    String? uKey = userId ?? emp?['linkedUserId']?.toString();
-    if (uKey == null && cleanCnic.isNotEmpty && Hive.isBoxOpen(LocalStorageService.usersBox)) {
-      final uBox = Hive.box(LocalStorageService.usersBox);
-      for (final k in uBox.keys) {
-        final raw = uBox.get(k);
-        if (raw is Map) {
-          final uCnic = ((raw['cnic'] ?? raw['identification']) ?? '').toString().replaceAll(RegExp(r'\D'), '');
-          if (uCnic.isNotEmpty && uCnic == cleanCnic) {
-            uKey = k.toString();
-            break;
-          }
-        }
-      }
-    }
-
-    if (uKey != null && Hive.isBoxOpen(LocalStorageService.usersBox)) {
-      final uBox = Hive.box(LocalStorageService.usersBox);
-      final raw = uBox.get(uKey);
-      if (raw is Map) {
-        final uMap = Map<String, dynamic>.from(raw);
-        uMap['status'] = 'revoked';
-        uMap['isRevoked'] = true;
-        uMap['accessRevoked'] = true;
-        uMap['offboardingDetails'] = offboardingDetails;
-        uMap['updatedAt'] = nowStr;
-        await uBox.put(uKey, uMap);
-      }
-
-      try {
-        FirebaseFirestore.instance.collection('users').doc(uKey).set({
-          'status': 'revoked',
-          'isRevoked': true,
-          'accessRevoked': true,
-          'offboardingDetails': offboardingDetails,
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true)).timeout(const Duration(seconds: 2)).catchError((_) {});
-      } catch (_) {}
-
-      await LocalStorageService.enqueueSync({
-        'type': 'revoke_user_access',
-        'userId': uKey,
-        'offboardingDetails': offboardingDetails,
-      });
-    }
+    // 2. NOTE: Employee offboarding no longer revokes system user app access.
+    //    Employees and users are independent entities. Revoking a user's app
+    //    access must be done explicitly from the Users management screen.
+    //    This prevents accidental lockouts when offboarding payroll-only records.
   }
 
   static Future<void> deleteEmployeePermanently({
@@ -753,14 +804,8 @@ class FinanceLocalStorage {
       performedBy: performedBy,
     );
 
-    try {
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('employees')
-          .doc(employeeId)
-          .delete();
-    } catch (_) {}
+    await addDeletedEmployeeTombstone(employeeId);
+    unawaited(ZkTecoNetworkService.deleteBiometricCredential(employeeId, branchId: branchId));
 
     await employeesBox.delete(employeeId);
     await employeesBox.flush();
@@ -789,6 +834,145 @@ class FinanceLocalStorage {
       performedBy: performedBy,
       reason: 'Permanently deleted employee profile & revoked linked app access.',
     );
+  }
+
+  /// Removes all employees from local storage (Hive) and enqueues deletion commands
+  /// for Firestore sync so they are removed when cloud is reachable.
+  static Future<int> deleteAllEmployeesAndEnqueue({String performedBy = 'Admin'}) async {
+    int count = 0;
+    final keys = List.from(employeesBox.keys);
+    for (final key in keys) {
+      final val = employeesBox.get(key);
+      String bId = 'karachi';
+      if (val is Map) {
+        bId = LocalStorageService.sanitizeBranchId(val['branchId']?.toString(), fallback: 'karachi');
+      }
+      final empId = key.toString();
+
+      // Enqueue sync delete for Firestore
+      await LocalStorageService.enqueueSync({
+        'type': 'delete_employee',
+        'branchId': bId,
+        'localId': empId,
+        'employeeId': empId,
+      });
+
+      await employeesBox.delete(key);
+      count++;
+    }
+    await employeesBox.flush();
+
+    SyncService().triggerUpload();
+
+    await logAction(
+      branchId: 'karachi',
+      entityType: 'employee',
+      entityId: 'all',
+      action: 'delete_all',
+      performedBy: performedBy,
+      reason: 'Cleared all local employee records and queued cloud sync deletions.',
+    );
+
+    return count;
+  }
+
+  /// Identifies whether an employee record is an unconfigured ghost/placeholder
+  /// (e.g. named 'Employee', 'Staff', 'Unknown', 'Staff PIN ...' without a real CNIC).
+  static bool isPlaceholderEmployee(Map<dynamic, dynamic> emp) {
+    final rawName = (emp['name'] ?? emp['employeeName'] ?? '').toString().trim().toLowerCase();
+    final cnic = (emp['cnic'] ?? emp['identification'] ?? '').toString().trim();
+    final role = (emp['role'] ?? emp['designation'] ?? '').toString().trim().toLowerCase();
+
+    final isPlaceholderName = rawName.isEmpty ||
+        rawName == 'employee' ||
+        rawName == 'staff' ||
+        rawName == 'unknown' ||
+        rawName == 'null' ||
+        rawName.startsWith('employee ') ||
+        rawName.startsWith('staff pin') ||
+        rawName.startsWith('staff (');
+
+    final isPlaceholderCnic = cnic.isEmpty ||
+        cnic == '00000-0000000-0' ||
+        cnic.startsWith('00000') ||
+        cnic.replaceAll(RegExp(r'\D'), '').isEmpty;
+
+    return isPlaceholderName && (isPlaceholderCnic || role.startsWith('staff pin'));
+  }
+
+  /// Scans and permanently purges unknown/placeholder employee records (e.g. named 'Employee',
+  /// 'Staff', 'Unknown', empty name, or placeholder auto-assigned biometric pins without real identity).
+  /// Deletes them locally from Hive, frees their biometric credentials, and enqueues cloud sync deletions for their real branch.
+  static Future<int> purgeUnknownPlaceholderEmployees({
+    String? branchId,
+    String performedBy = 'Admin',
+  }) async {
+    int count = 0;
+    final keys = List.from(employeesBox.keys);
+    final cleanBranch = (branchId != null && LocalStorageService.isValidBranchId(branchId))
+        ? LocalStorageService.sanitizeBranchId(branchId)
+        : null;
+
+    final credBox = Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)
+        ? Hive.box(LocalStorageService.biometricCredentialsBox)
+        : null;
+
+    for (final key in keys) {
+      final val = employeesBox.get(key);
+      if (val is! Map) continue;
+      final emp = Map<String, dynamic>.from(val);
+      final empBranch = LocalStorageService.sanitizeBranchId(emp['branchId']?.toString(), fallback: cleanBranch ?? 'karachi');
+      if (cleanBranch != null && empBranch != cleanBranch) {
+        continue;
+      }
+
+      final empId = (emp['localId'] ?? emp['id'] ?? key).toString();
+
+      if (isPlaceholderEmployee(emp)) {
+        // 1. Enqueue sync delete for Firestore in proper branch
+        await LocalStorageService.enqueueSync({
+          'type': 'delete_employee',
+          'branchId': empBranch,
+          'localId': empId,
+          'employeeId': empId,
+        });
+
+        // 2. Remove biometric credentials for this entity so the hardware PIN is freed
+        if (credBox != null) {
+          final credKeysToDelete = <dynamic>[];
+          for (final cKey in credBox.keys) {
+            final cVal = credBox.get(cKey);
+            if (cVal is Map && (cVal['entityId']?.toString() == empId || cKey.toString() == empId)) {
+              credKeysToDelete.add(cKey);
+            }
+          }
+          for (final cKey in credKeysToDelete) {
+            await credBox.delete(cKey);
+          }
+        }
+
+        // 4. Delete from local Hive employeesBox
+        await employeesBox.delete(key);
+        count++;
+      }
+    }
+
+    if (count > 0) {
+      await employeesBox.flush();
+      if (credBox != null) await credBox.flush();
+      SyncService().triggerUpload();
+
+      await logAction(
+        branchId: cleanBranch ?? 'karachi',
+        entityType: 'employee',
+        entityId: 'unknown_placeholders',
+        action: 'purge_unknown_employees',
+        performedBy: performedBy,
+        reason: 'Purged $count unknown placeholder employee records.',
+      );
+    }
+
+    return count;
   }
 
   // ── Salary History Operations ─────────────────────────────────────────────
@@ -846,7 +1030,7 @@ class FinanceLocalStorage {
       // Find latest salary rate effective
       final historyList = getSalaryHistory(employeeId);
       final latest = historyList.isNotEmpty ? (historyList.first['rateMinor'] as num? ?? historyList.first['amount'] as num? ?? amount) : amount;
-      final double latestDouble = latest is int ? latest / 100 : (latest as num).toDouble();
+      final double latestDouble = latest is int ? latest / 100 : latest.toDouble();
       
       emp['currentSalary'] = latestDouble;
       emp['currentSalaryMinor'] = (latestDouble * 100).round();
@@ -2345,10 +2529,15 @@ class FinanceLocalStorage {
   }
 
   static List<Map<String, dynamic>> getCustomBranches() {
-    final val = settingsBox.get('global_custom_branches');
-    if (val is List) {
-      return List<Map<String, dynamic>>.from(val.map((e) => Map<String, dynamic>.from(e as Map)));
-    }
+    try {
+      if (!Hive.isBoxOpen(LocalStorageService.financeSettingsBox)) {
+        return [];
+      }
+      final val = settingsBox.get('global_custom_branches');
+      if (val is List) {
+        return List<Map<String, dynamic>>.from(val.map((e) => Map<String, dynamic>.from(e as Map)));
+      }
+    } catch (_) {}
     return [];
   }
 
@@ -2416,6 +2605,17 @@ class FinanceLocalStorage {
       for (final doc in docs) {
         final data = doc.data();
         final localId = data['localId'] as String? ?? doc.id;
+
+        // Permanently reject placeholder/ghost or tombstoned/deleted employees
+        if (isPlaceholderEmployee(data) || isEmployeeDeleted(localId) || data['isDeleted'] == true || data['status'] == 'deleted') {
+          doc.reference.delete().ignore();
+          box.delete(localId).ignore();
+          if (Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
+            Hive.box(LocalStorageService.biometricCredentialsBox).delete(localId).ignore();
+          }
+          continue;
+        }
+
         final localRecord = box.get(localId);
         if (localRecord is Map && localRecord['syncStatus'] == 'pending') {
           continue;
@@ -2444,6 +2644,15 @@ class FinanceLocalStorage {
           final credUpdates = <String, Map<String, dynamic>>{};
           for (final entry in updates.entries) {
             final emp = entry.value as Map;
+            final isInactive = emp['isActive'] == false ||
+                emp['status'] == 'Inactive' ||
+                emp['status'] == 'Terminated' ||
+                emp['isDeleted'] == true ||
+                isEmployeeDeleted(entry.key);
+            if (isInactive) {
+              credBox.delete(entry.key).ignore();
+              continue;
+            }
             final empPin = (emp['biometricPin'] ?? emp['pin'] ?? '').toString().trim();
             if (empPin.isNotEmpty) {
               final empId = entry.key;
@@ -3017,34 +3226,66 @@ class FinanceLocalStorage {
     required String employeeId,
   }) async {
     try {
-      // 1. Update User Record in local_users
+      String empName = '';
+      String userRole = '';
+      String userName = '';
+      String empBranch = '';
+
+      // 1. Fetch employee info if present
+      if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final empBox = Hive.box(LocalStorageService.employeesBox);
+        final empRaw = empBox.get(employeeId);
+        if (empRaw is Map) {
+          empName = (empRaw['name'] ?? '').toString();
+          empBranch = (empRaw['branchId'] ?? '').toString();
+        }
+      }
+
+      // 2. Update User Record in local_users
       if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
         final usersBox = Hive.box(LocalStorageService.usersBox);
         final userRaw = usersBox.get(userId);
         if (userRaw is Map) {
           final uMap = Map<String, dynamic>.from(userRaw);
           uMap['employeeId'] = employeeId;
+          uMap['linkedEmployeeId'] = employeeId;
+          if (empName.isNotEmpty) uMap['linkedEmployeeName'] = empName;
+          userRole = (uMap['role'] ?? '').toString();
+          userName = (uMap['username'] ?? uMap['name'] ?? '').toString();
           await usersBox.put(userId, uMap);
           await usersBox.flush();
         }
       }
 
-      // 2. Update Employee Record in local_employees
+      // 3. Update Employee Record in local_employees
       if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
         final empBox = Hive.box(LocalStorageService.employeesBox);
         final empRaw = empBox.get(employeeId);
         if (empRaw is Map) {
           final eMap = Map<String, dynamic>.from(empRaw);
           eMap['userId'] = userId;
+          eMap['linkedUserId'] = userId;
+          if (userName.isNotEmpty) eMap['linkedUserName'] = userName;
+          if (userRole.isNotEmpty) eMap['linkedUserRole'] = userRole;
           await empBox.put(employeeId, eMap);
           await empBox.flush();
         }
       }
 
-      // 3. Update Firestore if online
+      // 4. Update Firestore if online
       try {
-        await FirebaseFirestore.instance.collection('users').doc(userId).update({'employeeId': employeeId});
-        await FirebaseFirestore.instance.collection('employees').doc(employeeId).update({'userId': userId});
+        await FirebaseFirestore.instance.collection('users').doc(userId).set({
+          'employeeId': employeeId,
+          'linkedEmployeeId': employeeId,
+          if (empName.isNotEmpty) 'linkedEmployeeName': empName,
+        }, SetOptions(merge: true));
+        final bId = LocalStorageService.sanitizeBranchId(empBranch, fallback: 'karachi');
+        await FirebaseFirestore.instance.collection('branches').doc(bId).collection('employees').doc(employeeId).set({
+          'userId': userId,
+          'linkedUserId': userId,
+          if (userName.isNotEmpty) 'linkedUserName': userName,
+          if (userRole.isNotEmpty) 'linkedUserRole': userRole,
+        }, SetOptions(merge: true));
       } catch (e) {
         debugPrint('[FinanceLS] Firestore user-employee link update warning: $e');
       }
@@ -3053,6 +3294,74 @@ class FinanceLocalStorage {
       return true;
     } catch (e) {
       debugPrint('[FinanceLS] Error linking user to employee: $e');
+      return false;
+    }
+  }
+
+  /// Disconnects / Unlinks a User account from an Employee profile
+  static Future<bool> unlinkUserAndEmployee({
+    required String userId,
+    String? employeeId,
+  }) async {
+    try {
+      String resolvedEmpId = employeeId ?? '';
+      String empBranch = '';
+
+      // 1. Clear link in local_users
+      if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+        final usersBox = Hive.box(LocalStorageService.usersBox);
+        final userRaw = usersBox.get(userId);
+        if (userRaw is Map) {
+          final uMap = Map<String, dynamic>.from(userRaw);
+          resolvedEmpId = (uMap['employeeId'] ?? uMap['linkedEmployeeId'] ?? resolvedEmpId).toString();
+          uMap.remove('employeeId');
+          uMap.remove('linkedEmployeeId');
+          uMap.remove('linkedEmployeeName');
+          await usersBox.put(userId, uMap);
+          await usersBox.flush();
+        }
+      }
+
+      // 2. Clear link in local_employees
+      if (resolvedEmpId.isNotEmpty && Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final empBox = Hive.box(LocalStorageService.employeesBox);
+        final empRaw = empBox.get(resolvedEmpId);
+        if (empRaw is Map) {
+          final eMap = Map<String, dynamic>.from(empRaw);
+          empBranch = (eMap['branchId'] ?? '').toString();
+          eMap.remove('userId');
+          eMap.remove('linkedUserId');
+          eMap.remove('linkedUserName');
+          eMap.remove('linkedUserRole');
+          await empBox.put(resolvedEmpId, eMap);
+          await empBox.flush();
+        }
+      }
+
+      // 3. Update Firestore if online
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(userId).update({
+          'employeeId': FieldValue.delete(),
+          'linkedEmployeeId': FieldValue.delete(),
+          'linkedEmployeeName': FieldValue.delete(),
+        });
+        if (resolvedEmpId.isNotEmpty) {
+          final bId = LocalStorageService.sanitizeBranchId(empBranch, fallback: 'karachi');
+          await FirebaseFirestore.instance.collection('branches').doc(bId).collection('employees').doc(resolvedEmpId).update({
+            'userId': FieldValue.delete(),
+            'linkedUserId': FieldValue.delete(),
+            'linkedUserName': FieldValue.delete(),
+            'linkedUserRole': FieldValue.delete(),
+          });
+        }
+      } catch (e) {
+        debugPrint('[FinanceLS] Firestore unlink update warning: $e');
+      }
+
+      debugPrint('[FinanceLS] Successfully unlinked User $userId and Employee $resolvedEmpId');
+      return true;
+    } catch (e) {
+      debugPrint('[FinanceLS] Error unlinking user and employee: $e');
       return false;
     }
   }
@@ -3135,7 +3444,8 @@ class FinanceLocalStorage {
 
       // 3. Sync to Firestore
       try {
-        await FirebaseFirestore.instance.collection('employees').doc(empId).set(empData, SetOptions(merge: true));
+        final bId = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
+        await FirebaseFirestore.instance.collection('branches').doc(bId).collection('employees').doc(empId).set(empData, SetOptions(merge: true));
         await FirebaseFirestore.instance.collection('users').doc(userId).set({'employeeId': empId}, SetOptions(merge: true));
       } catch (e) {
         debugPrint('[FinanceLS] Firestore unified employee sync warning: $e');
@@ -3149,192 +3459,49 @@ class FinanceLocalStorage {
     }
   }
 
-  /// Self-healing synchronizer: Scans usersBox, creates/links employee profiles
-  /// for staff users, and resolves unassigned ghost PIN records.
+  /// Non-destructive self-healing synchronizer: Normalizes employee records without deleting non-user employees
   static Future<int> syncAllUsersToEmployees() async {
-    final retained = await purgeEmployeesExceptUsers();
+    final retained = await sanitizeEmployeeProfiles();
     return retained.length;
   }
 
-  /// Removes all employees from local_employees EXCEPT those corresponding to actual users
-  /// in local_users. Also cleans and formats employee names properly (proper title casing).
-  /// Returns the list of retained, cleaned employee profiles.
+  /// Alias for backward compatibility that performs safe non-destructive employee profile normalization
   static Future<List<Map<String, dynamic>>> purgeEmployeesExceptUsers() async {
-    final retainedList = <Map<String, dynamic>>[];
+    return sanitizeEmployeeProfiles();
+  }
+
+  /// Safely sanitizes and formats employee names properly (proper title casing) without deleting any employee profiles.
+  /// Retains all employees in local_employees so employees can exist independently of user accounts.
+  static Future<List<Map<String, dynamic>>> sanitizeEmployeeProfiles() async {
+    final sanitizedList = <Map<String, dynamic>>[];
     try {
-      if (!Hive.isBoxOpen(LocalStorageService.usersBox)) {
-        await LocalStorageService.openBoxSafe(LocalStorageService.usersBox);
-      }
       if (!Hive.isBoxOpen(LocalStorageService.employeesBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.employeesBox);
       }
-
-      final uBox = Hive.box(LocalStorageService.usersBox);
       final eBox = Hive.box(LocalStorageService.employeesBox);
 
-      // Collect all actual user records (excluding server or bot accounts)
-      final activeUsers = <Map<String, dynamic>>[];
-      for (final uKey in uBox.keys) {
-        final val = uBox.get(uKey);
-        if (val is! Map) continue;
-        final u = Map<String, dynamic>.from(val);
-        final role = (u['role'] ?? '').toString().toLowerCase();
-        if (role.contains('server') || role.contains('terminal') || u['isServerAccount'] == true) {
-          continue;
-        }
-        activeUsers.add(u);
-      }
-
-      final keepEmployeeKeys = <String>{};
-
-      for (final user in activeUsers) {
-        final uid = (user['uid'] ?? user['id'] ?? user['userId'] ?? '').toString().trim();
-        final rawName = (user['name'] ?? user['displayName'] ?? user['username'] ?? '').toString().trim();
-        final email = (user['email'] ?? '').toString().trim().toLowerCase();
-        final cleanName = formatCleanEmployeeName(rawName.isNotEmpty ? rawName : email);
-        final role = (user['role'] ?? 'Staff').toString().trim();
-        final branchId = (user['branchId'] ?? 'karachi').toString().trim();
-        final userPin = (user['biometricPin'] ?? user['pin'] ?? '').toString().trim();
-        final userDept = user['department']?.toString().trim();
-
-        // Find existing employee for this user (by userId, name, email, or PIN)
-        dynamic matchedKey;
-        Map<String, dynamic>? existingEmp;
-
-        for (final eKey in eBox.keys) {
-          final eVal = eBox.get(eKey);
-          if (eVal is! Map) continue;
-          final eMap = Map<String, dynamic>.from(eVal);
-          final eUserId = (eMap['userId'] ?? eMap['linkedUserId'] ?? '').toString().trim();
-          final eName = (eMap['name'] ?? eMap['employeeName'] ?? '').toString().trim().toLowerCase();
-          final eEmail = (eMap['email'] ?? '').toString().trim().toLowerCase();
-          final ePin = (eMap['biometricPin'] ?? eMap['pin'] ?? '').toString().trim();
-
-          if (uid.isNotEmpty && eUserId == uid) {
-            matchedKey = eKey;
-            existingEmp = eMap;
-            break;
-          } else if (email.isNotEmpty && eEmail == email) {
-            matchedKey = eKey;
-            existingEmp = eMap;
-            break;
-          } else if (cleanName.toLowerCase() == eName) {
-            matchedKey = eKey;
-            existingEmp = eMap;
-            break;
-          } else if (userPin.isNotEmpty && ePin == userPin) {
-            matchedKey = eKey;
-            existingEmp = eMap;
-            break;
-          }
-        }
-
-        // Determine department based on role if unassigned
-        String effectiveDept = (userDept != null && userDept.isNotEmpty && userDept.toLowerCase() != 'unassigned')
-            ? userDept
-            : (role.toLowerCase().contains('doc')
-                ? 'Dispensary'
-                : (role.toLowerCase().contains('dispens') || role.toLowerCase().contains('rec+dis')
-                    ? 'Dispensary'
-                    : 'Office'));
-
-        // Determine best PIN (preserve if employee had one or user had one)
-        final existingPin = (existingEmp?['biometricPin'] ?? existingEmp?['pin'] ?? '').toString().trim();
-        final bestPin = userPin.isNotEmpty ? userPin : existingPin;
-
-        final targetKey = matchedKey?.toString() ?? (uid.isNotEmpty ? 'emp_$uid' : 'emp_${DateTime.now().microsecondsSinceEpoch}');
-
-        final updatedProfile = <String, dynamic>{
-          if (existingEmp != null) ...existingEmp,
-          'localId': targetKey,
-          'id': targetKey,
-          'userId': uid,
-          'linkedUserId': uid,
-          'name': cleanName,
-          'employeeName': cleanName,
-          'email': email,
-          'role': role,
-          'department': effectiveDept,
-          'branchId': branchId,
-          'isActive': true,
-          'status': 'Active',
-          'isEmployee': true,
-          if (bestPin.isNotEmpty) 'biometricPin': bestPin,
-          if (bestPin.isNotEmpty) 'pin': bestPin,
-          'updatedAt': DateTime.now().toIso8601String(),
-        };
-
-        await eBox.put(targetKey, _sanitize(updatedProfile));
-        keepEmployeeKeys.add(targetKey);
-        retainedList.add(updatedProfile);
-
-        // Update ZKTeco credentials if PIN present
-        if (bestPin.isNotEmpty) {
-          try {
-            await ZkTecoNetworkService.assignPinToEntity(
-              entityId: targetKey,
-              entityName: cleanName,
-              entityType: 'employee',
-              branchId: branchId,
-              customPin: bestPin,
-            );
-          } catch (_) {}
-        }
-      }
-
-      // NOW REMOVE ALL OTHER EMPLOYEES
-      final keysToDelete = <dynamic>[];
-      final pinsToDelete = <String>{};
       for (final key in eBox.keys) {
-        if (!keepEmployeeKeys.contains(key.toString())) {
-          keysToDelete.add(key);
-          final raw = eBox.get(key);
-          if (raw is Map) {
-            final p = (raw['biometricPin'] ?? raw['pin'] ?? '').toString().trim();
-            if (p.isNotEmpty) pinsToDelete.add(p);
-          }
-        }
-      }
+        final val = eBox.get(key);
+        if (val is! Map) continue;
+        final emp = Map<String, dynamic>.from(val);
+        final rawName = (emp['name'] ?? emp['employeeName'] ?? '').toString().trim();
+        final cleanName = formatCleanEmployeeName(rawName);
 
-      for (final k in keysToDelete) {
-        await eBox.delete(k);
+        final updated = Map<String, dynamic>.from(emp)
+          ..['name'] = cleanName.isNotEmpty ? cleanName : rawName
+          ..['employeeName'] = cleanName.isNotEmpty ? cleanName : rawName
+          ..['isActive'] = emp['isActive'] ?? (emp['status'] != 'Inactive' && emp['status'] != 'Terminated')
+          ..['status'] = emp['status'] ?? (emp['isActive'] == false ? 'Inactive' : 'Active');
+
+        await eBox.put(key, _sanitize(updated));
+        sanitizedList.add(updated);
       }
       await eBox.flush();
-
-      // Clean up biometric credentials corresponding to deleted employees
-      try {
-        if (!Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
-          await LocalStorageService.openBoxSafe(LocalStorageService.biometricCredentialsBox);
-        }
-        final credBox = Hive.box(LocalStorageService.biometricCredentialsBox);
-        final credKeysToDelete = <dynamic>[];
-        for (final k in credBox.keys) {
-          final val = credBox.get(k);
-          if (val is Map) {
-            final entityType = (val['entityType'] ?? '').toString().toLowerCase();
-            final entityId = (val['entityId'] ?? k).toString().trim();
-            final pin = (val['biometricPin'] ?? '').toString().trim();
-            if (entityType == 'employee' && !keepEmployeeKeys.contains(entityId)) {
-              credKeysToDelete.add(k);
-            } else if (pinsToDelete.contains(pin) && !retainedList.any((r) => r['biometricPin'] == pin)) {
-              credKeysToDelete.add(k);
-            }
-          }
-        }
-        for (final ck in credKeysToDelete) {
-          await credBox.delete(ck);
-        }
-        await credBox.flush();
-        debugPrint('[FinanceLS] purgeEmployeesExceptUsers: Cleaned ${credKeysToDelete.length} unassigned biometric credentials.');
-      } catch (err) {
-        debugPrint('[FinanceLS] Error purging credentials: $err');
-      }
-
-      debugPrint('[FinanceLS] purgeEmployeesExceptUsers: Kept ${retainedList.length} user employees, deleted ${keysToDelete.length} dummy/orphan employees.');
+      debugPrint('[FinanceLS] sanitizeEmployeeProfiles: Cleaned and verified ${sanitizedList.length} employee records.');
     } catch (e) {
-      debugPrint('[FinanceLS] purgeEmployeesExceptUsers error: $e');
+      debugPrint('[FinanceLS] sanitizeEmployeeProfiles error: $e');
     }
-    return retainedList;
+    return sanitizedList;
   }
 
   /// Helper to format a raw name or email into proper clean Title Case (e.g. 'iqra' -> 'Iqra', 'kashif' -> 'Kashif')

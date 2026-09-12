@@ -11,14 +11,24 @@ import '../../models/biometric_credential.dart';
 import '../../services/zkteco_network_service.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/finance_local_storage.dart';
+import '../madrassa/utils/madrassa_local_storage.dart';
 import '../../services/image_upload_service.dart';
 import '../../utils/network_utils.dart';
 import 'python_terminal_screen.dart';
 import '../../services/user_theme_service.dart';
+import '../../services/role_simulator_service.dart';
 
 class BiometricDeviceManagerPage extends StatefulWidget {
   final String branchId;
-  const BiometricDeviceManagerPage({super.key, this.branchId = 'main'});
+  final VoidCallback? onBack;
+  final String? currentUserRole;
+
+  const BiometricDeviceManagerPage({
+    super.key,
+    this.branchId = 'main',
+    this.onBack,
+    this.currentUserRole,
+  });
 
   @override
   State<BiometricDeviceManagerPage> createState() => _BiometricDeviceManagerPageState();
@@ -33,7 +43,494 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
   String _searchQuery = '';
   String _userPinsFilter = 'All'; // 'All', 'Enrolled', 'Not Enrolled'
   bool _isAutoAssigning = false;
+  bool _isClearingPins = false;
   String _pcIpAddress = 'Detecting...';
+  String _entityCategory = 'madrassa_student'; // Default to Madrassa students: 'madrassa_student', 'employee', 'all'
+
+  bool get _canDeleteDevices {
+    String role = '';
+    if (RoleSimulatorService.isSimulating) {
+      role = RoleSimulatorService.activeSimulationRole.value?.toLowerCase().trim() ?? '';
+    }
+    if (role.isEmpty && widget.currentUserRole != null && widget.currentUserRole!.isNotEmpty) {
+      role = widget.currentUserRole!.toLowerCase().trim();
+    }
+    if (role.isEmpty) {
+      role = LocalStorageService.getActiveUserRole().toLowerCase().trim();
+    }
+    if (role.isEmpty) {
+      try {
+        if (Hive.isBoxOpen('app_settings')) {
+          role = (Hive.box('app_settings').get('role') ?? '').toString().toLowerCase().trim();
+        }
+      } catch (_) {}
+    }
+
+    if (role == 'server') return true;
+
+    const allowed = [
+      'hq manager',
+      'hq_manager',
+      'hqmanager',
+      'hq',
+      'headquarters manager',
+      'admin',
+      'global admin',
+      'superadmin',
+      'ceo',
+      'chairman',
+      'director',
+    ];
+    return allowed.any((a) => role == a || role.contains(a));
+  }
+
+  Future<void> _confirmDeleteDevice(BiometricDeviceConfig dev) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEE2E2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.delete_forever_rounded, color: Color(0xFFDC2626), size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Delete Biometric Device',
+                style: GoogleFonts.outfit(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white : const Color(0xFF0F172A),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Are you sure you want to delete this device configuration?',
+              style: GoogleFonts.inter(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.fingerprint_rounded, size: 16, color: Color(0xFF10B981)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          dev.deviceName,
+                          style: GoogleFonts.outfit(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: isDark ? Colors.white : const Color(0xFF0F172A),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Location: ${dev.buildingLocation} (${dev.branchId.toUpperCase()})',
+                    style: GoogleFonts.inter(fontSize: 12, color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Network: ${dev.ipAddress}:${dev.port} • SN: ${dev.serialNumber.isEmpty ? "N/A" : dev.serialNumber}',
+                    style: GoogleFonts.inter(fontSize: 12, color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '⚠️ Clearance: HQ Manager & Admins. This permanently removes the device from local hardware storage and Cloud Firestore.',
+              style: GoogleFonts.inter(
+                fontSize: 11.5,
+                color: isDark ? const Color(0xFFFCA5A5) : const Color(0xFFB91C1C),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: const Text('Delete Device'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        await ZkTecoNetworkService.deleteDeviceConfig(
+          dev.deviceId,
+          branchId: dev.branchId,
+          deviceName: dev.deviceName,
+          ipAddress: dev.ipAddress,
+        );
+        if (mounted) {
+          setState(() {});
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text("🗑️ Biometric device '${dev.deviceName}' deleted permanently."),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFF10B981),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to delete biometric device: $e'),
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _confirmDeleteCredential(BiometricCredential c) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEE2E2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.link_off_rounded, color: Color(0xFFDC2626), size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Remove Biometric PIN',
+                style: GoogleFonts.outfit(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white : const Color(0xFF0F172A),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Remove and unlink PIN ${c.biometricPin} from ${c.entityName}?',
+              style: GoogleFonts.inter(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'This will free PIN ${c.biometricPin} so it can be manually reassigned, and set ${c.entityName} to Not Enrolled.',
+              style: GoogleFonts.inter(fontSize: 12, color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.delete_outline_rounded, size: 16),
+            label: const Text('Unlink PIN'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await ZkTecoNetworkService.deleteBiometricCredential(c.entityId, branchId: c.branchId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Unlinked PIN ${c.biometricPin} from ${c.entityName}"),
+            backgroundColor: const Color(0xFF10B981),
+          ),
+        );
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _confirmClearStaffPinsOnly() async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.school_rounded, color: Color(0xFF2563EB), size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Keep Madrassa Students Only',
+                style: GoogleFonts.outfit(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white : const Color(0xFF0F172A),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Clear all employee/staff PINs and only keep Madrassa students on this biometric list?',
+              style: GoogleFonts.inter(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF0B2A21) : const Color(0xFFECFDF5),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFA7F3D0)),
+              ),
+              child: Text(
+                '✅ All Madrassa student biometric credentials will be fully preserved. Only staff profiles will be unlinked so you can manually assign staff PINs.',
+                style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF065F46)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.cleaning_services_rounded, size: 16),
+            label: const Text('Clear Staff PINs Only'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF2563EB),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isClearingPins = true);
+      final count = await ZkTecoNetworkService.clearEmployeeBiometricCredentials(branchId: widget.branchId);
+      setState(() {
+        _isClearingPins = false;
+        _entityCategory = 'madrassa_student';
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('🎓 Cleared $count staff PINs! Displaying Madrassa students only.'),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF10B981),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmClearAllPins() async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEE2E2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.delete_sweep_rounded, color: Color(0xFFDC2626), size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Clear All Biometric PINs?',
+                style: GoogleFonts.outfit(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white : const Color(0xFF0F172A),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Are you sure you want to remove all biometric PIN assignments for this branch (${widget.branchId.toUpperCase()})?',
+              style: GoogleFonts.inter(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF2A1212) : const Color(0xFFFFF1F2),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFECDD3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '⚠️ All bulk and auto-assigned PINs will be cleared from employee profiles.',
+                    style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.bold, color: const Color(0xFFBE123C)),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'You will be able to manually link and assign each employee their custom PIN one-by-one.',
+                    style: GoogleFonts.inter(fontSize: 11.5, color: isDark ? const Color(0xFFFDA4AF) : const Color(0xFF9F1239)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.delete_sweep_rounded, size: 16),
+            label: const Text('Clear All PINs'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isClearingPins = true);
+      final count = await ZkTecoNetworkService.clearAllBiometricCredentials(branchId: widget.branchId);
+      setState(() => _isClearingPins = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('🧹 Removed $count biometric PINs! You can now manually assign custom PINs to each employee.'),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF10B981),
+          ),
+        );
+      }
+    }
+  }
 
   Widget _buildEntityAvatar(String entityId, String entityName, String entityType) {
     if (entityId.isEmpty ||
@@ -223,20 +720,34 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
         final isDark = UserThemeService.isDarkMode();
         final bgCanvas = isDark ? const Color(0xFF0B0F19) : const Color(0xFFF1F5F9);
 
-        return Scaffold(
-          backgroundColor: bgCanvas,
-          appBar: AppBar(
-            title: Text(
-              'Biometric Attendance Settings & Devices',
-              style: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 19),
-            ),
-            backgroundColor: const Color(0xFF0F172A), // Rich dark slate header
-            elevation: 2,
-            shadowColor: Colors.black26,
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-              onPressed: () => Navigator.pop(context),
-            ),
+        return PopScope(
+          canPop: widget.onBack == null && Navigator.canPop(context),
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) return;
+            if (widget.onBack != null) {
+              widget.onBack!();
+            }
+          },
+          child: Scaffold(
+            backgroundColor: bgCanvas,
+            appBar: AppBar(
+              title: Text(
+                'Biometric Attendance Settings & Devices',
+                style: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 19),
+              ),
+              backgroundColor: const Color(0xFF0F172A), // Rich dark slate header
+              elevation: 2,
+              shadowColor: Colors.black26,
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+                onPressed: () {
+                  if (widget.onBack != null) {
+                    widget.onBack!();
+                  } else if (Navigator.canPop(context)) {
+                    Navigator.pop(context);
+                  }
+                },
+              ),
             actions: [
               IconButton(
                 icon: const Icon(Icons.delete_sweep_rounded, color: Color(0xFFF87171), size: 22),
@@ -330,9 +841,10 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
               ),
             ],
           ),
-        );
-      },
-    );
+        ),
+      );
+    },
+  );
   }
 
   Widget _buildServerStatusBanner(bool isDark) {
@@ -982,6 +1494,14 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                 tooltip: 'Edit Device Settings',
                                 onPressed: () => _showAddEditDeviceDialog(device: dev),
                               ),
+                              if (_canDeleteDevices) ...[
+                                const SizedBox(width: 2),
+                                IconButton(
+                                  icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFFDC2626)),
+                                  tooltip: 'Delete Device (HQ Manager / Admin)',
+                                  onPressed: () => _confirmDeleteDevice(dev),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -1026,21 +1546,40 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
     return ValueListenableBuilder<Box>(
       valueListenable: Hive.box(LocalStorageService.biometricCredentialsBox).listenable(),
       builder: (context, box, child) {
-        // Filter credentials to only show people from this branch
+        // 1. Enrolled Credentials (filter by branch if branch is specific)
         final allCredentials = ZkTecoNetworkService.getAllCredentials();
         final credentials = allCredentials.where((c) {
           if (widget.branchId.isEmpty || widget.branchId == 'main' || widget.branchId == 'all' || widget.branchId == 'global') return true;
           final credBranch = c.branchId.trim().toLowerCase();
           final myBranch = widget.branchId.trim().toLowerCase();
-          if (credBranch.isEmpty) return true; // Include if no branch set
+          if (credBranch.isEmpty) return true;
           final cleanCred = credBranch.replaceAll('branch_', '').replaceAll('_', ' ').trim();
           final cleanMy = myBranch.replaceAll('branch_', '').replaceAll('_', ' ').trim();
           return cleanCred == cleanMy || cleanCred.contains(cleanMy) || cleanMy.contains(cleanCred);
         }).toList();
         final enrolledEntityIds = credentials.map((c) => c.entityId.trim()).toSet();
 
-        // Get active employees only from this branch (not 'all' branches)
-        final allEmployees = FinanceLocalStorage.getEmployees(widget.branchId).where((e) => e['isActive'] != false).toList();
+        // 2. Madrassa Students (Active)
+        final rawStudents = MadrassaLocalStorage.getAllStudentsCached(widget.branchId);
+        final activeStudents = rawStudents.where((s) {
+          final st = (s['status'] ?? 'active').toString().toLowerCase();
+          return st != 'inactive' && st != 'withdrawn' && st != 'deleted';
+        }).toList();
+
+        final unenrolledStudents = activeStudents.where((s) {
+          final sId = (s['id'] ?? s['localId'] ?? '').toString().trim();
+          final pin = (s['biometricPin'] ?? s['pin'] ?? '').toString().trim();
+          final isEnrolled = (sId.isNotEmpty && enrolledEntityIds.contains(sId)) ||
+              (pin.isNotEmpty && credentials.any((c) => c.biometricPin == pin));
+          return !isEnrolled;
+        }).toList();
+
+        // 3. Employees (Active & Non-Deleted)
+        final allEmployees = FinanceLocalStorage.getEmployees(widget.branchId).where((e) {
+          final eId = (e['localId'] ?? e['id'] ?? '').toString().trim();
+          return e['isActive'] != false && !FinanceLocalStorage.isEmployeeDeleted(eId);
+        }).toList();
+
         final unenrolledEmployees = allEmployees.where((e) {
           final localId = (e['localId'] ?? '').toString().trim();
           final id = (e['id'] ?? '').toString().trim();
@@ -1051,7 +1590,32 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
           return !isEnrolled;
         }).toList();
 
-        final filteredCredentials = credentials.where((c) {
+        // Counts
+        final madrassaCreds = credentials.where((c) => c.entityType == 'madrassa_student' || c.entityType == 'student').toList();
+        final employeeCreds = credentials.where((c) => c.entityType != 'madrassa_student' && c.entityType != 'student').toList();
+
+        final totalMadrassa = madrassaCreds.length + unenrolledStudents.length;
+        final totalEmployees = employeeCreds.length + unenrolledEmployees.length;
+
+        // Partition according to selected _entityCategory
+        List<BiometricCredential> activeCategoryCreds;
+        List<Map<String, dynamic>> activeCategoryUnenrolled;
+
+        if (_entityCategory == 'madrassa_student') {
+          activeCategoryCreds = madrassaCreds;
+          activeCategoryUnenrolled = unenrolledStudents.map((s) => {...s, '_entityKind': 'madrassa_student'}).toList();
+        } else if (_entityCategory == 'employee') {
+          activeCategoryCreds = employeeCreds;
+          activeCategoryUnenrolled = unenrolledEmployees.map((e) => {...e, '_entityKind': 'employee'}).toList();
+        } else {
+          activeCategoryCreds = credentials;
+          activeCategoryUnenrolled = [
+            ...unenrolledStudents.map((s) => {...s, '_entityKind': 'madrassa_student'}),
+            ...unenrolledEmployees.map((e) => {...e, '_entityKind': 'employee'}),
+          ];
+        }
+
+        final filteredCredentials = activeCategoryCreds.where((c) {
           if (_searchQuery.isEmpty) return true;
           final q = _searchQuery.toLowerCase();
           return c.entityName.toLowerCase().contains(q) ||
@@ -1059,23 +1623,61 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
               c.entityType.toLowerCase().contains(q);
         }).toList();
 
-        final filteredUnenrolled = unenrolledEmployees.where((e) {
+        final filteredUnenrolled = activeCategoryUnenrolled.where((item) {
           if (_searchQuery.isEmpty) return true;
           final q = _searchQuery.toLowerCase();
-          final name = (e['name']?.toString() ?? '').toLowerCase();
-          final role = (e['role']?.toString() ?? '').toLowerCase();
-          final dept = (e['department']?.toString() ?? '').toLowerCase();
-          return name.contains(q) || role.contains(q) || dept.contains(q);
+          final name = (item['name'] ?? item['studentName'] ?? '').toString().toLowerCase();
+          final sub = (item['rollNumber'] ?? item['rollNo'] ?? item['role'] ?? item['department'] ?? '').toString().toLowerCase();
+          return name.contains(q) || sub.contains(q);
         }).toList();
 
-        final totalEnrolled = credentials.length;
-        final totalUnenrolled = unenrolledEmployees.length;
+        final totalEnrolled = activeCategoryCreds.length;
+        final totalUnenrolled = activeCategoryUnenrolled.length;
         final totalAll = totalEnrolled + totalUnenrolled;
 
         return Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
+              // ── Top Category Segments ──────────────────────────────────────
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: borderColor),
+                ),
+                child: Row(
+                  children: [
+                    _buildCategorySegment(
+                      label: '🎓 Madrassa Students',
+                      count: totalMadrassa,
+                      category: 'madrassa_student',
+                      isDark: isDark,
+                      activeColor: const Color(0xFF0F766E),
+                    ),
+                    const SizedBox(width: 6),
+                    _buildCategorySegment(
+                      label: '👔 Staff / Employees',
+                      count: totalEmployees,
+                      category: 'employee',
+                      isDark: isDark,
+                      activeColor: const Color(0xFF2563EB),
+                    ),
+                    const SizedBox(width: 6),
+                    _buildCategorySegment(
+                      label: '🌐 All Profiles',
+                      count: totalMadrassa + totalEmployees,
+                      category: 'all',
+                      isDark: isDark,
+                      activeColor: const Color(0xFF7C3AED),
+                    ),
+                  ],
+                ),
+              ),
+
+              // ── Search & Actions Bar ──────────────────────────────────────
               Row(
                 children: [
                   Expanded(
@@ -1090,7 +1692,9 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                         onChanged: (val) => setState(() => _searchQuery = val.trim()),
                         style: GoogleFonts.inter(fontSize: 14, color: textPrimary, fontWeight: FontWeight.w600),
                         decoration: InputDecoration(
-                          hintText: 'Search by Employee Name, Biometric PIN, or Role...',
+                          hintText: _entityCategory == 'madrassa_student'
+                              ? 'Search Madrassa Student Name, PIN, Roll #...'
+                              : 'Search Name, Biometric PIN, or Role...',
                           hintStyle: GoogleFonts.inter(color: const Color(0xFF94A3B8), fontSize: 13),
                           prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF64748B)),
                           border: InputBorder.none,
@@ -1099,7 +1703,23 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                       ),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
+                  // Keep Madrassa Only Button (Quick action for user request)
+                  OutlinedButton.icon(
+                    onPressed: _isClearingPins ? null : _confirmClearStaffPinsOnly,
+                    icon: const Icon(Icons.school_rounded, size: 16, color: Color(0xFF0F766E)),
+                    label: const Text(
+                      'Keep Madrassa Only',
+                      style: TextStyle(color: Color(0xFF0F766E), fontWeight: FontWeight.bold),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF99F6E4), width: 1.2),
+                      backgroundColor: isDark ? const Color(0xFF062B28) : const Color(0xFFF0FDFA),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   ElevatedButton.icon(
                     onPressed: _isAutoAssigning
                         ? null
@@ -1127,27 +1747,48 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF10B981),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       elevation: 0,
                     ),
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
-                    onPressed: () => _showAddCredentialDialog(),
+                    onPressed: () => _showAddCredentialDialog(
+                      prefillType: _entityCategory == 'madrassa_student' ? 'madrassa_student' : 'employee',
+                    ),
                     icon: const Icon(Icons.person_add_rounded, size: 18),
-                    label: const Text('Link User PIN'),
+                    label: const Text('Link PIN'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF4F46E5),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       elevation: 0,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: _isClearingPins ? null : _confirmClearAllPins,
+                    icon: _isClearingPins
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFDC2626)),
+                          )
+                        : const Icon(Icons.delete_sweep_rounded, size: 18, color: Color(0xFFDC2626)),
+                    label: const Text('Clear All PINs', style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFFFECDD3)),
+                      backgroundColor: isDark ? const Color(0xFF2A1212) : const Color(0xFFFFF1F2),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 12),
+
               // Filter Chips: All, Enrolled, Not Enrolled
               Row(
                 children: [
@@ -1159,6 +1800,7 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                 ],
               ),
               const SizedBox(height: 12),
+
               Expanded(
                 child: Card(
                   elevation: 0,
@@ -1193,15 +1835,23 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.badge_outlined, size: 48, color: Color(0xFF94A3B8)),
+                                Icon(
+                                  _entityCategory == 'madrassa_student' ? Icons.school_outlined : Icons.badge_outlined,
+                                  size: 48,
+                                  color: const Color(0xFF94A3B8),
+                                ),
                                 const SizedBox(height: 12),
                                 Text(
-                                  'No Profiles Matching Filter',
+                                  _entityCategory == 'madrassa_student'
+                                      ? 'No Madrassa Students Matching Filter'
+                                      : 'No Profiles Matching Filter',
                                   style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.bold, color: textPrimary),
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  'Click "Bulk Auto-Assign PINs" to assign PINs to all existing staff profiles!',
+                                  _entityCategory == 'madrassa_student'
+                                      ? 'Use "Link PIN" to assign a biometric ID to a student, or switch category above.'
+                                      : 'Click "Bulk Auto-Assign PINs" or "Link PIN" to add assignments.',
                                   style: GoogleFonts.inter(fontSize: 13, color: textSecondary),
                                 ),
                               ],
@@ -1217,7 +1867,8 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                           final item = displayList[i];
                           if (item['type'] == 'enrolled') {
                             final c = item['data'] as BiometricCredential;
-                            final roleName = c.entityType.replaceAll('_', ' ').toUpperCase();
+                            final isMadrassa = c.entityType == 'madrassa_student' || c.entityType == 'student';
+                            final roleName = isMadrassa ? 'MADRASSA STUDENT' : c.entityType.replaceAll('_', ' ').toUpperCase();
 
                             return ListTile(
                               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1230,8 +1881,10 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                     width: 65,
                                     height: 48,
                                     decoration: BoxDecoration(
-                                      gradient: const LinearGradient(
-                                        colors: [Color(0xFF4F46E5), Color(0xFF3730A3)],
+                                      gradient: LinearGradient(
+                                        colors: isMadrassa
+                                            ? const [Color(0xFF0F766E), Color(0xFF042F2E)]
+                                            : const [Color(0xFF4F46E5), Color(0xFF3730A3)],
                                         begin: Alignment.topLeft,
                                         end: Alignment.bottomRight,
                                       ),
@@ -1248,7 +1901,7 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                           style: GoogleFonts.inter(
                                             fontWeight: FontWeight.w600,
                                             fontSize: 8.5,
-                                            color: const Color(0xFFC7D2FE),
+                                            color: isMadrassa ? const Color(0xFF99F6E4) : const Color(0xFFC7D2FE),
                                             letterSpacing: 1,
                                           ),
                                         ),
@@ -1279,16 +1932,22 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                                      color: isMadrassa
+                                          ? (isDark ? const Color(0xFF062B28) : const Color(0xFFF0FDFA))
+                                          : (isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9)),
                                       borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                                      border: Border.all(
+                                        color: isMadrassa
+                                            ? (isDark ? const Color(0xFF0F766E) : const Color(0xFF99F6E4))
+                                            : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                                      ),
                                     ),
                                     child: Text(
                                       roleName,
                                       style: GoogleFonts.inter(
                                         fontSize: 10,
                                         fontWeight: FontWeight.bold,
-                                        color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
+                                        color: isMadrassa ? const Color(0xFF0F766E) : (isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569)),
                                       ),
                                     ),
                                   ),
@@ -1308,37 +1967,50 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                 ],
                               ),
                               subtitle: Text(
-                                'Enrolled: ${DateFormat('yyyy-MM-dd').format(c.enrolledAt)}',
+                                'ID: ${c.entityId} • Enrolled: ${DateFormat('yyyy-MM-dd').format(c.enrolledAt)}',
                                 style: GoogleFonts.inter(fontSize: 12, color: textSecondary),
                               ),
-                              trailing: ElevatedButton.icon(
-                                onPressed: () => _showEnrollFingerprintGuide(c),
-                                icon: const Icon(Icons.fingerprint_rounded, size: 16),
-                                label: const Text('Enroll Fingerprint'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: isDark ? const Color(0xFF0B2A21) : const Color(0xFFECFDF5),
-                                  foregroundColor: isDark ? const Color(0xFF6EE7B7) : const Color(0xFF047857),
-                                  elevation: 0,
-                                  side: const BorderSide(color: Color(0xFFA7F3D0)),
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ElevatedButton.icon(
+                                    onPressed: () => _showEnrollFingerprintGuide(c),
+                                    icon: const Icon(Icons.fingerprint_rounded, size: 16),
+                                    label: const Text('Enroll Fingerprint'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: isDark ? const Color(0xFF0B2A21) : const Color(0xFFECFDF5),
+                                      foregroundColor: isDark ? const Color(0xFF6EE7B7) : const Color(0xFF047857),
+                                      elevation: 0,
+                                      side: const BorderSide(color: Color(0xFFA7F3D0)),
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  IconButton(
+                                    icon: const Icon(Icons.link_off_rounded, color: Color(0xFFDC2626), size: 20),
+                                    tooltip: 'Remove / Unlink PIN',
+                                    onPressed: () => _confirmDeleteCredential(c),
+                                  ),
+                                ],
                               ),
                             );
                           } else {
-                            // Unenrolled Employee
-                            final emp = item['data'] as Map<String, dynamic>;
-                            final empId = emp['localId']?.toString() ?? emp['id']?.toString() ?? '';
-                            final name = emp['name']?.toString() ?? 'Employee';
-                            final role = emp['role']?.toString() ?? 'Staff';
-                            final dept = emp['department']?.toString() ?? '';
+                            // Unenrolled Profile (Madrassa student or Employee)
+                            final itemData = item['data'] as Map<String, dynamic>;
+                            final isMadrassa = itemData['_entityKind'] == 'madrassa_student';
+                            final entityId = (itemData['id'] ?? itemData['localId'])?.toString() ?? '';
+                            final name = (itemData['name'] ?? itemData['studentName'] ?? (isMadrassa ? 'Student' : 'Employee')).toString();
+                            final subInfo = isMadrassa
+                                ? 'Roll: ${itemData['rollNumber'] ?? itemData['rollNo'] ?? 'N/A'} • Class: ${itemData['classId'] ?? itemData['grade'] ?? 'General'} • Madrassa'
+                                : '${itemData['role'] ?? 'Staff'} • ${itemData['department'] ?? 'Office'}';
 
                             return ListTile(
                               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                               leading: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  _buildEntityAvatar(empId, name, 'employee'),
+                                  _buildEntityAvatar(entityId, name, isMadrassa ? 'madrassa_student' : 'employee'),
                                   const SizedBox(width: 10),
                                   Container(
                                     width: 65,
@@ -1380,9 +2052,9 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                       borderRadius: BorderRadius.circular(6),
                                       border: Border.all(color: const Color(0xFFFDE68A)),
                                     ),
-                                    child: const Text(
-                                      'NOT ENROLLED',
-                                      style: TextStyle(
+                                    child: Text(
+                                      isMadrassa ? 'STUDENT' : 'NOT ENROLLED',
+                                      style: const TextStyle(
                                         fontSize: 9,
                                         fontWeight: FontWeight.bold,
                                         color: Color(0xFF92400E),
@@ -1392,36 +2064,58 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                                 ],
                               ),
                               subtitle: Text(
-                                '$role • $dept',
+                                subInfo,
                                 style: GoogleFonts.inter(fontSize: 12, color: textSecondary),
                               ),
-                              trailing: ElevatedButton.icon(
-                                onPressed: () async {
-                                  final assignedPin = await ZkTecoNetworkService.assignPinToEntity(
-                                    entityId: empId,
-                                    entityName: name,
-                                    entityType: 'employee',
-                                    branchId: emp['branchId']?.toString() ?? widget.branchId,
-                                  );
-                                  if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text('✅ Enrolled $name with PIN: $assignedPin'),
-                                        backgroundColor: const Color(0xFF10B981),
-                                      ),
-                                    );
-                                    setState(() {});
-                                  }
-                                },
-                                icon: const Icon(Icons.add_rounded, size: 16),
-                                label: const Text('Assign PIN'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF10B981),
-                                  foregroundColor: Colors.white,
-                                  elevation: 0,
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  OutlinedButton.icon(
+                                    onPressed: () => _showAddCredentialDialog(
+                                      prefillId: entityId,
+                                      prefillName: name,
+                                      prefillType: isMadrassa ? 'madrassa_student' : 'employee',
+                                      prefillBranch: itemData['branchId']?.toString() ?? widget.branchId,
+                                    ),
+                                    icon: const Icon(Icons.edit_note_rounded, size: 16, color: Color(0xFF2563EB)),
+                                    label: const Text('Custom PIN', style: TextStyle(color: Color(0xFF2563EB), fontWeight: FontWeight.bold)),
+                                    style: OutlinedButton.styleFrom(
+                                      side: const BorderSide(color: Color(0xFF93C5FD)),
+                                      backgroundColor: isDark ? const Color(0xFF172554) : const Color(0xFFEFF6FF),
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  ElevatedButton.icon(
+                                    onPressed: () async {
+                                      final assignedPin = await ZkTecoNetworkService.assignPinToEntity(
+                                        entityId: entityId,
+                                        entityName: name,
+                                        entityType: isMadrassa ? 'madrassa_student' : 'employee',
+                                        branchId: itemData['branchId']?.toString() ?? widget.branchId,
+                                      );
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(
+                                            content: Text('✅ Enrolled $name with PIN: $assignedPin'),
+                                            backgroundColor: const Color(0xFF10B981),
+                                          ),
+                                        );
+                                        setState(() {});
+                                      }
+                                    },
+                                    icon: const Icon(Icons.add_rounded, size: 16),
+                                    label: const Text('Auto PIN'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF10B981),
+                                      foregroundColor: Colors.white,
+                                      elevation: 0,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                    ),
+                                  ),
+                                ],
                               ),
                             );
                           }
@@ -1435,6 +2129,67 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
           ),
         );
       },
+    );
+  }
+
+  Widget _buildCategorySegment({
+    required String label,
+    required int count,
+    required String category,
+    required bool isDark,
+    required Color activeColor,
+  }) {
+    final isSelected = _entityCategory == category;
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() => _entityCategory = category),
+        borderRadius: BorderRadius.circular(10),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 8),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? (isDark ? activeColor.withOpacity(0.25) : activeColor.withOpacity(0.12))
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected ? activeColor : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                label,
+                style: GoogleFonts.outfit(
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                  fontSize: 13,
+                  color: isSelected
+                      ? (isDark ? Colors.white : activeColor)
+                      : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isSelected ? activeColor : (isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '$count',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: isSelected ? Colors.white : (isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1916,6 +2671,18 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                 ),
               ),
               actions: [
+                if (isEdit && _canDeleteDevices)
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _confirmDeleteDevice(device);
+                    },
+                    icon: const Icon(Icons.delete_forever_rounded, color: Color(0xFFDC2626), size: 18),
+                    label: const Text(
+                      'Delete Device',
+                      style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold),
+                    ),
+                  ),
                 TextButton(
                   onPressed: () => Navigator.pop(ctx),
                   child: const Text('Cancel'),
@@ -1930,9 +2697,14 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                       ipAddress: ipCtrl.text.trim(),
                       port: int.tryParse(portCtrl.text.trim()) ?? 4370,
                       status: device?.status ?? 'Offline',
+                      serialNumber: device?.serialNumber ?? '',
+                      lastHeartbeat: device?.lastHeartbeat,
                     );
-                    await ZkTecoNetworkService.saveDeviceConfig(newConfig);
-                    if (mounted) Navigator.pop(ctx);
+                    await ZkTecoNetworkService.saveDeviceConfig(newConfig, oldBranchId: device?.branchId);
+                    if (mounted) {
+                      Navigator.pop(ctx);
+                      setState(() {});
+                    }
                   },
                   child: const Text('Save Device'),
                 ),
@@ -1944,11 +2716,17 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
     );
   }
 
-  void _showAddCredentialDialog() {
-    final nameCtrl = TextEditingController();
+  void _showAddCredentialDialog({
+    String? prefillId,
+    String? prefillName,
+    String? prefillType,
+    String? prefillBranch,
+  }) {
+    final nameCtrl = TextEditingController(text: prefillName ?? '');
     final pinCtrl = TextEditingController();
-    final idCtrl = TextEditingController();
-    String type = 'employee';
+    final idCtrl = TextEditingController(text: prefillId ?? '');
+    String type = prefillType ?? 'employee';
+    final targetBranch = prefillBranch ?? widget.branchId;
 
     showDialog(
       context: context,
@@ -1961,7 +2739,11 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
             TextField(
               controller: pinCtrl,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Biometric PIN (e.g. 101)'),
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Biometric PIN * (e.g. 101, 102)',
+                helperText: 'Enter the hardware device user PIN number',
+              ),
             ),
             const SizedBox(height: 10),
             TextField(
@@ -2014,11 +2796,14 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
                 entityId: idCtrl.text.trim(),
                 entityName: nameCtrl.text.trim(),
                 entityType: type,
-                branchId: widget.branchId,
+                branchId: targetBranch,
                 enrolledAt: DateTime.now(),
               );
               await ZkTecoNetworkService.registerBiometricCredential(cred);
-              if (mounted) Navigator.pop(ctx);
+              if (mounted) {
+                Navigator.pop(ctx);
+                setState(() {});
+              }
             },
             child: const Text('Link PIN'),
           ),

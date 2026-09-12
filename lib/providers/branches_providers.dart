@@ -13,11 +13,16 @@ import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
 import '../services/local_storage_service.dart';
+import '../services/finance_local_storage.dart';
 import '../services/serials_service.dart';
 import '../services/camp_session_service.dart';
 
+import 'package:rxdart/rxdart.dart';
+import 'package:flutter/foundation.dart';
+import '../realtime/realtime_manager.dart';
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Branches list – streams all branches from Firestore.
+// 1. Branches list – streams all branches from local Hive storage.
 //    If a specific branchId is provided (supervisor mode) it filters to that one.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -28,37 +33,77 @@ final singleBranchIdProvider = StateProvider<String?>((ref) => null);
 /// Holds the active branchId tab selected externally (e.g. from Dashboard performance table).
 final selectedBranchTabIdProvider = StateProvider<String?>((ref) => null);
 
-/// Streams the list of branches as [{id, name}] maps, sorted by name.
-final branchesListProvider =
-    StreamProvider<List<Map<String, dynamic>>>((ref) {
-  final singleId = ref.watch(singleBranchIdProvider);
-  final Query<Map<String, dynamic>> query = singleId != null
-      ? FirebaseFirestore.instance
-          .collection('branches')
-          .where(FieldPath.documentId, isEqualTo: singleId)
-      : FirebaseFirestore.instance.collection('branches');
-
-  return query.snapshots().map((snap) {
-    final list = snap.docs
-        .where((doc) {
-          final idLower = doc.id.toLowerCase().trim();
-          final nameLower = (doc.data()['name'] as String? ?? '').toLowerCase().trim();
-          return idLower != 'all' && idLower != 'global' && nameLower != 'all' && nameLower != 'global';
-        })
-        .map((doc) {
-          final data = doc.data();
-          return <String, dynamic>{
-            'id': doc.id,
-            'name': data['name'] as String? ?? doc.id,
-          };
-        }).toList();
-    list.sort((a, b) =>
-        (a['name'] as String).compareTo(b['name'] as String));
-    if (singleId == null && list.length > 1) {
-      list.insert(0, {'id': 'all', 'name': 'All Branches'});
+List<Map<String, dynamic>> _getLocalBranchesList(String? singleId) {
+  final merged = FinanceLocalStorage.getAllBranches([]);
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+      final box = Hive.box(LocalStorageService.branchesBox);
+      for (final val in box.values) {
+        if (val is Map) {
+          final id = (val['id'] ?? '').toString().trim();
+          final name = (val['name'] ?? id).toString().trim();
+          if (id.isNotEmpty && id.toLowerCase() != 'all' && id.toLowerCase() != 'global') {
+            if (!merged.any((b) => (b['id'] ?? '').toString().toLowerCase() == id.toLowerCase())) {
+              merged.add({'id': id, 'name': name.isNotEmpty ? name : id});
+            }
+          }
+        }
+      }
     }
-    return list;
-  });
+  } catch (_) {}
+  try {
+    if (Hive.isBoxOpen('local_branches')) {
+      final box = Hive.box('local_branches');
+      for (final key in box.keys) {
+        final val = box.get(key);
+        if (val is Map) {
+          final id = (val['id'] ?? key.toString().replaceAll('branch:', '')).toString().trim();
+          final name = (val['name'] ?? id).toString().trim();
+          if (id.isNotEmpty && id.toLowerCase() != 'all' && id.toLowerCase() != 'global') {
+            if (!merged.any((b) => (b['id'] ?? '').toString().toLowerCase() == id.toLowerCase())) {
+              merged.add({'id': id, 'name': name.isNotEmpty ? name : id});
+            }
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  if (singleId != null) {
+    merged.retainWhere((b) => (b['id'] ?? '').toString().toLowerCase() == singleId.toLowerCase());
+  }
+
+  merged.sort((a, b) =>
+      ((a['name'] ?? '') as String).compareTo((b['name'] ?? '') as String));
+  if (singleId == null && merged.length > 1) {
+    merged.insert(0, {'id': 'all', 'name': 'All Branches'});
+  }
+  return merged;
+}
+
+/// Streams the list of branches as [{id, name}] maps, sorted by name, backed by local Hive storage.
+final branchesListProvider =
+    StreamProvider<List<Map<String, dynamic>>>((ref) async* {
+  final singleId = ref.watch(singleBranchIdProvider);
+  yield _getLocalBranchesList(singleId);
+
+  final streams = <Stream<dynamic>>[];
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+      streams.add(Hive.box(LocalStorageService.branchesBox).watch());
+    }
+  } catch (_) {}
+  try {
+    if (Hive.isBoxOpen('local_branches')) {
+      streams.add(Hive.box('local_branches').watch());
+    }
+  } catch (_) {}
+
+  if (streams.isNotEmpty) {
+    await for (final _ in Rx.merge(streams).debounceTime(const Duration(milliseconds: 200))) {
+      yield _getLocalBranchesList(singleId);
+    }
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +183,7 @@ class DispensaryState {
 
 class DispensaryNotifier
     extends AutoDisposeFamilyNotifier<DispensaryState, String> {
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _todaySubscription;
+  StreamSubscription? _todaySubscription;
   String? _subscribedTodayKey;
 
   // The branchId is available as `arg` from the family provider, normalized to lowercase.
@@ -284,46 +329,27 @@ class DispensaryNotifier
     _todaySubscription?.cancel();
     _subscribedTodayKey = todayKey;
 
-    _todaySubscription = FirebaseFirestore.instance
-        .collection('branches/$branchId/dispensary/$todayKey/$todayKey')
-        .snapshots()
-        .listen((snap) async {
-      try {
-        final rawDocs = await _fetchDispensaryDocsForDay(todayKey);
-        List<Map<String, dynamic>> enrichedToday;
-        try {
-          enrichedToday =
-              await LocalStorageService.enrichRawDocs(branchId, rawDocs);
-        } catch (_) {
-          enrichedToday = _fallbackEnrich(rawDocs);
-        }
-
-        final displayFormat = DateFormat('dd MMM yyyy');
-        final todayDisplayStr = displayFormat
-            .format(LocalStorageService.parseDdMMyy(todayKey));
-        for (final d in enrichedToday) {
-          d['dispenseDate'] = todayDisplayStr;
-          d['type'] = _resolveType(d);
-        }
-
-        final merged = List<Map<String, dynamic>>.from(state.records);
-        merged.removeWhere((item) => item['dispenseDate'] == todayDisplayStr);
-        merged.addAll(enrichedToday);
-        await _computeVisitsAndEmit(merged);
-      } catch (e, stack) {
-        print('[DispensaryNotifier] today listener error: $e');
-        try {
-          final file = io.File('e:/GMWF/gmwf/debug_branches.txt');
-          await file.writeAsString('\n=== ERROR IN today listener ===\n$e\n$stack\n', mode: io.FileMode.append);
-        } catch (_) {}
+    final streams = <Stream<dynamic>>[];
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+        streams.add(Hive.box(LocalStorageService.dispensaryBox).watch());
       }
-    }, onError: (err, stack) {
-      print('[DispensaryNotifier] today stream error: $err');
-      try {
-        final file = io.File('e:/GMWF/gmwf/debug_branches.txt');
-        file.writeAsStringSync('\n=== ERROR IN today stream onError ===\n$err\n$stack\n', mode: io.FileMode.append);
-      } catch (_) {}
-    });
+    } catch (_) {}
+    try {
+      streams.add(RealtimeManager().messageStream);
+    } catch (_) {}
+
+    if (streams.isNotEmpty) {
+      _todaySubscription = Rx.merge(streams)
+          .debounceTime(const Duration(milliseconds: 300))
+          .listen((_) async {
+        try {
+          await _fetchAndMergeToday(todayKey, List.from(state.records));
+        } catch (e) {
+          debugPrint('[DispensaryNotifier] today local listener notice: $e');
+        }
+      });
+    }
   }
 
   Future<void> _fetchAndMergeToday(
@@ -497,7 +523,8 @@ class DispensaryNotifier
             d['branchId'] ??= targetBranchId;
             final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
             final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
-            if ((b == targetBranchId || b.isEmpty) && (dk == dayKey || dk.isEmpty)) {
+            final matchBranch = targetBranchId == 'all' || targetBranchId.isEmpty || b == targetBranchId || b.isEmpty;
+            if (matchBranch && (dk == dayKey || dk.isEmpty)) {
               final s = (d['serial'] ?? d['id'] ?? k).toString().trim().toLowerCase();
               if (s.isNotEmpty && !combined.containsKey(s)) combined[s] = d;
             }
@@ -516,7 +543,8 @@ class DispensaryNotifier
             final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
             final dk = (d['dateKey'] ?? '').toString().trim();
             final status = (d['dispenseStatus'] ?? d['status'] ?? '').toString().toLowerCase().trim();
-            if ((b == targetBranchId || b.isEmpty) && dk == dayKey && (status.isEmpty || activeStatuses.contains(status) || status.contains('waiting') || status.contains('prescribed') || status.contains('dispensed'))) {
+            final matchBranch = targetBranchId == 'all' || targetBranchId.isEmpty || b == targetBranchId || b.isEmpty;
+            if (matchBranch && dk == dayKey && (status.isEmpty || activeStatuses.contains(status) || status.contains('waiting') || status.contains('prescribed') || status.contains('dispensed'))) {
               final s = (d['serial'] ?? d['id'] ?? k).toString().trim().toLowerCase();
               final parts = s.split('-');
               final canonical = parts.length > 2 ? '${parts[1]}-${parts[2]}' : (parts.length > 1 ? '${parts[0]}-${parts[1]}' : s);
@@ -538,15 +566,16 @@ class DispensaryNotifier
     }
 
     // 2. Only fetch remote data when the device has connectivity and local data is missing.
+    final firestoreBranch = (targetBranchId.isEmpty || targetBranchId == 'all') ? 'karachi' : targetBranchId;
     try {
       final snap = await FirebaseFirestore.instance
-          .collection('branches/$targetBranchId/dispensary/$dayKey/$dayKey')
+          .collection('branches/$firestoreBranch/dispensary/$dayKey/$dayKey')
           .get()
           .timeout(const Duration(seconds: 4));
       for (final doc in snap.docs) {
         final d = Map<String, dynamic>.from(doc.data());
         d['id'] = doc.id;
-        d['branchId'] ??= targetBranchId;
+        d['branchId'] ??= firestoreBranch;
         final s = (d['serial'] ?? doc.id).toString().trim().toLowerCase();
         if (s.isNotEmpty && !combined.containsKey(s)) combined[s] = d;
       }
@@ -555,14 +584,14 @@ class DispensaryNotifier
     try {
       final queues = ['zakat', 'non-zakat', 'gmwf'];
       final dateDocIds = CampSessionService.getAllCampDateDocIds(
-        branchId: targetBranchId,
+        branchId: firestoreBranch,
         dateKey: dayKey,
       );
       final serialDocs = await Future.wait<List<QueryDocumentSnapshot<Map<String, dynamic>>>>([
         for (final dateDocId in dateDocIds)
           for (final q in queues)
             FirebaseFirestore.instance
-                .collection('branches/$targetBranchId/serials/$dateDocId/$q')
+                .collection('branches/$firestoreBranch/serials/$dateDocId/$q')
                 .get()
                 .timeout(const Duration(seconds: 3))
                 .then((snap) => snap.docs)

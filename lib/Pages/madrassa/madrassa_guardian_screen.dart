@@ -17,9 +17,11 @@ import 'widgets/parent_report_card.dart';
 import 'madrassa_strings.dart';
 import 'utils/madrassa_local_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/local_storage_service.dart';
 import '../../services/offline_auth_service.dart';
 import '../../services/image_upload_service.dart';
 import '../../services/user_theme_service.dart';
+import '../../services/sync_service.dart';
 import '../../theme/role_theme_provider.dart';
 import '../login_page.dart';
 
@@ -70,6 +72,7 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
 
   Future<void> _loadLanguage() async {
     try {
+      await MadrassaLocalStorage.ensureBoxesOpen();
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getString('madrassa_locale');
       if (mounted) setState(() => _langCode = saved ?? '');
@@ -117,6 +120,10 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
     // Trigger scoped download only for linked children to optimize payload & ensure privacy
     try {
       await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, ids);
+      final now = DateTime.now();
+      MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+      MadrassaLocalStorage.downloadHolidays(branchId);
+      MadrassaLocalStorage.downloadConfig(branchId);
     } catch (_) {}
 
     try {
@@ -140,6 +147,55 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
           .collection('madrassa_students')
           .doc(id)
           .get(const GetOptions(source: Source.cache))));
+    }
+  }
+
+  Future<void> _refreshData() async {
+    final branchId = widget.userData['branchId'] as String? ?? '';
+    final dynamic rawIds = widget.userData['studentIds'] ?? widget.userData['studentId'];
+    final List<String> studentIds = [];
+    if (rawIds is List) {
+      for (final id in rawIds) {
+        final s = id?.toString().trim() ?? '';
+        if (s.isNotEmpty) studentIds.add(s);
+      }
+    } else if (rawIds is String && rawIds.trim().isNotEmpty) {
+      studentIds.add(rawIds.trim());
+    }
+
+    try {
+      if (branchId.isNotEmpty) {
+        if (studentIds.isNotEmpty) {
+          await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, studentIds);
+        } else {
+          await MadrassaLocalStorage.downloadStudents(branchId);
+        }
+        final now = DateTime.now();
+        await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+        await MadrassaLocalStorage.downloadHolidays(branchId);
+        await MadrassaLocalStorage.downloadConfig(branchId);
+      }
+      await SyncService().triggerUpload();
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        _studentsFuture = _fetchStudents(branchId, studentIds);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.check_circle_rounded, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(context.t('Data updated successfully')),
+            ],
+          ),
+          backgroundColor: const Color(0xFF0F766E),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
     }
   }
 
@@ -521,9 +577,18 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
           }
           // ── Regular guardian path ──
           final dynamic rawIds = widget.userData['studentIds'] ?? widget.userData['studentId'];
-          final List<String> studentIds = rawIds is List
-              ? List<String>.from(rawIds)
-              : (rawIds is String && rawIds.isNotEmpty ? [rawIds] : []);
+          final Set<String> uniqueIds = {};
+          final List<String> studentIds = [];
+          if (rawIds is List) {
+            for (final id in rawIds) {
+              final s = id?.toString().trim() ?? '';
+              if (s.isNotEmpty && uniqueIds.add(s)) {
+                studentIds.add(s);
+              }
+            }
+          } else if (rawIds is String && rawIds.trim().isNotEmpty) {
+            studentIds.add(rawIds.trim());
+          }
 
           debugPrint("[Diagnostic] MadrassaGuardianScreen Guardian - branchId: $branchId, studentIds: $studentIds");
           if (studentIds.isEmpty) return _EmptyState(onLogout: _logout);
@@ -534,7 +599,13 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
               debugPrint("[Diagnostic] MadrassaGuardianScreen fetchStudents - connectionState: ${allSnap.connectionState}, hasData: ${allSnap.hasData}, hasError: ${allSnap.hasError}, error: ${allSnap.error}");
               if (allSnap.connectionState == ConnectionState.waiting) return _LoadingScreen();
               if (allSnap.hasError) return _EmptyState(onLogout: _logout, message: 'Error loading data');
-              final allDocs = allSnap.data ?? [];
+              final Map<String, DocumentSnapshot> uniqueDocs = {};
+              for (final doc in allSnap.data ?? []) {
+                if (doc.exists && !uniqueDocs.containsKey(doc.id)) {
+                  uniqueDocs[doc.id] = doc;
+                }
+              }
+              final allDocs = uniqueDocs.values.toList();
               if (allDocs.isEmpty) return _EmptyState(onLogout: _logout);
 
               final selectedDoc = _selectedIndex < allDocs.length ? allDocs[_selectedIndex] : allDocs.first;
@@ -582,8 +653,25 @@ class _LanguagePickerScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!Hive.isBoxOpen('app_settings')) {
+      return FutureBuilder<Box>(
+        future: LocalStorageService.ensureBoxOpen('app_settings'),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator(color: Color(0xFF0F6C5A))),
+            );
+          }
+          return _buildPickerContent(context, snapshot.data!);
+        },
+      );
+    }
+    return _buildPickerContent(context, Hive.box('app_settings'));
+  }
+
+  Widget _buildPickerContent(BuildContext context, Box appSettingsBox) {
     return ValueListenableBuilder(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
+      valueListenable: appSettingsBox.listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
         final isDark = box.get('is_dark_mode', defaultValue: false) == true;
         final bg = isDark ? const Color(0xFF0F172A) : Colors.white;
@@ -618,30 +706,28 @@ class _LanguagePickerScreen extends StatelessWidget {
                       color: const Color(0xFF0F6C5A).withValues(alpha: 0.15),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(Icons.language_rounded, color: Color(0xFF0F6C5A), size: 36),
+                    child: const Icon(Icons.language_rounded, size: 38, color: Color(0xFF0F6C5A)),
                   ),
                   const SizedBox(height: 24),
-                  // Title
+                  // App Title
                   Text(
-                    'زبان منتخب کریں',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, fontFamily: 'Noori', color: textPrimary),
+                    'Gulzar Madina Madrassa',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: textPrimary,
+                      letterSpacing: -0.3,
+                    ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(
-                    'Select Language',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textPrimary),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Please choose your preferred language to continue.',
+                    'Select your preferred language\nاپنی زبان منتخب کریں',
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, color: textMuted, height: 1.5),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'براہ کرم جاری رکھنے کے لیے اپنی پسندیدہ زبان منتخب کریں۔',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, color: textMuted, fontFamily: 'Noori', height: 1.5),
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: textMuted,
+                      height: 1.5,
+                    ),
                   ),
                   const SizedBox(height: 32),
                   // English button
@@ -692,23 +778,35 @@ class _AdminStudentSwitchButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF0F6C5A),
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [BoxShadow(color: const Color(0xFF0F6C5A).withValues(alpha: 0.3), blurRadius: 10, offset: const Offset(0, 4))],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.swap_horiz, color: Colors.white, size: 18),
-            const SizedBox(width: 8),
-            Text(studentName, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
-          ],
-        ),
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F6C5A).withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF0F6C5A).withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.school, size: 20, color: Color(0xFF0F6C5A)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Viewing: $studentName',
+              style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF0F6C5A)),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton.icon(
+            onPressed: onTap,
+            icon: const Icon(Icons.swap_horiz, size: 18),
+            label: const Text('Switch'),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF0F6C5A),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -717,6 +815,12 @@ class _AdminStudentSwitchButton extends StatelessWidget {
 class _LoadingScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
+    if (!Hive.isBoxOpen('app_settings')) {
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(child: CircularProgressIndicator(color: Color(0xFF0F6C5A))),
+      );
+    }
     return ValueListenableBuilder(
       valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
@@ -860,6 +964,18 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
               ],
             ),
             actions: [
+              // Refresh / Sync button
+              IconButton(
+                icon: const Icon(Icons.sync_rounded, color: Colors.white, size: 20),
+                tooltip: context.isUrdu ? 'تازہ ترین معلومات حاصل کریں' : 'Download Latest Updates',
+                onPressed: () async {
+                  final sIds = allDocs.map((d) => d.id).toList();
+                  await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, sIds);
+                  final now = DateTime.now();
+                  await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+                  if (mounted) setState(() {});
+                },
+              ),
               // Dark Mode Toggle
               IconButton(
                 icon: Icon(
@@ -956,254 +1072,234 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                         ),
                       ],
                       Expanded(
-                    child: StreamBuilder<QuerySnapshot>(
-                      stream: FirebaseFirestore.instance
-                          .collection('branches')
-                          .doc(branchId)
-                          .collection('madrassa_daily_logs')
-                          .snapshots(),
-                      builder: (context, logSnap) {
-                        if (logSnap.hasError) {
-                          debugPrint("[FamilySummaryView] Error loading daily logs: ${logSnap.error}");
-                        }
+                    child: ValueListenableBuilder(
+                      valueListenable: Hive.box(MadrassaLocalStorage.logsBox).listenable(),
+                      builder: (context, Box box, _) {
                         final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-                        final rawDocs = logSnap.data?.docs ?? [];
-                        final logsDocs = [...rawDocs]..sort((a, b) => b.id.compareTo(a.id));
-                        
-                        QueryDocumentSnapshot? todayDoc;
-                        for (var doc in logsDocs) {
-                          if (doc.id == todayStr) {
-                            todayDoc = doc;
-                            break;
+                        final Map<String, dynamic> todayLogData = MadrassaLocalStorage.getDailyLogCached(branchId, todayStr) ?? {};
+                        final logsDocs = <Map<String, dynamic>>[];
+                        for (final key in box.keys) {
+                          final val = box.get(key);
+                          if (val is Map) {
+                            final m = Map<String, dynamic>.from(val);
+                            m['id'] = key.toString();
+                            logsDocs.add(m);
                           }
                         }
-                        final todayLogData = todayDoc != null && todayDoc.exists
-                            ? todayDoc.data() as Map<String, dynamic>? ?? {}
-                            : (MadrassaLocalStorage.getDailyLogCached(branchId, todayStr) ?? {});
 
-                        return ListView.separated(
-                          itemCount: filteredDocs.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 16),
-                          itemBuilder: (ctx, index) {
-                            final doc = filteredDocs[index];
-                            final d = doc.data() as Map<String, dynamic>? ?? {};
-                            final studentId = doc.id;
-                            final name = d['name'] ?? 'Student';
-                            final rollNumber = d['rollNumber'] ?? '?';
-                            final className = d['class'] ?? 'Hifz';
-                            final photoUrl = (d['photoBase64'] ??
-                                    d['photoUrl'] ??
-                                    d['photo'] ??
-                                    d['image'] ??
-                                    d['studentPhotoBase64'])
-                                ?.toString();
+                        return RefreshIndicator(
+                          onRefresh: () async {
+                            final sIds = allDocs.map((dynamic d) => (d is Map ? (d['id'] ?? d['studentId']) : d.id).toString()).toList();
+                            await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, sIds);
+                            final now = DateTime.now();
+                            await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+                            if (mounted) setState(() {});
+                          },
+                          child: ListView.separated(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            itemCount: filteredDocs.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 16),
+                            itemBuilder: (ctx, index) {
+                              final dynamic doc = filteredDocs[index];
+                              final d = doc is Map ? Map<String, dynamic>.from(doc) : (doc.data() as Map<String, dynamic>? ?? {});
+                              final studentId = (doc is Map ? (doc['id'] ?? doc['studentId']) : doc.id)?.toString() ?? '';
+                              final name = d['name'] ?? 'Student';
+                              final rollNumber = d['rollNumber'] ?? '?';
+                              final className = d['class'] ?? 'Hifz';
+                              final photoUrl = (d['photoBase64'] ??
+                                      d['photoUrl'] ??
+                                      d['photo'] ??
+                                      d['image'] ??
+                                      d['studentPhotoBase64'])
+                                  ?.toString();
 
-                            int maxLogLines = 0;
-                            int sumSabakLogs = 0;
-                            for (var logDoc in logsDocs) {
-                              final map = logDoc.data() as Map<String, dynamic>? ?? {};
-                              final sLog = map[studentId] as Map<String, dynamic>?;
-                              if (sLog != null) {
-                                final sL = (sLog['sabakLines'] as num?)?.toInt() ?? int.tryParse(sLog['sabakLines']?.toString() ?? '');
-                                if (sL != null && sL > 0) sumSabakLogs += sL;
-                                final cL = (sLog['currentLines'] as num?)?.toInt() ?? int.tryParse(sLog['currentLines']?.toString() ?? '');
-                                if (cL != null && cL > maxLogLines) maxLogLines = cL;
+                              int maxLogLines = 0;
+                              int sumSabakLogs = 0;
+                              for (var logDoc in logsDocs) {
+                                final map = logDoc;
+                                final sLog = map[studentId] as Map<String, dynamic>?;
+                                if (sLog != null) {
+                                  final sL = (sLog['sabakLines'] as num?)?.toInt() ?? int.tryParse(sLog['sabakLines']?.toString() ?? '');
+                                  if (sL != null && sL > 0) sumSabakLogs += sL;
+                                  final cL = (sLog['currentLines'] as num?)?.toInt() ?? int.tryParse(sLog['currentLines']?.toString() ?? '');
+                                  if (cL != null && cL > maxLogLines) maxLogLines = cL;
+                                }
                               }
-                            }
-                            final currentLinesProfile = int.tryParse(d['currentLines']?.toString() ?? '0') ?? 0;
-                            final currentLines = [currentLinesProfile, maxLogLines, sumSabakLogs].reduce(math.max);
-                            final prevLines = int.tryParse(d['prevHifzLines']?.toString() ?? '0') ?? 0;
-                            final totalMemorized = (currentLines + prevLines).clamp(0, 8640);
-                            const total = 8640;
-                            final pct = totalMemorized / total;
+                              final currentLinesProfile = int.tryParse(d['currentLines']?.toString() ?? '0') ?? 0;
+                              final currentLines = [currentLinesProfile, maxLogLines, sumSabakLogs].reduce(math.max);
+                              final prevLines = int.tryParse(d['prevHifzLines']?.toString() ?? '0') ?? 0;
+                              final totalMemorized = (currentLines + prevLines).clamp(0, 8640);
+                              const total = 8640;
+                              final pct = totalMemorized / total;
 
-                            final todayStudentLog = todayLogData[studentId] as Map<String, dynamic>?;
+                              final todayStudentLog = todayLogData[studentId] as Map<String, dynamic>?;
 
-                            int sabakDelta = 0;
-                            bool hasSabak = false;
-                            if (todayStudentLog != null) {
-                              hasSabak = true;
-                              if (todayStudentLog.containsKey('sabakLines') && todayStudentLog['sabakLines'] != null) {
-                                sabakDelta = (todayStudentLog['sabakLines'] as num?)?.toInt() ?? 0;
-                              } else if (todayStudentLog.containsKey('currentLines')) {
-                                final todayCumulativeLines = todayStudentLog['currentLines'] as int? ?? currentLines;
-                                int prevCumulativeLines = -1;
-                                for (var logDoc in logsDocs) {
-                                  if (logDoc.id == todayStr) continue;
-                                  final map = logDoc.data() as Map<String, dynamic>? ?? {};
-                                  final sLog = map[studentId] as Map<String, dynamic>?;
-                                  if (sLog != null && sLog.containsKey('currentLines')) {
-                                    prevCumulativeLines = sLog['currentLines'] as int? ?? 0;
-                                    break;
+                              int sabakDelta = 0;
+                              bool hasSabak = false;
+                              if (todayStudentLog != null) {
+                                hasSabak = true;
+                                if (todayStudentLog.containsKey('sabakLines') && todayStudentLog['sabakLines'] != null) {
+                                  sabakDelta = (todayStudentLog['sabakLines'] as num?)?.toInt() ?? 0;
+                                } else if (todayStudentLog.containsKey('currentLines')) {
+                                  final todayCumulativeLines = todayStudentLog['currentLines'] as int? ?? currentLines;
+                                  int prevCumulativeLines = -1;
+                                  for (var logDoc in logsDocs) {
+                                    if (logDoc['id'] == todayStr) continue;
+                                    final map = logDoc;
+                                    final sLog = map[studentId] as Map<String, dynamic>?;
+                                    if (sLog != null && sLog.containsKey('currentLines')) {
+                                      prevCumulativeLines = sLog['currentLines'] as int? ?? 0;
+                                      break;
+                                    }
                                   }
+                                  if (prevCumulativeLines == -1) {
+                                    prevCumulativeLines = prevLines;
+                                  }
+                                  sabakDelta = (todayCumulativeLines - prevCumulativeLines).clamp(0, 8640);
                                 }
-                                if (prevCumulativeLines == -1) {
-                                  prevCumulativeLines = prevLines;
-                                }
-                                sabakDelta = (todayCumulativeLines - prevCumulativeLines).clamp(0, 8640);
                               }
-                            }
 
-                            final hasTodayLog = todayStudentLog != null;
-                            final attendance = todayStudentLog?['attendance']?.toString() ?? 'unknown';
-                            final uniformOk = todayStudentLog?['uniform'] == true;
-                            final replied = todayStudentLog?['parentReplied'] == true;
-                            final sabkiPara = todayStudentLog?['sabkiPara'] as int? ?? 0;
-                            final sabkiRatio = todayStudentLog?['sabkiRatio']?.toString() ?? '-';
-                            final manzilPara = todayStudentLog?['manzilPara'] as int? ?? 0;
-                            final manzilRatio = todayStudentLog?['manzilRatio']?.toString() ?? '-';
+                              final hasTodayLog = todayStudentLog != null;
+                              final attendance = todayStudentLog?['attendance']?.toString() ?? 'unknown';
+                              final uniformOk = todayStudentLog?['uniform'] == true;
+                              final replied = todayStudentLog?['parentReplied'] == true;
+                              final sabkiPara = todayStudentLog?['sabkiPara'] as int? ?? 0;
+                              final sabkiRatio = todayStudentLog?['sabkiRatio']?.toString() ?? '-';
+                              final manzilPara = todayStudentLog?['manzilPara'] as int? ?? 0;
+                              final manzilRatio = todayStudentLog?['manzilRatio']?.toString() ?? '-';
 
-                            String formatRatio(String? ratio) {
-                              if (ratio == '1/4') return context.t('Pao (1/4)');
-                              if (ratio == '1/2') return context.t('Nisf (1/2)');
-                              if (ratio == '3/4') return context.t('Salasa (3/4)');
-                              if (ratio == '1') return context.t('Para (1)');
-                              if (ratio == 'nahi_sunaya') return context.isUrdu ? 'نہیں سنایا' : 'Nahi Sunaya';
-                              return ratio ?? '';
-                            }
+                              String formatRatio(String? ratio) {
+                                if (ratio == '1/4') return context.t('Pao (1/4)');
+                                if (ratio == '1/2') return context.t('Nisf (1/2)');
+                                if (ratio == '3/4') return context.t('Salasa (3/4)');
+                                if (ratio == '1') return context.t('Para (1)');
+                                if (ratio == 'nahi_sunaya') return context.isUrdu ? 'نہیں سنایا' : 'Nahi Sunaya';
+                                return ratio ?? '';
+                              }
 
-                            Widget buildStatusChip({
-                              required IconData icon,
-                              required String label,
-                              required Color color,
-                              required Color textColor,
-                            }) {
-                              return Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: color.withValues(alpha: isDark ? 0.2 : 0.1),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: color.withValues(alpha: isDark ? 0.4 : 0.2)),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(icon, size: 14, color: color),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      label,
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        color: isDark ? Colors.white : textColor,
-                                        fontFamily: context.isUrdu ? 'Noori' : null,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            }
-
-                            return Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: cardBg,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.04),
-                                    blurRadius: 16,
-                                    offset: const Offset(0, 4),
+                              Widget buildStatusChip({
+                                required IconData icon,
+                                required String label,
+                                required Color color,
+                                required Color textColor,
+                              }) {
+                                return Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: color.withValues(alpha: isDark ? 0.2 : 0.1),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: color.withValues(alpha: isDark ? 0.4 : 0.2)),
                                   ),
-                                ],
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      CircleAvatar(
-                                        radius: 32,
-                                        backgroundColor: accentColor,
-                                        child: ClipOval(
-                                          child: () {
-                                            final str = photoUrl?.toString().trim();
-                                            final bytes = ImageUploadService.decodeBase64ToBytes(str);
-                                            if (bytes != null) {
-                                              return Image.memory(bytes, fit: BoxFit.cover, width: 64, height: 64);
-                                            } else if (str != null && str.startsWith('http')) {
-                                              return Image.network(
-                                                str,
-                                                fit: BoxFit.cover,
-                                                width: 64,
-                                                height: 64,
-                                                errorBuilder: (_, __, ___) => Text(
-                                                  name.isNotEmpty ? name[0] : '?',
-                                                  style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                                                ),
-                                              );
-                                            }
-                                            return Text(
-                                              name.isNotEmpty ? name[0] : '?',
-                                              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                                            );
-                                          }(),
+                                      Icon(icon, size: 14, color: color),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        label,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: isDark ? Colors.white : textColor,
+                                          fontFamily: context.isUrdu ? 'Noori' : null,
                                         ),
-                                      ),
-                                      const SizedBox(width: 16),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              name,
-                                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: textPrimary),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              '${context.t('Roll')}: $rollNumber • ${context.t('Class')}: ${context.t(className)}',
-                                              style: TextStyle(color: textMuted, fontSize: 13),
-                                            ),
-                                            const SizedBox(height: 12),
-                                            // Progress Bar
-                                            Row(
-                                              children: [
-                                                Expanded(
-                                                  child: ClipRRect(
-                                                    borderRadius: BorderRadius.circular(4),
-                                                    child: LinearProgressIndicator(
-                                                      value: pct.clamp(0.0, 1.0),
-                                                      backgroundColor: progressTrack,
-                                                      color: accentColor,
-                                                      minHeight: 8,
-                                                    ),
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 12),
-                                                Text(
-                                                  '${(pct * 100).toStringAsFixed(1)}%',
-                                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
-                                                ),
-                                              ],
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              context.isUrdu 
-                                                  ? 'کل $total میں سے لائن $totalMemorized مکمل'
-                                                  : 'Line $totalMemorized of $total completed',
-                                              style: TextStyle(color: textMuted, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 16),
-                                      ElevatedButton(
-                                        onPressed: () {
-                                          final origIndex = allDocs.indexOf(doc);
-                                          onViewDetails(origIndex >= 0 ? origIndex : index);
-                                        },
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: accentColor,
-                                          foregroundColor: Colors.white,
-                                          elevation: 0,
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                        ),
-                                        child: Text(context.t('View Details')),
                                       ),
                                     ],
                                   ),
+                                );
+                              }
+
+                              return Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  color: cardBg,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                                  boxShadow: [
+                                    BoxShadow(color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.04), blurRadius: 8, offset: const Offset(0, 2)),
+                                  ],
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 24,
+                                          backgroundColor: accentColor.withValues(alpha: 0.1),
+                                          backgroundImage: (photoUrl != null && photoUrl.isNotEmpty) ? NetworkImage(photoUrl) : null,
+                                          child: (photoUrl == null || photoUrl.isEmpty)
+                                              ? Text(name.isNotEmpty ? name[0] : 'S', style: const TextStyle(color: accentColor, fontWeight: FontWeight.bold, fontSize: 18))
+                                              : null,
+                                        ),
+                                        const SizedBox(width: 16),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                name,
+                                                style: TextStyle(
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: textPrimary,
+                                                  fontFamily: context.isUrdu ? 'Noori' : null,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                '${context.t('Roll No')}: $rollNumber  •  $className',
+                                                style: TextStyle(fontSize: 12, color: textMuted),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                children: [
+                                                  Expanded(
+                                                    child: ClipRRect(
+                                                      borderRadius: BorderRadius.circular(4),
+                                                      child: LinearProgressIndicator(
+                                                        value: pct.clamp(0.0, 1.0),
+                                                        backgroundColor: progressTrack,
+                                                        color: accentColor,
+                                                        minHeight: 8,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  Text(
+                                                    '${(pct * 100).toStringAsFixed(1)}%',
+                                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                context.isUrdu 
+                                                    ? 'کل $total میں سے لائن $totalMemorized مکمل'
+                                                    : 'Line $totalMemorized of $total completed',
+                                                style: TextStyle(color: textMuted, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 16),
+                                        ElevatedButton(
+                                          onPressed: () {
+                                            final origIndex = allDocs.indexOf(doc);
+                                            onViewDetails(origIndex >= 0 ? origIndex : index);
+                                          },
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: accentColor,
+                                            foregroundColor: Colors.white,
+                                            elevation: 0,
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                          ),
+                                          child: Text(context.t('View Details')),
+                                        ),
+                                      ],
+                                    ),
                                   
                                   Divider(height: 24, color: dividerColor),
                                   Text(
@@ -1328,8 +1424,9 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                               ),
                             );
                           },
-                        );
-                      },
+                        ),
+                      );
+                    },
                     ),
                   ),
                 ],
@@ -1351,6 +1448,46 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!Hive.isBoxOpen('app_settings')) {
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.link_off_rounded, size: 64, color: Color(0xFF0F6C5A)),
+                const SizedBox(height: 24),
+                Text(
+                  context.t('Account Not Linked'),
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: const Color(0xFF1E293B), fontFamily: context.isUrdu ? 'Noori' : null),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  context.t(message ?? 'Your account is not linked to any student.'),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey, fontFamily: context.isUrdu ? 'Noori' : null),
+                ),
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: onLogout,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0F6C5A),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: Text(context.t('Back to Login'), style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return ValueListenableBuilder(
       valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
@@ -1423,8 +1560,21 @@ class _AdminSelectionPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!Hive.isBoxOpen('app_settings')) {
+      return FutureBuilder<Box>(
+        future: LocalStorageService.ensureBoxOpen('app_settings'),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const Scaffold(body: Center(child: CircularProgressIndicator(color: Color(0xFF0F6C5A))));
+          return _buildPlaceholderContent(context, snapshot.data!);
+        },
+      );
+    }
+    return _buildPlaceholderContent(context, Hive.box('app_settings'));
+  }
+
+  Widget _buildPlaceholderContent(BuildContext context, Box appSettingsBox) {
     return ValueListenableBuilder(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
+      valueListenable: appSettingsBox.listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
         final isDark = box.get('is_dark_mode', defaultValue: false) == true;
         final bg = isDark ? const Color(0xFF0F172A) : Colors.white;

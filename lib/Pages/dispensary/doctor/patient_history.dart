@@ -142,18 +142,43 @@ class _PatientIdentity {
     return ids.where((s) => s.isNotEmpty).toList();
   }
 
-  /// For child patients: whether a doc's patientName matches this child.
-  bool docBelongsToThisChild(Map<String, dynamic> doc) {
-    if (isAdult) return true; // adults — no name check needed
-    if (name.isEmpty) return true; // no name stored — can't filter, show all
+  /// Whether a doc/entry/prescription belongs to this individual patient.
+  /// Strictly prevents mixing adult history with child history under the same CNIC.
+  bool docBelongsToThisPatient(Map<String, dynamic> doc) {
+    final docPid = (doc['patientId'] ?? doc['id'] ?? '').toString().trim();
+    final docResolvedPid = LocalStorageService.resolveIndividualPatientId(doc).trim();
+    final docGuardian = (doc['guardianCnic'] ?? '').toString().trim();
+    final docAge = (doc['age'] is num) ? (doc['age'] as num).toInt() : (int.tryParse(doc['age']?.toString() ?? '') ?? 0);
+    final docIsAdult = doc['isAdult'] is bool
+        ? doc['isAdult'] as bool
+        : (!docPid.contains('_child_') && !docResolvedPid.contains('_child_') && docGuardian.isEmpty && (docAge == 0 || docAge >= 20));
+
+    // Rule 0: Never mix adult and child history
+    if (isAdult != docIsAdult) return false;
+
+    // Direct canonical ID match
+    final cleanMyPid = patientId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+    final cleanDocPid = docPid.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+    final cleanDocResolved = docResolvedPid.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+    if (cleanMyPid.isNotEmpty && (cleanMyPid == cleanDocPid || cleanMyPid == cleanDocResolved)) {
+      return true;
+    }
+
     final docName = (doc['patientName'] ?? doc['name'] ?? '')
         .toString()
         .trim()
         .toLowerCase()
         .replaceAll(RegExp(r'[^a-z0-9]'), '');
     final myName = name.replaceAll(RegExp(r'[^a-z0-9]'), '');
-    return docName == myName || docName.contains(myName) || myName.contains(docName);
+
+    if (name.isNotEmpty && docName.isNotEmpty) {
+      return docName == myName || docName.contains(myName) || myName.contains(docName);
+    }
+    return true;
   }
+
+  /// Backward-compatible alias
+  bool docBelongsToThisChild(Map<String, dynamic> doc) => docBelongsToThisPatient(doc);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -289,7 +314,7 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
               belongs = true;
             }
           }
-          if (!belongs || !identity.docBelongsToThisChild(data)) continue;
+          if (!belongs || !identity.docBelongsToThisPatient(data)) continue;
 
           if (data['prescription'] is Map) {
             final nested = Map<String, dynamic>.from(data['prescription'] as Map);
@@ -298,9 +323,13 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
             }
           }
 
-          data['serial'] ??= data['id'] ?? key.toString();
+          final rawSer = (data['serial'] ?? data['id'] ?? key.toString()).toString().trim();
+          final serialMatch = RegExp(r'(\d{6}-[A-Za-z0-9]+-\d{3,})').firstMatch(rawSer);
+          final canonicalSerial = serialMatch != null ? serialMatch.group(1)!.toUpperCase() : rawSer.toUpperCase();
+          data['serial'] = canonicalSerial;
+
           final entry = _HistoryEntry.fromMap(data, source: sourceLabel);
-          if (entry != null && seen.add(entry.serial)) found.add(entry);
+          if (entry != null && seen.add(canonicalSerial)) found.add(entry);
         }
       } catch (e) {
         debugPrint('[PatientHistory] $boxName scan error: $e');
@@ -371,8 +400,10 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
             if (entry != null && seen.add(entry.serial)) {
               found.add(entry);
               try {
-                Hive.box(LocalStorageService.reportsCacheBox)
-                    .put('legacy_${id}_${entry.serial}', data);
+                if (Hive.isBoxOpen(LocalStorageService.reportsCacheBox)) {
+                  Hive.box(LocalStorageService.reportsCacheBox)
+                      .put('legacy_${id}_${entry.serial}', data);
+                }
               } catch (_) {}
             }
           }
@@ -781,7 +812,11 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
           final entry = _HistoryEntry.fromMap(data, source: 'Prescriptions');
           if (entry != null && seen.add(entry.serial)) {
             found.add(entry);
-            try { Hive.box(LocalStorageService.reportsCacheBox).put('legacy_${id}_${entry.serial}', data); } catch (_) {}
+            try {
+              if (Hive.isBoxOpen(LocalStorageService.reportsCacheBox)) {
+                Hive.box(LocalStorageService.reportsCacheBox).put('legacy_${id}_${entry.serial}', data);
+              }
+            } catch (_) {}
           }
         }
       } catch (e) { debugPrint('[PatientHistoryPage] $id error: $e'); }
@@ -1196,11 +1231,6 @@ class _HistoryCard extends StatelessWidget {
             decoration: BoxDecoration(
               color: isDark ? const Color(0xFF1E293B) : const Color(0xFF065F46),
               borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
-              border: Border(
-                bottom: BorderSide(
-                  color: isDark ? const Color(0xFF334155) : const Color(0xFF047857),
-                ),
-              ),
             ),
             child: Row(
               children: [

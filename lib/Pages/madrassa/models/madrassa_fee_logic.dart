@@ -21,6 +21,27 @@ class MadrassaFeeLogic {
     return null;
   }
 
+  static DateTime? parseStudentJoinDate(Map<String, dynamic> studentData) {
+    final raw = studentData['joinDate'] ??
+        studentData['admissionDate'] ??
+        studentData['enrollmentDate'] ??
+        studentData['createdDate'] ??
+        studentData['createdAt'] ??
+        studentData['dateOfAdmission'];
+    if (raw == null) return null;
+    return _parseDateTime(raw);
+  }
+
+  static DateTime _parseDateTime(dynamic val) {
+    if (val == null) return DateTime.now();
+    if (val is Timestamp) return val.toDate();
+    if (val is String) {
+      return DateTime.tryParse(val) ?? DateTime.now();
+    }
+    if (val is DateTime) return val;
+    return DateTime.now();
+  }
+
   static Map<String, dynamic> calculateStudentFee({
     required String studentId,
     required Map<String, dynamic> studentData,
@@ -72,7 +93,7 @@ class MadrassaFeeLogic {
       holidays: holidays,
     );
 
-    final bool isFeeEnabled = config.enableFees;
+    final bool isFeeEnabled = config.enableFees && activeWorkingDays > 0;
 
     double proRatedBaseFee = (isFeeEnabled && totalWorkingDays > 0)
         ? (activeWorkingDays / totalWorkingDays) * config.baseFee
@@ -90,9 +111,7 @@ class MadrassaFeeLogic {
         : 0;
 
     // Check if student joined after the current month's PTM date
-    final joinDateVal = studentData['joinDate'] != null
-        ? _parseDateTime(studentData['joinDate'])
-        : DateTime(config.year, config.month, 1);
+    final joinDateVal = parseStudentJoinDate(studentData) ?? DateTime(config.year, config.month, 1);
     final ptmDate = config.getPtmDate();
     final joinDateOnly = DateTime(joinDateVal.year, joinDateVal.month, joinDateVal.day);
     final ptmDateOnly = DateTime(ptmDate.year, ptmDate.month, ptmDate.day);
@@ -106,7 +125,7 @@ class MadrassaFeeLogic {
     return {
       'present': presentDays,
       'leave': leaveDays,
-      'absent': activeWorkingDays - (presentDays + leaveDays),
+      'absent': activeWorkingDays > 0 ? (activeWorkingDays - (presentDays + leaveDays)).clamp(0, 9999) : 0,
       'uniform': uniformDays,
       'message': messageDays,
       'ptm': ptmAttended,
@@ -122,31 +141,29 @@ class MadrassaFeeLogic {
     };
   }
 
-  static DateTime _parseDateTime(dynamic val) {
-    if (val == null) return DateTime.now();
-    if (val is Timestamp) return val.toDate();
-    if (val is String) {
-      return DateTime.tryParse(val) ?? DateTime.now();
-    }
-    if (val is DateTime) return val;
-    return DateTime.now();
-  }
-
   static int _calculateActiveWorkingDays({
     required Map<String, dynamic> studentData,
     required int year,
     required int month,
     required List<DateTime> holidays,
   }) {
-    final joinDate = studentData['joinDate'] != null
-        ? _parseDateTime(studentData['joinDate'])
-        : DateTime(year, month, 1);
+    final parsedJoin = parseStudentJoinDate(studentData);
+    if (parsedJoin == null) {
+      // If student has no join date, check if they have any logs or default
+      return 0;
+    }
+    final joinDate = parsedJoin;
     final auditLog = (studentData['auditLog'] as List? ?? [])
         .map((e) => _asStringMap(e) ?? <String, dynamic>{})
         .toList();
 
     final monthStart = DateTime(year, month, 1);
     final monthEnd = DateTime(year, month + 1, 0);
+
+    // If entire month is before student join date, active working days is 0
+    if (monthEnd.isBefore(DateTime(joinDate.year, joinDate.month, joinDate.day))) {
+      return 0;
+    }
 
     int activeCount = 0;
     DateTime date = monthStart;

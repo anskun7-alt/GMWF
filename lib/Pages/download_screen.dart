@@ -77,7 +77,7 @@ class _DownloadScreenState extends State<DownloadScreen>
     {'id': 'madrassa', 'label': 'Madrassa Module', 'icon': Icons.menu_book_rounded, 'color': const Color(0xFF4F46E5)},
     {'id': 'school', 'label': 'School System (TWT)', 'icon': Icons.school_rounded, 'color': const Color(0xFF6366F1)},
     {'id': 'donations', 'label': 'Donations & Credit', 'icon': Icons.volunteer_activism_outlined, 'color': const Color(0xFFBE185D)},
-    {'id': 'officeboy', 'label': 'Office Boy Module', 'icon': Icons.cleaning_services_rounded, 'color': const Color(0xFFF59E0B)},
+    {'id': 'officeboy', 'label': 'Food Tokens (Dasterkhwaan)', 'icon': Icons.confirmation_number_rounded, 'color': const Color(0xFFF59E0B)},
     {'id': 'finance', 'label': 'Finance, Loans & Expenses', 'icon': Icons.account_balance_wallet_rounded, 'color': const Color(0xFF10B981)},
     {'id': 'hr', 'label': 'HR & Staff Payroll', 'icon': Icons.badge_rounded, 'color': const Color(0xFF0284C7)},
   ];

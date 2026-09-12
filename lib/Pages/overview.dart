@@ -344,11 +344,11 @@ class _OverviewScreenState extends State<OverviewScreen>
     final ids = (filter.branchId == 'all' || filter.branchId.isEmpty)
         ? allIds
         : allIds.where((id) => id == filter.branchId).toList();
-    if (filter.timeRange == TimeRange.today) {
+    if (filter.timeRange == TimeRange.today && !filter.multiDayMedicineOnly && filter.patientType == null) {
       return StreamBuilder<BranchStats>(
         stream: streamAllBranchesStats(ids, filter: filter),
         builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
+          if (!snap.hasData && snap.connectionState == ConnectionState.waiting) {
             return DashLoadingCard(t: RoleThemeScope.dataOf(context), height: 260);
           }
           final s = snap.data ?? const BranchStats();
@@ -359,15 +359,18 @@ class _OverviewScreenState extends State<OverviewScreen>
       // Use _refreshKey so tapping the refresh button forces a new Future despite cache.
       // Include filter.customRange bounds so switching between custom date ranges
       // (which share the same timeRange.name == 'custom') also triggers a refetch.
+      final cKey = statsCacheKey(filter.branchId, filter);
+      final cachedStats = statsCacheGet(cKey);
       return FutureBuilder<BranchStats>(
         key: ValueKey(
-            '$_refreshKey|${filter.timeRange.name}|${filter.branchId}|${filter.customRange?.start}|${filter.customRange?.end}'),
+            '$_refreshKey|${filter.timeRange.name}|${filter.branchId}|${filter.customRange?.start}|${filter.customRange?.end}|${filter.patientType}|${filter.multiDayMedicineOnly}'),
+        initialData: cachedStats,
         future: fetchAllBranchesStats(ids, filter: filter),
         builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
+          if (!snap.hasData && cachedStats == null && snap.connectionState == ConnectionState.waiting) {
             return DashLoadingCard(t: RoleThemeScope.dataOf(context), height: 260);
           }
-          final s = snap.data ?? const BranchStats();
+          final s = snap.data ?? cachedStats ?? const BranchStats();
           return _buildInnerKPI(context, s, branches.length);
         },
       );
@@ -978,10 +981,21 @@ class _DonationIntelligenceSection extends StatelessWidget {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     switch (filter.timeRange) {
-      case TimeRange.today: return DateTimeRange(start: today, end: today);
-      case TimeRange.week:  return DateTimeRange(start: today.subtract(const Duration(days: 6)), end: today);
-      case TimeRange.month: return DateTimeRange(start: today.subtract(const Duration(days: 30)), end: today);
-      case TimeRange.custom: return filter.customRange ?? DateTimeRange(start: today, end: today);
+      case TimeRange.today:
+        return DateTimeRange(start: today, end: today);
+      case TimeRange.yesterday:
+        final yest = today.subtract(const Duration(days: 1));
+        return DateTimeRange(start: yest, end: yest);
+      case TimeRange.week:
+        return DateTimeRange(start: today.subtract(const Duration(days: 6)), end: today);
+      case TimeRange.biweek:
+        return DateTimeRange(start: today.subtract(const Duration(days: 13)), end: today);
+      case TimeRange.month:
+        return DateTimeRange(start: today.subtract(const Duration(days: 29)), end: today);
+      case TimeRange.thisMonth:
+        return DateTimeRange(start: DateTime(now.year, now.month, 1), end: today);
+      case TimeRange.custom:
+        return filter.customRange ?? DateTimeRange(start: today, end: today);
     }
   }
 }

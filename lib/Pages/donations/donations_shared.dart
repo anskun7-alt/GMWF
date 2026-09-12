@@ -15,7 +15,9 @@ import 'package:file_picker/file_picker.dart';
 import 'dart:io';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/foundation.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import '../../constants/colors.dart';
+import '../../services/local_storage_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // USER ROLE
@@ -38,7 +40,7 @@ extension UserRoleX on UserRole {
   bool get isHqManager       => this == UserRole.hqManager;
   bool get isChairman        => this == UserRole.chairman;
   bool get canApprove        => isChairman || isHqManager || isManager;
-  bool get canMarkReceived   => isChairman || isHqManager;
+  bool get canMarkReceived   => isHqManager || isManager;
   bool get canSeeAllBranches => isChairman || isHqManager;
 
   Color get roleColor {
@@ -266,8 +268,50 @@ String cleanReceiptNumber(String raw) {
 List<String> branchPhonesFor(String branchId) {
   const hq = ['0331-8525333', '0533525333'];
   final id = branchId.toLowerCase().trim();
+
+  // Dynamic lookup from local_branches (configured in Branches Management)
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+      final box = Hive.box(LocalStorageService.branchesBox);
+      dynamic branchData = box.get('branch_$id') ?? box.get(id);
+      if (branchData == null) {
+        for (final k in box.keys) {
+          final v = box.get(k);
+          if (v is Map) {
+            final bId = (v['id'] ?? '').toString().toLowerCase().trim();
+            if (bId == id || (id.isNotEmpty && bId.contains(id))) {
+              branchData = v;
+              break;
+            }
+          }
+        }
+      }
+      if (branchData is Map) {
+        final customNumbers = <String>[];
+        final vPhone = branchData['verificationPhone']?.toString().trim();
+        final cPhone = branchData['complaintPhone']?.toString().trim();
+        final gPhone = branchData['phone']?.toString().trim();
+        final phonesList = branchData['contactNumbers'];
+
+        if (vPhone != null && vPhone.isNotEmpty) customNumbers.add(vPhone);
+        if (cPhone != null && cPhone.isNotEmpty && !customNumbers.contains(cPhone)) customNumbers.add(cPhone);
+        if (gPhone != null && gPhone.isNotEmpty && !customNumbers.contains(gPhone)) customNumbers.add(gPhone);
+        if (phonesList is List) {
+          for (final p in phonesList) {
+            final pStr = p?.toString().trim() ?? '';
+            if (pStr.isNotEmpty && !customNumbers.contains(pStr)) customNumbers.add(pStr);
+          }
+        }
+        if (customNumbers.isNotEmpty) {
+          return [...hq, ...customNumbers];
+        }
+      }
+    }
+  } catch (_) {}
+
+  // Built-in defaults per branch
   if (id.contains('sialkot'))    return [...hq, '0310-7222821', '0316-7916223'];
-  if (id.contains('karachi'))    return [...hq, '0300-8226606'];
+  if (id.contains('karachi') || id.contains('khi')) return [...hq, '0333-3047931'];
   if (id.contains('lahore'))     return [...hq, '04235292905', '0333-4504497'];
   if (id.contains('rawalpindi')) return [...hq, '0533525333'];
   return List.from(hq);

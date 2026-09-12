@@ -12,6 +12,7 @@ import '../services/camp_session_service.dart';
 import '../realtime/realtime_manager.dart';
 import '../realtime/realtime_events.dart';
 import '../utils/formatters.dart';
+import '../widgets/global_module_wrapper.dart';
 
 class RequestUtils {
   static String getTitle(String type, String patient) {
@@ -193,9 +194,13 @@ class _RequestPageState extends State<RequestPage>
         }
       } catch (_) {}
 
+      final effBId = (widget.branchId.isNotEmpty && widget.branchId != 'all')
+          ? widget.branchId
+          : (LocalStorageService.getActiveBranchId() ?? 'karachi');
+
       FirebaseFirestore.instance
           .collection('branches')
-          .doc(widget.branchId)
+          .doc(effBId)
           .collection('users')
           .doc(uid)
           .get()
@@ -234,13 +239,17 @@ class _RequestPageState extends State<RequestPage>
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isWrapped = GlobalModuleWrapper.isWrapped(context);
+
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
+        automaticallyImplyLeading: !isWrapped,
+        toolbarHeight: isWrapped ? 0 : kToolbarHeight,
         backgroundColor: isDark ? const Color(0xFF0F172A) : Colors.teal.shade800,
         foregroundColor: Colors.white,
         elevation: 0,
-        title: const Text('Requests',
+        title: isWrapped ? null : const Text('Requests',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
         bottom: TabBar(
           controller: _tabCtrl,
@@ -304,13 +313,36 @@ class _StableRequestTab extends StatefulWidget {
   State<_StableRequestTab> createState() => _StableRequestTabState();
 }
 
+class LocalRequestDoc {
+  final String id;
+  final Map<String, dynamic> _data;
+  final String parentCollection;
+
+  LocalRequestDoc({
+    required this.id,
+    required Map<String, dynamic> data,
+    this.parentCollection = 'edit_requests',
+  }) : _data = data;
+
+  Map<String, dynamic> data() => _data;
+  LocalRef get reference => LocalRef(parentCollection);
+}
+
+class LocalRef {
+  final LocalParent parent;
+  LocalRef(String parentId) : parent = LocalParent(parentId);
+}
+
+class LocalParent {
+  final String id;
+  LocalParent(this.id);
+}
+
 class _StableRequestTabState extends State<_StableRequestTab>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
 
-  late final Stream<QuerySnapshot> _editStream;
-  late final Stream<QuerySnapshot> _dispenseStream;
   final Map<String, String> _nameCache = {};
   bool _isApprovingAll = false;
   bool _toastShownForPending = false;
@@ -318,19 +350,14 @@ class _StableRequestTabState extends State<_StableRequestTab>
   @override
   void initState() {
     super.initState();
-    _editStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('edit_requests')
-        .where('status', isEqualTo: widget.status)
-        .snapshots();
+    _ensureBox();
+  }
 
-    _dispenseStream = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('dispense_edit_requests')
-        .where('status', isEqualTo: widget.status)
-        .snapshots();
+  Future<void> _ensureBox() async {
+    if (!Hive.isBoxOpen('local_edit_requests')) {
+      await LocalStorageService.openBoxSafe('local_edit_requests');
+      if (mounted) setState(() {});
+    }
   }
 
   String _resolveRequesterName(String docId, Map<String, dynamic> data) {
@@ -351,22 +378,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
       return 'Unknown';
     }
 
-    _nameCache[docId] = '…';
-
-    FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('users')
-        .doc(requesterId)
-        .get()
-        .then((snap) {
-      final name = snap.data()?['username']?.toString() ?? 'User';
-      if (mounted) setState(() => _nameCache[docId] = name);
-    }).catchError((_) {
-      if (mounted) setState(() => _nameCache[docId] = 'User');
-    });
-
-    return '…';
+    return requesterId;
   }
 
   int _safeInt(dynamic val) {
@@ -386,40 +398,35 @@ class _StableRequestTabState extends State<_StableRequestTab>
   Widget build(BuildContext context) {
     super.build(context);
 
-    return StreamBuilder<List<QuerySnapshot>>(
-      stream: CombineLatestStream.list([_editStream, _dispenseStream]),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Error loading requests:\n${snapshot.error.toString().split('\n').first}',
-                style: const TextStyle(color: Colors.red, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          );
-        }
-        if (!snapshot.hasData) {
-          return const Center(
-              child: CircularProgressIndicator(color: Colors.teal));
-        }
+    if (!Hive.isBoxOpen('local_edit_requests')) {
+      return const Center(
+          child: CircularProgressIndicator(color: Colors.teal));
+    }
 
-        final editDocs    = snapshot.data![0].docs;
-        final dispenseDocs = snapshot.data![1].docs;
-        var allDocs = [...editDocs, ...dispenseDocs];
-
-        final seen = <String>{};
-        allDocs = allDocs.where((d) => seen.add(d.id)).toList();
+    return ValueListenableBuilder<Box>(
+      valueListenable: Hive.box('local_edit_requests').listenable(),
+      builder: (context, box, _) {
+        final allDocs = <LocalRequestDoc>[];
+        for (final entry in box.toMap().entries) {
+          if (entry.value is Map) {
+            final data = Map<String, dynamic>.from(entry.value as Map);
+            final status = (data['status']?.toString() ?? 'pending').toLowerCase();
+            if (status == widget.status.toLowerCase()) {
+              final id = data['requestId']?.toString() ?? data['id']?.toString() ?? entry.key.toString();
+              final col = data['collection']?.toString() ?? (data['type'] == 'dispense' ? 'dispense_edit_requests' : 'edit_requests');
+              allDocs.add(LocalRequestDoc(id: id, data: data, parentCollection: col));
+            }
+          }
+        }
 
         allDocs.sort((a, b) {
-          final aTime = (a.data() as Map)['requestedAt'] as Timestamp?;
-          final bTime = (b.data() as Map)['requestedAt'] as Timestamp?;
-          if (aTime == null && bTime == null) return 0;
-          if (aTime == null) return 1;
-          if (bTime == null) return -1;
-          return bTime.compareTo(aTime);
+          final aData = a.data();
+          final bData = b.data();
+          final rawA = aData['requestedAt'] ?? aData['createdAt'];
+          final rawB = bData['requestedAt'] ?? bData['createdAt'];
+          final DateTime dtA = rawA is Timestamp ? rawA.toDate() : (rawA is String ? (DateTime.tryParse(rawA) ?? DateTime(1970)) : DateTime(1970));
+          final DateTime dtB = rawB is Timestamp ? rawB.toDate() : (rawB is String ? (DateTime.tryParse(rawB) ?? DateTime(1970)) : DateTime(1970));
+          return dtB.compareTo(dtA);
         });
 
         final role = (widget.currentUserRole ?? '').toLowerCase().trim();
@@ -591,7 +598,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
   }
 
   Widget _buildRequestCard(
-      BuildContext context, QueryDocumentSnapshot doc) {
+      BuildContext context, dynamic doc) {
     final isDark      = Theme.of(context).brightness == Brightness.dark;
     final data        = doc.data() as Map<String, dynamic>;
     final requestType = data['requestType']?.toString() ??
@@ -599,7 +606,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'unknown';
     final collection  = doc.reference.parent.id;
     final patientName = data['patientName']?.toString() ?? '—';
-    final ts          = data['requestedAt'] as Timestamp?;
+    final rawTs       = data['requestedAt'] ?? data['createdAt'];
+    final ts          = rawTs is Timestamp ? rawTs : (rawTs is String ? (DateTime.tryParse(rawTs) != null ? Timestamp.fromDate(DateTime.parse(rawTs)) : null) : null);
     final reason      = data['reason']?.toString() ?? '';
     final name        = _resolveRequesterName(doc.id, data);
     final approverName = data['reviewedByName'] ?? data['approvedByName'];
@@ -1974,7 +1982,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
   }
 
   Future<void> _confirmApproveAll(
-      BuildContext context, List<QueryDocumentSnapshot> allDocs) async {
+      BuildContext context, List<dynamic> allDocs) async {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final role = (widget.currentUserRole ?? '').toLowerCase().trim();
     final isBranchManager = role.contains('branch manager') ||
@@ -2126,19 +2134,40 @@ class _StableRequestTabState extends State<_StableRequestTab>
     required String? reviewerName,
     String? docReason,
   }) async {
-    final ref = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection(collection)
-        .doc(docId);
+    // 1. Update local Hive request immediately
+    if (Hive.isBoxOpen('local_edit_requests')) {
+      final box = Hive.box('local_edit_requests');
+      final current = box.get(docId) ?? data;
+      if (current is Map) {
+        final updated = Map<String, dynamic>.from(current)
+          ..addAll({
+            'status': 'approved',
+            'reviewedAt': DateTime.now().toIso8601String(),
+            'reviewedBy': reviewerUid,
+            if (reviewerName != null) 'reviewedByName': reviewerName,
+            if (docReason != null) 'doctorReason': docReason,
+          });
+        await box.put(docId, updated);
+      }
+    }
 
-    await ref.update({
-      'status':     'approved',
-      'reviewedAt': FieldValue.serverTimestamp(),
-      'reviewedBy': reviewerUid,
-      if (reviewerName != null) 'reviewedByName': reviewerName,
-      if (docReason != null) 'doctorReason': docReason,
-    });
+    try {
+      final ref = FirebaseFirestore.instance
+          .collection('branches')
+          .doc(widget.branchId)
+          .collection(collection)
+          .doc(docId);
+
+      await ref.update({
+        'status':     'approved',
+        'reviewedAt': FieldValue.serverTimestamp(),
+        'reviewedBy': reviewerUid,
+        if (reviewerName != null) 'reviewedByName': reviewerName,
+        if (docReason != null) 'doctorReason': docReason,
+      });
+    } catch (e) {
+      debugPrint('[RequestPage] Firestore update failed (offline): $e');
+    }
 
     final reqCampId = data['dispensaryId']?.toString() ??
         data['campId']?.toString() ??
@@ -2169,12 +2198,12 @@ class _StableRequestTabState extends State<_StableRequestTab>
           final existing = box.get('patient:$patientId') ?? box.get(patientId);
           if (existing is Map) {
             final updated = Map<String, dynamic>.from(existing)..addAll(toApply);
-            LocalStorageService.saveLocalPatient(updated);
+            LocalStorageService.saveLocalPatient(updated, isFromSync: true);
           } else {
-            LocalStorageService.saveLocalPatient(toApply);
+            LocalStorageService.saveLocalPatient(toApply, isFromSync: true);
           }
         } else {
-          LocalStorageService.saveLocalPatient(toApply);
+          LocalStorageService.saveLocalPatient(toApply, isFromSync: true);
         }
         await LocalStorageService.updateActiveEntriesForPatient(widget.branchId, patientId, toApply);
       } catch (e) {
@@ -2226,7 +2255,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
       await LocalStorageService.deleteLocalEntry(
           widget.branchId, tokenSerial);
 
-      try {
+            try {
         RealtimeManager().sendMessage({
           'event_type': 'token_reversal_approved',
           'data': {
@@ -2238,6 +2267,20 @@ class _StableRequestTabState extends State<_StableRequestTab>
         });
       } catch (e) {
         debugPrint('Failed to broadcast token reversal: $e');
+      }
+
+      if (!RealtimeManager().isConnected) {
+        await LocalStorageService.enqueueSync({
+          'type': 'token_reversal',
+          'branchId': widget.branchId,
+          'serial': tokenSerial,
+          'dateKey': dateKey,
+          'data': {
+            'tokenSerial': tokenSerial,
+            'queueType': queueCollection,
+            'dateKey': dateKey,
+          },
+        });
       }
     }
     else if (requestType == 'add_stock') {
@@ -2424,10 +2467,23 @@ class _StableRequestTabState extends State<_StableRequestTab>
         reviewerName = userDoc.data()?['username']?.toString();
       }
 
-      if (newStatus == 'approved') {
-        final snap = await ref.get();
-        final data = (snap.data() as Map<String, dynamic>?) ?? {};
+      // 1. Resolve local request data from Hive first
+      Map<String, dynamic> data = {};
+      if (Hive.isBoxOpen('local_edit_requests')) {
+        final box = Hive.box('local_edit_requests');
+        final raw = box.get(docId);
+        if (raw is Map) data = Map<String, dynamic>.from(raw);
+      }
+      if (data.isEmpty) {
+        try {
+          final snap = await ref.get().timeout(const Duration(seconds: 2));
+          if (snap.exists && snap.data() != null) {
+            data = snap.data() as Map<String, dynamic>;
+          }
+        } catch (_) {}
+      }
 
+      if (newStatus == 'approved') {
         await _processSingleDocApproval(
           docId: docId,
           data: data,
@@ -2440,13 +2496,32 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
         await SyncService().forceFullRefresh(widget.branchId);
       } else {
-        await ref.update({
-          'status':     newStatus,
-          'reviewedAt': FieldValue.serverTimestamp(),
-          'reviewedBy': reviewerUid,
-          if (reviewerName != null) 'reviewedByName': reviewerName,
-          if (docReason != null) 'doctorReason': docReason,
-        });
+        // Update local Hive box immediately
+        if (Hive.isBoxOpen('local_edit_requests')) {
+          final box = Hive.box('local_edit_requests');
+          final updated = Map<String, dynamic>.from(data)
+            ..addAll({
+              'status':     newStatus,
+              'reviewedAt': DateTime.now().toIso8601String(),
+              'reviewedBy': reviewerUid,
+              if (reviewerName != null) 'reviewedByName': reviewerName,
+              if (docReason != null) 'doctorReason': docReason,
+              if (docReason != null && newStatus == 'rejected') 'rejectionReason': docReason,
+            });
+          await box.put(docId, updated);
+        }
+
+        try {
+          await ref.update({
+            'status':     newStatus,
+            'reviewedAt': FieldValue.serverTimestamp(),
+            'reviewedBy': reviewerUid,
+            if (reviewerName != null) 'reviewedByName': reviewerName,
+            if (docReason != null) 'doctorReason': docReason,
+          });
+        } catch (e) {
+          debugPrint('[RequestPage] Firestore rejection update failed (offline): $e');
+        }
       }
 
       // ✅ FIX: Use microtask so the Firestore stream has one event-loop turn
@@ -2690,11 +2765,17 @@ class _StableRequestTabState extends State<_StableRequestTab>
         batch.set(inventory.doc(newId), newData);
       }
 
-      final finalMedId = oldId == newId ? oldId : newId;
+            final finalMedId = oldId == newId ? oldId : newId;
       final hiveData = Map<String, dynamic>.from(newData);
       hiveData['id'] = finalMedId;
       hiveData['branchId'] = widget.branchId;
       LocalStorageService.saveLocalInventoryItem(hiveData);
+
+      RealtimeManager().sendMessage({
+        'event_type': RealtimeEvents.saveStockItem,
+        'branchId': widget.branchId,
+        'data': hiveData,
+      });
 
       // Add to log
       FirebaseFirestore.instance

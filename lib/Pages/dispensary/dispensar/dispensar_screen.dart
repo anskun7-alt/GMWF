@@ -19,6 +19,7 @@ import 'package:gmwf/widgets/clock_skew_warning_banner.dart';
 import 'package:gmwf/widgets/connection_status_widget.dart';
 import 'package:gmwf/widgets/gmwf_app_bar.dart';
 import 'package:gmwf/widgets/camp_selection_dialog.dart';
+import 'package:gmwf/widgets/update_dialog_widget.dart';
 import 'package:gmwf/utils/notification_deduper.dart';
 import '../user_settings_dialog.dart';
 import 'inventory.dart';
@@ -79,6 +80,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
   @override
   void initState() {
     super.initState();
+    LocalStorageService.ensureDoctorBoxesOpen();
     if (!widget.isEmbedded) {
       SyncService().start(widget.branchId);
     }
@@ -109,6 +111,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!widget.isEmbedded) {
         _startBackgroundSync();
+        if (mounted) UpdateDialogWidget.showUpdateDialogIfNeeded(context);
       }
     });
 
@@ -120,37 +123,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
       s.cancel();
     }
     _inventoryLiveSubs.clear();
-
-    final invPaths = CampSessionService.getAllCampInventoryPaths(
-      branchId: widget.branchId,
-      selectedCamp: CampSessionService.getActiveCamp(widget.branchId),
-    );
-
-    for (final invCol in invPaths) {
-      final sub = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection(invCol)
-          .snapshots()
-          .listen((snap) {
-        for (final change in snap.docChanges) {
-          if (change.type == DocumentChangeType.removed) {
-            LocalStorageService.deleteLocalStockItem(change.doc.id);
-          } else {
-            final d = change.doc.data();
-            if (d != null) {
-              LocalStorageService.saveLocalInventoryItem({
-                ...d,
-                'id': change.doc.id,
-                'branchId': widget.branchId,
-              });
-            }
-          }
-        }
-        if (mounted) setState(() {});
-      }, onError: (e) => debugPrint('[Dispenser] Inventory live stream error: $e'));
-      _inventoryLiveSubs.add(sub);
-    }
+    // Pure Local/LAN Architecture: inventory updates are received reactively via LAN events and Hive
   }
 
   // [FIX-USERNAME] Resolve dispenser name then start/update connection with it.
@@ -252,7 +225,9 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
 
     // ── Handle INVENTORY events (no patient serial) ───────────────────────────
     if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered') {
-      LocalStorageService.saveLocalInventoryItem(data);
+      // RealtimeRouter._handleSaveStockItem already ran (before this stream listener fires)
+      // and correctly persisted the stock update to Hive (with delta handling).
+      // We only refresh the UI state here to avoid applying the delta twice.
       if (mounted) setState(() {});
       return;
     } else if (type == RealtimeEvents.deleteStockItem || type == 'delete_stock_item') {
@@ -282,8 +257,9 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     final isToday = (itemDateKey == null || itemDateKey.isEmpty || itemDateKey == today) &&
         (serialDk.length != 6 || serialDk == today);
 
+    final hasMultiCamps = CampSessionService.hasCampsForBranch(widget.branchId);
     final activeCamp = CampSessionService.getActiveCamp(widget.branchId);
-    final matchesActiveCamp = (activeCamp == null || activeCamp.isEmpty || activeCamp == 'all')
+    final matchesActiveCamp = (!hasMultiCamps || activeCamp == null || activeCamp.isEmpty || activeCamp == 'all')
         ? true
         : CampSessionService.matchesCamp(
             selectedCamp: activeCamp,
@@ -425,7 +401,10 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
             ).show(context);
           }
         });
-        if (isOnline) _forceSync();
+        if (isOnline) {
+          RealtimeManager().forceFlushAndCatchUp().ignore();
+          SyncService().triggerUpload().ignore();
+        }
       }
     });
   }
@@ -437,10 +416,10 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
       // 1. Force-flush LAN WebSocket outbox & request catch-up from LAN server
       await RealtimeManager().forceFlushAndCatchUp();
 
-      // 2. If online, sync with cloud
+      // 2. If online, sync pending and today records with cloud
       if (_online) {
-        await SyncService().forceFullRefresh(widget.branchId);
-        await LocalStorageService.downloadTodayTokens(widget.branchId);
+        await SyncService().syncTodayOnly(widget.branchId);
+        await SyncService().triggerUpload();
       }
       if (mounted) setState(() {});
       WidgetsBinding.instance.addPostFrameCallback((_) {

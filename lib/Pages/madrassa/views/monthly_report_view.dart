@@ -13,16 +13,10 @@ import '../providers/madrassa_providers.dart';
 import '../utils/madrassa_local_storage.dart';
 import '../../../services/local_storage_service.dart';
 import '../../../services/user_theme_service.dart';
+import '../../../services/sync_service.dart';
 
 /// Safely converts whatever Map-ish value comes back from Firestore / JSON
-/// / local-storage into a proper `Map<String, dynamic>`. Firestore (and
-/// some local/json sources) can hand back a raw `Map<dynamic, dynamic>` for
-/// nested maps, and a direct `as Map<String, dynamic>` cast on that throws:
-///   "type '_Map<dynamic, dynamic>' is not a subtype of type
-///    'Map<String, dynamic>?' in type cast"
-/// `Map<String, dynamic>.from(...)` re-keys everything as Strings instead
-/// of doing an unsafe runtime cast, so this never throws for a Map of any
-/// shape.
+/// / local-storage into a proper `Map<String, dynamic>`.
 Map<String, dynamic>? _asStringMap(dynamic raw) {
   if (raw == null) return null;
   if (raw is Map<String, dynamic>) return raw;
@@ -33,7 +27,14 @@ Map<String, dynamic>? _asStringMap(dynamic raw) {
 class MonthlyReportView extends ConsumerStatefulWidget {
   final String branchId;
   final String? username;
-  const MonthlyReportView({super.key, required this.branchId, this.username});
+  final String? role;
+
+  const MonthlyReportView({
+    super.key,
+    required this.branchId,
+    this.username,
+    this.role,
+  });
 
   @override
   ConsumerState<MonthlyReportView> createState() => _MonthlyReportViewState();
@@ -49,14 +50,25 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
   // Cache for student fee calculations to improve performance
   final Map<String, Map<String, dynamic>> _feeCache = {};
 
-  // Shared vertical scroll controller so the frozen (name/roll) column and
-  // the scrollable data columns move together as one table, even though
-  // they're technically two separate widgets side by side.
   final ScrollController _verticalController = ScrollController();
 
   static const double _kRowHeight = 56;
   static const double _kHeaderHeight = 50;
-  static const Color _kHeadingBg = Color(0xFFF8F9FD);
+
+  bool get _canManageDues {
+    final r = (widget.role ?? '').toLowerCase().trim();
+    final u = (widget.username ?? '').toLowerCase().trim();
+    return r.contains('chairman') ||
+        r.contains('hq') ||
+        r.contains('manager') ||
+        r.contains('ceo') ||
+        r.contains('superadmin') ||
+        r.contains('super_admin') ||
+        r.contains('global_admin') ||
+        r.contains('admin') ||
+        u.contains('chairman') ||
+        u.contains('hq');
+  }
 
   @override
   void dispose() {
@@ -106,15 +118,10 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
       error: (e, st) => Scaffold(body: Center(child: Text('Error loading config: $e'))),
       data: (config) {
-        final currentYear = _selectedYear ?? config.year;
-        final currentMonth = _selectedMonth ?? config.month;
+        final now = DateTime.now();
+        final currentYear = _selectedYear ?? now.year;
+        final currentMonth = _selectedMonth ?? now.month;
 
-        // ── Holidays are now resolved BEFORE `workingDays`, so the
-        // denominator passed into the fee calculation excludes the exact
-        // same Sundays + holidays that the numerator (`activeWorkingDays`)
-        // excludes. Previously `workingDays` was computed without
-        // `holidays`, so a fully-present student could never reach 100% of
-        // the base fee whenever a holiday fell inside the month.
         final cachedHolidays = holidaysAsyncValue.value ?? [];
         final holidays = cachedHolidays
             .map<DateTime>((d) {
@@ -126,7 +133,6 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
             .toList();
 
         final workingDays = MadrassaFeeLogic.getWorkingDaysCount(currentYear, currentMonth, holidays);
-
         final isFeeEnabled = (config.enableFees != false) && LocalStorageService.isMadrassaFeeEnabled(widget.branchId);
 
         final displayConfig = MadrassaConfig(
@@ -148,20 +154,27 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           _downloadedMonth = currentMonth;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, currentYear, currentMonth);
+            MadrassaLocalStorage.downloadFeePaymentsForMonth(widget.branchId, currentYear, currentMonth);
           });
         }
 
         final studentsAsyncValue = ref.watch(madrassaStudentsProvider(widget.branchId));
         final logsAsyncValue = ref.watch(madrassaMonthlyLogsProvider((branchId: widget.branchId, year: currentYear, month: currentMonth)));
+        final feePaymentsAsyncValue = ref.watch(madrassaFeePaymentsProvider((branchId: widget.branchId, year: currentYear, month: currentMonth)));
 
         return studentsAsyncValue.when(
           loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
           error: (e, st) => Scaffold(body: Center(child: Text('Error loading students: $e'))),
           data: (students) {
             final filteredStudents = students.where((s) {
-              final name = (s['name']?.toString() ?? '').toLowerCase();
+              final name = (s['name']?.toString() ?? '').trim();
+              final isDeleted = s['isDeleted'] == true ||
+                  s['deleted'] == true ||
+                  s['status']?.toString().toLowerCase() == 'deleted';
+              if (name.isEmpty || isDeleted) return false;
+              if (_searchQuery.isEmpty) return true;
               final roll = (s['rollNumber']?.toString() ?? '').toLowerCase();
-              return name.contains(_searchQuery) || roll.contains(_searchQuery);
+              return name.toLowerCase().contains(_searchQuery) || roll.contains(_searchQuery);
             }).toList();
 
             return logsAsyncValue.when(
@@ -169,6 +182,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
               error: (e, st) => Scaffold(body: Center(child: Text('Error loading logs: $e'))),
               data: (monthLogs) {
                 _feeCache.clear();
+                final payments = feePaymentsAsyncValue.value ?? {};
 
                 return ValueListenableBuilder(
                   valueListenable: UserThemeService.listenable(widget.username),
@@ -270,13 +284,17 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                                             workingDays: workingDays,
                                             holidays: holidays,
                                           );
+                                          final payment = payments[sId];
                                           return _buildMobileStudentSummaryCard(
                                             context,
                                             s,
                                             fee,
+                                            payment,
                                             displayConfig,
                                             monthLogs,
                                             holidays,
+                                            currentYear,
+                                            currentMonth,
                                             isDark,
                                           );
                                         },
@@ -288,10 +306,13 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                                             : _buildFrozenColumnTable(
                                                 context,
                                                 filteredStudents,
+                                                payments,
                                                 displayConfig,
                                                 monthLogs,
                                                 workingDays,
                                                 holidays,
+                                                currentYear,
+                                                currentMonth,
                                                 showDetail,
                                                 isDark,
                                               ),
@@ -336,25 +357,22 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     );
   }
 
-  /// Renders the monthly grid as two side-by-side panels sharing one
-  /// vertical scroll: a FROZEN left panel (row #, student name, roll
-  /// number) that never moves horizontally, and a horizontally scrollable
-  /// right panel with every other column (attendance, fees, actions...).
   Widget _buildFrozenColumnTable(
     BuildContext context,
     List<dynamic> filteredStudents,
+    Map<String, Map<String, dynamic>> payments,
     MadrassaConfig config,
     List<dynamic> logs,
     int workingDays,
     List<DateTime> holidays,
+    int year,
+    int month,
     bool showDetail,
     bool isDark,
   ) {
     final cardBg = isDark ? const Color(0xFF1E293B) : Colors.white;
     final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
 
-    // Pre-resolve each row's data once so both panels read from the same
-    // source and never get out of sync.
     final rows = List.generate(filteredStudents.length, (i) {
       final s = filteredStudents[i];
       final sId = s['id']?.toString() ?? '';
@@ -367,7 +385,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
         holidays: holidays,
       );
       final data = s is DocumentSnapshot ? (_asStringMap(s.data()) ?? <String, dynamic>{}) : Map<String, dynamic>.from(s as Map);
-      return (s: s, sId: sId, fee: fee, data: data);
+      final payment = payments[sId];
+      return (s: s, sId: sId, fee: fee, data: data, payment: payment);
     });
 
     return Container(
@@ -415,7 +434,23 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                         _scrollableHeaderRow(context, showDetail, config.enableFees, widths, isDark),
                         ...List.generate(
                           rows.length,
-                          (i) => _scrollableDataRow(context, i, rows[i].s, rows[i].fee, rows[i].data, config, logs, holidays, showDetail, config.enableFees, widths, isDark),
+                          (i) => _scrollableDataRow(
+                            context,
+                            i,
+                            rows[i].s,
+                            rows[i].fee,
+                            rows[i].data,
+                            rows[i].payment,
+                            config,
+                            logs,
+                            holidays,
+                            year,
+                            month,
+                            showDetail,
+                            config.enableFees,
+                            widths,
+                            isDark,
+                          ),
                         ),
                       ],
                     ),
@@ -440,7 +475,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     final double baseMsg = 65;
     final double basePtm = 55;
     final double baseSavings = isFeeEnabled ? 80 : 0;
-    final double baseDue = isFeeEnabled ? 80 : 0;
+    final double baseDue = isFeeEnabled ? 110 : 0;
     final double baseActions = 130;
 
     final double totalBase = baseDays + baseP + baseL + baseA + baseAtt + baseUni + baseUniRs + baseMsg + basePtm + baseSavings + baseDue + baseActions;
@@ -467,22 +502,20 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
   }
 
   Widget _frozenHeaderRow(BuildContext context, bool isDark) {
-    final headingBg = isDark ? const Color(0xFF0F172A) : _kHeadingBg;
-    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
-    final textPrimary = isDark ? Colors.white : const Color(0xFF1A1C1E);
+    final headingBg = isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9);
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
 
     return Container(
       height: _kHeaderHeight,
       decoration: BoxDecoration(
         color: headingBg,
-        border: Border(bottom: BorderSide(color: borderColor)),
+        border: Border(bottom: BorderSide(color: borderColor, width: 1.5)),
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _colCell(Text('#', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary)), 32, center: true),
-          _colCell(Text(context.l.students, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary))), 170),
-          _colCell(Text(context.l.rollNumber, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary))), 95, center: true),
+          _colCell(Text('#', style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 32.0, center: true),
+          _colCell(Text(context.l.studentName, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 170.0),
+          _colCell(Text(context.l.rollNumber, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 95.0),
         ],
       ),
     );
@@ -493,7 +526,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     final cardBg = isDark ? const Color(0xFF1E293B) : Colors.white;
     final altBg = isDark ? const Color(0xFF182234) : const Color(0xFFFAFBFE);
     final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFF1F5F9);
-    final textPrimary = isDark ? Colors.white : const Color(0xFF0F172A);
+    final textPrimary = isDark ? Colors.white : const Color(0xFF1A1C1E);
+    final textMuted = isDark ? const Color(0xFF94A3B8) : Colors.grey[600];
 
     return Container(
       height: _kRowHeight,
@@ -504,67 +538,70 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _colCell(Text('${index + 1}', style: TextStyle(fontSize: 12, color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF94A3B8), fontWeight: FontWeight.w600)), 32, center: true),
+          _colCell(Text('${index + 1}', style: TextStyle(color: textMuted, fontSize: 12)), 32.0, center: true),
           _colCell(
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Text(
-                data['name'] ?? '',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
-              ),
+            Text(
+              data['name'] ?? '',
+              style: TextStyle(fontWeight: FontWeight.w600, color: textPrimary, fontSize: 13),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
-            170,
+            170.0,
           ),
           _colCell(
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: BoxDecoration(
                 color: isDark ? const Color(0xFF0D9488).withValues(alpha: 0.2) : const Color(0xFFF0FDFC),
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
                 '${data['rollNumber'] ?? '?'}',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E)),
-                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                  color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                ),
               ),
             ),
-            95,
-            center: true,
+            95.0,
           ),
         ],
       ),
     );
   }
 
-  Widget _scrollableHeaderRow(BuildContext context, bool showDetail, bool isFeeEnabled, Map<String, double> widths, bool isDark) {
-    final headingBg = isDark ? const Color(0xFF0F172A) : _kHeadingBg;
-    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
-    final textPrimary = isDark ? Colors.white : const Color(0xFF1A1C1E);
+  Widget _scrollableHeaderRow(
+    BuildContext context,
+    bool showDetail,
+    bool isFeeEnabled,
+    Map<String, double> widths,
+    bool isDark,
+  ) {
+    final headingBg = isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9);
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
 
     return Container(
       height: _kHeaderHeight,
       decoration: BoxDecoration(
         color: headingBg,
-        border: Border(bottom: BorderSide(color: borderColor)),
+        border: Border(bottom: BorderSide(color: borderColor, width: 1.5)),
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _colCell(Text(context.l.academicDays, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary))), widths['days']!, center: true),
-          _colCell(Text(context.l.present[0], style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13)), widths['p']!, center: true),
-          _colCell(Text(context.l.leave[0], style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFED6C02), fontSize: 13)), widths['l']!, center: true),
-          _colCell(Text(context.l.absent[0], style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFD32F2F), fontSize: 13)), widths['a']!, center: true),
+          _colCell(Text(context.l.activeWorkingDays, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['days']!, center: true),
+          _colCell(Text(context.l.present[0], style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13))), widths['p']!, center: true),
+          _colCell(Text(context.l.leave[0], style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFED6C02), fontSize: 13))), widths['l']!, center: true),
+          _colCell(Text(context.l.absent[0], style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFD32F2F), fontSize: 13))), widths['a']!, center: true),
           if (showDetail && isFeeEnabled)
-            _colCell(Text(context.l.attendance, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13))), widths['att']!, center: true),
-          _colCell(Text(context.l.uniform[0], style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080), fontSize: 13)), widths['uni']!, center: true),
+            _colCell(Text(context.l.attendanceSavings, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['att']!, center: true),
+          _colCell(Text(context.l.uniform[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080), fontSize: 13))), widths['uni']!, center: true),
           if (showDetail && isFeeEnabled)
-            _colCell(Text('${context.l.uniform[0]}.Rs', style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13)), widths['uniRs']!, center: true),
-          _colCell(const Text('Msg', style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFED6C02), fontSize: 13)), widths['msg']!, center: true),
-          _colCell(Text(context.l.ptm, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFD32F2F), fontSize: 13))), widths['ptm']!, center: true),
+            _colCell(Text(context.l.uniformSavings, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['uniRs']!, center: true),
+          _colCell(Text(context.l.message[0], style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFED6C02), fontSize: 13))), widths['msg']!, center: true),
+          _colCell(Text(context.l.ptm, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['ptm']!, center: true),
           if (isFeeEnabled) ...[
-            _colCell(Text('Savings', style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13))), widths['savings']!, center: true),
+            _colCell(Text(context.l.savings, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2E7D32), fontSize: 13))), widths['savings']!, center: true),
             _colCell(Text(context.l.due, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFFD32F2F), fontSize: 13))), widths['due']!, center: true),
           ],
           _colCell(Text(context.l.legendPresent, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080), fontSize: 13))), widths['actions']!, center: true),
@@ -579,9 +616,12 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     dynamic s,
     Map<String, dynamic> fee,
     Map<String, dynamic> data,
+    Map<String, dynamic>? payment,
     MadrassaConfig config,
     List<dynamic> logs,
     List<DateTime> holidays,
+    int year,
+    int month,
     bool showDetail,
     bool isFeeEnabled,
     Map<String, double> widths,
@@ -622,24 +662,18 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           if (isFeeEnabled) ...[
             _colCell(Text(((fee['totalSavings'] as num?) ?? 0).toStringAsFixed(0), style: const TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.bold, fontSize: 12)), widths['savings']!, center: true),
             _colCell(
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? (due <= 0 ? const Color(0xFF064E3B) : const Color(0xFF7F1D1D))
-                      : (due <= 0 ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE)),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  due.toStringAsFixed(0),
-                  style: TextStyle(
-                    color: isDark
-                        ? (due <= 0 ? const Color(0xFF6EE7B7) : const Color(0xFFFCA5A5))
-                        : (due <= 0 ? const Color(0xFF2E7D32) : const Color(0xFFD32F2F)),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                  ),
-                ),
+              _buildDuesCell(
+                context: context,
+                studentId: sId,
+                studentName: data['name']?.toString() ?? 'Student',
+                rollNumber: data['rollNumber']?.toString() ?? '?',
+                studentData: data,
+                config: config,
+                due: due,
+                payment: payment,
+                year: year,
+                month: month,
+                isDark: isDark,
               ),
               widths['due']!,
               center: true,
@@ -667,17 +701,670 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     );
   }
 
+  Widget _buildDuesCell({
+    required BuildContext context,
+    required String studentId,
+    required String studentName,
+    required String rollNumber,
+    required Map<String, dynamic> studentData,
+    required MadrassaConfig config,
+    required double due,
+    required Map<String, dynamic>? payment,
+    required int year,
+    required int month,
+    required bool isDark,
+  }) {
+    final isPaid = payment != null && payment['status'] == 'paid';
+    final amountPaid = (payment?['amountPaid'] as num?)?.toDouble() ?? due;
+    final canManage = _canManageDues;
+
+    final Color bg;
+    final Color fg;
+    final String text;
+    final IconData? icon;
+
+    if (isPaid) {
+      bg = isDark ? const Color(0xFF064E3B) : const Color(0xFFE8F5E9);
+      fg = isDark ? const Color(0xFF6EE7B7) : const Color(0xFF2E7D32);
+      text = 'PAID (Rs. ${amountPaid.toInt()})';
+      icon = Icons.check_circle_rounded;
+    } else if (due <= 0) {
+      bg = isDark ? const Color(0xFF064E3B) : const Color(0xFFE8F5E9);
+      fg = isDark ? const Color(0xFF6EE7B7) : const Color(0xFF2E7D32);
+      text = '0 (No Due)';
+      icon = null;
+    } else {
+      bg = isDark ? const Color(0xFF7F1D1D) : const Color(0xFFFFEBEE);
+      fg = isDark ? const Color(0xFFFCA5A5) : const Color(0xFFD32F2F);
+      text = 'Rs. ${due.toInt()}';
+      icon = canManage ? Icons.edit_note_rounded : null;
+    }
+
+    return InkWell(
+      onTap: () {
+        _showFeePaymentDialog(
+          context,
+          studentId: studentId,
+          studentName: studentName,
+          rollNumber: rollNumber,
+          studentData: studentData,
+          config: config,
+          amountDue: due,
+          currentPayment: payment,
+          year: year,
+          month: month,
+          canEdit: canManage,
+        );
+      },
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: fg.withValues(alpha: 0.35),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 12, color: fg),
+              const SizedBox(width: 4),
+            ],
+            Flexible(
+              child: Text(
+                text,
+                style: TextStyle(
+                  color: fg,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showFeePaymentDialog(
+    BuildContext context, {
+    required String studentId,
+    required String studentName,
+    required String rollNumber,
+    required Map<String, dynamic> studentData,
+    required MadrassaConfig config,
+    required double amountDue,
+    required Map<String, dynamic>? currentPayment,
+    required int year,
+    required int month,
+    required bool canEdit,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
+
+    // 1. Calculate historical months strictly from student admission date
+    final now = DateTime.now();
+    final joinDate = MadrassaFeeLogic.parseStudentJoinDate(studentData);
+    final earliestAllowed = DateTime(now.year - 1, now.month, 1);
+    final startMonthDate = joinDate != null
+        ? DateTime(joinDate.year, joinDate.month, 1)
+        : earliestAllowed;
+    final endMonthDate = DateTime(now.year, now.month, 1);
+
+    final holidaysList = MadrassaLocalStorage.getHolidaysCached(widget.branchId).map((h) {
+      final d = DateTime.tryParse(h['date']?.toString() ?? '');
+      return d ?? DateTime.now();
+    }).toList();
+
+    final List<Map<String, dynamic>> monthItems = [];
+    DateTime iter = DateTime(endMonthDate.year, endMonthDate.month, 1);
+
+    while (!iter.isBefore(startMonthDate)) {
+      final y = iter.year;
+      final m = iter.month;
+
+      final mConfig = config.copyWith(year: y, month: m);
+      final mWorkingDays = MadrassaFeeLogic.getWorkingDaysCount(y, m, holidaysList);
+      final mLogs = MadrassaLocalStorage.getLogsForMonthCached(widget.branchId, y, m);
+
+      final mFee = MadrassaFeeLogic.calculateStudentFee(
+        studentId: studentId,
+        studentData: studentData,
+        logs: mLogs,
+        config: mConfig,
+        totalWorkingDays: mWorkingDays,
+        holidays: holidaysList,
+      );
+
+      final mPayment = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, y, m, studentId);
+      final activeDays = (mFee['activeWorkingDays'] as num?)?.toInt() ?? 0;
+
+      // Only show months where student had active working days or has an existing payment record
+      if (activeDays > 0 || mPayment != null) {
+        final mDue = ((mFee['amountDue'] as num?) ?? 0.0).toDouble();
+        final mStatus = mPayment?['status']?.toString() ?? (mDue <= 0 ? 'paid' : 'unpaid');
+        final mPaid = (mPayment?['amountPaid'] as num?)?.toDouble() ?? (mStatus == 'paid' ? mDue : 0.0);
+        final mNote = mPayment?['note']?.toString() ?? '';
+
+        monthItems.add({
+          'year': y,
+          'month': m,
+          'label': DateFormat('MMMM yyyy').format(DateTime(y, m)),
+          'amountDue': mDue,
+          'amountPaid': mPaid,
+          'status': mStatus,
+          'isPaid': mStatus == 'paid',
+          'present': mFee['present'] ?? 0,
+          'leave': mFee['leave'] ?? 0,
+          'absent': mFee['absent'] ?? 0,
+          'activeWorkingDays': activeDays,
+          'note': mNote,
+          'paymentRecord': mPayment,
+          'isSelected': mStatus != 'paid' && mDue > 0,
+        });
+      }
+
+      if (iter.month == 1) {
+        iter = DateTime(iter.year - 1, 12, 1);
+      } else {
+        iter = DateTime(iter.year, iter.month - 1, 1);
+      }
+    }
+
+    bool isSaving = false;
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final unpaidItems = monthItems.where((item) => item['isPaid'] != true && (item['amountDue'] as double) > 0).toList();
+            final totalUnpaidDues = unpaidItems.fold<double>(0.0, (sum, item) => sum + (item['amountDue'] as double));
+            final selectedItems = monthItems.where((item) => item['isSelected'] == true && item['isPaid'] != true && (item['amountDue'] as double) > 0).toList();
+            final totalSelectedDues = selectedItems.fold<double>(0.0, (sum, item) => sum + (item['amountDue'] as double));
+            final allUnpaidSelected = unpaidItems.isNotEmpty && unpaidItems.every((item) => item['isSelected'] == true);
+
+            Future<void> performPayment({
+              required List<Map<String, dynamic>> itemsToPay,
+              String? customNote,
+            }) async {
+              if (itemsToPay.isEmpty) return;
+              setDialogState(() => isSaving = true);
+              try {
+                final markUser = (widget.username != null && widget.username!.isNotEmpty)
+                    ? widget.username!
+                    : ((widget.role ?? '').toLowerCase().contains('chairman') ? 'Chairman' : 'HQ Manager');
+                final markRole = (widget.role != null && widget.role!.isNotEmpty)
+                    ? widget.role!
+                    : ((widget.role ?? '').toLowerCase().contains('chairman') ? 'Chairman' : 'HQ Manager');
+
+                for (final item in itemsToPay) {
+                  final y = item['year'] as int;
+                  final m = item['month'] as int;
+                  final due = item['amountDue'] as double;
+
+                  await MadrassaLocalStorage.saveFeePaymentLocalAndSync(
+                    branchId: widget.branchId,
+                    studentId: studentId,
+                    studentName: studentName,
+                    rollNumber: rollNumber,
+                    year: y,
+                    month: m,
+                    amountDue: due,
+                    amountPaid: due,
+                    status: 'paid',
+                    markedBy: markUser,
+                    markedByRole: markRole,
+                    note: customNote ?? 'Fee Payment via Madrassa Portal',
+                  );
+                }
+
+                SyncService().triggerUpload();
+
+                if (dialogCtx.mounted) {
+                  Navigator.pop(dialogCtx);
+                }
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Recorded payment for ${itemsToPay.length} month(s) (Total: Rs. ${itemsToPay.fold<double>(0.0, (s, e) => s + (e['amountDue'] as double)).toInt()}).'),
+                      backgroundColor: const Color(0xFF0F766E),
+                    ),
+                  );
+                }
+              } catch (e) {
+                setDialogState(() => isSaving = false);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error saving payments: $e'), backgroundColor: Colors.red),
+                  );
+                }
+              }
+            }
+
+            return Dialog(
+              backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 620, maxHeight: 720),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Header
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0F766E).withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF0F766E), size: 22),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  studentName,
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: isDark ? Colors.white : const Color(0xFF0F172A),
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Roll #$rollNumber • Monthly Dues Breakdown',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, size: 20),
+                            onPressed: () => Navigator.pop(dialogCtx),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      const Divider(height: 1),
+                      const SizedBox(height: 12),
+
+                      // Dues Summary Bar
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: totalUnpaidDues > 0
+                              ? (isDark ? const Color(0xFF450A0A) : const Color(0xFFFEF2F2))
+                              : (isDark ? const Color(0xFF064E3B) : const Color(0xFFECFDF5)),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: totalUnpaidDues > 0
+                                ? const Color(0xFFDC2626).withValues(alpha: 0.3)
+                                : const Color(0xFF059669).withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Total Outstanding Dues',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: isDark ? Colors.white70 : Colors.grey.shade700,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Rs. ${totalUnpaidDues.toInt()}',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: totalUnpaidDues > 0 ? const Color(0xFFDC2626) : const Color(0xFF059669),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: totalUnpaidDues > 0
+                                    ? const Color(0xFFDC2626).withValues(alpha: 0.15)
+                                    : const Color(0xFF059669).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                totalUnpaidDues > 0 ? '${unpaidItems.length} Unpaid Month(s)' : 'All Dues Clear',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  color: totalUnpaidDues > 0 ? const Color(0xFFDC2626) : const Color(0xFF059669),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Select All Header
+                      if (canEdit && unpaidItems.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                'Previous Months Dues',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: isDark ? Colors.white70 : const Color(0xFF334155),
+                                ),
+                              ),
+                              InkWell(
+                                onTap: () {
+                                  setDialogState(() {
+                                    final newVal = !allUnpaidSelected;
+                                    for (final item in monthItems) {
+                                      if (item['isPaid'] != true && (item['amountDue'] as double) > 0) {
+                                        item['isSelected'] = newVal;
+                                      }
+                                    }
+                                  });
+                                },
+                                borderRadius: BorderRadius.circular(6),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  child: Row(
+                                    children: [
+                                      Checkbox(
+                                        value: allUnpaidSelected,
+                                        activeColor: const Color(0xFF0F766E),
+                                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.compact,
+                                        onChanged: (val) {
+                                          setDialogState(() {
+                                            for (final item in monthItems) {
+                                              if (item['isPaid'] != true && (item['amountDue'] as double) > 0) {
+                                                item['isSelected'] = val ?? false;
+                                              }
+                                            }
+                                          });
+                                        },
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Select All Unpaid',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                      // Scrollable List of Months
+                      Expanded(
+                        child: monthItems.isEmpty
+                            ? Center(
+                                child: Text(
+                                  'No monthly fee records found.',
+                                  style: TextStyle(color: isDark ? Colors.white54 : Colors.grey.shade500),
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: monthItems.length,
+                                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                                itemBuilder: (ctx, idx) {
+                                  final item = monthItems[idx];
+                                  final isItemPaid = item['isPaid'] == true;
+                                  final dueVal = (item['amountDue'] as double).toInt();
+                                  final paidVal = (item['amountPaid'] as double).toInt();
+                                  final isSelected = item['isSelected'] == true;
+
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: isItemPaid
+                                          ? (isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC))
+                                          : (isSelected
+                                              ? (isDark ? const Color(0xFF1E3A8A).withValues(alpha: 0.3) : const Color(0xFFEFF6FF))
+                                              : (isDark ? const Color(0xFF1E293B) : Colors.white)),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: isSelected && !isItemPaid
+                                            ? const Color(0xFF3B82F6)
+                                            : (isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                                        width: isSelected && !isItemPaid ? 1.5 : 1.0,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        if (canEdit && !isItemPaid && dueVal > 0)
+                                          Checkbox(
+                                            value: isSelected,
+                                            activeColor: const Color(0xFF0F766E),
+                                            onChanged: (val) {
+                                              setDialogState(() {
+                                                item['isSelected'] = val ?? false;
+                                              });
+                                            },
+                                          )
+                                        else
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                                            child: Icon(
+                                              isItemPaid ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
+                                              size: 18,
+                                              color: isItemPaid ? const Color(0xFF059669) : Colors.grey.shade400,
+                                            ),
+                                          ),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                children: [
+                                                  Text(
+                                                    item['label'] as String,
+                                                    style: TextStyle(
+                                                      fontWeight: FontWeight.bold,
+                                                      fontSize: 13,
+                                                      color: isDark ? Colors.white : const Color(0xFF1E293B),
+                                                    ),
+                                                  ),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                    decoration: BoxDecoration(
+                                                      color: isItemPaid
+                                                          ? const Color(0xFF10B981).withValues(alpha: 0.15)
+                                                          : const Color(0xFFEF4444).withValues(alpha: 0.15),
+                                                      borderRadius: BorderRadius.circular(6),
+                                                    ),
+                                                    child: Text(
+                                                      isItemPaid ? 'PAID (Rs. $paidVal)' : 'UNPAID (Rs. $dueVal)',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        fontWeight: FontWeight.bold,
+                                                        color: isItemPaid ? const Color(0xFF059669) : const Color(0xFFDC2626),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Row(
+                                                children: [
+                                                  Text(
+                                                    'P: ${item['present']} • L: ${item['leave']} • A: ${item['absent']}',
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: isDark ? Colors.white54 : Colors.grey.shade600,
+                                                    ),
+                                                  ),
+                                                  if ((item['note'] as String).isNotEmpty) ...[
+                                                    const SizedBox(width: 8),
+                                                    Flexible(
+                                                      child: Text(
+                                                        '• ${item['note']}',
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          fontStyle: FontStyle.italic,
+                                                          color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF0F766E),
+                                                        ),
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        if (canEdit && isItemPaid)
+                                          IconButton(
+                                            tooltip: 'Mark as Unpaid',
+                                            icon: const Icon(Icons.undo_rounded, size: 16, color: Colors.orange),
+                                            onPressed: () async {
+                                              await MadrassaLocalStorage.saveFeePaymentLocalAndSync(
+                                                branchId: widget.branchId,
+                                                studentId: studentId,
+                                                studentName: studentName,
+                                                rollNumber: rollNumber,
+                                                year: item['year'] as int,
+                                                month: item['month'] as int,
+                                                amountDue: item['amountDue'] as double,
+                                                amountPaid: 0,
+                                                status: 'unpaid',
+                                                markedBy: widget.username ?? 'HQ',
+                                                markedByRole: widget.role ?? 'manager',
+                                                note: 'Marked unpaid by manager',
+                                              );
+                                              setDialogState(() {
+                                                item['status'] = 'unpaid';
+                                                item['isPaid'] = false;
+                                                item['isSelected'] = true;
+                                              });
+                                            },
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+
+                      const SizedBox(height: 14),
+                      const Divider(height: 1),
+                      const SizedBox(height: 12),
+
+                      // Dialog Action Buttons: Pay Selected & Pay All
+                      if (canEdit)
+                        Row(
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(dialogCtx),
+                              child: const Text('Close'),
+                            ),
+                            const Spacer(),
+                            if (selectedItems.isNotEmpty) ...[
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF0F766E),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                icon: isSaving
+                                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                    : const Icon(Icons.check_box_rounded, size: 16),
+                                label: Text(
+                                  'Pay Selected (${selectedItems.length} • Rs. ${totalSelectedDues.toInt()})',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                                onPressed: isSaving ? null : () => performPayment(itemsToPay: selectedItems),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            if (unpaidItems.isNotEmpty && totalUnpaidDues > 0)
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF059669),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                icon: isSaving
+                                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                    : const Icon(Icons.done_all_rounded, size: 16),
+                                label: Text(
+                                  'Pay All Dues (Rs. ${totalUnpaidDues.toInt()})',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                                onPressed: isSaving ? null : () => performPayment(itemsToPay: unpaidItems),
+                              ),
+                          ],
+                        )
+                      else
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton(
+                            onPressed: () => Navigator.pop(dialogCtx),
+                            child: const Text('Close'),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildMobileStudentSummaryCard(
-      BuildContext context,
-      dynamic s,
-      Map<String, dynamic> fee,
-      MadrassaConfig config,
-      List<dynamic> logs,
-      List<DateTime> holidays,
-      bool isDark) {
+    BuildContext context,
+    dynamic s,
+    Map<String, dynamic> fee,
+    Map<String, dynamic>? payment,
+    MadrassaConfig config,
+    List<dynamic> logs,
+    List<DateTime> holidays,
+    int year,
+    int month,
+    bool isDark,
+  ) {
     final data = s is DocumentSnapshot ? (_asStringMap(s.data()) ?? <String, dynamic>{}) : Map<String, dynamic>.from(s as Map);
     final sId = s is DocumentSnapshot ? s.id : s['id'].toString();
-    final due = ((fee['amountDue'] as num?) ?? 0).toStringAsFixed(0);
+    final due = ((fee['amountDue'] as num?) ?? 0.0).toDouble();
     final savings = ((fee['totalSavings'] as num?) ?? 0).toStringAsFixed(0);
     final p = fee['present'];
     final l = fee['leave'];
@@ -686,6 +1373,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE0E2E7);
     final textPrimary = isDark ? Colors.white : const Color(0xFF1A1C1E);
     final textMuted = isDark ? const Color(0xFF94A3B8) : Colors.grey[600];
+
+    final isPaid = payment != null && payment['status'] == 'paid';
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -738,6 +1427,27 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
+                        if (isPaid) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF10B981).withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.check_circle_rounded, size: 11, color: Color(0xFF059669)),
+                                SizedBox(width: 3),
+                                Text(
+                                  'PAID',
+                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFF059669)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],
@@ -787,8 +1497,20 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(context.l.amountDue, style: context.urduStyle(style: TextStyle(fontSize: 10, color: textMuted))),
-                    const SizedBox(height: 2),
-                    Text('Rs. $due', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD32F2F), fontSize: 14)),
+                    const SizedBox(height: 4),
+                    _buildDuesCell(
+                      context: context,
+                      studentId: sId,
+                      studentName: data['name']?.toString() ?? 'Student',
+                      rollNumber: data['rollNumber']?.toString() ?? '?',
+                      studentData: data,
+                      config: config,
+                      due: due,
+                      payment: payment,
+                      year: year,
+                      month: month,
+                      isDark: isDark,
+                    ),
                   ],
                 ),
               ],
@@ -850,100 +1572,196 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
             color: isDark ? const Color(0xFF0D9488).withValues(alpha: 0.2) : const Color(0xFFE0F2F1),
             borderRadius: BorderRadius.circular(12),
           ),
-          child: Icon(Icons.description_outlined, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080), size: 20),
+          child: Icon(Icons.analytics_rounded, color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080), size: 24),
         ),
         const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                context.l.appName,
-                style: context.urduStyle(
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: isMobile ? 20 : 26,
-                    color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080),
-                    letterSpacing: -0.5,
-                  ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              context.l.monthlyReport,
+              style: context.urduStyle(
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                  color: textPrimary,
                 ),
               ),
-              Text(
-                '$monthName • $workingDays working days • ${students.length} students',
-                style: TextStyle(fontSize: 12, color: textMuted, fontWeight: FontWeight.w500),
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              monthName,
+              style: TextStyle(fontSize: 12, color: textMuted),
+            ),
+          ],
         ),
       ],
     );
 
-    final selectors = Row(
+    final monthPicker = Container(
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: borderColor),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.chevron_left, size: 20),
+            tooltip: 'Previous Month',
+            onPressed: () {
+              setState(() {
+                if (month == 1) {
+                  _selectedYear = year - 1;
+                  _selectedMonth = 12;
+                } else {
+                  _selectedYear = year;
+                  _selectedMonth = month - 1;
+                }
+              });
+            },
+          ),
+          Text(
+            DateFormat('MMM yyyy').format(DateTime(year, month)),
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_right, size: 20),
+            tooltip: 'Next Month',
+            onPressed: () {
+              setState(() {
+                if (month == 12) {
+                  _selectedYear = year + 1;
+                  _selectedMonth = 1;
+                } else {
+                  _selectedYear = year;
+                  _selectedMonth = month + 1;
+                }
+              });
+            },
+          ),
+        ],
+      ),
+    );
+
+    final exportActions = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: isDark ? cardBg : const Color(0xFFF0FDF4),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: isDark ? borderColor : const Color(0xFFDCFCE7)),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              dropdownColor: cardBg,
-              value: year,
-              items: List.generate(5, (i) => 2024 + i).map((y) {
-                return DropdownMenuItem(value: y, child: Text('$y', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textPrimary)));
-              }).toList(),
-              onChanged: (y) {
-                if (y != null) {
-                  setState(() => _selectedYear = y);
-                }
-              },
+        PopupMenuButton<String>(
+          tooltip: 'Export Report',
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          color: isDark ? const Color(0xFF1E293B) : Colors.white,
+          elevation: 4,
+          onSelected: (val) {
+            if (val == 'pdf') {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Preparing bulk PDF report...'), duration: Duration(seconds: 2)),
+              );
+              MadrassaReportHelper.exportMonthlyPdf(config: displayConfig, students: students, logs: logs, holidays: holidays);
+            } else if (val == 'excel') {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Preparing bulk Excel report...'), duration: Duration(seconds: 2)),
+              );
+              MadrassaReportHelper.exportMonthlyExcel(config: displayConfig, students: students, logs: logs, holidays: holidays);
+            }
+          },
+          itemBuilder: (ctx) => [
+            PopupMenuItem(
+              value: 'pdf',
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEF4444).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.picture_as_pdf_rounded, color: Color(0xFFEF4444), size: 18),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    context.l.printPdf,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: isDark ? Colors.white : const Color(0xFF1E293B),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: isDark ? cardBg : const Color(0xFFF0FDF4),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: isDark ? borderColor : const Color(0xFFDCFCE7)),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              dropdownColor: cardBg,
-              value: month,
-              items: List.generate(12, (i) => i + 1).map((m) {
-                final mName = DateFormat('MMMM').format(DateTime(2024, m));
-                return DropdownMenuItem(value: m, child: Text(mName, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textPrimary)));
-              }).toList(),
-              onChanged: (m) {
-                if (m != null) {
-                  setState(() => _selectedMonth = m);
-                }
-              },
+            PopupMenuItem(
+              value: 'excel',
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10B981).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.table_chart_rounded, color: Color(0xFF10B981), size: 18),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    context.l.exportExcel,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: isDark ? Colors.white : const Color(0xFF1E293B),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF008080), Color(0xFF0D9488)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(10),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF008080).withValues(alpha: 0.25),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.file_download_outlined, color: Colors.white, size: 18),
+                const SizedBox(width: 6),
+                Text(
+                  context.isUrdu ? 'رپورٹ برآمد کریں' : 'Export',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.white70, size: 16),
+              ],
             ),
           ),
         ),
         if (!isMobile) ...[
           const SizedBox(width: 8),
-          ElevatedButton.icon(
-            icon: Icon(showDetail ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 14),
-            label: Text(showDetail ? 'Hide Detail' : 'Show Detail', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.teal.shade50,
-              foregroundColor: isDark ? const Color(0xFF2DD4BF) : Colors.teal.shade800,
-              elevation: 0,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: BorderSide(color: isDark ? borderColor : Colors.teal.shade100),
-              ),
+          IconButton(
+            icon: Icon(
+              showDetail ? Icons.unfold_less_rounded : Icons.unfold_more_rounded,
+              color: isDark ? const Color(0xFF2DD4BF) : const Color(0xFF008080),
+              size: 20,
             ),
+            tooltip: showDetail ? 'Compact View' : 'Detailed View',
             onPressed: () {
               setState(() {
                 _userShowDetailOverride = !showDetail;
@@ -954,194 +1772,112 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       ],
     );
 
-    final exportSection = Column(
-      crossAxisAlignment: isMobile ? CrossAxisAlignment.start : CrossAxisAlignment.end,
-      children: [
-        ExportButton(
-          onExcel: () {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Preparing Excel report...')));
-            final activeStudentsForBulk = students.where((s) {
-              final status = s['status']?.toString() ?? 'active';
-              return status != 'hifz_completed' && status != 'archived';
-            }).toList();
-            MadrassaReportHelper.exportMonthlyExcel(config: displayConfig, students: activeStudentsForBulk, logs: logs, holidays: holidays);
-          },
-          onPdf: () {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Preparing PDF report...')));
-            final activeStudentsForBulk = students.where((s) {
-              final status = s['status']?.toString() ?? 'active';
-              return status != 'hifz_completed' && status != 'archived';
-            }).toList();
-            MadrassaReportHelper.exportMonthlyPdf(config: displayConfig, students: activeStudentsForBulk, logs: logs, holidays: holidays);
-          },
-        ),
-        const SizedBox(height: 6),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.folder_open, size: 12, color: Colors.teal),
-            const SizedBox(width: 4),
-            Text('Saved in Downloads', style: context.urduStyle(style: const TextStyle(fontSize: 10, color: Colors.teal, fontWeight: FontWeight.bold))),
-          ],
-        ),
-      ],
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardBg,
+        border: Border(bottom: BorderSide(color: borderColor, width: 1)),
+      ),
+      child: isMobile
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    headerInfo,
+                    exportActions,
+                  ],
+                ),
+                const SizedBox(height: 12),
+                monthPicker,
+              ],
+            )
+          : Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                headerInfo,
+                Row(
+                  children: [
+                    monthPicker,
+                    const SizedBox(width: 12),
+                    exportActions,
+                  ],
+                ),
+              ],
+            ),
     );
+  }
 
-    if (isMobile) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              headerInfo,
-              const SizedBox(height: 16),
-              const Divider(height: 1, color: Color(0xFFEEF2F6)),
-              const SizedBox(height: 16),
-              selectors,
-              const SizedBox(height: 16),
-              exportSection,
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))],
-        ),
-        child: Row(
-          children: [
-            Expanded(child: headerInfo),
-            const SizedBox(width: 16),
-            selectors,
-            const SizedBox(width: 24),
-            exportSection,
-          ],
+  Widget _colCell(Widget child, double width, {bool center = false}) {
+    return SizedBox(
+      width: width,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Align(
+          alignment: center ? Alignment.center : Alignment.centerLeft,
+          child: child,
         ),
       ),
     );
   }
 
-  Future<void> _sendMonthlyWhatsApp(dynamic s, Map<String, dynamic> fee, List<dynamic> monthLogs) async {
+  Widget _tag(String text, Color bg, Color textC) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(4)),
+      child: Text(text, style: TextStyle(color: textC, fontWeight: FontWeight.bold, fontSize: 11)),
+    );
+  }
+
+  void _sendMonthlyWhatsApp(dynamic s, Map<String, dynamic> fee, List<dynamic> monthLogs) async {
     final studentData = s is DocumentSnapshot ? (_asStringMap(s.data()) ?? <String, dynamic>{}) : Map<String, dynamic>.from(s as Map);
+    final phone = (studentData['guardianContact'] ?? studentData['phone'] ?? '').toString().replaceAll(RegExp(r'[^0-9+]'), '');
     final sId = s is DocumentSnapshot ? s.id : s['id'].toString();
 
-    // Get parent phone
-    final String rawPhone = studentData['contactPhone']?.toString() ?? studentData['phone']?.toString() ?? '';
-    if (rawPhone.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Error: Parent contact phone number not provided.')),
-      );
+    if (phone.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No guardian contact found for student')));
+      }
       return;
     }
 
-    // Clean phone number
-    String phone = rawPhone.replaceAll(RegExp(r'[^0-9+]'), '');
-    if (phone.startsWith('0')) {
-      phone = '92${phone.substring(1)}';
-    }
-    phone = phone.replaceAll('+', '');
-    if (!phone.startsWith('92') && phone.length == 10) {
-      phone = '92$phone';
-    }
+    final sortedLogs = List<dynamic>.from(monthLogs)
+      ..sort((a, b) {
+        final da = a is DocumentSnapshot ? a.id : (a['dateKey'] ?? a['id'] ?? '');
+        final db = b is DocumentSnapshot ? b.id : (b['dateKey'] ?? b['id'] ?? '');
+        return da.toString().compareTo(db.toString());
+      });
 
-    // Extract academic updates from month logs
-    final sortedLogs = [...monthLogs]..sort((a, b) {
-      final aId = a is DocumentSnapshot ? a.id : (a as Map)['id']?.toString() ?? '';
-      final bId = b is DocumentSnapshot ? b.id : (b as Map)['id']?.toString() ?? '';
-      return aId.compareTo(bId);
-    });
-    int firstLines = -1;
+    String sabakMsg = 'No updates recorded / کوئی سبق درج نہیں';
+    String sabkiMsg = 'No updates recorded / کوئی سبکی درج نہیں';
+    String manzilMsg = 'No updates recorded / کوئی منزل درج نہیں';
     int lastLines = -1;
-    int latestSabkiPara = 0;
-    String latestSabkiRatio = '';
-    int latestManzilPara = 0;
-    String latestManzilRatio = '';
 
-    for (var logDoc in sortedLogs) {
-      Map<String, dynamic>? logData;
-      if (logDoc is DocumentSnapshot) {
-        logData = _asStringMap(logDoc.data());
-      } else if (logDoc is Map) {
-        logData = Map<String, dynamic>.from(logDoc);
-      }
-      if (logData == null || !logData.containsKey(sId)) continue;
-      final studentLog = _asStringMap(logData[sId]);
-      if (studentLog == null) continue;
-
-      final currentLines = (studentLog['currentLines'] as num?)?.toInt() ?? int.tryParse(studentLog['currentLines']?.toString() ?? '');
-      if (currentLines != null && currentLines > 0) {
-        if (firstLines == -1) firstLines = currentLines;
-        lastLines = currentLines;
-      }
-
-      final sabkiPara = (studentLog['sabkiPara'] as num?)?.toInt() ?? int.tryParse(studentLog['sabkiPara']?.toString() ?? '');
-      final sabkiRatio = studentLog['sabkiRatio']?.toString();
-      if (sabkiPara != null && sabkiPara > 0) {
-        latestSabkiPara = sabkiPara;
-        latestSabkiRatio = sabkiRatio ?? '';
-      } else if (sabkiRatio == 'nahi_sunaya') {
-        latestSabkiPara = 0;
-        latestSabkiRatio = 'nahi_sunaya';
-      }
-
-      final manzilPara = (studentLog['manzilPara'] as num?)?.toInt() ?? int.tryParse(studentLog['manzilPara']?.toString() ?? '');
-      final manzilRatio = studentLog['manzilRatio']?.toString();
-      if (manzilPara != null && manzilPara > 0) {
-        latestManzilPara = manzilPara;
-        latestManzilRatio = manzilRatio ?? '';
-      } else if (manzilRatio == 'nahi_sunaya') {
-        latestManzilPara = 0;
-        latestManzilRatio = 'nahi_sunaya';
+    for (int i = sortedLogs.length - 1; i >= 0; i--) {
+      final doc = sortedLogs[i];
+      final data = doc is DocumentSnapshot ? (_asStringMap(doc.data()) ?? <String, dynamic>{}) : Map<String, dynamic>.from(doc as Map);
+      final sLog = _asStringMap(data[sId]);
+      if (sLog != null) {
+        if (sLog['sabakRatio'] != null && sabakMsg.contains('No updates')) {
+          sabakMsg = 'Ratio: ${sLog['sabakRatio']}' + (sLog['sabakPara'] != null ? ' (Para: ${sLog['sabakPara']})' : '');
+        }
+        if (sLog['sabkiRatio'] != null && sabkiMsg.contains('No updates')) {
+          sabkiMsg = 'Ratio: ${sLog['sabkiRatio']}' + (sLog['sabkiPara'] != null ? ' (Para: ${sLog['sabkiPara']})' : '');
+        }
+        if (sLog['manzilRatio'] != null && manzilMsg.contains('No updates')) {
+          manzilMsg = 'Ratio: ${sLog['manzilRatio']}' + (sLog['manzilPara'] != null ? ' (Para: ${sLog['manzilPara']})' : '');
+        }
+        if (sLog['currentLines'] != null && lastLines == -1) {
+          lastLines = (sLog['currentLines'] as num).toInt();
+        }
       }
     }
 
-    String formatRatio(String? ratio) {
-      if (ratio == '1/4') return 'Pao (1/4) / پاؤ';
-      if (ratio == '1/2') return 'Nisf (1/2) / نصف';
-      if (ratio == '3/4') return 'Salasa (3/4) / ثلاثہ';
-      if (ratio == '1') return 'Para (1) / پارہ';
-      if (ratio == 'nahi_sunaya') return 'Did not recite / نہیں سنایا';
-      return ratio ?? '-';
-    }
-
-    String sabkiMsg = 'No test recorded / کوئی ریکارڈ نہیں';
-    if (latestSabkiPara > 0 && latestSabkiRatio.isNotEmpty && latestSabkiRatio != '-') {
-      sabkiMsg = 'Para $latestSabkiPara (${formatRatio(latestSabkiRatio)}) / پارہ $latestSabkiPara (${formatRatio(latestSabkiRatio)})';
-    } else if (latestSabkiRatio == 'nahi_sunaya') {
-      sabkiMsg = 'Did not recite / نہیں سنایا';
-    }
-
-    String manzilMsg = 'No test recorded / کوئی ریکارڈ نہیں';
-    if (latestManzilPara > 0 && latestManzilRatio.isNotEmpty && latestManzilRatio != '-') {
-      manzilMsg = 'Para $latestManzilPara (${formatRatio(latestManzilRatio)}) / پارہ $latestManzilPara (${formatRatio(latestManzilRatio)})';
-    } else if (latestManzilRatio == 'nahi_sunaya') {
-      manzilMsg = 'Did not recite / نہیں سنایا';
-    }
-
-    int linesMemorized = 0;
-    if (firstLines != -1 && lastLines != -1) {
-      linesMemorized = (lastLines - firstLines).clamp(0, 99999);
-    }
-    String sabakMsg = '$linesMemorized lines / $linesMemorized لائنیں';
     if (lastLines != -1) {
       sabakMsg += ' (Cumulative Line: $lastLines / مجموعی لائن: $lastLines)';
     }
 
-    // Financial/Attendance metrics
     final due = (fee['amountDue'] as num?)?.toStringAsFixed(0) ?? '0';
     final savings = (fee['totalSavings'] as num?)?.toStringAsFixed(0) ?? '0';
     final p = fee['present'] ?? 0;
@@ -1155,10 +1891,14 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     final studentName = studentData['name'] ?? '—';
     final rollNumber = studentData['rollNumber'] ?? '?';
 
+    final payment = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, currentYear, currentMonth, sId);
+    final isPaid = payment != null && payment['status'] == 'paid';
+
     final bool isFeeEnabled = (fee['enableFees'] != false) && LocalStorageService.isMadrassaFeeEnabled(widget.branchId);
 
     final String feeSection = isFeeEnabled
         ? '\n*Financial Summary / مالیاتی رپورٹ:*\n'
+            '• *Status/حیثیت:* ${isPaid ? "PAID / ادا شدہ" : "UNPAID / غیر ادا شدہ"}\n'
             '• *Amount Due/قابل ادا رقم:* Rs. $due\n'
             '• *Total Savings/کل بچت:* Rs. $savings\n'
         : '';
@@ -1178,38 +1918,23 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
         '• *Manzil/منزل:* $manzilMsg\n'
         '$feeSection'
         '--------------------------------------------\n'
-        'JazakAllah Khair! / جزاک اللہ خیر!';
+        'جزاک اللہ خیراً';
 
-    final waUri = Uri.parse('https://wa.me/$phone?text=${Uri.encodeComponent(message)}');
+    final cleanPhone = phone.startsWith('+') ? phone : (phone.startsWith('0') ? '92${phone.substring(1)}' : '92$phone');
+    final uri = Uri.parse('https://wa.me/$cleanPhone?text=${Uri.encodeComponent(message)}');
 
     try {
-      final success = await launchUrl(waUri, mode: LaunchMode.externalApplication);
-      if (!success) {
-        throw 'Could not launch URL';
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not launch WhatsApp')));
+        }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not launch WhatsApp.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error launching WhatsApp: $e')));
       }
     }
-  }
-
-  Widget _colCell(Widget child, double width, {bool center = false}) {
-    return SizedBox(
-      width: width,
-      child: center
-          ? Center(child: child)
-          : Align(alignment: AlignmentDirectional.centerStart, child: child),
-    );
-  }
-
-  Widget _tag(String label, Color bg, Color text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
-      child: Text(label, style: TextStyle(color: text, fontSize: 10, fontWeight: FontWeight.bold)),
-    );
   }
 }

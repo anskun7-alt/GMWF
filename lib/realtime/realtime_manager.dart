@@ -55,7 +55,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb, ValueNotifier;
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -82,6 +82,11 @@ class RealtimeManager {
   bool _isConnected      = false;
   bool _serverIdentified = false;
   bool _flushedOnConnect = false; // [BUG-4] guard against double outbox flush
+
+  // ── LAN Health State (3-up / 2-down Hysteresis) ───────────────────────────
+  static final ValueNotifier<bool> isLanHealthyNotifier = ValueNotifier<bool>(false);
+  int _consecutivePingSuccesses = 0;
+  int _consecutivePingFailures  = 0;
 
   String? _role;
   String? _branchId;
@@ -119,18 +124,48 @@ class RealtimeManager {
     'token_created',
     'save_prescription',
     'prescription_created',
+    'save_stock_item',
+    'token_reversal_approved',
+    'save_proforma_item',
+    'proforma_item_updated',
+    'request_created',
+    'request_approved',
+    'request_rejected',
   };
 
   // ── Back-off schedule (seconds). After the last value, stays at 5 s. ──────
   static const _backoffDelays = [2, 4, 8, 16, 32];
 
-  // ── Public getters ─────────────────────────────────────────────────────────
   Stream<Map<String, dynamic>> get messageStream => _messageController.stream;
-  bool    get isConnected => _isConnected;
-  String? get role        => _role;
-  String? get branchId    => _branchId;
-  String? get username    => _username;
-  String? get clientId    => _clientId;
+  bool    get isConnected          => _isConnected;
+  bool    get isServerIdentified   => _serverIdentified;
+  bool    get isLanHealthy         => isLanHealthyNotifier.value;
+  String? get role                 => _role;
+  String? get branchId             => _branchId;
+  String? get username             => _username;
+  String? get clientId             => _clientId;
+
+  void _recordHealthSuccess() {
+    _consecutivePingSuccesses++;
+    _consecutivePingFailures = 0;
+    if (_consecutivePingSuccesses >= 3 && !isLanHealthyNotifier.value) {
+      isLanHealthyNotifier.value = true;
+      if (kDebugMode) {
+        print('[RealtimeManager] 🟢 LAN is HEALTHY (3 pings confirmed). Dispensary screens will silence live Firestore streams.');
+      }
+    }
+  }
+
+  void _recordHealthFailure() {
+    _consecutivePingFailures++;
+    _consecutivePingSuccesses = 0;
+    if (_consecutivePingFailures >= 2 && isLanHealthyNotifier.value) {
+      isLanHealthyNotifier.value = false;
+      if (kDebugMode) {
+        print('[RealtimeManager] 🔴 LAN is UNHEALTHY (2 consecutive drops). Falling back to Firestore cloud streams.');
+      }
+    }
+  }
 
   static Future<void> initOutbox() async {
     await LocalStorageService.openBoxSafe(_outboxBox);
@@ -270,6 +305,7 @@ class RealtimeManager {
   void _onMessage(dynamic raw) {
     if (raw == null) return;
     _lastPong = DateTime.now();
+    _recordHealthSuccess();
     final msg = raw as String;
 
     if (msg == 'pong' || msg == '{"type":"pong"}') {
@@ -278,19 +314,6 @@ class RealtimeManager {
 
     try {
       final decoded = jsonDecode(msg) as Map<String, dynamic>;
-
-      // Auto-calibrate client clock to authoritative server time
-      final serverEpoch = (decoded['serverEpoch'] as num?)?.toInt() ??
-          (decoded['_serverEpoch'] as num?)?.toInt();
-      if (serverEpoch != null && serverEpoch > 0) {
-        CampSessionService.updateServerOffset(
-            DateTime.fromMillisecondsSinceEpoch(serverEpoch));
-      } else if (decoded['timestamp'] is String) {
-        final st = DateTime.tryParse(decoded['timestamp'] as String);
-        if (st != null) {
-          CampSessionService.updateServerOffset(st);
-        }
-      }
 
       if (decoded['event_type'] == 'pong' || decoded['type'] == 'pong') {
         return;
@@ -362,17 +385,19 @@ class RealtimeManager {
         }
       }
       // Also check failed outbox in case it was already moved there.
-      final failedBox = Hive.box(_failedOutboxBox);
-      for (final key in failedBox.keys.toList()) {
-        final entry = failedBox.get(key);
-        if (entry is Map) {
-          final entryMsgId = (entry['_messageId'] ?? entry['messageId'])?.toString();
-          if (entryMsgId == messageId) {
-            failedBox.delete(key);
-            if (kDebugMode) {
-              print('[RealtimeManager] ACK: removed failed-outbox entry for msgId=$messageId');
+      if (Hive.isBoxOpen(_failedOutboxBox)) {
+        final failedBox = Hive.box(_failedOutboxBox);
+        for (final key in failedBox.keys.toList()) {
+          final entry = failedBox.get(key);
+          if (entry is Map) {
+            final entryMsgId = (entry['_messageId'] ?? entry['messageId'])?.toString();
+            if (entryMsgId == messageId) {
+              failedBox.delete(key);
+              if (kDebugMode) {
+                print('[RealtimeManager] ACK: removed failed-outbox entry for msgId=$messageId');
+              }
+              return;
             }
-            return;
           }
         }
       }
@@ -403,6 +428,7 @@ class RealtimeManager {
       if (_lastPong != null &&
           DateTime.now().difference(_lastPong!).inSeconds > 50) {
         if (kDebugMode) print('[RealtimeManager] Pong timeout → reconnecting');
+        _recordHealthFailure();
         _handleDisconnect();
         return;
       }
@@ -476,6 +502,7 @@ class RealtimeManager {
   // This prevents the >60-second dead window that occurred when the old cap
   // of 5 was hit and ConnectionManager had to re-run full LAN discovery.
   void _handleDisconnect() {
+    _recordHealthFailure();
     _isConnected      = false;
     _serverIdentified = false;
     _flushedOnConnect = false;
@@ -563,7 +590,9 @@ class RealtimeManager {
         outboxEntry['_outboxKey']        = outboxKey;
         outboxEntry['_outboxTimestamp']  = DateTime.now().toIso8601String();
         outboxEntry['_outboxRetryCount'] = 0; // [FAIL-BOX]
-        Hive.box(_outboxBox).put(outboxKey, outboxEntry);
+        if (Hive.isBoxOpen(_outboxBox)) {
+          Hive.box(_outboxBox).put(outboxKey, outboxEntry);
+        }
       } catch (e) {
         if (kDebugMode) print('[RealtimeManager] Outbox write failed: $e');
         outboxKey = null;
@@ -616,6 +645,7 @@ class RealtimeManager {
     if (!_isConnected || !_serverIdentified || _channel == null) return;
 
     try {
+      if (!Hive.isBoxOpen(_outboxBox)) return;
       final box = Hive.box(_outboxBox);
       if (box.isEmpty) return;
 
@@ -693,6 +723,7 @@ class RealtimeManager {
   // ── [FAIL-BOX] Move an entry to the failed outbox ─────────────────────────
   void _moveToFailedOutbox(dynamic originalKey, Map<String, dynamic> item, {String? reason}) {
     try {
+      if (!Hive.isBoxOpen(_failedOutboxBox)) return;
       final failedBox = Hive.box(_failedOutboxBox);
       final failedKey = 'failed_${DateTime.now().microsecondsSinceEpoch}';
       final failedEntry = Map<String, dynamic>.from(item);
@@ -713,6 +744,7 @@ class RealtimeManager {
   // ── [FAIL-BOX] Retry failed outbox on new connection ──────────────────────
   void _retryFailedOutbox() {
     try {
+      if (!Hive.isBoxOpen(_failedOutboxBox) || !Hive.isBoxOpen(_outboxBox)) return;
       final failedBox = Hive.box(_failedOutboxBox);
       if (failedBox.isEmpty) return;
 
@@ -778,14 +810,45 @@ class RealtimeManager {
     }
 
     if (copy['data'] is Map) {
-      final data = copy['data'] as Map;
-      if (data.containsKey('branchId')) {
-        copy['branchId'] ??= data['branchId'];
-        data.remove('branchId');
+      final data = Map<String, dynamic>.from(copy['data'] as Map);
+      if (data.containsKey('branchId') && (copy['branchId'] == null || copy['branchId'].toString().isEmpty)) {
+        copy['branchId'] = data['branchId'];
       }
+      if (copy['branchId'] != null) {
+        data['branchId'] ??= copy['branchId'];
+      }
+      copy['data'] = data;
     }
 
-    return copy;
+    return Map<String, dynamic>.from(_sanitizeForRealtime(copy) as Map);
+  }
+
+  static dynamic _sanitizeForRealtime(dynamic value) {
+    if (value == null) return null;
+    if (value is String || value is num || value is bool) return value;
+    if (value is DateTime) return value.toIso8601String();
+    final typeName = value.runtimeType.toString();
+    if (typeName.contains('Timestamp')) {
+      try {
+        final dt = (value as dynamic).toDate();
+        if (dt is DateTime) return dt.toIso8601String();
+      } catch (_) {}
+      return DateTime.now().toIso8601String();
+    }
+    if (typeName.contains('FieldValue')) {
+      return DateTime.now().toIso8601String();
+    }
+    if (value is Map) {
+      final res = <String, dynamic>{};
+      value.forEach((k, v) {
+        res[k.toString()] = _sanitizeForRealtime(v);
+      });
+      return res;
+    }
+    if (value is Iterable) {
+      return value.map((e) => _sanitizeForRealtime(e)).toList();
+    }
+    return value.toString();
   }
 
   String _generateMessageId() => const Uuid().v4();
@@ -805,14 +868,42 @@ class RealtimeManager {
         ?.toString().toLowerCase().trim();
     final myBranch = _branchId?.toLowerCase().trim();
 
-    if (msgBranch != null && myBranch != null && msgBranch != myBranch) {
+    final isUniversalBranch = msgBranch == null ||
+        msgBranch.isEmpty ||
+        msgBranch == 'all' ||
+        msgBranch == 'default' ||
+        myBranch == null ||
+        myBranch.isEmpty ||
+        myBranch == 'all' ||
+        myBranch == 'default';
+
+    if (!isUniversalBranch && msgBranch != myBranch && !msgBranch.contains(myBranch) && !myBranch.contains(msgBranch)) {
       return;
     }
 
     RealtimeRouter.routeMessage(decoded);
 
     // [IMM-ACK] Send immediate ACK for data-bearing events (tokens, prescriptions).
-    if (type != null && _immAckEvents.contains(type)) {
+    if (type == 'save_stock_item') {
+      // [INV-CATCHUP] Stock items ack by medicineId+version (not serial),
+      // matching the server's seen-tracking key so catch-up/periodic sweeps
+      // know this exact version already reached this client.
+      final medicineId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim() ?? '';
+      final version = (data['updatedAt'] ?? data['lastUpdated'] ?? data['createdAt'] ?? '').toString();
+      if (medicineId.isNotEmpty) {
+        try {
+          final ackMsg = {
+            'event_type': 'ack_stock_items',
+            'items':      [{'medicineId': medicineId, 'version': version}],
+            '_clientId':  _clientId,
+            '_timestamp': DateTime.now().millisecondsSinceEpoch,
+            '_immediate': true,
+          };
+          _channel?.sink.add(jsonEncode(ackMsg));
+          if (kDebugMode) print('[RealtimeManager] ⚡ Immediate stock ACK: $medicineId v=$version');
+        } catch (_) {}
+      }
+    } else if (type != null && _immAckEvents.contains(type)) {
       final serial = data['serial']?.toString().trim() ?? '';
       if (serial.isNotEmpty) {
         // Send immediately inline — do not wait for the 5-second batch.

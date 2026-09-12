@@ -4,6 +4,7 @@
 // Palette  : Deep forest green hero · mint accent · white surfaces
 // Typography: Google Fonts – DM Serif Display (headings) + DM Sans (body)
 //
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,6 +12,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import '../../widgets/gmwf_loading_view.dart';
 import '../donations/donations_screen.dart';
 import '../donations/donation_boxes_screen.dart';
@@ -20,19 +22,35 @@ import '../../services/donations_local_storage.dart';
 import '../../services/donation_box_storage.dart';
 import '../../models/donation_box_models.dart';
 import '../../services/local_storage_service.dart';
+import '../../services/camp_session_service.dart';
 import '../../services/auth_service.dart';
 import '../../utils/formatters.dart';
 import '../settings_page.dart';
+import '../../theme/app_theme.dart';
+import '../../theme/role_theme_provider.dart';
+import '../../realtime/realtime_manager.dart';
+import '../../realtime/realtime_events.dart';
+import '../../services/sync_service.dart';
 
 // ─────────────────────────── Design Tokens ──────────────────────────────────
 
 abstract class _DS {
-  // Surfaces
+  // Surfaces (Static Fallbacks)
   static const Color bg       = Color(0xFFF4F7F6);
   static const Color surface  = Color(0xFFFFFFFF);
   static const Color surface2 = Color(0xFFEDF2F1);
   static const Color border   = Color(0xFFE2ECEA);
   static const Color border2  = Color(0xFFC8D9D6);
+
+  // Dynamic Theme Helpers for Dark Mode
+  static Color getBg(bool isDark) => isDark ? const Color(0xFF0F172A) : const Color(0xFFF4F7F6);
+  static Color getSurface(bool isDark) => isDark ? const Color(0xFF1E293B) : const Color(0xFFFFFFFF);
+  static Color getSurface2(bool isDark) => isDark ? const Color(0xFF243044) : const Color(0xFFEDF2F1);
+  static Color getBorder(bool isDark) => isDark ? const Color(0xFF334155) : const Color(0xFFE2ECEA);
+  static Color getBorder2(bool isDark) => isDark ? const Color(0xFF475569) : const Color(0xFFC8D9D6);
+  static Color getInk(bool isDark) => isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0A0F0E);
+  static Color getInk2(bool isDark) => isDark ? const Color(0xFFCBD5E1) : const Color(0xFF2D3B38);
+  static Color getInk3(bool isDark) => isDark ? const Color(0xFF94A3B8) : const Color(0xFF6B8480);
 
   // Brand greens
   static const Color sage     = Color(0xFF1A3530);
@@ -52,7 +70,7 @@ abstract class _DS {
   static const Color purpleBg = Color(0xFFF0EBFE);
   static const Color purpleDark = Color(0xFF2D1B69);
 
-  // Text
+  // Text (Static Fallbacks)
   static const Color ink      = Color(0xFF0A0F0E);
   static const Color ink2     = Color(0xFF2D3B38);
   static const Color ink3     = Color(0xFF6B8480);
@@ -116,6 +134,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
   late PageController _pageController;
   final _qtyCtrl = TextEditingController(text: '1');
   final double _pricePerToken = 10.0;
+  late String _selectedSession;
 
   bool get _isOfficeBoy {
     final r = (widget.role ?? '').toLowerCase().trim();
@@ -141,6 +160,22 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
   final DateFormat _displayFmt = DateFormat('EEE, dd MMM yyyy');
   late final String today      = _dateFmt.format(DateTime.now());
 
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _dayDocSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _tokensSub;
+
+  Map<String, dynamic> _stats = {
+    'total': 0,
+    'served': 0,
+    'breakfastTotal': 0,
+    'breakfastServed': 0,
+    'lunchTotal': 0,
+    'lunchServed': 0,
+    'dinnerTotal': 0,
+    'dinnerServed': 0,
+    'donations': 0,
+    'donationAmount': 0.0,
+  };
+
   @override
   void initState() {
     super.initState();
@@ -157,12 +192,38 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
     _pulseCtrl.repeat(reverse: true);
 
+    LocalStorageService.initForRoles([
+      if (widget.role != null) widget.role!,
+      'office_boy',
+      'office boy',
+      'dasterkhwaan',
+      'welfare',
+      'donation',
+    ]);
+    DonationsLocalStorage.init().then((_) {
+      if (mounted) setState(() => _recalculateLocalStats());
+    });
+    DonationBoxStorage.init().then((_) {
+      if (mounted) setState(() {});
+    });
+    LocalStorageService.openBoxSafe('dasterkhwaan_tokens').then((_) {
+      if (mounted) {
+        setState(() {
+          _recalculateLocalStats();
+        });
+        _backfillUnsyncedTokens();
+      }
+    });
+
     if (widget.branchId != null) {
       _branchId = widget.branchId;
       _userName = widget.userName ?? 'Office Boy';
+      _recalculateLocalStats();
+      _setupRealtimeListeners();
     } else {
       _loadUserAndBranch();
     }
+    _selectedSession = CampSessionService.resolveDasterkhwaanSession(null, _branchId);
   }
 
   void _goToTab(int index) {
@@ -200,8 +261,19 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     return 'Office Boy';
   }
 
+  String get _effectiveUserId {
+    final activeUser = LocalStorageService.getActiveUserData();
+    final uid = (activeUser['uid'] ?? activeUser['id'] ?? activeUser['userId'] ?? '').toString().trim();
+    if (uid.isNotEmpty) return uid;
+    final fbUid = FirebaseAuth.instance.currentUser?.uid;
+    if (fbUid != null && fbUid.isNotEmpty) return fbUid;
+    return '';
+  }
+
   @override
   void dispose() {
+    _dayDocSub?.cancel();
+    _tokensSub?.cancel();
     _pageController.dispose();
     _fadeCtrl.dispose();
     _pulseCtrl.dispose();
@@ -228,7 +300,10 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
               fallback: data['username'] ?? user.email?.split('@').first ?? 'Office Boy',
             );
             _branchId = branch.id;
+            _selectedSession = CampSessionService.resolveDasterkhwaanSession(null, _branchId);
           });
+          _recalculateLocalStats();
+          _setupRealtimeListeners();
           return;
         }
       }
@@ -237,7 +312,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     }
   }
 
-  DocumentReference get _dayDoc {
+  DocumentReference<Map<String, dynamic>> get _dayDoc {
     if (_branchId == null) throw Exception('Branch not found');
     return FirebaseFirestore.instance
         .collection('branches')
@@ -246,52 +321,88 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         .doc(today);
   }
 
-  Future<Map<String, dynamic>> _getTodayStats() async {
-    if (_branchId == null) return {'total': 0, 'served': 0, 'donations': 0, 'donationAmount': 0.0};
-    
-    // ── 1. Tokens (Firestore) ──────────────────────────────────────────
-    final snap = await _dayDoc.get();
-    final data = snap.data() as Map<String, dynamic>? ?? {};
-    final totalTokens = data['totalTokens'] as int? ?? 0;
-    final servedTokens = data['servedTokens'] as int? ?? 0;
+  CollectionReference<Map<String, dynamic>> get _tokensCol {
+    if (_branchId == null) throw Exception('Branch not found');
+    return _dayDoc.collection('tokens');
+  }
 
-    // ── 2. Donations (Local + Cloud) ───────────────────────────────────
+  Future<Box> _getTokensBox() async {
+    return await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+  }
+
+  void _recalculateLocalStats() {
+    if (_branchId == null) return;
+    int localTotal = 0;
+    int localServed = 0;
+    int localBreakfast = 0, localBreakfastServed = 0;
+    int localLunch = 0, localLunchServed = 0;
+    int localDinner = 0, localDinnerServed = 0;
+
+    try {
+      if (Hive.isBoxOpen('dasterkhwaan_tokens')) {
+        final box = Hive.box('dasterkhwaan_tokens');
+        for (final raw in box.values) {
+          if (raw is Map) {
+            final t = Map<String, dynamic>.from(raw);
+            if (t['dateKey'] == today && t['branchId'] == _branchId) {
+              localTotal++;
+              final isServed = t['served'] == true;
+              if (isServed) localServed++;
+
+              final s = (t['session'] ?? 'lunch').toString().toLowerCase();
+              if (s == 'breakfast') {
+                localBreakfast++;
+                if (isServed) localBreakfastServed++;
+              } else if (s == 'dinner' || s == 'evening' || s == 'night') {
+                localDinner++;
+                if (isServed) localDinnerServed++;
+              } else {
+                localLunch++;
+                if (isServed) localLunchServed++;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[OfficeBoy] Local tokens calculation error: $e');
+    }
+
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    
-    // a. Get Local (Hive) - Instant feedback for 'Pending Upload'
     final localDonations = DonationsLocalStorage.getAllDonations(_branchId!)
-        .where((d) => d.date == today && d.collectorId == uid);
-    
-    // b. Get Cloud (Firestore)
-    final donSnap = await FirebaseFirestore.instance
-        .collection('branches')
-        .doc(_branchId)
-        .collection('donations')
-        .where('branchId', isEqualTo: _branchId)
-        .where('date', isEqualTo: today)
-        .where('collectorId', isEqualTo: uid)
-        .get();
-    
-    // c. Merge and deduplicate (using localId/firestoreId)
-    final Map<String, double> uniqueDonations = {};
+        .where((d) => d.date == today && ((uid.isNotEmpty && d.collectorId == uid) || (_effectiveUserName.isNotEmpty && d.recordedBy.toLowerCase().trim() == _effectiveUserName.toLowerCase().trim()) || (d.collectorId == null || d.collectorId!.isEmpty)));
+    double donTotal = 0.0;
+    int donCount = 0;
     for (var d in localDonations) {
-      uniqueDonations[d.localId] = d.amount;
-    }
-    for (var d in donSnap.docs) {
-      final data = d.data();
-      final lid  = data['localId'] as String? ?? d.id;
-      uniqueDonations[lid] = (data['amount'] as num? ?? 0).toDouble();
+      donTotal += d.amount;
+      donCount++;
     }
 
-    double donTotal = 0;
-    uniqueDonations.forEach((_, amt) => donTotal += amt);
-
-    return {
-      'total': totalTokens,
-      'served': servedTokens,
-      'donations': uniqueDonations.length,
-      'donationAmount': donTotal,
+    final updated = {
+      'total': localTotal > (_stats['total'] as int? ?? 0) ? localTotal : _stats['total'],
+      'served': localServed > (_stats['served'] as int? ?? 0) ? localServed : _stats['served'],
+      'breakfastTotal': localBreakfast > (_stats['breakfastTotal'] as int? ?? 0) ? localBreakfast : _stats['breakfastTotal'],
+      'breakfastServed': localBreakfastServed > (_stats['breakfastServed'] as int? ?? 0) ? localBreakfastServed : _stats['breakfastServed'],
+      'lunchTotal': localLunch > (_stats['lunchTotal'] as int? ?? 0) ? localLunch : _stats['lunchTotal'],
+      'lunchServed': localLunchServed > (_stats['lunchServed'] as int? ?? 0) ? localLunchServed : _stats['lunchServed'],
+      'dinnerTotal': localDinner > (_stats['dinnerTotal'] as int? ?? 0) ? localDinner : _stats['dinnerTotal'],
+      'dinnerServed': localDinnerServed > (_stats['dinnerServed'] as int? ?? 0) ? localDinnerServed : _stats['dinnerServed'],
+      'donations': donCount > (_stats['donations'] as int? ?? 0) ? donCount : _stats['donations'],
+      'donationAmount': donTotal > (_stats['donationAmount'] as double? ?? 0.0) ? donTotal : _stats['donationAmount'],
     };
+
+    if (mounted) {
+      setState(() => _stats = updated);
+    } else {
+      _stats = updated;
+    }
+  }
+
+  void _setupRealtimeListeners() {
+    _dayDocSub?.cancel();
+    _tokensSub?.cancel();
+    if (_branchId == null) return;
+    _recalculateLocalStats();
   }
 
   Future<void> _generateTokens() async {
@@ -306,32 +417,150 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     }
     HapticFeedback.mediumImpact();
 
-    final tokensRef = FirebaseFirestore.instance
-        .collection('branches').doc(_branchId)
-        .collection('dasterkhwaan').doc(today)
-        .collection('tokens');
-    final dayRef = FirebaseFirestore.instance
-        .collection('branches').doc(_branchId)
-        .collection('dasterkhwaan').doc(today);
+    // 1. Calculate next sequential start number
+    int startNum = 1;
+    try {
+      final tokenBox = await _getTokensBox();
+      int maxNum = 0;
+      for (final raw in tokenBox.values) {
+        if (raw is Map) {
+          final t = Map<String, dynamic>.from(raw);
+          if (t['dateKey'] == today && t['branchId'] == _branchId) {
+            final n = (t['number'] as num?)?.toInt() ?? 0;
+            if (n > maxNum) maxNum = n;
+          }
+        }
+      }
+      startNum = maxNum + 1;
+    } catch (_) {}
 
-    final batch = FirebaseFirestore.instance.batch();
-    final snap  = await tokensRef.get();
-    final start = snap.size + 1;
+    final nowIso = DateTime.now().toIso8601String();
+    final tokensList = <Map<String, dynamic>>[];
 
     for (int i = 0; i < quantity; i++) {
-      batch.set(tokensRef.doc(), {
-        'number': start + i,
-        'time':   FieldValue.serverTimestamp(),
+      final num = startNum + i;
+      final tid = 'dst_${_branchId}_${today}_$num';
+      tokensList.add({
+        'id': tid,
+        'localId': tid,
+        'number': num,
+        'time': nowIso,
         'served': false,
+        'session': _selectedSession,
+        'branchId': _branchId,
+        'dateKey': today,
+        'issuedBy': _effectiveUserName,
+        'pricePerToken': _pricePerToken,
+        'syncStatus': 'pending',
       });
     }
-    batch.set(dayRef, {'totalTokens': FieldValue.increment(quantity)},
-        SetOptions(merge: true));
-    await batch.commit();
+
+    // ── STEP 1: Save Locally First (Hive) ──────────────────────────────
+    try {
+      final tokenBox = await _getTokensBox();
+      for (final t in tokensList) {
+        await tokenBox.put(t['id'], t);
+      }
+    } catch (e) {
+      debugPrint('[OfficeBoy] Local token write error: $e');
+    }
+
+    // ── STEP 2: Send to LAN Server (if connected) ──────────────────────
+    final isLanConnected = RealtimeManager().isConnected;
+    if (isLanConnected) {
+      try {
+        RealtimeManager().sendMessage(
+          RealtimeEvents.payload(
+            type: RealtimeEvents.saveOfficeBoyToken,
+            data: {
+              'branchId': _branchId,
+              'dateKey': today,
+              'session': _selectedSession,
+              'quantity': quantity,
+              'tokens': tokensList,
+              'issuedBy': _effectiveUserName,
+              'pricePerToken': _pricePerToken,
+              'timestamp': nowIso,
+            },
+          ),
+        );
+      } catch (e) {
+        debugPrint('[OfficeBoy] Realtime LAN broadcast error: $e');
+      }
+    }
+
+    // ── STEP 3: Always Enqueue for Cloud Sync ───────────────────────────
+    try {
+      await LocalStorageService.enqueueSync({
+        'type': 'save_dasterkhwan_tokens',
+        'branchId': _branchId,
+        'dateKey': today,
+        'data': {
+          'branchId': _branchId,
+          'dateKey': today,
+          'session': _selectedSession,
+          'quantity': quantity,
+          'tokens': tokensList,
+          'issuedBy': _effectiveUserName,
+          'pricePerToken': _pricePerToken,
+        },
+      });
+      SyncService().triggerUpload(force: true);
+    } catch (e) {
+      debugPrint('[OfficeBoy] Sync enqueue error: $e');
+    }
+
+    // ── STEP 4: Direct Firestore write in parallel for instant cloud sync ─────
+    try {
+      final tokensRef = _tokensCol;
+      final dayRef = _dayDoc;
+      final batch = FirebaseFirestore.instance.batch();
+
+      for (final t in tokensList) {
+        final docRef = tokensRef.doc(t['id']);
+        batch.set(docRef, {
+          'number': t['number'],
+          'time': FieldValue.serverTimestamp(),
+          'served': false,
+          'session': t['session'],
+          'issuedBy': t['issuedBy'],
+          'localId': t['id'],
+        }, SetOptions(merge: true));
+      }
+      batch.set(dayRef, {
+        'totalTokens': FieldValue.increment(quantity),
+        'session_${_selectedSession}_total': FieldValue.increment(quantity),
+        'lastUpdated': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      batch.commit().then((_) async {
+        final tokenBox = await _getTokensBox();
+        for (final t in tokensList) {
+          final existing = tokenBox.get(t['id']);
+          if (existing is Map) {
+            final updated = Map<String, dynamic>.from(existing)
+              ..['syncStatus'] = 'synced'
+              ..['synced'] = true;
+            await tokenBox.put(t['id'], updated);
+          }
+        }
+      }).catchError((err) {
+        debugPrint('[OfficeBoy] Direct Firestore write deferred to sync queue: $err');
+      });
+    } catch (_) {}
 
     if (!mounted) return;
+    _recalculateLocalStats();
+    String sessionDisplayName = 'Meal';
+    if (_selectedSession == 'breakfast') {
+      sessionDisplayName = 'Breakfast (ناشتہ)';
+    } else if (_selectedSession == 'lunch') {
+      sessionDisplayName = 'Lunch (دوپہر)';
+    } else if (_selectedSession == 'dinner') {
+      sessionDisplayName = 'Dinner (رات)';
+    }
     _showSnack(
-        '$quantity Token${quantity > 1 ? 's' : ''} Issued · PKR ${(quantity * _pricePerToken).toStringAsFixed(0)}');
+        '$quantity $sessionDisplayName Token${quantity > 1 ? 's' : ''} Issued · PKR ${(quantity * _pricePerToken).toStringAsFixed(0)}');
     _qtyCtrl.text = '1';
     setState(() {});
   }
@@ -342,24 +571,47 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       return;
     }
 
-    final tokensRef = FirebaseFirestore.instance
-        .collection('branches').doc(_branchId)
-        .collection('dasterkhwaan').doc(today)
-        .collection('tokens');
+    // Load unserved tokens from local Hive first
+    final List<Map<String, dynamic>> localUnserved = [];
+    try {
+      final tokenBox = await _getTokensBox();
+      for (final raw in tokenBox.values) {
+        if (raw is Map) {
+          final t = Map<String, dynamic>.from(raw);
+          if (t['dateKey'] == today && t['branchId'] == _branchId && t['served'] != true) {
+            localUnserved.add(t);
+          }
+        }
+      }
+    } catch (_) {}
 
-    final dayRef = FirebaseFirestore.instance
-        .collection('branches').doc(_branchId)
-        .collection('dasterkhwaan').doc(today);
+    // Also fetch cloud docs if reachable to get full list
+    try {
+      final unservedSnap = await _tokensCol.where('served', isEqualTo: false).get().timeout(const Duration(seconds: 2));
+      for (final d in unservedSnap.docs) {
+        final data = d.data();
+        final docId = data['localId'] ?? d.id;
+        if (!localUnserved.any((x) => x['id'] == docId || x['localId'] == docId)) {
+          localUnserved.add({
+            'id': docId,
+            'localId': docId,
+            'number': data['number'] ?? 0,
+            'session': data['session'] ?? 'lunch',
+            'served': false,
+            'branchId': _branchId,
+            'dateKey': today,
+          });
+        }
+      }
+    } catch (_) {}
 
-    final unservedSnap = await tokensRef.where('served', isEqualTo: false).get();
-    final unservedDocs = unservedSnap.docs;
-    unservedDocs.sort((a, b) {
-      final numA = (a.data())['number'] as int? ?? 0;
-      final numB = (b.data())['number'] as int? ?? 0;
+    localUnserved.sort((a, b) {
+      final numA = (a['number'] as num?)?.toInt() ?? 0;
+      final numB = (b['number'] as num?)?.toInt() ?? 0;
       return numB.compareTo(numA);
     });
 
-    if (unservedDocs.isEmpty) {
+    if (localUnserved.isEmpty) {
       _showSnack('No unserved tokens available to reverse today.', isError: true);
       return;
     }
@@ -390,7 +642,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Unintentionally issued tokens can be voided. ${unservedDocs.length} unserved token(s) available today.',
+                  'Unintentionally issued tokens can be voided. ${localUnserved.length} unserved token(s) available today.',
                   style: GoogleFonts.dmSans(fontSize: 13, color: _DS.ink3),
                 ),
                 const SizedBox(height: 16),
@@ -438,7 +690,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
                 child: Text('Cancel', style: GoogleFonts.dmSans(color: _DS.ink3, fontWeight: FontWeight.w600)),
               ),
               ElevatedButton.icon(
-                onPressed: (qty <= 0 || qty > unservedDocs.length)
+                onPressed: (qty <= 0 || qty > localUnserved.length)
                     ? null
                     : () => Navigator.pop(ctx, qty),
                 icon: const Icon(Icons.history_toggle_off_rounded, size: 18),
@@ -459,19 +711,82 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     if (confirmQty == null || confirmQty <= 0) return;
 
     try {
-      final docsToDelete = unservedDocs.take(confirmQty).toList();
-      final batch = FirebaseFirestore.instance.batch();
-      for (final doc in docsToDelete) {
-        batch.delete(doc.reference);
+      final tokensToVoid = localUnserved.take(confirmQty).toList();
+      final voidIds = tokensToVoid.map((t) => t['id']?.toString() ?? t['localId']?.toString() ?? '').where((id) => id.isNotEmpty).toList();
+      final Map<String, int> sessionCounts = {};
+
+      for (final t in tokensToVoid) {
+        final s = (t['session'] ?? 'lunch').toString().toLowerCase();
+        sessionCounts[s] = (sessionCounts[s] ?? 0) + 1;
       }
-      batch.set(
-        dayRef,
-        {'totalTokens': FieldValue.increment(-confirmQty)},
-        SetOptions(merge: true),
-      );
-      await batch.commit();
+
+      // ── STEP 1: Delete from Local Hive First ─────────────────────────
+      try {
+        final tokenBox = await _getTokensBox();
+        for (final tid in voidIds) {
+          await tokenBox.delete(tid);
+        }
+      } catch (_) {}
+
+      // ── STEP 2: Send over LAN (if connected) ────────────────────────
+      final isLanConnected = RealtimeManager().isConnected;
+      if (isLanConnected) {
+        try {
+          RealtimeManager().sendMessage(
+            RealtimeEvents.payload(
+              type: RealtimeEvents.saveOfficeBoyToken,
+              data: {
+                'action': 'reverse',
+                'branchId': _branchId,
+                'dateKey': today,
+                'quantity': confirmQty,
+                'tokenIds': voidIds,
+                'sessionCounts': sessionCounts,
+                'timestamp': DateTime.now().toIso8601String(),
+              },
+            ),
+          );
+        } catch (_) {}
+      }
+
+      // ── STEP 3: Always Enqueue for Cloud Sync ────────────────────────
+      try {
+        await LocalStorageService.enqueueSync({
+          'type': 'reverse_dasterkhwan_tokens',
+          'branchId': _branchId,
+          'dateKey': today,
+          'data': {
+            'branchId': _branchId,
+            'dateKey': today,
+            'quantity': confirmQty,
+            'tokenIds': voidIds,
+            'sessionCounts': sessionCounts,
+          },
+        });
+        SyncService().triggerUpload(force: true);
+      } catch (_) {}
+
+      // ── STEP 4: Direct Firestore deletion in parallel ─────────────────
+      try {
+        final batch = FirebaseFirestore.instance.batch();
+        for (final id in voidIds) {
+          batch.delete(_tokensCol.doc(id));
+        }
+        final Map<String, dynamic> dayUpdate = {
+          'totalTokens': FieldValue.increment(-confirmQty),
+          'lastUpdated': FieldValue.serverTimestamp(),
+        };
+        sessionCounts.forEach((s, cnt) {
+          if (cnt > 0) {
+            dayUpdate['session_${s}_total'] = FieldValue.increment(-cnt);
+          }
+        });
+        batch.set(_dayDoc, dayUpdate, SetOptions(merge: true));
+        batch.commit().catchError((_) {});
+      } catch (_) {}
 
       if (!mounted) return;
+      _recalculateLocalStats();
       _showSnack('Reversed $confirmQty Token${confirmQty > 1 ? "s" : ""} · PKR ${(confirmQty * _pricePerToken).toStringAsFixed(0)} voided', isError: false);
       setState(() {});
     } catch (e) {
@@ -480,6 +795,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
   }
 
   void _showSnack(String msg, {bool isError = false}) {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Row(children: [
         Container(
@@ -502,28 +818,95 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       ]),
       backgroundColor: isError ? _DS.red : _DS.sage,
       behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      duration: const Duration(seconds: 3),
       shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(_DS.r14)),
-      duration: const Duration(seconds: 3),
     ));
+  }
+
+  Future<void> _backfillUnsyncedTokens() async {
+    try {
+      if (_branchId == null || _branchId!.isEmpty) return;
+      final box = await _getTokensBox();
+      final unsynced = <Map<String, dynamic>>[];
+      for (final raw in box.values) {
+        if (raw is Map) {
+          final t = Map<String, dynamic>.from(raw);
+          final tBranch = (t['branchId']?.toString() ?? '').toLowerCase().trim();
+          if (tBranch.isNotEmpty && tBranch != _branchId!.toLowerCase().trim()) continue;
+          if (t['synced'] != true && t['syncStatus'] != 'synced') {
+            unsynced.add(t);
+          }
+        }
+      }
+      if (unsynced.isNotEmpty) {
+        debugPrint('[OfficeBoy] Found ${unsynced.length} unsynced tokens. Enqueuing to sync queue...');
+        final byDate = <String, List<Map<String, dynamic>>>{};
+        for (final t in unsynced) {
+          final dk = (t['dateKey']?.toString() ?? today).trim();
+          byDate.putIfAbsent(dk, () => []).add(t);
+        }
+        for (final entry in byDate.entries) {
+          await LocalStorageService.enqueueSync({
+            'type': 'save_dasterkhwan_tokens',
+            'branchId': _branchId,
+            'dateKey': entry.key,
+            'data': {
+              'branchId': _branchId,
+              'dateKey': entry.key,
+              'quantity': entry.value.length,
+              'tokens': entry.value,
+              'issuedBy': _effectiveUserName,
+              'pricePerToken': _pricePerToken,
+            },
+          });
+        }
+        SyncService().triggerUpload(force: true);
+      }
+    } catch (e) {
+      debugPrint('[OfficeBoy] Token backfill error: $e');
+    }
+  }
+
+  Future<void> _refresh() async {
+    _recalculateLocalStats();
+    if (_branchId != null) {
+      await _backfillUnsyncedTokens();
+      SyncService().triggerUpload(force: true);
+      try {
+        await DonationsLocalStorage.downloadAllDonations(_branchId!);
+        await DonationsLocalStorage.downloadDonors(_branchId!);
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {});
+      _showSnack('Refreshed data & checked cloud sync', isError: false);
+    }
   }
 
   Widget _buildPersistentHeader(BuildContext context) {
     final activeData = LocalStorageService.getActiveUserData();
     final branchName = activeData['branchName'] as String? ?? 'Gujrat';
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-      decoration: const BoxDecoration(
-        color: _DS.sage,
-        boxShadow: [
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF161B22) : _DS.sage,
+        boxShadow: const [
           BoxShadow(
             color: Colors.black12,
             blurRadius: 4,
             offset: Offset(0, 2),
           ),
         ],
+        border: Border(
+          bottom: BorderSide(
+            color: isDark ? const Color(0xFF30363D) : Colors.transparent,
+            width: 1,
+          ),
+        ),
       ),
       child: SafeArea(
         bottom: false,
@@ -598,7 +981,13 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
               ),
             ),
             const SizedBox(width: 8),
+            if (MediaQuery.of(context).size.width >= 380) ...[
+              _RefreshHeaderButton(onTap: _refresh),
+              const SizedBox(width: 6),
+            ],
             _SettingsButton(onTap: _openSettings),
+            const SizedBox(width: 6),
+            _LogoutButton(onTap: _logout),
           ],
         ),
       ),
@@ -612,100 +1001,136 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     final showDonations = _isOfficeBoy;
     final activeNav = showDonations ? _currentNav.clamp(0, 5) : _currentNav.clamp(0, 2);
 
-    final views = [
-      _HomeScreen(
-        userName:        _effectiveUserName,
-        role:            widget.role,
-        branchId:        _branchId,
-        today:           today,
-        getTodayStats:   _getTodayStats,
-        onGoTokens:      () => _goToTab(1),
-        onReverseTokens: _showReverseTokensDialog,
-        onGoDonation:    () => _goToTab(2),
-        onGoDonors:      () => _goToTab(3),
-        onGoBoxes:       () => _goToTab(4),
-        onGoHistory:     () => _goToTab(showDonations ? 5 : 2),
-        onLogout:        _logout,
-        onSettings:      _openSettings,
-        heroFade:        _fadeAnim,
-        pricePerToken:   _pricePerToken,
-        isOfficeBoy:     showDonations,
-      ),
-      _TokensScreen(
-        userName:           _effectiveUserName,
-        branchId:           _branchId,
-        today:              today,
-        displayFormat:      _displayFmt,
-        quantityController: _qtyCtrl,
-        pricePerToken:      _pricePerToken,
-        onGenerate:         _generateTokens,
-        onReverse:          _showReverseTokensDialog,
-        pulseAnim:          _pulseAnim,
-        getTodayStats:      _getTodayStats,
-        onLogout:           _logout,
-        onSettings:         _openSettings,
-        showLogout:         showDonations,
-        onSelectQty: (qty) {
-          _qtyCtrl.text = qty.toString();
-          setState(() {});
-        },
-      ),
-      if (showDonations) ...[
-        // 2 – Donations
-        _branchId == null
-            ? const GmwfLoadingView()
-            : DonationsScreen.embedded(
-                branchId: _branchId!,
-                username: _effectiveUserName,
-                userId:   FirebaseAuth.instance.currentUser?.uid ?? '',
-                role:     UserRole.officeBoy,
-              ),
-        // 3 – Donors
-        _branchId == null
-            ? const GmwfLoadingView()
-            : DonorRegistryWidget(
-                branchId:   _branchId!,
-                branchName: (LocalStorageService.getActiveUserData()['branchName'] as String?) ?? 'Gujrat',
-              ),
-        // 4 – Donation Boxes
-        _branchId == null
-            ? const GmwfLoadingView()
-            : DonationBoxesWidget(
-                branchId:   _branchId!,
-                branchName: 'Dasterkhwaan',
-                username:   _effectiveUserName,
-                role:       UserRole.officeBoy,
-              ),
-      ],
-      // 5 (or 2 for non-office-boy) – History (always last)
-      _branchId == null
-          ? const GmwfLoadingView()
-          : _HistoryScreen(
-              branchId:      _branchId!,
-              dateFmt:       _dateFmt,
-              onLogout:      _logout,
-              onSettings:    _openSettings,
-              showLogout:    showDonations,
-              pricePerToken: _pricePerToken,
-            ),
-    ];
+    return ValueListenableBuilder(
+      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode', 'custom_accent_color']),
+      builder: (context, Box box, child) {
+        final isDark = box.get('is_dark_mode', defaultValue: false) == true;
 
-    return Scaffold(
-      backgroundColor: _DS.bg,
-      body: Column(
-        children: [
-          _buildPersistentHeader(context),
-          Expanded(
-            child: PageView(
-              controller: _pageController,
-              physics: const BouncingScrollPhysics(),
-              onPageChanged: (idx) => setState(() => _currentNav = idx),
-              children: views,
+        final views = [
+          _HomeScreen(
+            userName:        _effectiveUserName,
+            role:            widget.role,
+            branchId:        _branchId,
+            today:           today,
+            todayStats:      _stats,
+            onGoTokens:      () => _goToTab(1),
+            onGoDonation:    () => _goToTab(2),
+            onGoDonors:      () => _goToTab(3),
+            onGoBoxes:       () => _goToTab(4),
+            onGoHistory:     () => _goToTab(showDonations ? 5 : 2),
+            onLogout:        _logout,
+            onSettings:      _openSettings,
+            onRefresh:       _refresh,
+            heroFade:        _fadeAnim,
+            pricePerToken:   _pricePerToken,
+            isOfficeBoy:     showDonations,
+          ),
+          _TokensScreen(
+            userName:           _effectiveUserName,
+            branchId:           _branchId,
+            today:              today,
+            displayFormat:      _displayFmt,
+            quantityController: _qtyCtrl,
+            pricePerToken:      _pricePerToken,
+            selectedSession:    _selectedSession,
+            onSessionChanged:   (s) => setState(() => _selectedSession = s),
+            onGenerate:         _generateTokens,
+            onReverse:          _showReverseTokensDialog,
+            pulseAnim:          _pulseAnim,
+            todayStats:         _stats,
+            onLogout:           _logout,
+            onSettings:         _openSettings,
+            showLogout:         showDonations,
+            onSelectQty: (qty) {
+              _qtyCtrl.text = qty.toString();
+              setState(() {});
+            },
+          ),
+          if (showDonations) ...[
+            // 2 – Donations
+            _branchId == null
+                ? const GmwfLoadingView()
+                : DonationsScreen.embedded(
+                    branchId: _branchId!,
+                    username: _effectiveUserName,
+                    userId:   _effectiveUserId,
+                    role:     UserRole.officeBoy,
+                  ),
+            // 3 – Donors
+            _branchId == null
+                ? const GmwfLoadingView()
+                : DonorRegistryWidget(
+                    branchId:   _branchId!,
+                    branchName: (LocalStorageService.getActiveUserData()['branchName'] as String?) ?? 'Gujrat',
+                  ),
+            // 4 – Donation Boxes
+            _branchId == null
+                ? const GmwfLoadingView()
+                : DonationBoxesWidget(
+                    branchId:   _branchId!,
+                    branchName: 'Dasterkhwaan',
+                    username:   _effectiveUserName,
+                    role:       UserRole.officeBoy,
+                  ),
+          ],
+          // 5 (or 2 for non-office-boy) – History (always last)
+          _branchId == null
+              ? const GmwfLoadingView()
+              : _HistoryScreen(
+                  branchId:      _branchId!,
+                  dateFmt:       _dateFmt,
+                  onLogout:      _logout,
+                  onSettings:    _openSettings,
+                  showLogout:    showDonations,
+                  pricePerToken: _pricePerToken,
+                  username:      _effectiveUserName,
+                ),
+        ];
+
+        return RoleThemeScope(
+          role: RoleTheme.supervisor,
+          child: Theme(
+            data: isDark
+                ? ThemeData.dark().copyWith(
+                    scaffoldBackgroundColor: const Color(0xFF0F172A),
+                    cardColor: const Color(0xFF1E293B),
+                    colorScheme: const ColorScheme.dark(
+                      primary: _DS.mint,
+                      surface: Color(0xFF1E293B),
+                    ),
+                  )
+                : ThemeData.light().copyWith(
+                    scaffoldBackgroundColor: const Color(0xFFF4F7F6),
+                    cardColor: Colors.white,
+                    colorScheme: const ColorScheme.light(
+                      primary: _DS.sage,
+                      surface: Colors.white,
+                    ),
+                  ),
+            child: Scaffold(
+              backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF4F7F6),
+              body: Column(
+                children: [
+                  _buildPersistentHeader(context),
+                  Expanded(
+                    child: PageView(
+                      controller: _pageController,
+                      physics: const BouncingScrollPhysics(),
+                      onPageChanged: (idx) => setState(() => _currentNav = idx),
+                      children: views,
+                    ),
+                  ),
+                ],
+              ),
+              bottomNavigationBar: _buildBottomNav(
+                showDonations: showDonations,
+                currentIndex: activeNav,
+                isDark: isDark,
+              ),
             ),
           ),
-        ],
-      ),
-      bottomNavigationBar: _buildBottomNav(showDonations: showDonations, currentIndex: activeNav),
+        );
+      },
     );
   }
 
@@ -727,6 +1152,26 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
   }
 
   Future<void> _logout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sign Out'),
+        content: const Text('Are you sure you want to sign out?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Sign Out', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
     try {
       await AuthService().signOut();
     } catch (e) {
@@ -737,13 +1182,17 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     }
   }
 
-  Widget _buildBottomNav({required bool showDonations, required int currentIndex}) {
+  Widget _buildBottomNav({
+    required bool showDonations,
+    required int currentIndex,
+    required bool isDark,
+  }) {
     final labels = showDonations
         ? ['Home', 'Tokens', 'Donations', 'Donors', 'Boxes', 'History']
         : ['Home', 'Tokens', 'History'];
     final icons = showDonations
         ? [
-            Icons.space_dashboard_rounded,
+            Icons.home_rounded,
             Icons.confirmation_number_rounded,
             Icons.volunteer_activism_rounded,
             Icons.people_alt_rounded,
@@ -751,15 +1200,27 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
             Icons.history_rounded,
           ]
         : [
-            Icons.space_dashboard_rounded,
+            Icons.home_rounded,
             Icons.confirmation_number_rounded,
             Icons.history_rounded,
           ];
 
     return Container(
       decoration: BoxDecoration(
-        color: _DS.surface,
-        border: Border(top: BorderSide(color: _DS.border, width: 0.5)),
+        color: isDark ? const Color(0xFF161B22) : Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.05),
+            blurRadius: 14,
+            offset: const Offset(0, -2),
+          ),
+        ],
+        border: Border(
+          top: BorderSide(
+            color: isDark ? const Color(0xFF30363D) : _DS.border,
+            width: 1,
+          ),
+        ),
       ),
       child: SafeArea(
         top: false,
@@ -777,8 +1238,13 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
                   curve: Curves.easeOutCubic,
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
-                    color: sel ? _DS.sage : Colors.transparent,
+                    color: sel
+                        ? (isDark ? _DS.mint.withValues(alpha: 0.20) : _DS.sage)
+                        : Colors.transparent,
                     borderRadius: BorderRadius.circular(_DS.r14),
+                    border: sel && isDark
+                        ? Border.all(color: _DS.mint.withValues(alpha: 0.35), width: 0.8)
+                        : null,
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -786,7 +1252,9 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
                       Icon(
                         icons[idx],
                         size: 18,
-                        color: sel ? Colors.white : _DS.ink3,
+                        color: sel
+                            ? (isDark ? _DS.mint : Colors.white)
+                            : (isDark ? const Color(0xFF8B949E) : _DS.ink3),
                       ),
                       if (sel) ...[
                         const SizedBox(width: 4),
@@ -795,7 +1263,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
                           style: GoogleFonts.dmSans(
                             fontSize: 10.5,
                             fontWeight: FontWeight.w700,
-                            color: Colors.white,
+                            color: isDark ? _DS.mint : Colors.white,
                           ),
                         ),
                       ],
@@ -811,17 +1279,14 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// HOME SCREEN
-// ═══════════════════════════════════════════════════════════════════════════
-
 class _HomeScreen extends StatelessWidget {
   final String userName;
   final String? role;
   final String? branchId;
   final String today;
-  final Future<Map<String, dynamic>> Function() getTodayStats;
-  final VoidCallback onGoTokens, onReverseTokens, onGoHistory, onGoDonation, onLogout, onSettings;
+  final Map<String, dynamic> todayStats;
+  final VoidCallback onGoTokens, onGoHistory, onGoDonation, onLogout, onSettings;
+  final Future<void> Function()? onRefresh;
   final VoidCallback? onGoBoxes, onGoDonors;
   final Animation<double> heroFade;
   final double pricePerToken;
@@ -832,15 +1297,15 @@ class _HomeScreen extends StatelessWidget {
     this.role,
     required this.branchId,
     required this.today,
-    required this.getTodayStats,
+    required this.todayStats,
     required this.onGoTokens,
-    required this.onReverseTokens,
     required this.onGoHistory,
     required this.onGoDonation,
     this.onGoDonors,
     this.onGoBoxes,
     required this.onLogout,
     required this.onSettings,
+    this.onRefresh,
     required this.heroFade,
     required this.pricePerToken,
     this.isOfficeBoy = true,
@@ -855,289 +1320,372 @@ class _HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final activeData = LocalStorageService.getActiveUserData();
+    final branchName = activeData['branchName'] as String? ?? 'Gujrat';
+
+    final total  = todayStats['total'] as int? ?? 0;
+    final served = todayStats['served'] as int? ?? 0;
+    final pending = total - served;
+    final revenue = total * pricePerToken;
+    final donCount = todayStats['donations'] as int? ?? 0;
+    final donAmount = (todayStats['donationAmount'] as num? ?? 0.0).toDouble();
+
     return FadeTransition(
       opacity: heroFade,
-      child: CustomScrollView(slivers: [
-
-        // ── Hero header ────────────────────────────────────────────────────
-        SliverToBoxAdapter(
-            child: _HeroHeader(
-              greeting:  _greeting(),
-              userName:  userName,
-              onLogout:  onLogout,
-              onSettings: onSettings,
-              badgeLabel: isOfficeBoy ? 'Office Boy' : (role ?? 'Office'),
-              showLogout: isOfficeBoy,
+      child: RefreshIndicator(
+        onRefresh: onRefresh ?? () async {},
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            // ── 1. Hero Header (Supervisor Theme & Layout) ───────────────────────
+            SliverToBoxAdapter(
+              child: _HeroHeader(
+                greeting:   _greeting(),
+                userName:   userName,
+                branchName: branchName,
+                onLogout:   onLogout,
+                onSettings: onSettings,
+                onRefresh:  onRefresh,
+                badgeLabel: isOfficeBoy ? 'Office Boy' : (role ?? 'Staff'),
+                showLogout: isOfficeBoy,
+              ),
             ),
-          ),
 
-        // ── Today stats row ───────────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: FutureBuilder<Map<String, dynamic>>(
-            future: getTodayStats(),
-            builder: (_, snap) {
-              final total  = snap.data?['total']  ?? 0;
-              final served = snap.data?['served'] ?? 0;
-              final pending = total - served;
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-                child: Row(children: [
-                  _StatChip(value: '$total',   label: 'Issued',  color: _DS.mint),
-                  const SizedBox(width: 8),
-                  _StatChip(value: '$pending', label: 'Pending', color: _DS.amber),
-                  const SizedBox(width: 8),
-                  _StatChip(value: '$served',  label: 'Served',  color: _DS.green),
-                ]),
-              );
-            },
-          ),
-        ),
+            // ── 2. Today's KPI Metric Cards ─────────────────────────────────────
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                child: Row(
+                  children: [
+                    _StatChip(
+                      value: '$total',
+                      label: 'Issued',
+                      color: _DS.mint,
+                      icon: Icons.confirmation_number_rounded,
+                      isDark: isDark,
+                    ),
+                    const SizedBox(width: 8),
+                    _StatChip(
+                      value: '$pending',
+                      label: 'Pending',
+                      color: _DS.amber,
+                      icon: Icons.hourglass_top_rounded,
+                      isDark: isDark,
+                    ),
+                    const SizedBox(width: 8),
+                    _StatChip(
+                      value: '$served',
+                      label: 'Served',
+                      color: _DS.green,
+                      icon: Icons.check_circle_rounded,
+                      isDark: isDark,
+                    ),
+                  ],
+                ),
+              ),
+            ),
 
-        // ── Revenue band ──────────────────────────────────────────────────
-        SliverToBoxAdapter(
-          child: FutureBuilder<Map<String, dynamic>>(
-            future: getTodayStats(),
-            builder: (_, snap) {
-              final total   = snap.data?['total'] ?? 0;
-              final revenue = total * pricePerToken;
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+            // ── 3. Revenue Band (Fintech Glass Scheme) ───────────────────────────
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                 child: _RevenueBand(
                   revenue: revenue,
                   pricePerToken: pricePerToken,
+                  isDark: isDark,
                 ),
-              );
-            },
-          ),
-        ),
-
-        // ── Quick Actions ─────────────────────────────────────────────────
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-          sliver: SliverToBoxAdapter(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _SectionLabel('Quick Actions'),
-                const SizedBox(height: 12),
-                _ActionCardWide(
-                  icon:      Icons.confirmation_number_rounded,
-                  iconColor: _DS.mint,
-                  iconBg:    _DS.mintBg,
-                  title:     'Issue Tokens',
-                  subtitle:  'Generate meal tokens for guests',
-                  urdu:      'کھانے کا ٹوکن جاری کریں',
-                  onTap:     onGoTokens,
-                ),
-                const SizedBox(height: 10),
-                _ActionCardWide(
-                  icon:      Icons.undo_rounded,
-                  iconColor: _DS.red,
-                  iconBg:    _DS.redBg,
-                  title:     'Reverse / Void Tokens',
-                  subtitle:  'Void mistakenly issued food tokens',
-                  urdu:      'ٹوکن واپس / منسوخ کریں',
-                  onTap:     onReverseTokens,
-                ),
-                if (isOfficeBoy) ...[
-                  const SizedBox(height: 10),
-                  _ActionCardWide(
-                    icon:      Icons.volunteer_activism_rounded,
-                    iconColor: _DS.amber,
-                    iconBg:    _DS.amberBg,
-                    title:     'Record Donation',
-                    subtitle:  'Collect and save new contributions',
-                    urdu:      'عطیہ جمع کریں',
-                    onTap:     onGoDonation,
-                  ),
-                  const SizedBox(height: 10),
-                  _ActionCardWide(
-                    icon:      Icons.people_alt_rounded,
-                    iconColor: const Color(0xFF2563EB),
-                    iconBg:    const Color(0xFFEFF6FF),
-                    title:     'Registered Donors',
-                    subtitle:  'View & search donor database',
-                    urdu:      'رجسٹرڈ ڈونرز کی فہرست',
-                    onTap:     onGoDonors ?? () {},
-                  ),
-                  const SizedBox(height: 10),
-                  _ActionCardWide(
-                    icon:      Icons.inventory_2_rounded,
-                    iconColor: const Color(0xFF0D9488),
-                    iconBg:    const Color(0xFFCCFBF1),
-                    title:     'Donation Boxes',
-                    subtitle:  'Track & open collection boxes',
-                    urdu:      'ڈبہ جات کا ریکارڈ',
-                    onTap:     onGoBoxes ?? () {},
-                  ),
-                ],
-                const SizedBox(height: 10),
-                _ActionCardWide(
-                  icon:      Icons.history_rounded,
-                  iconColor: _DS.purple,
-                  iconBg:    _DS.purpleBg,
-                  title:     'History & Reports',
-                  subtitle:  'Daily & monthly tokens, donations & boxes',
-                  urdu:      'روزانہ اور ماہانہ ریکارڈ',
-                  onTap:     onGoHistory,
-                ),
-              ],
-            ),
-          ),
-        ),
-
-        // ── Today's Donation summary (Office Boy role only) ────────────────
-        if (isOfficeBoy)
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
-            sliver: SliverToBoxAdapter(
-              child: FutureBuilder<Map<String, dynamic>>(
-                future: getTodayStats(),
-                builder: (_, snap) {
-                  final count  = snap.data?['donations'] ?? 0;
-                  final amount = snap.data?['donationAmount'] ?? 0.0;
-                  return _DonationSummaryCard(
-                    count: count,
-                    amount: amount,
-                  );
-                },
               ),
             ),
-          ),
 
-        const SliverToBoxAdapter(child: SizedBox(height: 24)),
-      ]),
+            // ── 4. Today's Donation Summary (Office Boy) ────────────────────────
+            if (isOfficeBoy)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                sliver: SliverToBoxAdapter(
+                  child: _DonationSummaryCard(
+                    count: donCount,
+                    amount: donAmount,
+                    isDark: isDark,
+                  ),
+                ),
+              ),
+
+            // ── 5. Quick Actions (Supervisor Module Layout) ──────────────────────
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
+              sliver: SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel('Dasterkhwaan Modules', isDark: isDark),
+                    const SizedBox(height: 10),
+                    _ActionCardWide(
+                      icon:      Icons.confirmation_number_rounded,
+                      iconColor: _DS.mint,
+                      iconBg:    _DS.mintBg,
+                      title:     'Issue Meal Tokens',
+                      subtitle:  'Select session & generate guest tokens',
+                      urdu:      'کھانے کا ٹوکن جاری کریں',
+                      onTap:     onGoTokens,
+                      isDark:    isDark,
+                    ),
+                    if (isOfficeBoy) ...[
+                      const SizedBox(height: 10),
+                      _ActionCardWide(
+                        icon:      Icons.volunteer_activism_rounded,
+                        iconColor: _DS.amber,
+                        iconBg:    _DS.amberBg,
+                        title:     'Record Donation',
+                        subtitle:  'Collect & log charitable contributions',
+                        urdu:      'عطیہ جمع کریں',
+                        onTap:     onGoDonation,
+                        isDark:    isDark,
+                      ),
+                      const SizedBox(height: 10),
+                      _ActionCardWide(
+                        icon:      Icons.people_alt_rounded,
+                        iconColor: const Color(0xFF2563EB),
+                        iconBg:    const Color(0xFFEFF6FF),
+                        title:     'Donors Registry',
+                        subtitle:  'Search database & historic donors',
+                        urdu:      'رجسٹرڈ ڈونرز کی فہرست',
+                        onTap:     onGoDonors ?? () {},
+                        isDark:    isDark,
+                      ),
+                      const SizedBox(height: 10),
+                      _ActionCardWide(
+                        icon:      Icons.inventory_2_rounded,
+                        iconColor: const Color(0xFF0D9488),
+                        iconBg:    const Color(0xFFCCFBF1),
+                        title:     'Donation Boxes',
+                        subtitle:  'Track & open charity collection boxes',
+                        urdu:      'ڈبہ جات کا ریکارڈ',
+                        onTap:     onGoBoxes ?? () {},
+                        isDark:    isDark,
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    _ActionCardWide(
+                      icon:      Icons.history_rounded,
+                      iconColor: _DS.purple,
+                      iconBg:    _DS.purpleBg,
+                      title:     'History & Analytics',
+                      subtitle:  'Daily tokens, revenue & audit trail',
+                      urdu:      'روزانہ اور ماہانہ ریکارڈ',
+                      onTap:     onGoHistory,
+                      isDark:    isDark,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SliverToBoxAdapter(child: SizedBox(height: 36)),
+          ],
+        ),
+      ),
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHARED HEADER WIDGET
+// HERO HEADER (SUPERVISOR STYLE SCHEME)
 // ═══════════════════════════════════════════════════════════════════════════
 
 class _HeroHeader extends StatelessWidget {
   final String greeting;
   final String userName;
-  final VoidCallback onLogout;
-  final VoidCallback onSettings;
+  final String branchName;
+  final VoidCallback? onLogout;
+  final VoidCallback? onSettings;
+  final Future<void> Function()? onRefresh;
   final String badgeLabel;
-  final List<Color> gradientColors;
   final bool showLogout;
 
   const _HeroHeader({
     required this.greeting,
     required this.userName,
-    required this.onLogout,
-    required this.onSettings,
+    this.branchName = 'Karachi',
+    this.onLogout,
+    this.onSettings,
+    this.onRefresh,
     required this.badgeLabel,
-    this.gradientColors = const [_DS.sage, _DS.sage2],
     this.showLogout = true,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: gradientColors,
+          colors: [_DS.sage, _DS.sage2],
         ),
       ),
       child: SafeArea(
         bottom: false,
-        child: Stack(children: [
-          // Decorative circles
-          Positioned(
-            top: -50, right: -30,
-            child: Container(
-              width: 180, height: 180,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _DS.mint.withValues(alpha: 0.06),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -60, left: -20,
-            child: Container(
-              width: 140, height: 140,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _DS.mint.withValues(alpha: 0.04),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 20, 24, 22),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    _UserAvatar(userName: userName, onTap: onSettings),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(greeting,
-                              style: GoogleFonts.dmSans(
-                                  color: Colors.white.withValues(alpha: 0.45),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w400)),
-                          const SizedBox(height: 2),
-                          Text(userName,
-                              style: GoogleFonts.dmSerifDisplay(
-                                  color: Colors.white,
-                                  fontSize: 24,
-                                  height: 1.1)),
-                        ],
-                      ),
-                    ),
-                  ],
+        child: Stack(
+          children: [
+            // Ambient Decorative Glow
+            Positioned(
+              top: -40,
+              right: -20,
+              child: Container(
+                width: 160,
+                height: 160,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _DS.mint.withValues(alpha: 0.08),
                 ),
-                const SizedBox(height: 14),
-                Row(children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: _DS.mint.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(_DS.rPill),
-                      border: Border.all(
-                          color: _DS.mint.withValues(alpha: 0.25), width: 0.5),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Container(
-                        width: 5, height: 5,
-                        decoration: const BoxDecoration(
-                            shape: BoxShape.circle, color: _DS.mint),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(badgeLabel,
-                          style: GoogleFonts.dmSans(
-                              color: _DS.mint,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600)),
-                    ]),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    DateFormat('EEE, dd MMM').format(DateTime.now()),
-                    style: GoogleFonts.dmSans(
-                        color: Colors.white.withValues(alpha: 0.35),
-                        fontSize: 11),
-                  ),
-                ]),
-              ],
+              ),
             ),
-          ),
-        ]),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      _UserAvatar(userName: userName, onTap: onSettings ?? () {}),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              greeting,
+                              style: GoogleFonts.dmSans(
+                                color: Colors.white.withValues(alpha: 0.60),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              userName,
+                              style: GoogleFonts.dmSerifDisplay(
+                                color: Colors.white,
+                                fontSize: 24,
+                                height: 1.15,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      // Role Pill
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _DS.mint.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(_DS.rPill),
+                          border: Border.all(color: _DS.mint.withValues(alpha: 0.35), width: 0.8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: _DS.mint,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              badgeLabel.toUpperCase(),
+                              style: GoogleFonts.dmSans(
+                                color: _DS.mint,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Branch Pill
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(_DS.rPill),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.20), width: 0.8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.storefront_rounded, color: Colors.white70, size: 12),
+                            const SizedBox(width: 4),
+                            Text(
+                              branchName,
+                              style: GoogleFonts.dmSans(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Spacer(),
+                      // Date
+                      Text(
+                        DateFormat('EEE, dd MMM yyyy').format(DateTime.now()),
+                        style: GoogleFonts.dmSans(
+                          color: Colors.white.withValues(alpha: 0.50),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
+}
+
+// ─── Refresh Button ────────────────────────────────────────────────────────
+class _RefreshHeaderButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _RefreshHeaderButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: 'Refresh',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(_DS.r12),
+          child: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(_DS.r12),
+              border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.22), width: 0.5),
+            ),
+            child: const Center(
+              child: Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
+            ),
+          ),
+        ),
+      );
 }
 
 // ─── Settings Button ────────────────────────────────────────────────────────
@@ -1146,26 +1694,52 @@ class _SettingsButton extends StatelessWidget {
   const _SettingsButton({required this.onTap});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(_DS.r12),
-            border: Border.all(
-                color: Colors.white.withValues(alpha: 0.22), width: 0.5),
+  Widget build(BuildContext context) => Tooltip(
+        message: 'Settings',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(_DS.r12),
+          child: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(_DS.r12),
+              border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.22), width: 0.5),
+            ),
+            child: const Center(
+              child: Icon(Icons.settings_outlined, color: Colors.white, size: 18),
+            ),
           ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.settings_outlined,
-                color: Colors.white, size: 15),
-            const SizedBox(width: 4),
-            Text('Settings',
-                style: GoogleFonts.dmSans(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600)),
-          ]),
+        ),
+      );
+}
+
+// ─── Logout Button ──────────────────────────────────────────────────────────
+class _LogoutButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _LogoutButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: 'Logout',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(_DS.r12),
+          child: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Colors.red.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(_DS.r12),
+              border: Border.all(
+                  color: Colors.red.withValues(alpha: 0.35), width: 0.5),
+            ),
+            child: const Center(
+              child: Icon(Icons.logout_rounded, color: Color(0xFFFCA5A5), size: 18),
+            ),
+          ),
         ),
       );
 }
@@ -1238,32 +1812,73 @@ class _UserAvatar extends StatelessWidget {
 class _StatChip extends StatelessWidget {
   final String value, label;
   final Color color;
-  const _StatChip({required this.value, required this.label, required this.color});
+  final IconData icon;
+  final bool isDark;
+
+  const _StatChip({
+    required this.value,
+    required this.label,
+    required this.color,
+    required this.icon,
+    this.isDark = false,
+  });
 
   @override
   Widget build(BuildContext context) => Expanded(
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
           decoration: BoxDecoration(
-            color: _DS.surface,
+            color: isDark ? const Color(0xFF1E293B) : Colors.white,
             borderRadius: BorderRadius.circular(_DS.r16),
-            border: Border.all(color: _DS.border, width: 0.5),
+            border: Border.all(
+              color: isDark ? const Color(0xFF334155) : _DS.border,
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.03),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
-          child: Column(children: [
-            Text(value,
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: isDark ? 0.20 : 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Icon(icon, color: color, size: 14),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    value,
+                    style: GoogleFonts.dmSans(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      color: color,
+                      height: 1.0,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                label.toUpperCase(),
                 style: GoogleFonts.dmSans(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w600,
-                    color: color,
-                    height: 1.0)),
-            const SizedBox(height: 4),
-            Text(label.toUpperCase(),
-                style: GoogleFonts.dmSans(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                    color: _DS.ink3,
-                    letterSpacing: 0.4)),
-          ]),
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w700,
+                  color: isDark ? const Color(0xFF94A3B8) : _DS.ink3,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
         ),
       );
 }
@@ -1271,53 +1886,89 @@ class _StatChip extends StatelessWidget {
 class _DonationSummaryCard extends StatelessWidget {
   final int count;
   final double amount;
-  const _DonationSummaryCard({required this.count, required this.amount});
+  final bool isDark;
+
+  const _DonationSummaryCard({
+    required this.count,
+    required this.amount,
+    this.isDark = false,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: _DS.surface,
+          color: isDark ? const Color(0xFF1E293B) : Colors.white,
           borderRadius: BorderRadius.circular(_DS.r22),
-          border: Border.all(color: _DS.border, width: 0.5),
-        ),
-        child: Row(children: [
-          Container(
-            width: 44, height: 44,
-            decoration: BoxDecoration(
-              color: _DS.amberBg,
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.volunteer_activism_rounded,
-                color: _DS.amber, size: 20),
+          border: Border.all(
+            color: isDark ? const Color(0xFF334155) : _DS.border,
+            width: 1,
           ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.03),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: _DS.amber.withValues(alpha: isDark ? 0.20 : 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.volunteer_activism_rounded, color: _DS.amber, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Today's Donations",
+                    style: GoogleFonts.dmSans(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: isDark ? Colors.white : _DS.ink,
+                    ),
+                  ),
+                  Text(
+                    '$count contributions recorded',
+                    style: GoogleFonts.dmSans(
+                      fontSize: 11,
+                      color: isDark ? const Color(0xFF94A3B8) : _DS.ink3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text("Today's Donations",
-                    style: GoogleFonts.dmSans(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: _DS.ink)),
-                Text('$count contributions recorded',
-                    style: GoogleFonts.dmSans(
-                        fontSize: 11, color: _DS.ink3)),
+                Text(
+                  'PKR ${amount.toStringAsFixed(0)}',
+                  style: GoogleFonts.dmSerifDisplay(
+                    fontSize: 19,
+                    color: _DS.amber,
+                  ),
+                ),
+                Text(
+                  'TOTAL COLLECTED',
+                  style: GoogleFonts.dmSans(
+                    fontSize: 8,
+                    fontWeight: FontWeight.w800,
+                    color: _DS.amber.withValues(alpha: 0.8),
+                    letterSpacing: 0.4,
+                  ),
+                ),
               ],
             ),
-          ),
-          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Text('PKR ${amount.toStringAsFixed(0)}',
-                style: GoogleFonts.dmSerifDisplay(
-                    fontSize: 20, color: _DS.amber)),
-            Text('TOTAL COLLECTED',
-                style: GoogleFonts.dmSans(
-                    fontSize: 8,
-                    fontWeight: FontWeight.w700,
-                    color: _DS.amber.withValues(alpha: 0.6))),
-          ]),
-        ]),
+          ],
+        ),
       );
 }
 
@@ -1325,62 +1976,105 @@ class _DonationSummaryCard extends StatelessWidget {
 
 class _RevenueBand extends StatelessWidget {
   final double revenue, pricePerToken;
-  const _RevenueBand({required this.revenue, required this.pricePerToken});
+  final bool isDark;
+
+  const _RevenueBand({
+    required this.revenue,
+    required this.pricePerToken,
+    this.isDark = false,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
         decoration: BoxDecoration(
-          color: _DS.sage,
-          borderRadius: BorderRadius.circular(_DS.r22),
-        ),
-        child: Stack(children: [
-          Positioned(
-            top: -30, right: -20,
-            child: Container(
-              width: 110, height: 110,
-              decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _DS.mint.withValues(alpha: 0.07)),
-            ),
+          gradient: LinearGradient(
+            colors: isDark
+                ? const [Color(0xFF132A24), Color(0xFF1E3D35)]
+                : const [_DS.sage, _DS.sage2],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text("Today's Revenue",
-                    style: GoogleFonts.dmSans(
-                        color: Colors.white.withValues(alpha: 0.40),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500)),
-                const SizedBox(height: 4),
-                Text('PKR ${revenue.toStringAsFixed(0)}',
-                    style: GoogleFonts.dmSerifDisplay(
-                        color: Colors.white, fontSize: 26)),
-              ]),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 7),
+          borderRadius: BorderRadius.circular(_DS.r22),
+          border: isDark
+              ? Border.all(color: _DS.mint.withValues(alpha: 0.25), width: 1)
+              : null,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.08),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              top: -24,
+              right: -16,
+              child: Container(
+                width: 90,
+                height: 90,
                 decoration: BoxDecoration(
-                  color: _DS.mint.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(_DS.rPill),
-                  border: Border.all(
-                      color: _DS.mint.withValues(alpha: 0.25), width: 0.5),
+                  shape: BoxShape.circle,
+                  color: _DS.mint.withValues(alpha: 0.08),
                 ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.toll_rounded,
-                      color: _DS.mint, size: 13),
-                  const SizedBox(width: 5),
-                  Text('PKR ${pricePerToken.toInt()} / token',
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Today's Food Revenue",
                       style: GoogleFonts.dmSans(
+                        color: Colors.white.withValues(alpha: 0.65),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'PKR ${revenue.toStringAsFixed(0)}',
+                      style: GoogleFonts.dmSerifDisplay(
+                        color: Colors.white,
+                        fontSize: 24,
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _DS.mint.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(_DS.rPill),
+                    border: Border.all(
+                      color: _DS.mint.withValues(alpha: 0.35),
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.toll_rounded, color: _DS.mint, size: 13),
+                      const SizedBox(width: 5),
+                      Text(
+                        'PKR ${pricePerToken.toInt()} / token',
+                        style: GoogleFonts.dmSans(
                           color: _DS.mint,
                           fontSize: 11,
-                          fontWeight: FontWeight.w600)),
-                ]),
-              ),
-            ],
-          ),
-        ]),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       );
 }
 
@@ -1388,16 +2082,19 @@ class _RevenueBand extends StatelessWidget {
 
 class _SectionLabel extends StatelessWidget {
   final String text;
-  const _SectionLabel(this.text);
+  final bool isDark;
+
+  const _SectionLabel(this.text, {this.isDark = false});
 
   @override
   Widget build(BuildContext context) => Text(
         text.toUpperCase(),
         style: GoogleFonts.dmSans(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.3,
-            color: _DS.ink3),
+          fontSize: 10.5,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 1.2,
+          color: isDark ? const Color(0xFF94A3B8) : _DS.ink3,
+        ),
       );
 }
 
@@ -1408,6 +2105,7 @@ class _ActionCardWide extends StatelessWidget {
   final Color iconColor, iconBg;
   final String title, subtitle, urdu;
   final VoidCallback onTap;
+  final bool isDark;
 
   const _ActionCardWide({
     required this.icon,
@@ -1417,6 +2115,7 @@ class _ActionCardWide extends StatelessWidget {
     required this.subtitle,
     required this.urdu,
     required this.onTap,
+    this.isDark = false,
   });
 
   @override
@@ -1426,459 +2125,1492 @@ class _ActionCardWide extends StatelessWidget {
           onTap();
         },
         child: Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           decoration: BoxDecoration(
-            color: _DS.surface,
+            color: isDark ? const Color(0xFF1E293B) : Colors.white,
             borderRadius: BorderRadius.circular(_DS.r22),
-            border: Border.all(color: _DS.border, width: 0.5),
-          ),
-          child: Row(children: [
-            Container(
-              width: 48, height: 48,
-              decoration: BoxDecoration(
-                  color: iconBg,
-                  borderRadius: BorderRadius.circular(_DS.r14)),
-              child: Icon(icon, color: iconColor, size: 22),
+            border: Border.all(
+              color: isDark ? const Color(0xFF334155) : _DS.border,
+              width: 1,
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: GoogleFonts.dmSans(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          color: _DS.ink)),
-                  const SizedBox(height: 2),
-                  Text(subtitle,
-                      style: GoogleFonts.dmSans(
-                          fontSize: 11, color: _DS.ink3)),
-                  const SizedBox(height: 5),
-                  Text(urdu,
-                      style: GoogleFonts.dmSans(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w500,
-                          color: iconColor.withValues(alpha: 0.7))),
-                ],
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.03),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
               ),
-            ),
-            Icon(Icons.arrow_forward_ios_rounded,
-                color: _DS.border2, size: 15),
-          ]),
-        ),
-      );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TOKENS SCREEN
-// ═══════════════════════════════════════════════════════════════════════════
-
-class _TokensScreen extends StatelessWidget {
-  final String userName;
-  final String? branchId, today;
-  final DateFormat displayFormat;
-  final TextEditingController quantityController;
-  final double pricePerToken;
-  final VoidCallback onGenerate, onReverse, onLogout, onSettings;
-  final Animation<double> pulseAnim;
-  final Future<Map<String, dynamic>> Function() getTodayStats;
-  final void Function(int) onSelectQty;
-  final bool showLogout;
-
-  const _TokensScreen({
-    required this.userName,
-    required this.branchId,
-    required this.today,
-    required this.displayFormat,
-    required this.quantityController,
-    required this.pricePerToken,
-    required this.onGenerate,
-    required this.onReverse,
-    required this.pulseAnim,
-    required this.getTodayStats,
-    required this.onSelectQty,
-    required this.onLogout,
-    required this.onSettings,
-    this.showLogout = true,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(children: [
-      // Header
-      Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF1A3530), Color(0xFF243D38)],
-            ),
+            ],
           ),
-          child: SafeArea(
-            bottom: false,
-            child: Stack(children: [
-              Positioned(
-                top: -40, right: -30,
-                child: Container(
-                  width: 150, height: 150,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _DS.mint.withValues(alpha: 0.06),
-                  ),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: isDark ? iconColor.withValues(alpha: 0.18) : iconBg,
+                  borderRadius: BorderRadius.circular(_DS.r14),
                 ),
+                child: Icon(icon, color: iconColor, size: 22),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+              const SizedBox(width: 14),
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Issue Tokens',
-                        style: GoogleFonts.dmSerifDisplay(
-                            color: Colors.white, fontSize: 24)),
-                    const SizedBox(height: 2),
                     Text(
-                      'PKR ${pricePerToken.toInt()} per token · Meal Distribution',
+                      title,
                       style: GoogleFonts.dmSans(
-                          color: Colors.white.withValues(alpha: 0.50),
-                          fontSize: 12),
-                    ),
-                    const SizedBox(height: 20),
-                    // Inline stats strip
-                    FutureBuilder<Map<String, dynamic>>(
-                      future: getTodayStats(),
-                      builder: (_, snap) {
-                        final total  = snap.data?['total']  ?? 0;
-                        final served = snap.data?['served'] ?? 0;
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 14),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(_DS.r16),
-                            border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.12),
-                                width: 0.5),
-                          ),
-                          child: Row(children: [
-                            _InlineStat('Total',   '$total',
-                                Icons.credit_card_rounded,
-                                const Color(0xFF80DEEA)),
-                            _divider(),
-                            _InlineStat('Pending', '${total - served}',
-                                Icons.hourglass_empty_rounded,
-                                const Color(0xFFFFCC80)),
-                            _divider(),
-                            _InlineStat('Served',  '$served',
-                                Icons.check_circle_rounded,
-                                const Color(0xFFA5D6A7)),
-                            _divider(),
-                            _InlineStat('PKR',
-                                '${(total * pricePerToken).toStringAsFixed(0)}',
-                                Icons.account_balance_wallet_rounded,
-                                const Color(0xFFCE93D8)),
-                          ]),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ]),
-          ),
-        ),
-
-      // Body
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Date pill (centered)
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: _DS.mintBg,
-                    borderRadius: BorderRadius.circular(_DS.rPill),
-                    border: Border.all(
-                        color: _DS.mint.withValues(alpha: 0.25), width: 0.5),
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.calendar_today_rounded,
-                        size: 11, color: _DS.mint),
-                    const SizedBox(width: 6),
-                    Text(
-                      displayFormat.format(DateTime.now()),
-                      style: GoogleFonts.dmSans(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: _DS.mint),
-                    ),
-                  ]),
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              // Quick select
-              _SectionLabel('Quick Select'),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [1, 2, 3, 4, 5].map((qty) => _QuickChip(
-                  qty: qty,
-                  selected: quantityController.text == qty.toString(),
-                  onTap: () => onSelectQty(qty),
-                )).toList(),
-              ),
-              const SizedBox(height: 24),
-
-              // Custom quantity
-              _SectionLabel('Custom Quantity'),
-              const SizedBox(height: 10),
-              Container(
-                decoration: BoxDecoration(
-                  color: _DS.surface,
-                  borderRadius: BorderRadius.circular(_DS.r22),
-                  border: Border.all(color: _DS.border, width: 0.5),
-                ),
-                child: TextField(
-                  controller: quantityController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly
-                  ],
-                  style: GoogleFonts.dmSans(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: _DS.ink),
-                  decoration: InputDecoration(
-                    prefixIcon: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: _DS.mintBg,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(Icons.credit_card_rounded,
-                            color: _DS.mint, size: 17),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: isDark ? Colors.white : _DS.ink,
                       ),
                     ),
-                    suffixText: () {
-                      final n = int.tryParse(quantityController.text);
-                      if (n == null || n <= 0) return null;
-                      return '= PKR ${(n * pricePerToken).toStringAsFixed(0)}';
-                    }(),
-                    suffixStyle: GoogleFonts.dmSans(
-                        color: _DS.mint,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13),
-                    hintText: 'Enter quantity…',
-                    hintStyle: GoogleFonts.dmSans(
-                        color: _DS.ink3, fontSize: 14),
-                    filled: true,
-                    fillColor: _DS.surface,
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(_DS.r22),
-                        borderSide: BorderSide.none),
-                    focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(_DS.r22),
-                        borderSide: const BorderSide(
-                            color: _DS.mint, width: 1.5)),
-                    contentPadding: const EdgeInsets.symmetric(
-                        vertical: 20, horizontal: 16),
-                  ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: GoogleFonts.dmSans(
+                        fontSize: 11,
+                        color: isDark ? const Color(0xFF94A3B8) : _DS.ink3,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 28),
-
-              // Issue button
-              _IssueButton(
-                quantityController: quantityController,
-                pricePerToken:      pricePerToken,
-                pulseAnim:          pulseAnim,
-                onPressed:          onGenerate,
-              ),
-              const SizedBox(height: 14),
-
-              // Reverse button
-              _ReverseButton(
-                pricePerToken: pricePerToken,
-                onPressed:     onReverse,
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    urdu,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: isDark ? const Color(0xFF64748B) : _DS.ink3,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    size: 16,
+                    color: isDark ? const Color(0xFF64748B) : _DS.ink3,
+                  ),
+                ],
               ),
             ],
           ),
         ),
-      ),
-    ]);
-  }
-
-  Widget _InlineStat(
-      String label, String val, IconData icon, Color color) =>
-      Expanded(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 14),
-          const SizedBox(height: 4),
-          Text(val,
-              style: GoogleFonts.dmSans(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600)),
-          Text(label,
-              style: GoogleFonts.dmSans(
-                  color: Colors.white.withValues(alpha: 0.40),
-                  fontSize: 9,
-                  fontWeight: FontWeight.w500)),
-        ]),
       );
-
-  Widget _divider() => Container(
-      width: 0.5, height: 34,
-      color: Colors.white.withValues(alpha: 0.12));
 }
 
-// ─── Quick Chip ───────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SCREEN 1: ISSUE FOOD TOKENS
+// ─────────────────────────────────────────────────────────────────────────────
 
-class _QuickChip extends StatelessWidget {
-  final int qty;
-  final bool selected;
-  final VoidCallback onTap;
+class _TokensScreen extends StatefulWidget {
+  final String userName;
+  final String? branchId;
+  final String today;
+  final DateFormat displayFormat;
+  final TextEditingController quantityController;
+  final double pricePerToken;
+  final String selectedSession;
+  final ValueChanged<String> onSessionChanged;
+  final VoidCallback onGenerate;
+  final VoidCallback onReverse;
+  final Animation<double> pulseAnim;
+  final Map<String, dynamic> todayStats;
+  final VoidCallback onLogout;
+  final VoidCallback onSettings;
+  final bool showLogout;
+  final Function(int) onSelectQty;
 
-  const _QuickChip({
-    required this.qty,
-    required this.selected,
-    required this.onTap,
+  const _TokensScreen({
+    required this.userName,
+    this.branchId,
+    required this.today,
+    required this.displayFormat,
+    required this.quantityController,
+    required this.pricePerToken,
+    required this.selectedSession,
+    required this.onSessionChanged,
+    required this.onGenerate,
+    required this.onReverse,
+    required this.pulseAnim,
+    required this.todayStats,
+    required this.onLogout,
+    required this.onSettings,
+    required this.showLogout,
+    required this.onSelectQty,
   });
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: () {
-          HapticFeedback.selectionClick();
-          onTap();
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-          width: 58, height: 60,
-          decoration: BoxDecoration(
-            color: selected ? _DS.sage : _DS.surface,
-            borderRadius: BorderRadius.circular(_DS.r16),
-            border: Border.all(
-              color: selected ? _DS.sage : _DS.border,
-              width: selected ? 1.5 : 0.5,
-            ),
-          ),
-          child: Center(
-            child: Text(
-              '$qty',
-              style: GoogleFonts.dmSans(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                  color: selected ? Colors.white : _DS.ink2),
-            ),
-          ),
-        ),
-      );
+  State<_TokensScreen> createState() => _TokensScreenState();
 }
 
-// ─── Issue Button ─────────────────────────────────────────────────────────────
+class _TokensScreenState extends State<_TokensScreen> {
+  String _feedFilter = 'all';
+  late Future<Box> _tokensBoxFuture;
 
-class _IssueButton extends StatelessWidget {
-  final TextEditingController quantityController;
-  final double pricePerToken;
-  final Animation<double> pulseAnim;
-  final VoidCallback onPressed;
+  @override
+  void initState() {
+    super.initState();
+    _tokensBoxFuture = LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+  }
 
-  const _IssueButton({
-    required this.quantityController,
-    required this.pricePerToken,
-    required this.pulseAnim,
-    required this.onPressed,
-  });
+  Map<String, ({String title, String shortTitle, String urdu, IconData icon, Color color, Color bg, List<Color> gradient})> get _sessionMeta => {
+    'breakfast': (
+      title: 'Breakfast (ناشتہ)',
+      shortTitle: 'Breakfast',
+      urdu: 'ناشتہ کا دسترخوان',
+      icon: Icons.wb_sunny_rounded,
+      color: const Color(0xFFD97706),
+      bg: const Color(0xFFFFFBEB),
+      gradient: const [Color(0xFFB45309), Color(0xFFD97706)],
+    ),
+    'lunch': (
+      title: 'Lunch (دوپہر)',
+      shortTitle: 'Lunch',
+      urdu: 'دوپہر کا دسترخوان',
+      icon: Icons.sunny,
+      color: const Color(0xFF0D9488),
+      bg: const Color(0xFFE6FDF8),
+      gradient: const [Color(0xFF0F766E), Color(0xFF0D9488)],
+    ),
+    'dinner': (
+      title: 'Dinner (رات)',
+      shortTitle: 'Dinner',
+      urdu: 'رات کا دسترخوان',
+      icon: Icons.nightlight_round,
+      color: const Color(0xFF4F46E5),
+      bg: const Color(0xFFEEF2FF),
+      gradient: const [Color(0xFF3730A3), Color(0xFF4F46E5)],
+    ),
+  };
 
   @override
   Widget build(BuildContext context) {
-    final qty   = int.tryParse(quantityController.text) ?? 0;
-    final total = (qty * pricePerToken).toStringAsFixed(0);
-    return ScaleTransition(
-      scale: pulseAnim,
-      child: Container(
-        width: double.infinity, height: 62,
-        decoration: BoxDecoration(
-          color: _DS.sage,
-          borderRadius: BorderRadius.circular(_DS.r22),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(_DS.r22),
-            onTap: onPressed,
-            splashColor: Colors.white.withValues(alpha: 0.08),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 32, height: 32,
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final qty = int.tryParse(widget.quantityController.text) ?? 1;
+    final currentKey = widget.selectedSession.toLowerCase();
+    final meta = _sessionMeta[currentKey] ?? _sessionMeta['dinner']!;
+    final sessionColor = meta.color;
+
+    final total = widget.todayStats['total'] as int? ?? 0;
+    final nextStart = total + 1;
+
+    return Column(
+      children: [
+        // ── Top Header with Session Switcher & Analytics ──
+        _buildHeader(context),
+
+        // ── Scrollable Body ──
+        Expanded(
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 36),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. Tactile Meal Voucher Preview
+                _buildVoucherPreview(
+                  nextStart: nextStart,
+                  qty: qty,
+                  sessionKey: currentKey,
+                  meta: meta,
+                ),
+                const SizedBox(height: 22),
+
+                // 2. Quantity Selection
+                _buildQuantitySection(context, qty),
+                const SizedBox(height: 24),
+
+                // 3. Grand Issue Button
+                ScaleTransition(
+                  scale: widget.pulseAnim,
+                  child: Container(
+                    width: double.infinity,
+                    height: 62,
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.12),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.add_rounded,
-                        size: 17, color: Colors.white),
-                  ),
-                  const SizedBox(width: 14),
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Issue ${quantityController.text.isEmpty ? "0" : quantityController.text}'
-                        ' Token${qty != 1 ? "s" : ""}',
-                        style: GoogleFonts.dmSans(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white),
+                      gradient: LinearGradient(
+                        colors: meta.gradient,
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                      if (qty > 0)
-                        Text('Total · PKR $total',
-                            style: GoogleFonts.dmSans(
-                                fontSize: 11,
-                                color: Colors.white.withValues(alpha: 0.45))),
+                      borderRadius: BorderRadius.circular(_DS.r22),
+                      boxShadow: [
+                        BoxShadow(
+                          color: sessionColor.withValues(alpha: 0.35),
+                          blurRadius: 18,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(_DS.r22),
+                        onTap: widget.onGenerate,
+                        splashColor: Colors.white.withValues(alpha: 0.15),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.18),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  meta.icon,
+                                  size: 18,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Issue $qty ${meta.shortTitle} Token${qty > 1 ? "s" : ""}',
+                                      style: GoogleFonts.dmSans(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.white,
+                                        letterSpacing: -0.2,
+                                      ),
+                                    ),
+                                    Text(
+                                      'PKR ${(qty * widget.pricePerToken).toStringAsFixed(0)} · ${_sessionUrdu(widget.selectedSession)}',
+                                      style: GoogleFonts.dmSans(
+                                        fontSize: 11,
+                                        color: Colors.white.withValues(alpha: 0.85),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 20),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // 4. Reverse Tokens Button
+                _ReverseButton(
+                  pricePerToken: widget.pricePerToken,
+                  onPressed: widget.onReverse,
+                  isDark: isDark,
+                ),
+                const SizedBox(height: 28),
+
+                // 5. Live Feed of Today's Tokens
+                _buildLiveTokensFeed(context),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Header Component ───────────────────────────────────────────────────────
+  Widget _buildHeader(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final conf = CampSessionService.getDasterkhwaanSessionConfig(widget.branchId);
+    final availableSessions = ['breakfast', 'lunch', 'dinner']
+        .where((s) => conf.containsKey(s) && (conf[s] is Map && (conf[s] as Map)['enabled'] == true))
+        .toList();
+
+    final sessionsToRender = availableSessions.isNotEmpty
+        ? availableSessions
+        : ['breakfast', 'lunch', 'dinner'];
+
+    final total = widget.todayStats['total'] as int? ?? 0;
+    final served = widget.todayStats['served'] as int? ?? 0;
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? const [Color(0xFF0F2620), Color(0xFF1E3D35), Color(0xFF162E27)]
+              : const [Color(0xFF143029), Color(0xFF1E433A), Color(0xFF1A3830)],
+        ),
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            top: -30,
+            right: -20,
+            child: Container(
+              width: 140,
+              height: 140,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _DS.mint.withValues(alpha: 0.08),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Title + Price Tag
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    'Food Tokens',
+                                    style: GoogleFonts.dmSerifDisplay(
+                                      color: Colors.white,
+                                      fontSize: 22,
+                                      letterSpacing: -0.3,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: _DS.mint.withValues(alpha: 0.18),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Text(
+                                    'طعام لنگر',
+                                    style: TextStyle(
+                                      color: _DS.mint,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Meal Distribution · ${widget.displayFormat.format(DateTime.now())}',
+                              style: GoogleFonts.dmSans(
+                                color: Colors.white.withValues(alpha: 0.55),
+                                fontSize: 11.5,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+                        ),
+                        child: Text(
+                          'PKR ${widget.pricePerToken.toInt()} / token',
+                          style: GoogleFonts.dmSans(
+                            color: const Color(0xFF80DEEA),
+                            fontWeight: FontWeight.w700,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
                     ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Dynamic Meal Sessions Segmented Switcher
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                    ),
+                    child: Row(
+                      children: sessionsToRender.map((sKey) {
+                        final sConf = conf[sKey] as Map? ?? {};
+                        final openT = sConf['openTime']?.toString() ?? '';
+                        final closeT = sConf['closeTime']?.toString() ?? '';
+                        final timingStr = (openT.isNotEmpty && closeT.isNotEmpty)
+                            ? '$openT - $closeT'
+                            : (sKey == 'breakfast'
+                                ? '07:00 AM - 11:30 AM'
+                                : (sKey == 'lunch' ? '12:00 PM - 04:30 PM' : '05:00 PM - 11:59 PM'));
+
+                        final meta = _sessionMeta[sKey] ?? _sessionMeta['dinner']!;
+
+                        return Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: _buildSessionTab(
+                              id: sKey,
+                              title: meta.title,
+                              timingSubtitle: timingStr,
+                              icon: meta.icon,
+                              activeGradient: meta.gradient,
+                              activeShadow: meta.color,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Multi-Session Analytics Strip
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.07),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.12),
+                        width: 0.8,
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            for (int idx = 0; idx < sessionsToRender.length; idx++) ...[
+                              if (idx > 0)
+                                Container(
+                                  width: 1,
+                                  height: 36,
+                                  color: Colors.white.withValues(alpha: 0.15),
+                                ),
+                              Expanded(
+                                child: Builder(
+                                  builder: (_) {
+                                    final sKey = sessionsToRender[idx];
+                                    final sTotal = widget.todayStats['${sKey}Total'] ?? 0;
+                                    final sServed = widget.todayStats['${sKey}Served'] ?? 0;
+                                    final meta = _sessionMeta[sKey] ?? _sessionMeta['dinner']!;
+                                    return _buildSessionStatColumn(
+                                      title: meta.shortTitle,
+                                      total: sTotal,
+                                      served: sServed,
+                                      accentColor: meta.color,
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Divider(color: Colors.white.withValues(alpha: 0.1), height: 1),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.receipt_long_rounded,
+                                    size: 13, color: Color(0xFF80DEEA)),
+                                const SizedBox(width: 5),
+                                Text(
+                                  'Combined: $total Issued · ${total - served} Pending',
+                                  style: GoogleFonts.dmSans(
+                                    fontSize: 11,
+                                    color: Colors.white.withValues(alpha: 0.75),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Text(
+                              'PKR ${(total * widget.pricePerToken).toStringAsFixed(0)}',
+                              style: GoogleFonts.dmSans(
+                                fontSize: 12,
+                                color: const Color(0xFFA7F3D0),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
             ),
+          ],
+        ),
+      );
+    }
+
+  Widget _buildSessionTab({
+    required String id,
+    required String title,
+    String? timingSubtitle,
+    required IconData icon,
+    required List<Color> activeGradient,
+    required Color activeShadow,
+  }) {
+    final active = widget.selectedSession.toLowerCase() == id.toLowerCase();
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.selectionClick();
+        widget.onSessionChanged(id);
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeInOut,
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        decoration: BoxDecoration(
+          gradient: active ? LinearGradient(colors: activeGradient) : null,
+          color: active ? null : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: activeShadow.withValues(alpha: 0.4),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ]
+              : null,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: 14,
+                  color: active ? Colors.white : Colors.white.withValues(alpha: 0.6),
+                ),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    title,
+                    style: GoogleFonts.dmSans(
+                      fontSize: 11.5,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                      color: active ? Colors.white : Colors.white.withValues(alpha: 0.7),
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (timingSubtitle != null && timingSubtitle.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                timingSubtitle,
+                style: GoogleFonts.dmSans(
+                  fontSize: 9.5,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                  color: active ? Colors.white.withValues(alpha: 0.9) : Colors.white.withValues(alpha: 0.45),
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSessionStatColumn({
+    required String title,
+    required int total,
+    required int served,
+    required Color accentColor,
+  }) {
+    final pending = total - served;
+    return Column(
+      children: [
+        Text(
+          title,
+          style: GoogleFonts.dmSans(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: accentColor,
+          ),
+          overflow: TextOverflow.ellipsis,
+        ),
+        const SizedBox(height: 3),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              '$total',
+              style: GoogleFonts.dmSans(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 3),
+            Text(
+              'issued',
+              style: GoogleFonts.dmSans(
+                fontSize: 9.5,
+                color: Colors.white.withValues(alpha: 0.4),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.amber.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                '$pending wait',
+                style: GoogleFonts.dmSans(
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.amberAccent,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Tactile Meal Voucher Preview ───────────────────────────────────────────
+  Widget _buildVoucherPreview({
+    required int nextStart,
+    required int qty,
+    required String sessionKey,
+    required ({String title, String shortTitle, String urdu, IconData icon, Color color, Color bg, List<Color> gradient}) meta,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final endNum = nextStart + qty - 1;
+    final rangeText = qty == 1 ? 'Token #$nextStart' : 'Tokens #$nextStart → #$endNum';
+    final totalPKR = (qty * widget.pricePerToken).toStringAsFixed(0);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _DS.getSurface(isDark),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: meta.color.withValues(alpha: isDark ? 0.15 : 0.08),
+            blurRadius: 20,
+            offset: const Offset(0, 6),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+        border: Border.all(color: _DS.getBorder(isDark), width: 1),
+      ),
+      child: Column(
+        children: [
+          // Top portion of voucher
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: isDark ? meta.color.withValues(alpha: 0.15) : meta.bg,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(
+                            meta.icon,
+                            size: 16,
+                            color: meta.color,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'GULAB MEHMOOD WELFARE',
+                              style: GoogleFonts.dmSans(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.8,
+                                color: _DS.getInk3(isDark),
+                              ),
+                            ),
+                            Text(
+                              'Dasterkhwaan Meal Voucher',
+                              style: GoogleFonts.dmSans(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: _DS.getInk(isDark),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: isDark ? meta.color.withValues(alpha: 0.15) : meta.bg,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: meta.color.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: meta.color,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            '${meta.shortTitle.toUpperCase()} SESSION',
+                            style: GoogleFonts.dmSans(
+                              fontSize: 9,
+                              fontWeight: FontWeight.w800,
+                              color: meta.color,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'NEXT IN QUEUE',
+                          style: GoogleFonts.dmSans(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: _DS.getInk3(isDark),
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          rangeText,
+                          style: GoogleFonts.dmSans(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w900,
+                            color: _DS.getInk(isDark),
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: _DS.getSurface2(isDark),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        '$qty Meal${qty > 1 ? "s" : ""}',
+                        style: GoogleFonts.dmSans(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: _DS.getInk2(isDark),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Perforated divider with circular punch cutouts
+          _buildPerforatedDivider(context),
+
+          // Bottom stub of voucher
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.confirmation_num_outlined, size: 16, color: _DS.getInk3(isDark)),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$qty × PKR ${widget.pricePerToken.toInt()} = ',
+                      style: GoogleFonts.dmSans(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: _DS.getInk3(isDark),
+                      ),
+                    ),
+                    Text(
+                      'PKR $totalPKR',
+                      style: GoogleFonts.dmSans(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: meta.color,
+                      ),
+                    ),
+                  ],
+                ),
+                // Barcode simulation lines
+                Row(
+                  children: [1, 3, 2, 4, 1, 3, 2, 1, 3].map((w) {
+                    return Container(
+                      margin: const EdgeInsets.only(left: 2),
+                      width: w.toDouble(),
+                      height: 18,
+                      color: _DS.getBorder2(isDark),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPerforatedDivider(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return SizedBox(
+      height: 20,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Dashed line
+          Positioned(
+            left: 16,
+            right: 16,
+            child: CustomPaint(
+              size: const Size(double.infinity, 1),
+              painter: _DashedLinePainter(color: _DS.getBorder2(isDark)),
+            ),
+          ),
+          // Left cutout
+          Positioned(
+            left: -10,
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                color: _DS.getBg(isDark),
+                shape: BoxShape.circle,
+                border: Border.all(color: _DS.getBorder(isDark), width: 1),
+              ),
+            ),
+          ),
+          // Right cutout
+          Positioned(
+            right: -10,
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                color: _DS.getBg(isDark),
+                shape: BoxShape.circle,
+                border: Border.all(color: _DS.getBorder(isDark), width: 1),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Quantity Section ───────────────────────────────────────────────────────
+  Widget _buildQuantitySection(BuildContext context, int currentQty) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _SectionLabel('Token Quantity', isDark: isDark),
+            Text(
+              '= PKR ${(currentQty * widget.pricePerToken).toStringAsFixed(0)}',
+              style: GoogleFonts.dmSans(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: _DS.mint,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // Tactile Stepper Box
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: _DS.getSurface(isDark),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _DS.getBorder(isDark)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.02),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              // Minus button
+              GestureDetector(
+                onTap: () {
+                  if (currentQty > 1) {
+                    HapticFeedback.selectionClick();
+                    widget.onSelectQty(currentQty - 1);
+                  }
+                },
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: currentQty > 1 ? _DS.getSurface2(isDark) : _DS.getSurface2(isDark).withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.remove_rounded,
+                    color: currentQty > 1 ? _DS.getInk2(isDark) : _DS.getInk3(isDark).withValues(alpha: 0.4),
+                    size: 22,
+                  ),
+                ),
+              ),
+
+              // Value display with meal counter
+              Column(
+                children: [
+                  Text(
+                    '$currentQty',
+                    style: GoogleFonts.dmSans(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                      color: _DS.getInk(isDark),
+                      letterSpacing: -1,
+                    ),
+                  ),
+                  Text(
+                    '${currentQty == 1 ? "1 Meal" : "$currentQty Meals"} · PKR ${(currentQty * widget.pricePerToken).toStringAsFixed(0)}',
+                    style: GoogleFonts.dmSans(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: _DS.mint,
+                    ),
+                  ),
+                ],
+              ),
+
+              // Plus button
+              GestureDetector(
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  widget.onSelectQty(currentQty + 1);
+                },
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: _DS.mint.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.add_rounded,
+                    color: _DS.mint,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+
+        // Quick Presets Pills
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          child: Row(
+            children: [1, 2, 3, 5, 10, 20, 50].map((preset) {
+              final selected = currentQty == preset;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    widget.onSelectQty(preset);
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? (isDark ? _DS.mint : _DS.sage)
+                          : _DS.getSurface(isDark),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected
+                            ? (isDark ? _DS.mint : _DS.sage)
+                            : _DS.getBorder(isDark),
+                        width: selected ? 1.5 : 1,
+                      ),
+                      boxShadow: selected
+                          ? [
+                              BoxShadow(
+                                color: (isDark ? _DS.mint : _DS.sage).withValues(alpha: 0.25),
+                                blurRadius: 6,
+                                offset: const Offset(0, 2),
+                              )
+                            ]
+                          : null,
+                    ),
+                    child: Text(
+                      '$preset',
+                      style: GoogleFonts.dmSans(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: selected ? (isDark ? const Color(0xFF0F172A) : Colors.white) : _DS.getInk(isDark),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 14),
+
+        // Custom Quantity Input Box
+        Container(
+          decoration: BoxDecoration(
+            color: _DS.getSurface(isDark),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _DS.getBorder(isDark)),
+          ),
+          child: TextField(
+            controller: widget.quantityController,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            onChanged: (_) => setState(() {}),
+            style: GoogleFonts.dmSans(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: _DS.getInk(isDark),
+            ),
+            decoration: InputDecoration(
+              prefixIcon: Icon(Icons.dialpad_rounded, color: _DS.getInk3(isDark), size: 20),
+              suffixText: '= PKR ${(currentQty * widget.pricePerToken).toStringAsFixed(0)}',
+              suffixStyle: GoogleFonts.dmSans(
+                color: _DS.mint,
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+              hintText: 'Enter custom token quantity…',
+              hintStyle: GoogleFonts.dmSans(fontSize: 13, color: _DS.getInk3(isDark)),
+              filled: true,
+              fillColor: _DS.getSurface(isDark),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Live Recent Tokens Feed ────────────────────────────────────────────────
+  Widget _buildLiveTokensFeed(BuildContext context) {
+    if (widget.branchId == null) return const SizedBox.shrink();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final conf = CampSessionService.getDasterkhwaanSessionConfig(widget.branchId);
+    final availableSessions = ['breakfast', 'lunch', 'dinner']
+        .where((s) => conf.containsKey(s) && (conf[s] is Map && (conf[s] as Map)['enabled'] == true))
+        .toList();
+
+    final sessionsToRender = availableSessions.isNotEmpty
+        ? availableSessions
+        : ['breakfast', 'lunch', 'dinner'];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _SectionLabel("Today's Issued Tokens", isDark: isDark),
+                const SizedBox(height: 2),
+                Text(
+                  'Live feed of meal tickets for today',
+                  style: GoogleFonts.dmSans(fontSize: 11, color: _DS.getInk3(isDark)),
+                ),
+              ],
+            ),
+            // Filter Pills
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                children: [
+                  _filterChip('all', 'All', isDark),
+                  ...sessionsToRender.map((sKey) {
+                    final meta = _sessionMeta[sKey] ?? _sessionMeta['dinner']!;
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: _filterChip(sKey, meta.shortTitle, isDark),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        FutureBuilder<Box>(
+          future: Hive.isBoxOpen('dasterkhwaan_tokens') ? Future.value(Hive.box('dasterkhwaan_tokens')) : _tokensBoxFuture,
+          builder: (context, boxSnap) {
+            if (!boxSnap.hasData) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            }
+            final box = boxSnap.data!;
+            return ValueListenableBuilder(
+              valueListenable: box.listenable(),
+              builder: (ctx, Box box, _) {
+                final List<Map<String, dynamic>> tokenList = [];
+                for (final raw in box.values) {
+                  if (raw is Map) {
+                    final t = Map<String, dynamic>.from(raw);
+                    if (t['dateKey'] == widget.today && t['branchId'] == widget.branchId) {
+                      String rawSession = (t['session'] as String? ?? 'lunch').toLowerCase();
+                      if (rawSession == 'evening' || rawSession == 'night') {
+                        rawSession = 'dinner';
+                      } else if (rawSession == 'morning') {
+                        rawSession = 'lunch';
+                      }
+                      DateTime? tTime;
+                      if (t['time'] is String) {
+                        tTime = DateTime.tryParse(t['time']);
+                      } else if (t['timestamp'] is String) {
+                        tTime = DateTime.tryParse(t['timestamp']);
+                      }
+                      tokenList.add({
+                        'id': t['id'] ?? t['localId'] ?? '',
+                        'number': (t['number'] as num?)?.toInt() ?? 0,
+                        'served': t['served'] == true,
+                        'session': rawSession,
+                        'time': tTime,
+                      });
+                    }
+                  }
+                }
+
+                var filtered = tokenList;
+                if (_feedFilter != 'all') {
+                  filtered = filtered.where((t) => t['session'] == _feedFilter).toList();
+                }
+
+                filtered.sort((a, b) => (b['number'] as int).compareTo(a['number'] as int));
+
+                if (filtered.isEmpty) {
+                  return Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 20),
+                    decoration: BoxDecoration(
+                      color: _DS.getSurface(isDark),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: _DS.getBorder(isDark)),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(Icons.confirmation_number_outlined,
+                            size: 40, color: _DS.getInk3(isDark).withValues(alpha: 0.3)),
+                        const SizedBox(height: 8),
+                        Text(
+                          'No tokens issued today yet',
+                          style: GoogleFonts.dmSans(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: _DS.getInk(isDark),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Select session and quantity above to issue tickets',
+                          style: GoogleFonts.dmSans(
+                            fontSize: 11,
+                            color: _DS.getInk3(isDark),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                final displayList = filtered.take(20).toList();
+
+                return ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: displayList.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 8),
+                  itemBuilder: (_, idx) {
+                    final item = displayList[idx];
+                    final number = item['number'] as int;
+                    final served = item['served'] as bool;
+                    final session = item['session'] as String;
+                    final time = item['time'] as DateTime?;
+                    final meta = _sessionMeta[session] ?? _sessionMeta['dinner']!;
+
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _DS.getSurface(isDark),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: _DS.getBorder(isDark)),
+                      ),
+                      child: Row(
+                        children: [
+                          // Token Number Pill
+                          Container(
+                            width: 44,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: isDark ? meta.color.withValues(alpha: 0.18) : meta.bg,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: meta.color.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            child: Center(
+                              child: Text(
+                                '#$number',
+                                style: GoogleFonts.dmSans(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                  color: meta.color,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+
+                          // Session and time
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      meta.icon,
+                                      size: 12,
+                                      color: meta.color,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${meta.shortTitle} Session (${_sessionUrdu(session)})',
+                                      style: GoogleFonts.dmSans(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: _DS.getInk(isDark),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  time != null
+                                      ? DateFormat('hh:mm a').format(time)
+                                      : 'Today',
+                                  style: GoogleFonts.dmSans(
+                                    fontSize: 11,
+                                    color: _DS.getInk3(isDark),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          // Served / Waiting status badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: served
+                                  ? (isDark ? _DS.green.withValues(alpha: 0.2) : _DS.greenBg)
+                                  : (isDark ? _DS.amber.withValues(alpha: 0.2) : _DS.amberBg),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: served ? _DS.green.withValues(alpha: 0.3) : _DS.amber.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  served ? Icons.check_circle_rounded : Icons.hourglass_top_rounded,
+                                  size: 12,
+                                  color: served ? _DS.green : _DS.amber,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  served ? 'Served' : 'Waiting',
+                                  style: GoogleFonts.dmSans(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: served ? _DS.green : _DS.amber,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _filterChip(String filterKey, String label, bool isDark) {
+    final sel = _feedFilter == filterKey;
+    return GestureDetector(
+      onTap: () => setState(() => _feedFilter = filterKey),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: sel ? (isDark ? _DS.mint : _DS.sage) : _DS.getSurface2(isDark),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.dmSans(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            color: sel ? (isDark ? const Color(0xFF0F172A) : Colors.white) : _DS.getInk3(isDark),
           ),
         ),
       ),
     );
   }
+
+  String _sessionUrdu(String session) {
+    final s = session.toLowerCase();
+    if (s == 'breakfast') return 'ناشتہ کا دسترخوان';
+    if (s == 'lunch' || s == 'morning') return 'دوپہر کا دسترخوان';
+    return 'رات کا دسترخوان';
+  }
 }
+
+// ─── Perforated Dashed Line Painter ──────────────────────────────────────────
+
+class _DashedLinePainter extends CustomPainter {
+  final Color color;
+  _DashedLinePainter({this.color = const Color(0xFFCBD5E1)});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    double startX = 0;
+    const dashWidth = 5.0;
+    const dashSpace = 4.0;
+    while (startX < size.width) {
+      canvas.drawLine(Offset(startX, 0), Offset(startX + dashWidth, 0), paint);
+      startX += dashWidth + dashSpace;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// ─── Reverse Button ──────────────────────────────────────────────────────────
 
 class _ReverseButton extends StatelessWidget {
   final double pricePerToken;
   final VoidCallback onPressed;
+  final bool isDark;
 
   const _ReverseButton({
     required this.pricePerToken,
     required this.onPressed,
+    this.isDark = false,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      height: 54,
+      height: 50,
       decoration: BoxDecoration(
-        color: _DS.redBg,
+        color: isDark ? _DS.red.withValues(alpha: 0.15) : _DS.redBg,
         borderRadius: BorderRadius.circular(_DS.r22),
-        border: Border.all(color: _DS.red.withValues(alpha: 0.3), width: 1),
+        border: Border.all(color: _DS.red.withValues(alpha: isDark ? 0.35 : 0.25), width: 1),
       ),
       child: Material(
         color: Colors.transparent,
@@ -1890,14 +3622,14 @@ class _ReverseButton extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.undo_rounded, size: 18, color: _DS.red),
-                const SizedBox(width: 10),
+                Icon(Icons.undo_rounded, size: 17, color: isDark ? const Color(0xFFF87171) : _DS.red),
+                const SizedBox(width: 8),
                 Text(
-                  'Reverse / Void Tokens',
+                  'Reverse / Void Issued Tokens',
                   style: GoogleFonts.dmSans(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: _DS.red,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: isDark ? const Color(0xFFF87171) : _DS.red,
                   ),
                 ),
               ],
@@ -1920,6 +3652,7 @@ class _HistoryScreen extends StatefulWidget {
   final VoidCallback onSettings;
   final double pricePerToken;
   final bool showLogout;
+  final String username;
 
   const _HistoryScreen({
     required this.branchId,
@@ -1928,6 +3661,7 @@ class _HistoryScreen extends StatefulWidget {
     required this.onSettings,
     required this.pricePerToken,
     this.showLogout = true,
+    this.username = '',
   });
 
   @override
@@ -1939,142 +3673,197 @@ class _HistoryScreenState extends State<_HistoryScreen> {
   bool _isMonthView = false;
 
   Future<Map<String, dynamic>> _fetchHistoryData() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    await DonationsLocalStorage.init();
+    await DonationBoxStorage.init();
+    final box = await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
+    final activeUser = LocalStorageService.getActiveUserData();
+    final uid = (activeUser['uid'] ?? activeUser['id'] ?? activeUser['userId'] ?? FirebaseAuth.instance.currentUser?.uid ?? '').toString().trim();
     final dateKey = widget.dateFmt.format(_selectedDate);
     final monthKey = '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}';
+    final myUsername = widget.username.toLowerCase().trim();
 
     int totalTokens = 0;
     int servedTokens = 0;
     final List<Map<String, dynamic>> tokenList = [];
     final List<Map<String, dynamic>> donationList = [];
+    final Set<String> seenTokenIds = {};
     final Set<String> seenDonationIds = {};
 
-    if (!_isMonthView) {
-      // ── Day View ──
-      final tokensSnap = await FirebaseFirestore.instance
-          .collection('branches').doc(widget.branchId)
-          .collection('dasterkhwaan').doc(dateKey)
-          .collection('tokens')
-          .get();
+    // 1. Read tokens from Local Hive Box first (Instant offline access)
+    try {
+      for (final raw in box.values) {
+        if (raw is Map) {
+          final t = Map<String, dynamic>.from(raw);
+          final tDate = t['dateKey']?.toString() ?? '';
+          final tBranch = t['branchId']?.toString() ?? '';
+          final matchesBranch = tBranch.isEmpty || tBranch == widget.branchId;
+          final matchesDate = _isMonthView ? tDate.startsWith(monthKey) : tDate == dateKey;
 
-      totalTokens = tokensSnap.docs.length;
-      servedTokens = tokensSnap.docs
-          .where((d) => (d.data())['served'] == true)
-          .length;
+          if (matchesBranch && matchesDate) {
+            final tId = t['id']?.toString() ?? '${tDate}_${t['number']}';
+            if (seenTokenIds.add(tId)) {
+              totalTokens++;
+              final isServed = t['served'] == true;
+              if (isServed) servedTokens++;
 
-      tokenList.addAll(tokensSnap.docs.map((d) {
-        final data = d.data();
-        return {
-          'number':     data['number'] as int? ?? 0,
-          'served':     data['served'] as bool? ?? false,
-          'time':       (data['time'] as Timestamp?)?.toDate(),
-          'servedTime': (data['servedTime'] as Timestamp?)?.toDate(),
-        };
-      }).toList()
-        ..sort((a, b) => (a['number'] as int).compareTo(b['number'] as int)));
+              if (!_isMonthView) {
+                DateTime? tTime;
+                if (t['time'] is DateTime) {
+                  tTime = t['time'];
+                } else if (t['time'] is String) {
+                  tTime = DateTime.tryParse(t['time']);
+                }
+                DateTime? sTime;
+                if (t['servedTime'] is DateTime) {
+                  sTime = t['servedTime'];
+                } else if (t['servedTime'] is String) {
+                  sTime = DateTime.tryParse(t['servedTime']);
+                }
 
-      // Local Hive donations
-      final localList = DonationsLocalStorage.getAllDonations(widget.branchId)
-          .where((d) => d.date == dateKey && d.collectorId == uid)
-          .toList();
-      for (var d in localList) {
-        donationList.add({
-          'donorName':  d.donorName,
-          'amount':     d.amount,
-          'type':       d.categoryId,
-          'status':     d.status,
-          'syncStatus': d.syncStatus,
-          'localId':    d.localId,
-          'time':       DateTime.tryParse(d.timestamp ?? ''),
-        });
-        seenDonationIds.add(d.localId);
-      }
-
-      // Cloud donations
-      final donationsSnap = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('donations')
-          .where('branchId', isEqualTo: widget.branchId)
-          .where('date', isEqualTo: dateKey)
-          .where('collectorId', isEqualTo: uid)
-          .get();
-
-      for (var d in donationsSnap.docs) {
-        final data = d.data();
-        final lid = data['localId'] as String? ?? d.id;
-        if (!seenDonationIds.contains(lid)) {
-          donationList.add({
-            ...data,
-            'donorName':  data['donorName']  ?? 'Walk-in Donor',
-            'amount':     (data['amount']    as num? ?? 0.0).toDouble(),
-            'type':       data['categoryId'] ?? 'GMWF',
-            'status':     data['status']     ?? 'pending',
-            'time':       (data['time']      as Timestamp?)?.toDate(),
-          });
-        }
-      }
-    } else {
-      // ── Month View ──
-      // Aggregate days in month
-      final daysInMonth = DateTime(_selectedDate.year, _selectedDate.month + 1, 0).day;
-      for (int day = 1; day <= daysInMonth; day++) {
-        final dStr = '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
-        try {
-          final snap = await FirebaseFirestore.instance
-              .collection('branches').doc(widget.branchId)
-              .collection('dasterkhwaan').doc(dStr)
-              .collection('tokens')
-              .get();
-          totalTokens += snap.docs.length;
-          servedTokens += snap.docs.where((d) => (d.data())['served'] == true).length;
-        } catch (_) {}
-      }
-
-      // Local Hive donations for month
-      final localList = DonationsLocalStorage.getAllDonations(widget.branchId)
-          .where((d) => d.date.startsWith(monthKey) && d.collectorId == uid)
-          .toList();
-      for (var d in localList) {
-        donationList.add({
-          'donorName':  d.donorName,
-          'amount':     d.amount,
-          'type':       d.categoryId,
-          'status':     d.status,
-          'syncStatus': d.syncStatus,
-          'localId':    d.localId,
-          'time':       DateTime.tryParse(d.timestamp ?? ''),
-        });
-        seenDonationIds.add(d.localId);
-      }
-
-      // Cloud donations for month
-      final donationsSnap = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('donations')
-          .where('branchId', isEqualTo: widget.branchId)
-          .where('collectorId', isEqualTo: uid)
-          .get();
-
-      for (var d in donationsSnap.docs) {
-        final data = d.data();
-        final dtStr = data['date']?.toString() ?? '';
-        if (dtStr.startsWith(monthKey)) {
-          final lid = data['localId'] as String? ?? d.id;
-          if (!seenDonationIds.contains(lid)) {
-            donationList.add({
-              ...data,
-              'donorName':  data['donorName']  ?? 'Walk-in Donor',
-              'amount':     (data['amount']    as num? ?? 0.0).toDouble(),
-              'type':       data['categoryId'] ?? 'GMWF',
-              'status':     data['status']     ?? 'pending',
-              'time':       (data['time']      as Timestamp?)?.toDate(),
-            });
+                tokenList.add({
+                  'number': (t['number'] as num?)?.toInt() ?? 0,
+                  'served': isServed,
+                  'time': tTime,
+                  'servedTime': sTime,
+                });
+              }
+            }
           }
         }
       }
+      tokenList.sort((a, b) => ((a['number'] as int?) ?? 0).compareTo((b['number'] as int?) ?? 0));
+    } catch (e) {
+      debugPrint('[OfficeBoyHistory] Local token read error: $e');
     }
+
+    // 2. Read local donations from Hive for this office boy
+    try {
+      final allLocalDonations = DonationsLocalStorage.getAllDonations(widget.branchId);
+      final localList = allLocalDonations.where((d) {
+        final matchesDate = _isMonthView ? d.date.startsWith(monthKey) : d.date == dateKey;
+        if (!matchesDate) return false;
+        final dCollector = (d.collectorId ?? '').trim();
+        final dRecorded = d.recordedBy.toLowerCase().trim();
+        final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+            (myUsername.isNotEmpty && dRecorded == myUsername) ||
+            dCollector.isEmpty;
+        return matchesUser;
+      }).toList();
+
+      for (var d in localList) {
+        if (seenDonationIds.add(d.localId)) {
+          donationList.add({
+            'donorName':  d.donorName,
+            'amount':     d.amount > 0 ? d.amount : (d.probableAmount ?? 0.0),
+            'type':       d.categoryId,
+            'status':     d.status,
+            'syncStatus': d.syncStatus,
+            'localId':    d.localId,
+            'time':       DateTime.tryParse(d.timestamp ?? ''),
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[OfficeBoyHistory] Local donation read error: $e');
+    }
+
+    // 3. Optional Non-blocking Cloud Sync Merge (with short timeout)
+    try {
+      if (!_isMonthView) {
+        final tokensSnap = await FirebaseFirestore.instance
+            .collection('branches').doc(widget.branchId)
+            .collection('dasterkhwaan').doc(dateKey)
+            .collection('tokens')
+            .get()
+            .timeout(const Duration(seconds: 3));
+
+        for (final doc in tokensSnap.docs) {
+          final data = doc.data();
+          final tId = doc.id;
+          if (seenTokenIds.add(tId)) {
+            totalTokens++;
+            final isServed = data['served'] == true;
+            if (isServed) servedTokens++;
+
+            tokenList.add({
+              'number':     (data['number'] as num?)?.toInt() ?? 0,
+              'served':     isServed,
+              'time':       (data['time'] as Timestamp?)?.toDate(),
+              'servedTime': (data['servedTime'] as Timestamp?)?.toDate(),
+            });
+          }
+        }
+        tokenList.sort((a, b) => ((a['number'] as int?) ?? 0).compareTo((b['number'] as int?) ?? 0));
+
+        try {
+          final donationsSnap = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(widget.branchId)
+              .collection('donations')
+              .where('branchId', isEqualTo: widget.branchId)
+              .where('date', isEqualTo: dateKey)
+              .get()
+              .timeout(const Duration(seconds: 3));
+
+          for (var d in donationsSnap.docs) {
+            final data = d.data();
+            final dCollector = (data['collectorId'] ?? '').toString().trim();
+            final dRecorded = (data['recordedBy'] ?? '').toString().toLowerCase().trim();
+            final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+                (myUsername.isNotEmpty && dRecorded == myUsername) ||
+                dCollector.isEmpty;
+            if (!matchesUser) continue;
+
+            final lid = data['localId'] as String? ?? d.id;
+            if (seenDonationIds.add(lid)) {
+              donationList.add({
+                ...data,
+                'donorName':  data['donorName']  ?? 'Walk-in Donor',
+                'amount':     (data['amount']    as num? ?? 0.0).toDouble(),
+                'type':       data['categoryId'] ?? 'GMWF',
+                'status':     data['status']     ?? 'pending',
+                'time':       (data['time']      as Timestamp?)?.toDate(),
+              });
+            }
+          }
+        } catch (_) {}
+      } else {
+        try {
+          final donationsSnap = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(widget.branchId)
+              .collection('donations')
+              .where('branchId', isEqualTo: widget.branchId)
+              .get()
+              .timeout(const Duration(seconds: 3));
+
+          for (var d in donationsSnap.docs) {
+            final data = d.data();
+            final dtStr = data['date']?.toString() ?? '';
+            if (dtStr.startsWith(monthKey)) {
+              final dCollector = (data['collectorId'] ?? '').toString().trim();
+              final dRecorded = (data['recordedBy'] ?? '').toString().toLowerCase().trim();
+              final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+                  (myUsername.isNotEmpty && dRecorded == myUsername) ||
+                  dCollector.isEmpty;
+              if (!matchesUser) continue;
+
+              final lid = data['localId'] as String? ?? d.id;
+              if (seenDonationIds.add(lid)) {
+                donationList.add({
+                  ...data,
+                  'donorName':  data['donorName']  ?? 'Walk-in Donor',
+                  'amount':     (data['amount']    as num? ?? 0.0).toDouble(),
+                  'type':       data['categoryId'] ?? 'GMWF',
+                  'status':     data['status']     ?? 'pending',
+                  'time':       (data['time']      as Timestamp?)?.toDate(),
+                });
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
 
     final totalRevenue = totalTokens * widget.pricePerToken;
     final totalDonations = donationList.fold<double>(
@@ -2724,37 +4513,40 @@ class _HistSectionCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: _DS.surface,
-          borderRadius: BorderRadius.circular(_DS.r22),
-          border: Border.all(color: _DS.border, width: 0.5),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(
-                width: 34, height: 34,
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(_DS.r12),
-                ),
-                child: Icon(icon, color: color, size: 16),
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _DS.getSurface(isDark),
+        borderRadius: BorderRadius.circular(_DS.r22),
+        border: Border.all(color: _DS.getBorder(isDark), width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Container(
+              width: 34, height: 34,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: isDark ? 0.18 : 0.10),
+                borderRadius: BorderRadius.circular(_DS.r12),
               ),
-              const SizedBox(width: 10),
-              Text(title,
-                  style: GoogleFonts.dmSans(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: _DS.ink)),
-            ]),
-            const SizedBox(height: 14),
-            child,
-          ],
-        ),
-      );
+              child: Icon(icon, color: color, size: 16),
+            ),
+            const SizedBox(width: 10),
+            Text(title,
+                style: GoogleFonts.dmSans(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: _DS.getInk(isDark))),
+          ]),
+          const SizedBox(height: 14),
+          child,
+        ],
+      ),
+    );
+  }
 }
 
 // ─── Hist Stat Tile ────────────────────────────────────────────────────────────

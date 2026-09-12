@@ -9,6 +9,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/widgets/global_module_wrapper.dart';
+import '../../../realtime/realtime_manager.dart';
 import 'dart:async';
 
 class MedicineLedgerPage extends StatefulWidget {
@@ -51,7 +53,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     return Theme.of(context).brightness == Brightness.dark;
   }
 
-  bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(widget.branchId);
+  bool get _hasMultiCamps => CampSessionService.getCampsForBranch(widget.branchId).isNotEmpty;
 
   // ── State ──────────────────────────────────────────────────────────────────
   Map<String, dynamic>? _selectedMed;
@@ -92,10 +94,13 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
       setState(() {
         _allMedicines = items.map((m) {
           final copy = Map<String, dynamic>.from(m);
-          final clean = MasterProformaService.cleanBrandToFormula(copy['name'] ?? copy['formula'] ?? '');
-          if (clean.isNotEmpty) {
-            copy['name'] = clean;
-            copy['formula'] = clean;
+          final isCustom = copy['isCustomized'] == true || copy['userEdited'] == true;
+          if (!isCustom) {
+            final clean = MasterProformaService.cleanBrandToFormula(copy['name'] ?? copy['formula'] ?? '');
+            if (clean.isNotEmpty) {
+              copy['name'] = clean;
+              copy['formula'] = clean;
+            }
           }
           final rawCamp = (copy['campId'] ?? copy['dispensaryId'] ?? '').toString().toLowerCase();
           if (rawCamp.contains('kapay')) {
@@ -148,46 +153,63 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
       // 1. Query Logs (Additions, Registrations, Edits) from inventory_log
       final List<Future<QuerySnapshot>> logQueries = [];
-      if (_selectedMed != null) {
-        if (medId.isNotEmpty) {
-          logQueries.add(FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .where('medicineId', isEqualTo: medId)
-              .get());
-          logQueries.add(FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .where('docId', isEqualTo: medId)
-              .get());
-          logQueries.add(FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .where('newId', isEqualTo: medId)
-              .get());
-          logQueries.add(FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .where('oldId', isEqualTo: medId)
-              .get());
+      final startOfMonth = DateTime(selectedYear, selectedMonthVal, 1);
+      final endOfMonth = DateTime(selectedYear, selectedMonthVal + 1, 0, 23, 59, 59, 999);
+
+      if (!RealtimeManager().isConnected) {
+        if (_selectedMed != null) {
+          if (medId.isNotEmpty) {
+            logQueries.add(FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId)
+                .collection('inventory_log')
+                .where('medicineId', isEqualTo: medId)
+                .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+                .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
+                .get());
+            logQueries.add(FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId)
+                .collection('inventory_log')
+                .where('docId', isEqualTo: medId)
+                .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+                .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
+                .get());
+            logQueries.add(FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId)
+                .collection('inventory_log')
+                .where('newId', isEqualTo: medId)
+                .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+                .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
+                .get());
+            logQueries.add(FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId)
+                .collection('inventory_log')
+                .where('oldId', isEqualTo: medId)
+                .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+                .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
+                .get());
+          } else {
+            logQueries.add(FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId)
+                .collection('inventory_log')
+                .where('medicineName', isEqualTo: _selectedMed!['name'])
+                .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+                .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
+                .get());
+          }
         } else {
           logQueries.add(FirebaseFirestore.instance
               .collection('branches')
               .doc(widget.branchId)
               .collection('inventory_log')
-              .where('medicineName', isEqualTo: _selectedMed!['name'])
+              .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfMonth))
+              .where('timestamp', isLessThanOrEqualTo: Timestamp.fromDate(endOfMonth))
               .get());
         }
-      } else {
-        logQueries.add(FirebaseFirestore.instance
-            .collection('branches')
-            .doc(widget.branchId)
-            .collection('inventory_log')
-            .get());
       }
 
       final snapshots = await Future.wait(logQueries);
@@ -338,54 +360,56 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
           }
         }
 
-        // 2. Query Firestore records (serials + legacy dispensary fallback)
+        // 2. Query Firestore records (serials + legacy dispensary fallback) only if no local records and offline from LAN
         final firestoreRecords = <Map<String, dynamic>>[];
-        try {
-          final branchDoc = FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId);
+        if (localRecords.isEmpty && !RealtimeManager().isConnected) {
+          try {
+            final branchDoc = FirebaseFirestore.instance
+                .collection('branches')
+                .doc(widget.branchId);
 
-          // Check serials collection for the date
-          final serialsDateSnap = await branchDoc
-              .collection('serials')
-              .doc(dateKey)
-              .get();
-          
-          if (serialsDateSnap.exists) {
-            for (final qType in ['general', 'emergency', 'fasttrack', 'regular']) {
-              try {
-                final qSnap = await branchDoc
-                    .collection('serials')
-                    .doc(dateKey)
-                    .collection(qType)
-                    .where('dispenseStatus', isEqualTo: 'dispensed')
-                    .get();
-                for (final doc in qSnap.docs) {
-                  final data = doc.data();
-                  data['serial'] ??= doc.id;
-                  // Normalize prescriptions array from serial document structure
-                  if (data['prescription'] is Map && data['prescriptions'] == null) {
-                    final rxMap = data['prescription'] as Map;
-                    data['prescriptions'] = rxMap['medicines'] ?? rxMap['prescriptions'] ?? [];
-                  }
-                  firestoreRecords.add(data);
-                }
-              } catch (_) {}
-            }
-          }
-
-          // Legacy dispensary collection fallback if serials had no records
-          if (firestoreRecords.isEmpty) {
-            final dailySnap = await branchDoc
-                .collection('dispensary')
+            // Check serials collection for the date
+            final serialsDateSnap = await branchDoc
+                .collection('serials')
                 .doc(dateKey)
-                .collection(dateKey)
                 .get();
-            for (final doc in dailySnap.docs) {
-              firestoreRecords.add(doc.data());
+            
+            if (serialsDateSnap.exists) {
+              for (final qType in ['general', 'emergency', 'fasttrack', 'regular', 'zakat', 'non-zakat', 'gmwf']) {
+                try {
+                  final qSnap = await branchDoc
+                      .collection('serials')
+                      .doc(dateKey)
+                      .collection(qType)
+                      .where('dispenseStatus', isEqualTo: 'dispensed')
+                      .get();
+                  for (final doc in qSnap.docs) {
+                    final data = doc.data();
+                    data['serial'] ??= doc.id;
+                    // Normalize prescriptions array from serial document structure
+                    if (data['prescription'] is Map && data['prescriptions'] == null) {
+                      final rxMap = data['prescription'] as Map;
+                      data['prescriptions'] = rxMap['medicines'] ?? rxMap['prescriptions'] ?? [];
+                    }
+                    firestoreRecords.add(data);
+                  }
+                } catch (_) {}
+              }
             }
-          }
-        } catch (_) {}
+
+            // Legacy dispensary collection fallback if serials had no records
+            if (firestoreRecords.isEmpty) {
+              final dailySnap = await branchDoc
+                  .collection('dispensary')
+                  .doc(dateKey)
+                  .collection(dateKey)
+                  .get();
+              for (final doc in dailySnap.docs) {
+                firestoreRecords.add(doc.data());
+              }
+            }
+          } catch (_) {}
+        }
 
         final combinedDaily = <String, Map<String, dynamic>>{};
         for (final r in localRecords) {
@@ -521,9 +545,10 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   @override
   Widget build(BuildContext context) {
     final isDark = _isDark;
+    final isWrapped = GlobalModuleWrapper.isWrapped(context);
     final content = _buildBody();
 
-    if (widget.isEmbedded) return content;
+    if (widget.isEmbedded || isWrapped) return content;
 
     return Scaffold(
       backgroundColor: isDark ? const Color(0xFF0F172A) : _bg,
@@ -566,6 +591,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   Widget _buildFilterHeader() {
     final isDark = _isDark;
     final monthLabel = DateFormat('MMMM yyyy').format(_selectedMonth);
+    final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -617,15 +643,17 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                 ),
               ),
 
-              if (_hasMultiCamps) ...[
+              if (_hasMultiCamps && branchCamps.isNotEmpty) ...[
                 const SizedBox(width: 8),
                 _buildFilterDropdown(
                   value: _selectedCampFilter,
                   isDark: isDark,
-                  items: const [
+                  items: [
                     {'id': 'all', 'label': '🏥 All Camps'},
-                    {'id': 'haji', 'label': '📍 Haji Camp'},
-                    {'id': 'saddar', 'label': '📍 Saddar'},
+                    ...branchCamps.map((c) => {
+                      'id': (c['id'] ?? '').toString().toLowerCase().trim(),
+                      'label': '📍 ${(c['name'] ?? CampSessionService.getCampLabel((c['id'] ?? '').toString(), widget.branchId)).toString()}',
+                    }),
                   ],
                   onChanged: (v) {
                     setState(() {
@@ -774,52 +802,76 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     final adjusted = (tAdj is num ? tAdj.toDouble() : double.tryParse(tAdj?.toString() ?? '') ?? 0.0);
     final net = added - removed;
 
-    return Row(
-      children: [
-        Expanded(
-          child: _solidSummaryCard(
-            label: 'Total Added',
-            value: '+${added.toStringAsFixed(0)}',
-            icon: Icons.add_circle_outline_rounded,
-            bgGradientStart: _emerald,
-            bgGradientEnd: const Color(0xFF00704A),
-            glowColor: _emerald,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _solidSummaryCard(
-            label: 'Dispensed',
-            value: '-${removed.toStringAsFixed(0)}',
-            icon: Icons.medication_outlined,
-            bgGradientStart: _indigo,
-            bgGradientEnd: const Color(0xFF3730A3),
-            glowColor: _indigo,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _solidSummaryCard(
-            label: 'Adjustments',
-            value: '${adjusted.toStringAsFixed(0)}',
-            icon: Icons.tune_rounded,
-            bgGradientStart: _amber,
-            bgGradientEnd: const Color(0xFFB45309),
-            glowColor: _amber,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _solidSummaryCard(
-            label: 'Net Flow',
-            value: net >= 0 ? '+${net.toStringAsFixed(0)}' : net.toStringAsFixed(0),
-            icon: Icons.account_balance_wallet_outlined,
-            bgGradientStart: _teal,
-            bgGradientEnd: const Color(0xFF0D5A50),
-            glowColor: _teal,
-          ),
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 620;
+        final c1 = _solidSummaryCard(
+          label: 'Total Added',
+          value: '+${added.toStringAsFixed(0)}',
+          icon: Icons.add_circle_outline_rounded,
+          bgGradientStart: _emerald,
+          bgGradientEnd: const Color(0xFF00704A),
+          glowColor: _emerald,
+        );
+        final c2 = _solidSummaryCard(
+          label: 'Dispensed',
+          value: '-${removed.toStringAsFixed(0)}',
+          icon: Icons.medication_outlined,
+          bgGradientStart: _indigo,
+          bgGradientEnd: const Color(0xFF3730A3),
+          glowColor: _indigo,
+        );
+        final c3 = _solidSummaryCard(
+          label: 'Adjustments',
+          value: '${adjusted.toStringAsFixed(0)}',
+          icon: Icons.tune_rounded,
+          bgGradientStart: _amber,
+          bgGradientEnd: const Color(0xFFB45309),
+          glowColor: _amber,
+        );
+        final c4 = _solidSummaryCard(
+          label: 'Net Flow',
+          value: net >= 0 ? '+${net.toStringAsFixed(0)}' : net.toStringAsFixed(0),
+          icon: Icons.account_balance_wallet_outlined,
+          bgGradientStart: _teal,
+          bgGradientEnd: const Color(0xFF0D5A50),
+          glowColor: _teal,
+        );
+
+        if (isNarrow) {
+          return Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(child: c1),
+                  const SizedBox(width: 8),
+                  Expanded(child: c2),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(child: c3),
+                  const SizedBox(width: 8),
+                  Expanded(child: c4),
+                ],
+              ),
+            ],
+          );
+        }
+
+        return Row(
+          children: [
+            Expanded(child: c1),
+            const SizedBox(width: 8),
+            Expanded(child: c2),
+            const SizedBox(width: 8),
+            Expanded(child: c3),
+            const SizedBox(width: 8),
+            Expanded(child: c4),
+          ],
+        );
+      },
     );
   }
 
@@ -1008,113 +1060,73 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     final rawCampTag = (log['campTag'] ?? '').toString().trim().toUpperCase();
     final campTag = (rawCampTag.contains('KAPAY') || rawCampTag == 'KAPAYYA' || rawCampTag == 'KAPAYA')
         ? 'SADDAR'
-        : (rawCampTag.isNotEmpty ? CampSessionService.getCampLabel(rawCampTag).toUpperCase() : '');
+        : (rawCampTag.isNotEmpty ? CampSessionService.getCampLabel(rawCampTag, widget.branchId).toUpperCase() : '');
     final rawMedName = (log['medicineName'] ?? '').toString();
     final medName = MasterProformaService.cleanBrandToFormula(rawMedName);
     final rawMsg = (log['msg'] ?? (isAdded ? 'Restock' : 'Dispensed')).toString();
     final msg = MasterProformaService.cleanBrandToFormula(rawMsg);
 
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E293B) : Colors.white,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+          width: 1,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Action Icon Avatar
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: isAdded
-                  ? (isProforma ? _emerald.withValues(alpha: 0.15) : _teal.withValues(alpha: 0.15))
-                  : _indigo.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(
-              isAdded
-                  ? (isProforma ? Icons.inventory_2_rounded : Icons.add_circle_outline_rounded)
-                  : Icons.medication_outlined,
-              color: isAdded
-                  ? (isProforma ? _emerald : (isDark ? const Color(0xFF2DD4BF) : _teal))
-                  : _indigo,
-              size: 18,
-            ),
-          ),
-          const SizedBox(width: 12),
-
-          // Main Details
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        isAdded
-                            ? msg
-                            : '$medName • ${log['patientName'] ?? 'Unknown Patient'}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? Colors.white : _textDark,
-                          fontSize: 13.5,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (campTag.isNotEmpty && campTag != 'ALL') ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: campTag.contains('HAJI') ? const Color(0xFF6366F1) : const Color(0xFF0D9488),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          '📍 $campTag',
-                          style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 2),
-
-                if (!isAdded) ...[
-                  Row(
-                    children: [
-                      if (log['serial'] != null && log['serial'].toString().isNotEmpty)
-                        Text('#${log['serial']}  ', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _indigo)),
-                      if (log['patientCnic'] != null && log['patientCnic'].toString().isNotEmpty)
-                        Text('CNIC: ${log['patientCnic']}  ', style: TextStyle(fontSize: 11, color: isDark ? const Color(0xFF94A3B8) : _textLight)),
-                      if (log['days'] != null)
-                        Text('${log['days']}d supply', style: const TextStyle(fontSize: 10, color: Colors.deepOrange, fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                ],
-
-                Text(
-                  'Performed by: ${log['user'] ?? 'System'}',
-                  style: TextStyle(
-                    color: isDark ? const Color(0xFF64748B) : _textLight,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(width: 10),
-
-          // Quantity & Date
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              // Action Icon Avatar
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
+                  color: isAdded
+                      ? (isProforma ? _emerald.withValues(alpha: 0.15) : _teal.withValues(alpha: 0.15))
+                      : _indigo.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  isAdded
+                      ? (isProforma ? Icons.inventory_2_rounded : Icons.add_circle_outline_rounded)
+                      : Icons.medication_outlined,
+                  color: isAdded
+                      ? (isProforma ? _emerald : (isDark ? const Color(0xFF2DD4BF) : _teal))
+                      : _indigo,
+                  size: 16,
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Medicine Title / Action
+              Expanded(
+                child: Text(
+                  isAdded
+                      ? msg
+                      : '$medName • ${log['patientName'] ?? 'Unknown Patient'}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? Colors.white : _textDark,
+                    fontSize: 13,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Quantity Delta
               Text(
                 '${isAdded ? "+" : "-"}${log['qty']}',
                 style: TextStyle(
@@ -1123,10 +1135,76 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                   fontSize: 15,
                 ),
               ),
-              const SizedBox(height: 2),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Sub-details row with Wrap to NEVER overflow
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (!isAdded && log['serial'] != null && log['serial'].toString().isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: _indigo.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '#${log['serial']}',
+                    style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: _indigo),
+                  ),
+                ),
+              if (!isAdded && log['patientCnic'] != null && log['patientCnic'].toString().isNotEmpty)
+                Text(
+                  'CNIC: ${log['patientCnic']}',
+                  style: TextStyle(fontSize: 11, color: isDark ? const Color(0xFF94A3B8) : _textLight),
+                ),
+              if (!isAdded && log['days'] != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: Colors.deepOrange.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '${log['days']}d supply',
+                    style: const TextStyle(fontSize: 10, color: Colors.deepOrange, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              if (campTag.isNotEmpty && campTag != 'ALL')
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: campTag.contains('HAJI') ? const Color(0xFF6366F1) : const Color(0xFF0D9488),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '📍 $campTag',
+                    style: const TextStyle(color: Colors.white, fontSize: 9.5, fontWeight: FontWeight.bold),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // Footer: Performed by & Date/Time
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  'By: ${log['user'] ?? 'System'}',
+                  style: TextStyle(
+                    color: isDark ? const Color(0xFF64748B) : _textLight,
+                    fontSize: 10.5,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
               Text(
                 DateFormat('dd MMM, hh:mm a').format(date),
-                style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : _textLight, fontSize: 10),
+                style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : _textLight, fontSize: 10.5, fontWeight: FontWeight.w500),
               ),
             ],
           ),

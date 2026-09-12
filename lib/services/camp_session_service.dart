@@ -19,11 +19,120 @@ class CampSessionService {
     'haji_camp': 'Haji Camp Dispensary',
   };
 
-  /// Returns user-friendly label for a camp ID
-  static String getCampLabel(String id) {
+  /// Returns user-friendly label for a camp ID, dynamically looking up branch-specific configured camps if available.
+  static String getCampLabel(String id, [String? branchId]) {
     final key = id.trim().toLowerCase();
     if (_knownLabels.containsKey(key)) return _knownLabels[key]!;
+
+    if (branchId != null && branchId.trim().isNotEmpty) {
+      final camps = getCampsForBranch(branchId, includeClosed: true);
+      for (final c in camps) {
+        if ((c['id'] ?? '').toString().toLowerCase().trim() == key) {
+          final name = (c['name'] ?? '').toString().trim();
+          if (name.isNotEmpty) return name;
+        }
+      }
+    }
+
+    // Try all open branches in local cache
+    try {
+      if (Hive.isBoxOpen('local_branches')) {
+        final box = Hive.box('local_branches');
+        for (final bKey in box.keys) {
+          final bVal = box.get(bKey);
+          if (bVal is Map && bVal['camps'] is List) {
+            for (final c in bVal['camps']) {
+              if (c is Map && (c['id'] ?? '').toString().toLowerCase().trim() == key) {
+                final name = (c['name'] ?? '').toString().trim();
+                if (name.isNotEmpty) return name;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     return id.split('_').map((word) => word.isEmpty ? '' : '${word[0].toUpperCase()}${word.substring(1)}').join(' ');
+  }
+
+  /// Retrieves all configured camps for a branch from local cache / defaults.
+  static List<Map<String, dynamic>> getCampsForBranch(String? branchId, {bool includeClosed = false}) {
+    if (branchId == null || branchId.trim().isEmpty) return [];
+    final b = branchId.trim().toLowerCase();
+    final List<Map<String, dynamic>> result = [];
+
+    try {
+      if (Hive.isBoxOpen('local_branches')) {
+        final box = Hive.box('local_branches');
+        final raw = box.get('branch:$b') ?? box.get(b);
+        if (raw is Map) {
+          if (raw['camps'] is List && (raw['camps'] as List).isNotEmpty) {
+            for (final item in raw['camps'] as List) {
+              if (item is Map) {
+                final cMap = Map<String, dynamic>.from(item);
+                final isClosed = cMap['isClosed'] == true || cMap['status'] == 'closed' || cMap['status'] == 'offboarded';
+                cMap['isClosed'] = isClosed;
+                cMap['status'] = isClosed ? 'closed' : 'active';
+                if (includeClosed || !isClosed) {
+                  result.add(cMap);
+                }
+              }
+            }
+            if (result.isNotEmpty || (raw['camps'] as List).isNotEmpty) {
+              return result;
+            }
+          }
+
+          // Fallback: Infer from multiple dispensaries if camps not explicitly configured
+          if (raw['dispensaries'] is List && (raw['dispensaries'] as List).length > 1) {
+            for (final d in raw['dispensaries'] as List) {
+              if (d is Map) {
+                final dMap = Map<String, dynamic>.from(d);
+                final dId = (dMap['id'] ?? '').toString().trim().toLowerCase();
+                final dName = (dMap['name'] ?? dId).toString().trim();
+                if (dId.isNotEmpty) {
+                  result.add({
+                    'id': dId,
+                    'name': dName.isNotEmpty ? dName : getCampLabel(dId),
+                    'status': 'active',
+                    'isClosed': false,
+                    'departments': ['dispensary'],
+                    'sessions': dMap['sessions'] is List ? List<String>.from(dMap['sessions']) : ['morning', 'evening'],
+                    'sessionTimings': dMap['sessionTimings'] is Map ? Map<String, dynamic>.from(dMap['sessionTimings']) : {},
+                  });
+                }
+              }
+            }
+            return result;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Fallback: Default branch facilities
+    if (b == 'karachi') {
+      final defaultKarachiCamps = [
+        {
+          'id': 'saddar',
+          'name': 'Saddar Dispensary',
+          'status': 'active',
+          'isClosed': false,
+          'departments': ['dispensary', 'dasterkhwaan'],
+          'sessions': ['morning', 'evening'],
+        },
+        {
+          'id': 'haji_camp',
+          'name': 'Haji Camp Dispensary',
+          'status': 'active',
+          'isClosed': false,
+          'departments': ['dispensary'],
+          'sessions': ['morning', 'evening'],
+        },
+      ];
+      return defaultKarachiCamps;
+    }
+
+    return result;
   }
 
   /// Checks if a branch operates multi-camp facility sub-locations.
@@ -31,30 +140,83 @@ class CampSessionService {
     if (branchId == null || branchId.trim().isEmpty) return false;
     final b = branchId.trim().toLowerCase();
 
-    // Branches like Gujrat, Sialkot, Jalalpur Jattan, Rawalpindi do NOT operate camps
-    const singleFacilityKeywords = [
-      'gujrat',
-      'sialkot',
-      'jalalpur',
-      'jattan',
-      'rawalpindi',
-      'pindi',
-    ];
-    for (final kw in singleFacilityKeywords) {
-      if (b.contains(kw)) return false;
+    // 1. Dynamic check for configured camps (active or configured)
+    final camps = getCampsForBranch(b, includeClosed: true);
+    if (camps.isNotEmpty) {
+      // If camps exist, check if there is at least 1 active camp or multiple camps
+      return true;
     }
 
-    if (b == 'karachi') return true; // Primary multi-camp branch (Kapayya & Haji Camp)
+    if (b == 'karachi') return true;
+
+    return false;
+  }
+
+  /// Saves camps list for a branch locally to Hive and syncs to Firestore asynchronously.
+  static Future<void> saveBranchCamps(String branchId, List<Map<String, dynamic>> camps) async {
+    final b = branchId.toLowerCase().trim();
+    if (b.isEmpty) return;
+
     try {
       if (Hive.isBoxOpen('local_branches')) {
-        final raw = Hive.box('local_branches').get('branch:$b');
-        if (raw is Map && raw['dispensaries'] is List) {
-          final list = raw['dispensaries'] as List;
-          return list.length > 1;
-        }
+        final box = Hive.box('local_branches');
+        final raw = box.get('branch:$b') ?? box.get(b);
+        final map = raw is Map ? Map<String, dynamic>.from(raw) : {'id': branchId};
+        map['camps'] = camps;
+        map['campsCount'] = camps.length;
+        await box.put('branch:$b', map);
       }
-    } catch (_) {}
-    return false;
+    } catch (e) {
+      debugPrint('[CampSessionService] Error saving camps to local Hive: $e');
+    }
+
+    try {
+      await FirebaseFirestore.instance.collection('branches').doc(branchId).set({
+        'camps': camps,
+        'campsCount': camps.length,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('[CampSessionService] Error syncing camps to Firestore: $e');
+    }
+  }
+
+  /// Closes (archives) or reactivates a camp under a branch, preserving all historic data.
+  static Future<void> setCampStatus(
+    String branchId,
+    String campId, {
+    required bool isClosed,
+    String? reason,
+    String? performedBy,
+  }) async {
+    final camps = getCampsForBranch(branchId, includeClosed: true);
+    final nowIso = getAuthoritativeTime().toIso8601String();
+    final user = performedBy ?? 'Admin';
+
+    bool found = false;
+    for (int i = 0; i < camps.length; i++) {
+      if ((camps[i]['id'] ?? '').toString().toLowerCase().trim() == campId.toLowerCase().trim()) {
+        camps[i]['isClosed'] = isClosed;
+        camps[i]['status'] = isClosed ? 'closed' : 'active';
+        if (isClosed) {
+          camps[i]['closedAt'] = nowIso;
+          camps[i]['closedBy'] = user;
+          camps[i]['closureReason'] = reason ?? '';
+          camps[i]['reactivatedAt'] = null;
+        } else {
+          camps[i]['reactivatedAt'] = nowIso;
+          camps[i]['reactivatedBy'] = user;
+          camps[i]['reactivationRemarks'] = reason ?? '';
+          camps[i]['closedAt'] = null;
+        }
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+      await saveBranchCamps(branchId, camps);
+    }
   }
 
   /// Validates if a serial belongs to the specified branch.
@@ -274,7 +436,9 @@ class CampSessionService {
           final isRecent = entryTime == null || now.difference(entryTime).inHours.abs() <= 24;
 
           final hasValidSession = entrySession.isNotEmpty && entrySession != 'unknown' && entrySession != 'auto';
-          final needsDateFix = entryDateKey != activeDateKey;
+          final prevDateKey = DateFormat('ddMMyy').format(now.subtract(const Duration(days: 1)));
+          final isAlreadyValidDate = entryDateKey == activeDateKey || entryDateKey == prevDateKey;
+          final needsDateFix = entryDateKey.isEmpty || (!isAlreadyValidDate && isRecent);
           final needsSessionFix = !hasValidSession;
 
           if (isRecent && (needsDateFix || needsSessionFix)) {
@@ -637,6 +801,171 @@ class CampSessionService {
     return getDefaultSessionConfig('default', dep);
   }
 
+  /// Returns the configured operational sessions and timing windows for Dasterkhwaan.
+  /// Converts 24-hour time (e.g. '17:00' or '07:30') or raw string to 12-hour format (e.g. '05:00 PM' or '07:30 AM')
+  static String formatTo12Hour(String? timeStr) {
+    if (timeStr == null || timeStr.trim().isEmpty) return '';
+    final clean = timeStr.trim();
+    if (clean.toUpperCase().contains('AM') || clean.toUpperCase().contains('PM')) {
+      return clean;
+    }
+    final parts = clean.split(':');
+    if (parts.isEmpty) return clean;
+    int hour = int.tryParse(parts[0]) ?? 0;
+    int minute = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    final period = hour >= 12 ? 'PM' : 'AM';
+    final h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    final hStr = h12.toString().padLeft(2, '0');
+    final mStr = minute.toString().padLeft(2, '0');
+    return '$hStr:$mStr $period';
+  }
+
+  /// Returns the configured operational sessions and timing windows for Dasterkhwaan (Breakfast, Lunch, Dinner).
+  static Map<String, dynamic> getDasterkhwaanSessionConfig(String? branchId) {
+    final conf = getSessionConfig(branchId, department: 'dasterkhwaan');
+    
+    // Read configured meals or map legacy morning/evening/night to breakfast/lunch/dinner
+    final bf = conf['breakfast'];
+    final lunch = conf['lunch'] ?? conf['morning'];
+    final dinner = conf['dinner'] ?? conf['evening'] ?? conf['night'];
+
+    final res = <String, dynamic>{};
+
+    if (bf is Map) {
+      if (bf['enabled'] != false) {
+        res['breakfast'] = {
+          'enabled': true,
+          'openTime': formatTo12Hour(bf['openTime']?.toString() ?? '07:00'),
+          'closeTime': formatTo12Hour(bf['closeTime']?.toString() ?? '11:30'),
+        };
+      }
+    }
+
+    if (lunch is Map) {
+      if (lunch['enabled'] != false) {
+        res['lunch'] = {
+          'enabled': true,
+          'openTime': formatTo12Hour(lunch['openTime']?.toString() ?? '12:00'),
+          'closeTime': formatTo12Hour(lunch['closeTime']?.toString() ?? '16:30'),
+        };
+      }
+    }
+
+    if (dinner is Map) {
+      if (dinner['enabled'] != false) {
+        res['dinner'] = {
+          'enabled': true,
+          'openTime': formatTo12Hour(dinner['openTime']?.toString() ?? '17:00'),
+          'closeTime': formatTo12Hour(dinner['closeTime']?.toString() ?? '23:59'),
+        };
+      }
+    }
+
+    // Default configuration if none explicitly configured in branch
+    if (res.isEmpty) {
+      res['breakfast'] = {'enabled': true, 'openTime': '07:00 AM', 'closeTime': '11:30 AM'};
+      res['lunch'] = {'enabled': true, 'openTime': '12:00 PM', 'closeTime': '04:30 PM'};
+      res['dinner'] = {'enabled': true, 'openTime': '05:00 PM', 'closeTime': '11:59 PM'};
+    }
+
+    return res;
+  }
+
+  /// Dynamically resolves whether current time belongs to breakfast, lunch, or dinner session for Dasterkhwaan.
+  /// Rule:
+  /// - Breakfast: Before 12:00 PM
+  /// - Lunch: After 12:00 PM (12:00 PM to 5:00 PM)
+  /// - Dinner: After 5:00 PM up to 12:00 AM midnight
+  static String resolveDasterkhwaanSession([DateTime? time, String? branchId]) {
+    final dt = time ?? getAuthoritativeTime();
+    final hour = dt.hour; // 0 to 23
+
+    String candidate;
+    if (hour < 12) {
+      candidate = 'breakfast';
+    } else if (hour < 17) {
+      candidate = 'lunch';
+    } else {
+      candidate = 'dinner';
+    }
+
+    final config = getDasterkhwaanSessionConfig(branchId);
+    if (config.containsKey(candidate) && (config[candidate]['enabled'] == true)) {
+      return candidate;
+    }
+
+    // If candidate meal is not enabled in this branch, fallback to the first enabled meal
+    for (final key in ['breakfast', 'lunch', 'dinner']) {
+      if (config.containsKey(key) && config[key]['enabled'] == true) {
+        return key;
+      }
+    }
+
+    return candidate;
+  }
+
+  /// Updates Dasterkhwaan session timings locally in Hive and pushes to Firestore
+  static Future<void> saveDasterkhwaanSessionConfig(
+    String branchId, {
+    Map<String, dynamic>? sessionMap,
+    String? breakfastOpen,
+    String? breakfastClose,
+    bool breakfastEnabled = true,
+    String? lunchOpen,
+    String? lunchClose,
+    bool lunchEnabled = true,
+    String? dinnerOpen,
+    String? dinnerClose,
+    bool dinnerEnabled = true,
+    String? eveningOpen,
+    String? eveningClose,
+    String? nightOpen,
+    String? nightClose,
+  }) async {
+    final b = branchId.toLowerCase().trim();
+    if (b.isEmpty) return;
+
+    final dasterkhwaanConfig = sessionMap ?? {
+      'breakfast': {
+        'enabled': breakfastEnabled,
+        'openTime': breakfastOpen ?? '07:00 AM',
+        'closeTime': breakfastClose ?? '11:30 AM',
+      },
+      'lunch': {
+        'enabled': lunchEnabled,
+        'openTime': lunchOpen ?? '12:00 PM',
+        'closeTime': lunchClose ?? '04:30 PM',
+      },
+      'dinner': {
+        'enabled': dinnerEnabled,
+        'openTime': dinnerOpen ?? eveningOpen ?? '05:00 PM',
+        'closeTime': dinnerClose ?? eveningClose ?? '11:59 PM',
+      },
+    };
+
+    try {
+      if (Hive.isBoxOpen('local_branches')) {
+        final box = Hive.box('local_branches');
+        final raw = box.get('branch:$b');
+        if (raw is Map) {
+          final updated = Map<String, dynamic>.from(raw);
+          final sessions = (updated['sessionsConfig'] is Map)
+              ? Map<String, dynamic>.from(updated['sessionsConfig'] as Map)
+              : <String, dynamic>{};
+          sessions['dasterkhwaan'] = dasterkhwaanConfig;
+          updated['sessionsConfig'] = sessions;
+          await box.put('branch:$b', updated);
+        }
+      }
+    } catch (_) {}
+
+    try {
+      await FirebaseFirestore.instance.collection('branches').doc(b).set({
+        'sessionsConfig': {'dasterkhwaan': dasterkhwaanConfig}
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
   /// Returns the list of enabled session keys for a branch and optional department/facility/user.
   static List<String> getAllowedSessions(String? branchId, {String? department, String? facilityId, Map<String, dynamic>? userData}) {
     final dep = (department ?? '').toLowerCase().trim();
@@ -982,14 +1311,24 @@ class CampSessionService {
     return null;
   }
 
-  /// Safely extracts the dateKey from a serial (handles both X-ddmmyy-TAG-SEQ and ddmmyy-TAG-SEQ).
+  /// Safely extracts the 6-digit dateKey from any serial format
+  /// (e.g. KHI-HAJI-050926-Z001, HAJI-050926-Z001, X-050926-HAJI-Z001, 050926-Z001).
   static String getDateKeyFromSerial(String serial) {
     final s = serial.trim();
     if (s.isEmpty) return '';
     final parts = s.split('-');
     if (parts.isEmpty) return '';
-    if (parts[0].toUpperCase() == 'X') {
-      return parts.length > 1 ? parts[1] : '';
+
+    // Search for the 6-digit date part (ddMMyy)
+    final dateReg = RegExp(r'^\d{6}$');
+    for (final part in parts) {
+      if (dateReg.hasMatch(part)) {
+        return part;
+      }
+    }
+
+    if (parts[0].toUpperCase() == 'X' && parts.length > 1) {
+      return parts[1];
     }
     return parts[0];
   }
@@ -1063,6 +1402,9 @@ class CampSessionService {
     // 2. Secondary fallback by dispensaryId / campId
     final isHajiToken = dId.contains('haji') || cId.contains('haji');
     final isSaddarToken = dId.contains('sadd') || dId.contains('kap') || cId.contains('sadd') || cId.contains('kap');
+    final isSharedGeneralStock = (dId == 'all' || cId == 'all' || (dId.isEmpty && cId.isEmpty)) && ser.isEmpty;
+
+    if (isSharedGeneralStock) return true;
 
     if (isSaddar) {
       if (isHajiToken) return false;
@@ -1071,7 +1413,7 @@ class CampSessionService {
 
     if (isHaji) {
       if (isSaddarToken) return false;
-      return isHajiToken;
+      return isHajiToken || dId == 'all' || cId == 'all';
     }
 
     // Generic fallback for any other camp ID
@@ -1095,9 +1437,43 @@ class CampSessionService {
   ];
 
   /// Returns available camp options for the current user/context.
-  /// Higher-level users (Admins, Global Admins, Supervisors, HQ Managers) get all camps.
-  static List<Map<String, String>> getAvailableCampOptions([Map<String, dynamic>? userData]) {
+  /// Higher-level users (Admins, Global Admins, Supervisors, HQ Managers) get all active camps for the branch.
+  static List<Map<String, String>> getAvailableCampOptions([Map<String, dynamic>? userData, String? branchId]) {
     final assigned = getAssignedCampsFromHive();
+
+    // Resolve branch
+    String? effBranch = branchId;
+    if (effBranch == null || effBranch.isEmpty) {
+      try {
+        if (userData != null) {
+          effBranch = (userData['branchId'] ?? userData['branch'] ?? userData['selectedBranchId'])?.toString();
+        }
+        if ((effBranch == null || effBranch.isEmpty) && Hive.isBoxOpen('app_settings')) {
+          final box = Hive.box('app_settings');
+          final u = box.get('user_data') ?? box.get('currentUser');
+          if (u is Map) {
+            effBranch = (u['branchId'] ?? u['branch'] ?? u['selectedBranchId'])?.toString();
+          }
+          if (effBranch == null || effBranch.isEmpty) {
+            effBranch = box.get('current_branch_id')?.toString();
+          }
+        }
+      } catch (_) {}
+    }
+
+    final branchCamps = (effBranch != null && effBranch.isNotEmpty)
+        ? getCampsForBranch(effBranch, includeClosed: false)
+        : <Map<String, dynamic>>[];
+
+    List<Map<String, String>> campList = [];
+    if (branchCamps.isNotEmpty) {
+      campList = branchCamps.map((c) => {
+        'id': (c['id'] ?? '').toString().trim().toLowerCase(),
+        'label': (c['name'] ?? c['id'] ?? '').toString().trim(),
+      }).toList();
+    } else {
+      campList = allCampsList;
+    }
 
     bool isHigherLevel = false;
     try {
@@ -1106,7 +1482,7 @@ class CampSessionService {
         final uData = userData ?? box.get('user_data') ?? box.get('currentUser');
         if (uData is Map) {
           final role = (uData['role'] ?? uData['userRole'] ?? '').toString().toLowerCase();
-          if (role.contains('admin') || role.contains('supervisor') || role.contains('manager') || role.contains('chairman')) {
+          if (role.contains('admin') || role.contains('supervisor') || role.contains('manager') || role.contains('chairman') || role.contains('ceo')) {
             isHigherLevel = true;
           }
         }
@@ -1114,11 +1490,11 @@ class CampSessionService {
     } catch (_) {}
 
     if (isHigherLevel || assigned.length > 1 || assigned.isEmpty) {
-      return allCampsList;
+      return campList;
     }
 
-    final filtered = allCampsList.where((c) => assigned.contains(c['id'])).toList();
-    return filtered.isNotEmpty ? filtered : allCampsList;
+    final filtered = campList.where((c) => assigned.contains(c['id'])).toList();
+    return filtered.isNotEmpty ? filtered : campList;
   }
 
   /// Returns whether the user has only 1 camp and 1 session (or is single-context),

@@ -1,5 +1,6 @@
 // lib/pages/dispensary/dispensar/inventory_update.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -13,9 +14,9 @@ import 'package:gmwf/utils/string_similarity_helper.dart';
 import 'package:gmwf/pages/dispensary/dispensar/universal_proforma_sheet.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
-import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/widgets/app_back_button.dart';
 import 'package:gmwf/widgets/camp_selector_chip.dart';
+import 'package:gmwf/services/cloud_messaging_service.dart';
 
 class InventoryUpdatePage extends StatefulWidget {
   final String branchId;
@@ -72,8 +73,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   final _addQtyCtrl = TextEditingController(text: '1');
   bool _isSubmittingStock = false;
   late String _currentBranchId;
-  String _selectedCampFilter = 'saddar';
+  String _selectedCampFilter = 'all';
   String _selectedTypeFilter = 'All';
+
+  String _initialCampFilter() {
+    if (!_hasMultiCamps) return 'all';
+    final active = CampSessionService.getActiveCamp(_currentBranchId);
+    return (active != null && active.isNotEmpty && active != 'all') ? active : 'all';
+  }
 
   Map<String, dynamic> _getUserData() {
     try {
@@ -114,8 +121,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     if (newBranch == _currentBranchId) return;
     setState(() {
       _currentBranchId = newBranch;
-      final active = CampSessionService.getActiveCamp(_currentBranchId);
-      _selectedCampFilter = (active != null && active.isNotEmpty && active != 'all') ? active : 'saddar';
+      _selectedCampFilter = _initialCampFilter();
       _selectedMed = null;
       _selectedDocId = null;
     });
@@ -123,6 +129,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   }
 
   String get _effectiveTargetCamp {
+    if (!_hasMultiCamps) return '';
     if (_selectedMed != null) {
       final mCamp = (_selectedMed!['campId'] ?? _selectedMed!['dispensaryId'])?.toString().toLowerCase().trim();
       if (mCamp != null && mCamp.isNotEmpty && mCamp != 'all') return mCamp;
@@ -148,22 +155,20 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Map<String, dynamic>? _liveSpellingSuggestion;
 
   bool get _canRegisterMedicine {
-    if (widget.isDispenser || widget.isDoctor) return false;
-    String r = '';
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final uData = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
         if (uData is Map) {
-          r = (uData['role'] ?? uData['userRole'] ?? '').toString().trim().toLowerCase();
+          if (uData['canRegisterMedicine'] == true) return true;
+          final r = (uData['role'] ?? uData['userRole'] ?? '').toString().trim().toLowerCase();
+          if (r.contains('admin') || r.contains('supervisor') || r.contains('chairman') || r.contains('hqmanager') || r.contains('hq_manager') || r.contains('manager') || r.contains('president')) {
+            return true;
+          }
         }
       }
     } catch (_) {}
 
-    if (r.contains('doctor') || r.contains('dispens') || r.contains('hybrid') || r.contains('reception')) {
-      return false;
-    }
-
-    if (widget.isAdmin || r.contains('chairman') || r.contains('hqmanager') || r.contains('hq_manager') || r.contains('manager') || r.contains('admin') || r.contains('supervisor') || r.contains('president')) {
+    if (widget.isAdmin) {
       return true;
     }
     return false;
@@ -246,8 +251,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   void initState() {
     super.initState();
     _currentBranchId = widget.branchId;
-    final active = CampSessionService.getActiveCamp(_currentBranchId);
-    _selectedCampFilter = (active != null && active.isNotEmpty && active != 'all') ? active : 'saddar';
+    _selectedCampFilter = _initialCampFilter();
 
     _tabCtrl = TabController(length: 2, vsync: this);
     _fadeCtrl = AnimationController(
@@ -265,8 +269,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.branchId != widget.branchId) {
       _currentBranchId = widget.branchId;
-      final active = CampSessionService.getActiveCamp(_currentBranchId);
-      _selectedCampFilter = (active != null && active.isNotEmpty && active != 'all') ? active : 'saddar';
+      _selectedCampFilter = _initialCampFilter();
       _loadAllMedicines();
     }
   }
@@ -328,38 +331,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       if (excludeDocId != null && itemDocId == excludeDocId) return false;
       return true;
     });
-    if (localMatch) return true;
-
-    // 3. Check Firestore
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('inventory')
-          .where('code', isEqualTo: code.trim())
-          .limit(5)
-          .get();
-      for (final doc in snap.docs) {
-        if (excludeDocId != null && doc.id == excludeDocId) continue;
-        return true;
-      }
-    } catch (_) {}
-
-    try {
-      final snapBarcode = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('inventory')
-          .where('barcode', isEqualTo: code.trim())
-          .limit(5)
-          .get();
-      for (final doc in snapBarcode.docs) {
-        if (excludeDocId != null && doc.id == excludeDocId) continue;
-        return true;
-      }
-    } catch (_) {}
-
-    return false;
+    return localMatch;
   }
 
   /// Returns existing medicine matching barcode if found
@@ -408,26 +380,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       }
     }
 
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('inventory')
-          .where('name_lower', isEqualTo: cleanN)
-          .limit(10)
-          .get();
-      for (final doc in snap.docs) {
-        if (excludeDocId != null && doc.id == excludeDocId) continue;
-        final data = doc.data();
-        final itemT = (data['type'] as String? ?? '').trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
-        final itemD = (data['dose'] as String? ?? '').trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
-
-        if (itemT == cleanT && (cleanD.isEmpty || itemD == cleanD || itemD == 'standard')) {
-          return {...data, '_docId': doc.id};
-        }
-      }
-    } catch (_) {}
-
     return null;
   }
 
@@ -439,31 +391,51 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       final db = FirebaseFirestore.instance;
 
       if (widget.isAdmin || widget.isDoctor) {
-        final docId = originalMed['_docId'] ?? originalMed['id'] ?? originalMed['medicineId'];
-        if (docId != null) {
-          await db
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory')
-              .doc(docId)
-              .update(Map<String, dynamic>.from(updatedFields)..addAll({
-                'updatedAt': FieldValue.serverTimestamp(),
-              }));
+        final docId = (originalMed['_docId'] ?? originalMed['id'] ?? originalMed['medicineId'])?.toString();
+        if (docId != null && docId.isNotEmpty) {
+          final updatedItem = Map<String, dynamic>.from(originalMed)..addAll(updatedFields);
+          updatedItem['updatedAt'] = DateTime.now().toIso8601String();
+          LocalStorageService.saveLocalInventoryItem(updatedItem);
 
-          // Log the direct edit
-          await db
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .add({
+          final logData = {
             'action': 'edit_medicine_directly',
             'medicineName': originalMed['name'],
             'medicineId': docId,
             'updatedFields': updatedFields,
             'performedBy': userInfo['uid'],
             'performedByName': userInfo['username'],
+            'branchId': widget.branchId,
             'timestamp': FieldValue.serverTimestamp(),
+            'createdAt': DateTime.now().toIso8601String(),
+          };
+          LocalStorageService.saveLocalInventoryLog(logData);
+
+          RealtimeManager().sendMessage({
+            'event_type': RealtimeEvents.saveStockItem,
+            'branchId': widget.branchId,
+            'data': updatedItem,
+            'logData': logData,
           });
+
+          if (!RealtimeManager().isConnected) {
+            LocalStorageService.enqueueSync({
+              'type': 'register_medicine',
+              'branchId': widget.branchId,
+              'medicineId': docId,
+              'data': updatedItem,
+              'logData': logData,
+            });
+          }
+
+          // Background fire-and-forget sync to Firestore if not connected via LAN
+          unawaited(FirebaseFirestore.instance
+              .collection('branches')
+              .doc(widget.branchId)
+              .collection('inventory')
+              .doc(docId)
+              .update(Map<String, dynamic>.from(updatedFields)..addAll({
+                'updatedAt': FieldValue.serverTimestamp(),
+              })).catchError((_) {}));
 
           _snack('Medicine updated successfully!');
           _loadAllMedicines();
@@ -476,17 +448,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       final campLabel = CampSessionService.getCampLabel(activeCamp);
 
       final requestId = 'req_edit_${userInfo['uid'] ?? 'dispenser'}_${DateTime.now().millisecondsSinceEpoch}';
-      await db
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('edit_requests')
-          .doc(requestId)
-          .set({
+      final reqMap = <String, dynamic>{
+        'id': requestId,
+        'requestId': requestId,
         'requestType': 'edit_medicine',
         'requestedBy': userInfo['uid'],
         'requestedByName': userInfo['username'],
         'requesterName': userInfo['username'],
-        'requestedAt': FieldValue.serverTimestamp(),
+        'requestedAt': DateTime.now().toIso8601String(),
         'status': 'pending',
         'reason': updatedFields['reason'] ?? '',
         'campId': activeCamp,
@@ -520,7 +489,48 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           'dispensaryId': activeCamp,
           'campName': campLabel,
         }],
+      };
+
+      await LocalStorageService.saveLocalEditRequest(reqMap);
+      await LocalStorageService.enqueueSync({
+        'type': 'save_inventory_edit_request',
+        'branchId': widget.branchId,
+        'requestId': requestId,
+        'data': reqMap,
       });
+
+      RealtimeManager().sendMessage({
+        ...RealtimeEvents.payload(
+          type: 'request_created',
+          branchId: widget.branchId,
+          data: reqMap,
+        ),
+      });
+
+      try {
+        await db
+            .collection('branches')
+            .doc(widget.branchId)
+            .collection('edit_requests')
+            .doc(requestId)
+            .set({
+          ...reqMap,
+          'requestedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('[InventoryUpdate] Firestore offline, saved locally: $e');
+      }
+
+      try {
+        CloudMessagingService().notifySupervisorPendingRequests(
+          branchId: widget.branchId,
+          campId: activeCamp,
+          requestType: 'Inventory Edit',
+          details: 'Inventory edit request for ${originalMed['name'] ?? 'medicine'} submitted for approval',
+        );
+      } catch (e) {
+        debugPrint('[InventoryUpdate] Supervisor notification error: $e');
+      }
 
       _snack('Edit request submitted for supervisor approval');
     } catch (e) {
@@ -531,14 +541,15 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   // ── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final isDark = _isDark;
     if (widget.isEmbedded) {
       return Container(
-        color: _bg,
+        color: isDark ? const Color(0xFF0F172A) : _bg,
         child: widget.showMode == 1 ? _addStockTab() : _registerTab(),
       );
     }
     return Scaffold(
-      backgroundColor: _bg,
+      backgroundColor: isDark ? const Color(0xFF0F172A) : _bg,
       appBar: _buildAppBar(),
       body: FadeTransition(
         opacity: _fadeAnim,
@@ -563,37 +574,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'Nebulization' => FontAwesomeIcons.wind,
         _ => FontAwesomeIcons.pills,
       };
-
-  InputDecoration _inputDec(String label,
-      {IconData? icon, Widget? prefix, String? hint}) =>
-      InputDecoration(
-        labelText: label,
-        hintText: hint,
-        labelStyle: const TextStyle(color: _textLight, fontSize: 13),
-        hintStyle: const TextStyle(color: _textLight, fontSize: 13),
-        prefixIcon: prefix ??
-            (icon != null ? Icon(icon, color: _teal, size: 18) : null),
-        filled: true,
-        fillColor: _isDark ? const Color(0xFF0F172A) : _green50,
-        border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide.none),
-        enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: _border)),
-        focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: _teal, width: 1.5)),
-        errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: _red)),
-        focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: _red)),
-        errorStyle: const TextStyle(color: _red, fontSize: 11),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-      );
 
   bool _isLowStock(int qty, String? type) {
     final t = (type ?? '').toLowerCase();
@@ -674,19 +654,10 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Future<Map<String, String>> _getUserInfo() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return {'uid': '', 'username': 'Unknown'};
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('users')
-          .doc(user.uid)
-          .get();
-      final username =
-          doc.data()?['username']?.toString() ?? user.email ?? 'Unknown';
-      return {'uid': user.uid, 'username': username};
-    } catch (_) {
-      return {'uid': user.uid, 'username': user.email ?? 'Unknown'};
-    }
+    final email = user.email ?? '';
+    final cached = LocalStorageService.getLocalUserByEmail(email) ?? LocalStorageService.getLocalUserByUid(user.uid);
+    final username = cached?['username']?.toString() ?? cached?['name']?.toString() ?? user.displayName ?? (email.isNotEmpty ? email : 'Unknown');
+    return {'uid': user.uid, 'username': username};
   }
 
   // ── Load all medicines on start (Hive-first for instant offline updates) ───
@@ -704,20 +675,16 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           processedDocIds.add(docId);
         }
 
-        final filterCamp = _selectedCampFilter.toLowerCase().trim();
         final itemCamp = (d['dispensaryId'] ?? d['campId'] ?? '').toString().toLowerCase().trim();
-        final docIdStr = (docId ?? '').toLowerCase();
 
-        if (filterCamp.isNotEmpty && filterCamp != 'all') {
-          bool matches = false;
-          if (filterCamp.contains('sadd')) {
-            matches = itemCamp.contains('sadd') || itemCamp.contains('kap') ||
-                      docIdStr.startsWith('saddar') || docIdStr.startsWith('kapay');
-          } else if (filterCamp.contains('haji')) {
-            matches = itemCamp.contains('haji') || docIdStr.startsWith('haji');
-          } else {
-            matches = (itemCamp == filterCamp);
-          }
+        if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
+          final matches = CampSessionService.matchesCamp(
+            selectedCamp: _selectedCampFilter,
+            dispensaryId: d['dispensaryId']?.toString(),
+            campId: d['campId']?.toString(),
+            dispensaryTag: d['dispensaryTag']?.toString(),
+            serial: (d['barcode'] ?? d['code'] ?? docId)?.toString(),
+          );
           if (!matches) return;
         }
 
@@ -738,22 +705,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
       for (final item in localItems) {
         processItem(item);
-      }
-
-      try {
-        final snap = await FirebaseFirestore.instance
-            .collection('branches')
-            .doc(_currentBranchId)
-            .collection('inventory')
-            .orderBy('name_lower')
-            .limit(250)
-            .get(const GetOptions(source: Source.serverAndCache));
-
-        for (final doc in snap.docs) {
-          processItem({...doc.data(), '_docId': doc.id});
-        }
-      } catch (e) {
-        debugPrint('InventoryUpdate: Firestore background fetch failed (offline mode): $e');
       }
 
       if (mounted) {
@@ -788,49 +739,46 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
     setState(() => _isSearching = true);
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(_currentBranchId)
-          .collection('inventory')
-          .where('name_lower',
-              isGreaterThanOrEqualTo: query.toLowerCase())
-          .where('name_lower',
-              isLessThanOrEqualTo: '${query.toLowerCase()}\uf8ff')
-          .limit(60)
-          .get();
-
       final Map<String, Map<String, dynamic>> seen = {};
-      final filterCamp = _selectedCampFilter.toLowerCase().trim();
+      final q = query.toLowerCase().trim();
 
-      for (final doc in snap.docs) {
-        final d = doc.data();
+      void processDoc(Map<String, dynamic> d, String docId) {
         final itemCamp = (d['dispensaryId'] ?? d['campId'] ?? '').toString().toLowerCase().trim();
-        final docIdStr = doc.id.toLowerCase();
 
-        if (filterCamp.isNotEmpty && filterCamp != 'all') {
-          bool matches = false;
-          if (filterCamp.contains('sadd')) {
-            matches = itemCamp.contains('sadd') || itemCamp.contains('kap') ||
-                      docIdStr.startsWith('saddar') || docIdStr.startsWith('kapay');
-          } else if (filterCamp.contains('haji')) {
-            matches = itemCamp.contains('haji') || docIdStr.startsWith('haji');
-          } else {
-            matches = (itemCamp == filterCamp);
-          }
-          if (!matches) continue;
+        if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
+          final matches = CampSessionService.matchesCamp(
+            selectedCamp: _selectedCampFilter,
+            dispensaryId: d['dispensaryId']?.toString(),
+            campId: d['campId']?.toString(),
+            dispensaryTag: d['dispensaryTag']?.toString(),
+            serial: (d['barcode'] ?? d['code'] ?? docId)?.toString(),
+          );
+          if (!matches) return;
         }
 
         final itemType = (d['type'] ?? '').toString();
         if (_selectedTypeFilter != 'All' && itemType.toLowerCase() != _selectedTypeFilter.toLowerCase()) {
-          continue;
+          return;
         }
 
         final key = '${d['name']}|${d['type']}|${d['dose']}|$itemCamp';
         if (!seen.containsKey(key)) {
-          seen[key] = {...d, '_docId': doc.id};
+          seen[key] = {...d, '_docId': docId};
         } else {
           seen[key]!['quantity'] =
               (seen[key]!['quantity'] ?? 0) + (d['quantity'] ?? 0);
+        }
+      }
+
+      // Check local Hive stock first (works offline immediately)
+      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _currentBranchId, filterByCamp: false);
+      for (final item in localItems) {
+        final name = (item['name'] ?? '').toString().toLowerCase();
+        final barcode = (item['barcode'] ?? item['code'] ?? '').toString().toLowerCase();
+        final formula = (item['formula'] ?? '').toString().toLowerCase();
+        if (name.contains(q) || barcode.contains(q) || formula.contains(q)) {
+          final docId = (item['_docId'] ?? item['id'] ?? item['docId'])?.toString() ?? '';
+          processDoc(item, docId);
         }
       }
 
@@ -870,8 +818,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     }
 
     final targetCamp = _effectiveTargetCamp;
-    if (targetCamp == 'all') {
-      _snack('Please select a specific camp (Saddar or Haji Camp) above before adding stock.', err: true);
+    if (_hasMultiCamps && (targetCamp == 'all' || targetCamp.isEmpty)) {
+      _snack('Please select a specific camp above before adding stock.', err: true);
       return;
     }
 
@@ -890,6 +838,22 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       // STEP 1: Update local Hive instantly — local UI reflects immediately
       await LocalStorageService.updateLocalStockQuantity(medId, qty.toDouble());
 
+      final logData = {
+        'action': 'add_stock',
+        'medicineName': _selectedMed!['name'],
+        'medicineId': medId,
+        'quantityAdded': qty,
+        'branchId': _currentBranchId,
+        'dispensaryId': targetCamp,
+        'campId': targetCamp,
+        'campName': campLabel,
+        'performedBy': userInfo['uid'],
+        'performedByName': userInfo['username'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'createdAt': DateTime.now().toIso8601String(),
+      };
+      await LocalStorageService.saveLocalInventoryLog(logData);
+
       // STEP 2: LAN broadcast — all LAN devices (doctor, server) see it instantly
       final updatedMed = LocalStorageService.getLocalInventoryItem(medId);
       if (updatedMed != null) {
@@ -905,38 +869,12 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             'performedBy':      userInfo['uid'],
             'performedByName':  userInfo['username'],
           },
+          'logData': logData,
         });
       }
 
-      // STEP 3: Try Firestore directly (online devices see it via StreamBuilder).
-      try {
-        await FirebaseFirestore.instance
-            .collection('branches')
-            .doc(_currentBranchId)
-            .collection('inventory')
-            .doc(medId)
-            .update({'quantity': FieldValue.increment(qty)});
-
-        // Log the action
-        FirebaseFirestore.instance
-            .collection('branches')
-            .doc(_currentBranchId)
-            .collection('inventory_log')
-            .add({
-          'action': 'add_stock',
-          'medicineName': _selectedMed!['name'],
-          'medicineId': medId,
-          'quantityAdded': qty,
-          'branchId': _currentBranchId,
-          'dispensaryId': targetCamp,
-          'campId': targetCamp,
-          'campName': campLabel,
-          'performedBy': userInfo['uid'],
-          'performedByName': userInfo['username'],
-          'timestamp': FieldValue.serverTimestamp(),
-        });
-      } catch (_) {
-        // Offline — queue for Firestore sync when connectivity is restored
+      // STEP 3: If LAN is disconnected, enqueue locally so background sync uploads when connected
+      if (!RealtimeManager().isConnected) {
         await LocalStorageService.enqueueSync({
           'type': 'add_inventory_stock',
           'branchId': _currentBranchId,
@@ -948,6 +886,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           'quantity': qty,
           'performedBy': userInfo['uid'],
           'performedByName': userInfo['username'],
+          'logData': logData,
         });
       }
 
@@ -1218,8 +1157,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
       await MasterProformaService.saveProformaItem(proformaItem, auditLog: auditLog);
 
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.saveStockItem,
+            RealtimeManager().sendMessage({
+        'event_type': RealtimeEvents.saveProformaItem,
+        'branchId': widget.branchId,
         'data': proformaItem,
         'logData': auditLog,
       });
@@ -1254,10 +1194,60 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   bool get _isDark {
     try {
       if (Hive.isBoxOpen('app_settings')) {
-        return Hive.box('app_settings').get('is_dark_mode', defaultValue: false) == true;
+        final val = Hive.box('app_settings').get('is_dark_mode');
+        if (val != null) return val == true;
       }
     } catch (_) {}
-    return false;
+    return Theme.of(context).brightness == Brightness.dark;
+  }
+
+  static Color _typeColor(String t) => switch (t) {
+        'Tablet' => const Color(0xFF1565C0),
+        'Capsule' => const Color(0xFF6A1B9A),
+        'Syrup' => const Color(0xFFF57F17),
+        'Injection' => const Color(0xFFC62828),
+        'Infusion' => const Color(0xFF00695C),
+        'Drip' => const Color(0xFF00695C),
+        'Drip Set' => const Color(0xFF00838F),
+        'Syringe' => const Color(0xFFAD1457),
+        'Cannula' => const Color(0xFFD81B60),
+        'Needle' => const Color(0xFF8E24AA),
+        'Nebulization' => const Color(0xFF283593),
+        'Dressing Item' => const Color(0xFF455A64),
+        'Consumables' => const Color(0xFF00796B),
+        _ => const Color(0xFF37474F),
+      };
+
+  InputDecoration _inputDec(String label, {IconData? icon, String? hint}) {
+    final isDark = _isDark;
+    return InputDecoration(
+      labelText: label,
+      labelStyle: TextStyle(
+        color: isDark ? const Color(0xFF94A3B8) : _teal,
+        fontSize: 13,
+      ),
+      hintText: hint,
+      hintStyle: TextStyle(
+        color: isDark ? const Color(0xFF64748B) : _textLight,
+        fontSize: 13,
+      ),
+      prefixIcon: icon != null ? Icon(icon, color: isDark ? const Color(0xFF38BDF8) : _teal, size: 18) : null,
+      filled: true,
+      fillColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: isDark ? const Color(0xFF334155) : _border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: isDark ? const Color(0xFF334155) : _border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: isDark ? const Color(0xFF38BDF8) : _teal, width: 1.8),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    );
   }
 
   PreferredSizeWidget _buildAppBar() => AppBar(
@@ -1494,20 +1484,20 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           if (_selectedCampFilter == 'all' && _hasMultiCamps) ...[
             const SizedBox(height: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.amber.shade50,
+                color: isDark ? const Color(0xFF451A03).withValues(alpha: 0.6) : Colors.amber.shade50,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.shade300),
+                border: Border.all(color: isDark ? const Color(0xFFD97706).withValues(alpha: 0.5) : Colors.amber.shade300),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.info_outline_rounded, size: 14, color: Colors.amber.shade900),
-                  const SizedBox(width: 6),
+                  Icon(Icons.info_outline_rounded, size: 15, color: isDark ? const Color(0xFFFCD34D) : Colors.amber.shade900),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Viewing consolidated inventory. To add stock, select either Saddar or Haji Camp to avoid misassignment.',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.amber.shade900),
+                      'Viewing consolidated inventory from all camps. When adding stock, choose the specific destination camp in the pop-up.',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isDark ? const Color(0xFFFDE68A) : Colors.amber.shade900),
                     ),
                   ),
                 ],
@@ -1586,181 +1576,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
-  Widget _buildSelectedMedStockPanel() {
-    if (_selectedMed == null) return const SizedBox.shrink();
-    final isDark = _isDark;
-    final targetCampLabel = CampSessionService.getCampLabel(_effectiveTargetCamp);
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 4, 16, 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1E293B) : Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _teal, width: 2),
-        boxShadow: [
-          BoxShadow(
-            color: _teal.withValues(alpha: 0.18),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          )
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _teal.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(_typeIcon(_selectedMed!['type'] ?? ''), color: _teal, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _selectedMed!['name'] ?? '',
-                      style: TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white : _tealDark,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Wrap(
-                      spacing: 6,
-                      children: [
-                        _miniChip(_selectedMed!['type'] ?? '', _teal),
-                        if ((_selectedMed!['dose'] ?? '').toString().isNotEmpty)
-                          _miniChip(_selectedMed!['dose'].toString(), _textMid),
-                        _miniChip('Current Stock: ${_selectedMed!['quantity'] ?? 0}', _green600),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.close_rounded, color: _textLight, size: 22),
-                onPressed: _clearSelection,
-                tooltip: 'Cancel',
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: isDark ? const Color(0xFF0F766E).withValues(alpha: 0.2) : const Color(0xFFF0FDF4),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: isDark ? const Color(0xFF14B8A6).withValues(alpha: 0.4) : const Color(0xFFBBF7D0)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.verified_rounded, size: 15, color: _green600),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'Target Facility: $targetCampLabel (${_currentBranchId.toUpperCase()})',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: _green600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              _qtyBtn(Icons.remove_rounded, () {
-                final v = int.tryParse(_addQtyCtrl.text) ?? 1;
-                if (v > 1) setState(() => _addQtyCtrl.text = '${v - 1}');
-              }),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _addQtyCtrl,
-                  textAlign: TextAlign.center,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  cursorColor: _teal,
-                  style: TextStyle(
-                    color: isDark ? Colors.white : _teal,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                  ),
-                  decoration: InputDecoration(
-                    hintText: 'Qty',
-                    filled: true,
-                    fillColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: _border),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              _qtyBtn(Icons.add_rounded, () {
-                final v = int.tryParse(_addQtyCtrl.text) ?? 0;
-                setState(() => _addQtyCtrl.text = '${v + 1}');
-              }),
-              const SizedBox(width: 10),
-              // Preset chips
-              ...[10, 50, 100].map((increment) {
-                return Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ActionChip(
-                    label: Text('+$increment'),
-                    labelStyle: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: isDark ? Colors.white70 : _tealDark,
-                    ),
-                    backgroundColor: isDark ? const Color(0xFF334155) : const Color(0xFFE0F2FE),
-                    onPressed: () {
-                      final v = int.tryParse(_addQtyCtrl.text) ?? 0;
-                      setState(() => _addQtyCtrl.text = '${v + increment}');
-                    },
-                  ),
-                );
-              }),
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            height: 44,
-            child: ElevatedButton.icon(
-              onPressed: _isSubmittingStock ? null : _submitAddStock,
-              icon: _isSubmittingStock
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.add_task_rounded, color: Colors.white, size: 18),
-              label: Text(
-                _isSubmittingStock ? 'Adding Stock...' : 'Confirm & Add Stock to $targetCampLabel',
-                style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: Colors.white),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _green600,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                elevation: 2,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
+  // ══════════════════════════════════════════════════════════════════════════
+  // TAB 1 — Add Stock & Inventory Manager Redesign
+  // ══════════════════════════════════════════════════════════════════════════
   Widget _addStockTab() => Column(
         children: [
           // ── Context Banner (Branch & Camp Switcher + Stats) ───────────────
@@ -1793,10 +1611,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                             icon: const Icon(Icons.close_rounded, color: _textLight, size: 18),
                             onPressed: () {
                               _searchCtrl.clear();
-                              setState(() {
-                                _selectedMed = null;
-                                _selectedDocId = null;
-                              });
                               _loadAllMedicines();
                             },
                           )
@@ -1805,15 +1619,15 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                     fillColor: _isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: _border),
+                      borderSide: BorderSide(color: _isDark ? const Color(0xFF334155) : _border),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: _border),
+                      borderSide: BorderSide(color: _isDark ? const Color(0xFF334155) : _border),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: _teal, width: 1.5),
+                      borderSide: const BorderSide(color: Color(0xFF38BDF8), width: 1.5),
                     ),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   ),
@@ -1867,9 +1681,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             ),
           ),
 
-          // ── Selected medicine + qty panel ──────────────────────────────────
-          if (_selectedMed != null) _buildSelectedMedStockPanel(),
-
           // ── Section header ─────────────────────────────────────────────────
           if (_hasSearched && _searchResults.isNotEmpty)
             Container(
@@ -1885,7 +1696,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                   ),
                   const Spacer(),
                   Text(
-                    'Camp: ${CampSessionService.getCampLabel(_effectiveTargetCamp)}',
+                    _selectedCampFilter == 'all'
+                        ? 'Camp: All Camps (Combined)'
+                        : 'Camp: ${CampSessionService.getCampLabel(_effectiveTargetCamp)}',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
@@ -1917,228 +1730,194 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                         itemCount: _searchResults.length,
                         itemBuilder: (ctx, i) {
                           final med = _searchResults[i];
-                          final isSelected = _selectedMed != null &&
-                              _selectedMed!['_docId'] == med['_docId'];
-                          return _searchResultRow(med, isSelected);
+                          return _searchResultRow(med);
                         },
                       ),
           ),
         ],
       );
 
-  Widget _searchResultRow(Map<String, dynamic> med, bool isSelected) {
+  Widget _searchResultRow(Map<String, dynamic> med) {
     final isDark = _isDark;
     final qty = _safeInt(med['quantity']);
-    final type = med['type']?.toString() ?? '';
+    final type = med['type']?.toString() ?? 'Tablet';
+    final name = (med['name'] ?? med['formula'] ?? '').toString();
+    final dose = (med['dose'] ?? '').toString();
     final lowStock = _isLowStock(qty, type);
     final expSoon = _isExpiringSoon(med['expiryDate']?.toString());
-    final isWarning = lowStock || expSoon;
 
     final rawCamp = (med['campId'] ?? med['dispensaryId'] ?? '').toString().toLowerCase();
-    String campTag = 'Saddar Camp';
+    String campTag = _hasMultiCamps ? 'Saddar Camp' : '';
     if (rawCamp.contains('haji')) {
       campTag = 'Haji Camp';
     } else if (rawCamp.contains('sadd') || rawCamp.contains('kap')) {
       campTag = 'Saddar Camp';
-    } else if (_selectedCampFilter != 'all') {
+    } else if (_hasMultiCamps && _selectedCampFilter != 'all') {
       campTag = CampSessionService.getCampLabel(_selectedCampFilter);
     }
 
-    final rowBg = isDark
-        ? (isSelected ? const Color(0xFF1E3A3A) : const Color(0xFF1E293B))
-        : (isSelected ? const Color(0xFFF0FDF4) : Colors.white);
-    final borderColor = isDark
-        ? (isSelected ? const Color(0xFF0F766E) : const Color(0xFF334155))
-        : (isSelected ? _teal : const Color(0xFFE2E8F0));
-
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
-        color: rowBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: borderColor, width: isSelected ? 2.0 : 1.0),
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+          width: 1.0,
+        ),
         boxShadow: [
           BoxShadow(
-            color: isDark ? Colors.black12 : Colors.black.withValues(alpha: 0.04),
-            blurRadius: isSelected ? 6 : 3,
-            offset: const Offset(0, 2),
+            color: isDark ? Colors.black12 : Colors.black.withValues(alpha: 0.02),
+            blurRadius: 3,
+            offset: const Offset(0, 1),
           )
         ],
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(10),
         child: InkWell(
-          borderRadius: BorderRadius.circular(14),
-          onTap: () => _selectMedForStock(med),
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => _showAddStockDialog(med),
           child: Padding(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
-                // Type Icon Container
+                // Category Type Pill
                 Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                   decoration: BoxDecoration(
-                    color: isDark
-                        ? const Color(0xFF0F766E).withValues(alpha: 0.25)
-                        : (type == 'Syrup'
-                            ? Colors.amber.shade50
-                            : (type == 'Injection' ? Colors.purple.shade50 : _green50)),
-                    borderRadius: BorderRadius.circular(12),
+                    color: _typeColor(type).withValues(alpha: isDark ? 0.25 : 0.12),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: _typeColor(type).withValues(alpha: 0.4)),
                   ),
-                  child: Icon(
-                    _typeIcon(type),
-                    color: type == 'Syrup'
-                        ? Colors.amber.shade800
-                        : (type == 'Injection' ? Colors.purple.shade700 : _teal),
-                    size: 18,
+                  child: Text(
+                    type.length > 4 ? type.substring(0, 4) : type,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                      color: isDark ? const Color(0xFF38BDF8) : _typeColor(type),
+                    ),
                   ),
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 10),
 
-                // Name & Metadata
+                // Name, Dose, and Camp Info
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  child: Row(
                     children: [
-                      Text(
-                        med['name'] ?? '',
-                        style: TextStyle(
-                          color: isDark ? Colors.white : _textDark,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              name,
+                              style: TextStyle(
+                                color: isDark ? Colors.white : _textDark,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13.5,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (dose.isNotEmpty || (_hasMultiCamps && campTag.isNotEmpty) || lowStock || expSoon)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Row(
+                                  children: [
+                                    if (dose.isNotEmpty)
+                                      Text(
+                                        dose,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w500,
+                                          color: isDark ? const Color(0xFF94A3B8) : _textMid,
+                                        ),
+                                      ),
+                                    if (dose.isNotEmpty && _hasMultiCamps && campTag.isNotEmpty)
+                                      Text(' • ', style: TextStyle(fontSize: 10, color: isDark ? Colors.white38 : Colors.grey)),
+                                    if (_hasMultiCamps && campTag.isNotEmpty)
+                                      Text(
+                                        campTag,
+                                        style: TextStyle(
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w600,
+                                          color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7),
+                                        ),
+                                      ),
+                                    if (lowStock) ...[
+                                      const SizedBox(width: 6),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          color: Colors.amber.withValues(alpha: 0.2),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: const Text('LOW', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.amber)),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 5),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          _miniChip(type, isDark ? const Color(0xFF38BDF8) : _teal),
-                          if ((med['dose'] ?? '').toString().isNotEmpty)
-                            _miniChip(med['dose'].toString(), isDark ? const Color(0xFF94A3B8) : _textMid),
-                          // Facility Camp Badge
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isDark ? const Color(0xFF0284C7).withValues(alpha: 0.2) : const Color(0xFFE0F2FE),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: isDark ? const Color(0xFF38BDF8).withValues(alpha: 0.4) : const Color(0xFFBAE6FD)),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.location_on_rounded, size: 10, color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7)),
-                                const SizedBox(width: 3),
-                                Text(
-                                  campTag,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (isWarning) ...[
-                        const SizedBox(height: 4),
-                        _statusLabel(lowStock: lowStock, expSoon: expSoon),
-                      ],
                     ],
                   ),
                 ),
+                const SizedBox(width: 10),
 
-                // Right Side: Stock Badge + Action Buttons
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    // Stock Count Badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: qty == 0
-                            ? (isDark ? const Color(0xFF7F1D1D).withValues(alpha: 0.3) : const Color(0xFFFEE2E2))
-                            : (lowStock
-                                ? (isDark ? const Color(0xFF78350F).withValues(alpha: 0.3) : const Color(0xFFFEF3C7))
-                                : (isDark ? const Color(0xFF064E3B).withValues(alpha: 0.3) : const Color(0xFFDCFCE7))),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: qty == 0
-                              ? Colors.red.shade400
-                              : (lowStock ? Colors.amber.shade600 : Colors.green.shade400),
-                        ),
-                      ),
-                      child: Text(
-                        '$qty in stock',
-                        style: TextStyle(
-                          color: qty == 0
-                              ? Colors.red.shade700
-                              : (lowStock ? Colors.amber.shade900 : Colors.green.shade800),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12.5,
-                        ),
-                      ),
+                // Stock Count Pill
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: qty == 0
+                        ? (isDark ? const Color(0xFF7F1D1D).withValues(alpha: 0.3) : const Color(0xFFFEE2E2))
+                        : (lowStock
+                            ? (isDark ? const Color(0xFF78350F).withValues(alpha: 0.3) : const Color(0xFFFEF3C7))
+                            : (isDark ? const Color(0xFF064E3B).withValues(alpha: 0.3) : const Color(0xFFDCFCE7))),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: qty == 0
+                          ? Colors.red.shade400
+                          : (lowStock ? Colors.amber.shade600 : Colors.green.shade400),
                     ),
-                    const SizedBox(height: 8),
+                  ),
+                  child: Text(
+                    '$qty',
+                    style: TextStyle(
+                      color: qty == 0
+                          ? Colors.red.shade700
+                          : (lowStock ? Colors.amber.shade900 : Colors.green.shade800),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
 
-                    // Action buttons: [+ Add Stock] and [Edit]
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        InkWell(
-                          onTap: () => _selectMedForStock(med),
-                          borderRadius: BorderRadius.circular(6),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: isDark ? const Color(0xFF0F766E).withValues(alpha: 0.3) : _green50,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: _teal.withValues(alpha: 0.5)),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: const [
-                                Icon(Icons.add_circle_outline_rounded, size: 13, color: _teal),
-                                SizedBox(width: 4),
-                                Text(
-                                  'Add Stock',
-                                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _teal),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        InkWell(
-                          onTap: () => _showEditRequestSheet(med),
-                          borderRadius: BorderRadius.circular(6),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: _purple.withValues(alpha: 0.08),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: _purple.withValues(alpha: 0.3)),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: const [
-                                Icon(Icons.edit_rounded, size: 13, color: _purple),
-                                SizedBox(width: 4),
-                                Text(
-                                  'Edit',
-                                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _purple),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                // Action Buttons: [+ Add Stock] & [Edit]
+                ElevatedButton.icon(
+                  onPressed: () => _showAddStockDialog(med),
+                  icon: const Icon(Icons.add_rounded, size: 14, color: Colors.white),
+                  label: const Text('Add Stock', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _teal,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    minimumSize: const Size(0, 30),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    elevation: 0,
+                  ),
+                ),
+                const SizedBox(width: 5),
+                IconButton(
+                  icon: const Icon(Icons.edit_rounded, size: 16),
+                  color: isDark ? const Color(0xFFC084FC) : _purple,
+                  tooltip: 'Edit / Request Changes',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  onPressed: () => _showEditRequestSheet(med),
                 ),
               ],
             ),
@@ -2146,6 +1925,412 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         ),
       ),
     );
+  }
+
+  // ── Add Stock Pop-up Dialog ────────────────────────────────────────────────
+  void _showAddStockDialog(Map<String, dynamic> med) {
+    final isDark = _isDark;
+    final medName = (med['name'] ?? med['formula'] ?? 'Medicine').toString();
+    final medType = med['type']?.toString() ?? 'Tablet';
+    final medDose = med['dose']?.toString() ?? '';
+    final curQty = _safeInt(med['quantity']);
+
+    String targetCamp = (med['campId'] ?? med['dispensaryId'] ?? '').toString().toLowerCase().trim();
+    if (targetCamp.contains('haji')) {
+      targetCamp = 'haji_camp';
+    } else if (targetCamp.contains('sadd') || targetCamp.contains('kap')) {
+      targetCamp = 'saddar';
+    } else {
+      targetCamp = _effectiveTargetCamp;
+      if (targetCamp == 'all' || targetCamp.isEmpty) {
+        targetCamp = 'saddar';
+      }
+    }
+
+    final qtyCtrl = TextEditingController(text: '10');
+    bool isSubmitting = false;
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final campLabel = CampSessionService.getCampLabel(targetCamp);
+          return Dialog(
+            backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: 480,
+                maxHeight: MediaQuery.of(ctx).size.height * 0.90,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(22),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                    // Header
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF0F766E).withValues(alpha: 0.3) : const Color(0xFFE0F2FE),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(Icons.add_box_rounded, color: isDark ? const Color(0xFF38BDF8) : _teal, size: 22),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Add Stock to Inventory',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: isDark ? Colors.white : _textDark,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Routes to Local Server & connected Doctors immediately',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: isDark ? const Color(0xFF94A3B8) : _textMid,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.close_rounded, color: isDark ? Colors.white60 : _textLight, size: 20),
+                          onPressed: () => Navigator.of(dialogCtx).pop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Med Info Card
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  medName,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14.5,
+                                    color: isDark ? Colors.white : _textDark,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    _miniChip(medType, isDark ? const Color(0xFF38BDF8) : _teal),
+                                    if (medDose.isNotEmpty) ...[
+                                      const SizedBox(width: 6),
+                                      _miniChip(medDose, isDark ? const Color(0xFF94A3B8) : _textMid),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: isDark ? const Color(0xFF064E3B).withValues(alpha: 0.3) : const Color(0xFFDCFCE7),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.green.shade400),
+                            ),
+                            child: Column(
+                              children: [
+                                Text('Current Stock', style: TextStyle(fontSize: 10, color: isDark ? const Color(0xFF86EFAC) : Colors.green.shade800)),
+                                Text('$curQty', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.green.shade900)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Target Facility Camp Selector
+                    if (_hasMultiCamps) ...[
+                      Text('Target Facility Camp:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? Colors.white70 : _textMid)),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => setDialogState(() => targetCamp = 'saddar'),
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: targetCamp == 'saddar' ? _teal : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: targetCamp == 'saddar' ? _teal : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                                ),
+                                alignment: Alignment.center,
+                                child: Text('Saddar Camp', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: targetCamp == 'saddar' ? Colors.white : (isDark ? Colors.white70 : _textDark))),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => setDialogState(() => targetCamp = 'haji_camp'),
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? const Color(0xFF0284C7) : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? const Color(0xFF0284C7) : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                                ),
+                                alignment: Alignment.center,
+                                child: Text('Haji Camp', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? Colors.white : (isDark ? Colors.white70 : _textDark))),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+
+                    // Quantity Input with Steppers & Quick Increment Chips
+                    Text('Quantity to Add:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? Colors.white70 : _textMid)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        _qtyBtn(Icons.remove_rounded, () {
+                          final v = int.tryParse(qtyCtrl.text) ?? 1;
+                          if (v > 1) setDialogState(() => qtyCtrl.text = '${v - 1}');
+                        }),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: qtyCtrl,
+                            textAlign: TextAlign.center,
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                            cursorColor: _teal,
+                            style: TextStyle(
+                              color: isDark ? Colors.white : _teal,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 20,
+                            ),
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: isDark ? const Color(0xFF334155) : _border),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: isDark ? const Color(0xFF334155) : _border),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: Color(0xFF38BDF8), width: 1.8),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        _qtyBtn(Icons.add_rounded, () {
+                          final v = int.tryParse(qtyCtrl.text) ?? 0;
+                          setDialogState(() => qtyCtrl.text = '${v + 1}');
+                        }),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Quick Increment Chips
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [10, 50, 100, 500].map((increment) {
+                        return Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 3),
+                            child: InkWell(
+                              onTap: () {
+                                final v = int.tryParse(qtyCtrl.text) ?? 0;
+                                setDialogState(() => qtyCtrl.text = '${v + increment}');
+                              },
+                              borderRadius: BorderRadius.circular(6),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: isDark ? const Color(0xFF334155) : const Color(0xFFE0F2FE),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: isDark ? const Color(0xFF475569) : const Color(0xFFBAE6FD)),
+                                ),
+                                alignment: Alignment.center,
+                                child: Text(
+                                  '+$increment',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.bold,
+                                    color: isDark ? const Color(0xFF38BDF8) : _tealDark,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Submit & Cancel Buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: isSubmitting ? null : () => Navigator.of(dialogCtx).pop(),
+                            style: OutlinedButton.styleFrom(
+                              side: BorderSide(color: isDark ? const Color(0xFF475569) : Colors.grey.shade400),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            child: Text('Cancel', style: TextStyle(color: isDark ? Colors.white70 : _textMid, fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton.icon(
+                            onPressed: isSubmitting
+                                ? null
+                                : () async {
+                                    final qty = int.tryParse(qtyCtrl.text.trim()) ?? 0;
+                                    if (qty < 1) {
+                                      _snack('Enter a valid quantity (min 1)', err: true);
+                                      return;
+                                    }
+                                    setDialogState(() => isSubmitting = true);
+                                    Navigator.of(dialogCtx).pop();
+                                    await _submitAddStockForMed(med, qty, targetCamp);
+                                  },
+                            icon: isSubmitting
+                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : const Icon(Icons.add_task_rounded, color: Colors.white, size: 18),
+                            label: Text(
+                              'Add Stock to $campLabel',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF00A86B),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              elevation: 2,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        },
+      ),
+    );
+  }
+
+  // ── Submit Add Stock for specific medicine ──────────────────────────────────
+  Future<void> _submitAddStockForMed(Map<String, dynamic> med, int qty, String targetCamp) async {
+    final medId = (med['_docId'] ?? med['id'] ?? med['medicineId'])?.toString() ?? '';
+    if (medId.isEmpty) {
+      _snack('Invalid medicine ID', err: true);
+      return;
+    }
+
+    final campLabel = CampSessionService.getCampLabel(targetCamp);
+    final medName = (med['name'] ?? med['formula'] ?? 'Medicine').toString();
+
+    try {
+      final userInfo = await _getUserInfo();
+
+      // STEP 1: Update local Hive storage immediately so UI reflects without delay
+      await LocalStorageService.updateLocalStockQuantity(medId, qty.toDouble());
+
+      final logData = {
+        'action': 'add_stock',
+        'medicineName': medName,
+        'medicineId': medId,
+        'quantityAdded': qty,
+        'branchId': _currentBranchId,
+        'dispensaryId': targetCamp,
+        'campId': targetCamp,
+        'campName': campLabel,
+        'performedBy': userInfo['uid'],
+        'performedByName': userInfo['username'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'createdAt': DateTime.now().toIso8601String(),
+      };
+      await LocalStorageService.saveLocalInventoryLog(logData);
+
+      // STEP 2: LAN Server First routing — sends RealtimeEvents.saveStockItem to local Server
+      // The server updates its local state and broadcasts instantly to connected Doctors!
+      final updatedMed = LocalStorageService.getLocalInventoryItem(medId) ?? med;
+      RealtimeManager().sendMessage({
+        'event_type': RealtimeEvents.saveStockItem,
+        'data': {
+          ...updatedMed,
+          '_quantityDelta':  qty,
+          'branchId':        _currentBranchId,
+          'campId':          targetCamp,
+          'dispensaryId':    targetCamp,
+          'campName':        campLabel,
+          'performedBy':     userInfo['uid'],
+          'performedByName': userInfo['username'],
+        },
+        'logData': logData,
+      });
+
+      // STEP 3: If LAN is disconnected, enqueue locally for background sync
+      if (!RealtimeManager().isConnected) {
+        await LocalStorageService.enqueueSync({
+          'type': 'add_inventory_stock',
+          'branchId': _currentBranchId,
+          'dispensaryId': targetCamp,
+          'campId': targetCamp,
+          'campName': campLabel,
+          'medicineId': medId,
+          'medicineName': medName,
+          'quantity': qty,
+          'performedBy': userInfo['uid'],
+          'performedByName': userInfo['username'],
+          'logData': logData,
+        });
+      }
+
+      _snack('+$qty added to $medName at $campLabel (${_currentBranchId.toUpperCase()})!');
+      _loadAllMedicines();
+    } catch (e) {
+      _snack('Error updating stock: $e', err: true);
+    }
   }
 
   // ── Edit Request Sheet ─────────────────────────────────────────────────────
@@ -2197,15 +2382,15 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             children: [
               const Icon(Icons.lock_outline_rounded, size: 64, color: Colors.orange),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'Access Restricted',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _tealDark),
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _isDark ? Colors.white : _tealDark),
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 'Registering permanent medicines into the Master Proforma is restricted to Chairman, HQ Managers, and Admins.\nDispensary staff and doctors can restock and add branch inventory from the Universal Proforma Sheet.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: _textMid),
+                style: TextStyle(fontSize: 14, color: _isDark ? const Color(0xFF94A3B8) : _textMid),
               ),
             ],
           ),
@@ -2227,9 +2412,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 // Name (Formula)
                 TextFormField(
                   controller: _regNameCtrl,
-                  style:
-                      const TextStyle(color: _textDark, fontSize: 15),
-                  cursorColor: _teal,
+                  style: TextStyle(color: _isDark ? Colors.white : _textDark, fontSize: 15),
+                  cursorColor: _isDark ? const Color(0xFF38BDF8) : _teal,
                   decoration: _inputDec('Formula',
                       icon: Icons.medication_rounded,
                       hint: 'e.g. Amoxicillin, Panadol Extra'),
@@ -2242,9 +2426,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFE3F2FD),
+                      color: _isDark ? const Color(0xFF1E293B) : const Color(0xFFE3F2FD),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFF90CAF9)),
+                      border: Border.all(color: _isDark ? const Color(0xFF38BDF8) : const Color(0xFF90CAF9)),
                     ),
                     child: Row(
                       children: [
@@ -2253,7 +2437,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                         Expanded(
                           child: Text.rich(
                             TextSpan(
-                              style: const TextStyle(fontSize: 12, color: _textDark),
+                              style: TextStyle(fontSize: 12, color: _isDark ? Colors.white70 : _textDark),
                               children: [
                                 const TextSpan(text: 'Did you mean '),
                                 TextSpan(
@@ -2292,9 +2476,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 // Barcode — required and must be unique across the branch
                 TextFormField(
                   controller: _regCodeCtrl,
-                  style:
-                      const TextStyle(color: _textDark, fontSize: 15),
-                  cursorColor: _teal,
+                  style: TextStyle(color: _isDark ? Colors.white : _textDark, fontSize: 15),
+                  cursorColor: _isDark ? const Color(0xFF38BDF8) : _teal,
                   decoration: _inputDec('Barcode',
                       icon: Icons.qr_code_rounded,
                       hint: 'e.g. 8964000123456'),
@@ -2307,9 +2490,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 // Type Dropdown
                 DropdownButtonFormField<String>(
                   initialValue: _regType,
-                  dropdownColor: _white,
-                  style: const TextStyle(
-                      color: _textDark, fontSize: 14),
+                  dropdownColor: _isDark ? const Color(0xFF1E293B) : _white,
+                  style: TextStyle(
+                      color: _isDark ? Colors.white : _textDark, fontSize: 14),
                   decoration: _inputDec('Type',
                       icon: FontAwesomeIcons.capsules),
                   items: _allTypes
@@ -2319,7 +2502,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                             Icon(_typeIcon(t),
                                 size: 13, color: _teal),
                             const SizedBox(width: 8),
-                            Text(t),
+                            Text(t, style: TextStyle(color: _isDark ? Colors.white : _textDark)),
                           ])))
                       .toList(),
                   onChanged: (v) {
@@ -2338,16 +2521,16 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 if (_hasDoseDropdown) ...[
                   DropdownButtonFormField<String>(
                     initialValue: _regSelectedDose,
-                    dropdownColor: _white,
-                    style: const TextStyle(
-                        color: _textDark, fontSize: 14),
+                    dropdownColor: _isDark ? const Color(0xFF1E293B) : _white,
+                    style: TextStyle(
+                        color: _isDark ? Colors.white : _textDark, fontSize: 14),
                     decoration: _inputDec('Dose',
                         icon: Icons.science_rounded),
-                    hint: const Text('Select dose',
-                        style: TextStyle(color: _textLight)),
+                    hint: Text('Select dose',
+                        style: TextStyle(color: _isDark ? const Color(0xFF64748B) : _textLight)),
                     items: (_doseOptions[_regType] ?? [])
                         .map((d) => DropdownMenuItem(
-                            value: d, child: Text(d)))
+                            value: d, child: Text(d, style: TextStyle(color: _isDark ? Colors.white : _textDark))))
                         .toList(),
                     onChanged: (v) =>
                         setState(() => _regSelectedDose = v),
@@ -2362,9 +2545,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 if (_usesFreeTextDose) ...[
                   TextFormField(
                     controller: _regDoseCtrl,
-                    style: const TextStyle(
-                        color: _textDark, fontSize: 15),
-                    cursorColor: _teal,
+                    style: TextStyle(
+                        color: _isDark ? Colors.white : _textDark, fontSize: 15),
+                    cursorColor: _isDark ? const Color(0xFF38BDF8) : _teal,
                     decoration: _inputDec(
                       _regType == 'Nebulization'
                           ? 'Dose per session'
@@ -2379,8 +2562,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 TextFormField(
                   controller: _regReasonCtrl,
                   maxLines: 2,
-                  style: const TextStyle(color: _textDark, fontSize: 14),
-                  cursorColor: _teal,
+                  style: TextStyle(color: _isDark ? Colors.white : _textDark, fontSize: 14),
+                  cursorColor: _isDark ? const Color(0xFF38BDF8) : _teal,
                   decoration: _inputDec(
                     'Reason for Registration (Mandatory Audit) *',
                     icon: Icons.history_edu_rounded,

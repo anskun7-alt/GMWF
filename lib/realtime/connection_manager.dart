@@ -87,6 +87,7 @@ class ConnectionManager {
   String? _branchId;
   String? _username;
 
+  DateTime? _lastFirestoreProbeTime;
   Timer? _reconnectTimer;
   Timer? _heartbeatTimer;
   int    _reconnectAttempts = 0;
@@ -159,6 +160,15 @@ class ConnectionManager {
       return;
     }
 
+    // ── Fast-path 0: Probe localhost if running on server machine ─────────────
+    if (!kIsWeb) {
+      final isLocalHostServer = await LanDiscovery.isReachable('127.0.0.1', AppNetwork.websocketPort);
+      if (isLocalHostServer) {
+        final ok = await _connectTo('127.0.0.1', AppNetwork.websocketPort);
+        if (ok) return;
+      }
+    }
+
     // ── Fast-path 1: Try last-known server (instant sub-second connection) ─────
     final saved = _getSavedServer();
     if (saved != null) {
@@ -172,25 +182,66 @@ class ConnectionManager {
       }
     }
 
-    // ── Fast-path 2: Query Firestore for activeServerIp published by branch server ──
-    if (_isFirebaseReady && _branchId != null && _branchId!.isNotEmpty) {
+    // ── Fast-path 2: Query Firestore for activeServerIp published by branch server (5m cooldown) ──
+    final now = DateTime.now();
+    final canProbeFirestore = _isFirebaseReady &&
+        (_lastFirestoreProbeTime == null || now.difference(_lastFirestoreProbeTime!).inMinutes >= 5);
+    if (canProbeFirestore) {
+      _lastFirestoreProbeTime = now;
+      final candidates = <String>[
+        if (_branchId != null && _branchId!.isNotEmpty && _branchId != 'all' && _branchId != 'global') _branchId!,
+      ];
+      // Add all known branches from local cache for broader server discovery
       try {
-        final doc = await FirebaseFirestore.instance
-            .collection('branches').doc(_branchId).get()
-            .timeout(const Duration(seconds: 3));
-        final fsIp = doc.data()?['activeServerIp']?.toString().trim();
-        final fsPort = (doc.data()?['activeServerPort'] as num?)?.toInt() ?? AppNetwork.websocketPort;
-        if (fsIp != null && fsIp.isNotEmpty && fsIp != '127.0.0.1' && fsIp != 'localhost') {
-          debugPrint('[ConnectionManager] Probing Firestore-published activeServerIp: $fsIp:$fsPort');
-          final reachable = await LanDiscovery.isReachable(fsIp, fsPort);
+        if (Hive.isBoxOpen('local_branches')) {
+          final box = Hive.box('local_branches');
+          for (final val in box.values) {
+            if (val is Map) {
+              final id = (val['id'] ?? '').toString().trim().toLowerCase();
+              if (id.isNotEmpty && id != 'all' && id != 'global' && !candidates.contains(id)) {
+                candidates.add(id);
+              }
+            }
+          }
+        }
+      } catch (_) {}
+      // Fallback if no local branches found
+      if (candidates.isEmpty) candidates.add('karachi');
+      
+      for (final bId in candidates) {
+        try {
+          final doc = await FirebaseFirestore.instance
+              .collection('branches').doc(bId).get()
+              .timeout(const Duration(seconds: 2));
+          final fsIp = doc.data()?['activeServerIp']?.toString().trim();
+          final fsPort = (doc.data()?['activeServerPort'] as num?)?.toInt() ?? AppNetwork.websocketPort;
+          if (fsIp != null && fsIp.isNotEmpty && fsIp != 'localhost') {
+            debugPrint('[ConnectionManager] Probing branches/$bId activeServerIp: $fsIp:$fsPort');
+            final reachable = await LanDiscovery.isReachable(fsIp, fsPort);
+            if (reachable) {
+              final ok = await _connectTo(fsIp, fsPort);
+              if (ok) return;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Universal system metadata check
+      try {
+        final metaDoc = await FirebaseFirestore.instance
+            .collection('system_metadata').doc('active_server').get()
+            .timeout(const Duration(seconds: 2));
+        final metaIp = metaDoc.data()?['activeServerIp']?.toString().trim();
+        final metaPort = (metaDoc.data()?['activeServerPort'] as num?)?.toInt() ?? AppNetwork.websocketPort;
+        if (metaIp != null && metaIp.isNotEmpty && metaIp != 'localhost') {
+          debugPrint('[ConnectionManager] Probing system_metadata activeServerIp: $metaIp:$metaPort');
+          final reachable = await LanDiscovery.isReachable(metaIp, metaPort);
           if (reachable) {
-            final ok = await _connectTo(fsIp, fsPort);
+            final ok = await _connectTo(metaIp, metaPort);
             if (ok) return;
           }
         }
-      } catch (e) {
-        debugPrint('[ConnectionManager] Firestore activeServerIp check: $e');
-      }
+      } catch (_) {}
     }
 
     // Web fallback if no LAN discovery available
@@ -227,18 +278,20 @@ class ConnectionManager {
     }
 
     // ── Auto-discovery path (UDP broadcast + fast parallel subnet scan + mDNS) ─
-    final connList = await Connectivity().checkConnectivity();
-    final hasNetwork = connList.contains(ConnectivityResult.wifi) ||
-        connList.contains(ConnectivityResult.ethernet) ||
-        connList.contains(ConnectivityResult.other);
+    if (kIsWeb) {
+      final connList = await Connectivity().checkConnectivity();
+      final hasNetwork = connList.contains(ConnectivityResult.wifi) ||
+          connList.contains(ConnectivityResult.ethernet) ||
+          connList.contains(ConnectivityResult.other);
 
-    if (!hasNetwork) {
-      _emit(const ConnectionStatus(
-        state: LanConnectionState.disconnected,
-        message: 'No WiFi or LAN detected. Connect all devices to the same network.',
-      ));
-      _scheduleReconnect();
-      return;
+      if (!hasNetwork) {
+        _emit(const ConnectionStatus(
+          state: LanConnectionState.disconnected,
+          message: 'No WiFi or LAN detected. Connect all devices to the same network.',
+        ));
+        _scheduleReconnect();
+        return;
+      }
     }
 
     _emit(const ConnectionStatus(
@@ -247,7 +300,7 @@ class ConnectionManager {
     ));
 
     final found = await LanDiscovery.findServer(
-      timeout: const Duration(seconds: 8),
+      timeout: const Duration(seconds: 12),
       onStatus: (s) => _emit(ConnectionStatus(
         state: LanConnectionState.searching,
         message: s,
@@ -346,11 +399,13 @@ class ConnectionManager {
 
   // ── Wait for 'identified' ──────────────────────────────────────────────────
   Future<bool> _waitForIdentified({required int timeoutSeconds}) async {
+    if (RealtimeManager().isServerIdentified) return true;
+
     final completer = Completer<bool>();
 
     late StreamSubscription sub;
     sub = RealtimeManager().messageStream.listen((event) {
-      if (event['event_type'] == 'identified' && !completer.isCompleted) {
+      if ((event['event_type'] == 'identified' || RealtimeManager().isServerIdentified) && !completer.isCompleted) {
         sub.cancel();
         completer.complete(true);
       }
@@ -417,6 +472,39 @@ class ConnectionManager {
     _heartbeatTimer?.cancel();
     _reconnectAttempts = 0;
     await _tryConnect();
+  }
+
+  /// Manually connect directly to a user-specified Server IP address
+  Future<bool> connectDirectly(String ip, [int? port]) async {
+    final cleanIp = ip.trim();
+    if (cleanIp.isEmpty) return false;
+    final targetPort = port ?? AppNetwork.websocketPort;
+
+    _reconnectTimer?.cancel();
+    _heartbeatTimer?.cancel();
+    _saveServer(cleanIp, targetPort);
+
+    _emit(ConnectionStatus(
+      state: LanConnectionState.connecting,
+      ip: cleanIp,
+      port: targetPort,
+      message: 'Connecting to $cleanIp:$targetPort...',
+    ));
+
+    final ok = await _connectTo(cleanIp, targetPort);
+    if (!ok) {
+      _emit(ConnectionStatus(
+        state: LanConnectionState.disconnected,
+        message: 'Could not connect to $cleanIp:$targetPort. Ensure server is running.',
+      ));
+      _scheduleReconnect();
+    }
+    return ok;
+  }
+
+  /// Get the currently saved server IP, if any
+  String? getSavedServerIp() {
+    return _getSavedServer()?.$1;
   }
 
   // ── Persistence ────────────────────────────────────────────────────────────

@@ -92,6 +92,10 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
     final branchId = (widget.userData['branchId'] as String? ?? '').trim();
     if (branchId.isNotEmpty && branchId != _kGlobalBranchId) {
       SyncService().start(branchId);
+    } else {
+      // Executive roles (chairman, CEO, etc.) have branchId='all' or empty.
+      // Start sync with authorized branches so their data still uploads.
+      _startSyncForExecutive();
     }
     // ───────────────────────────────────────────────────────────────────────
 
@@ -304,6 +308,29 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
     } catch (_) {}
   }
 
+  /// Start sync for executive roles that don't have a single branchId.
+  void _startSyncForExecutive() {
+    try {
+      final localBranchesBox = Hive.box(LocalStorageService.branchesBox);
+      final realBranchIds = <String>[];
+      for (final val in localBranchesBox.values) {
+        if (val is Map) {
+          final id = (val['id'] ?? '').toString().trim().toLowerCase();
+          final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+          if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+            realBranchIds.add(id);
+          }
+        }
+      }
+      if (realBranchIds.isNotEmpty) {
+        SyncService().start(realBranchIds.first, authorizedBranches: realBranchIds);
+        debugPrint('[GlobalModuleWrapper] Executive sync started with ${realBranchIds.length} branches: ${realBranchIds.take(5)}');
+      }
+    } catch (e) {
+      debugPrint('[GlobalModuleWrapper] Executive sync start failed: $e');
+    }
+  }
+
   void _selectBranch(String id, String name) {
     // ── Branch-scoped roles cannot switch branches ─────────────────────────
     if (_isBranchScoped) return;
@@ -415,6 +442,8 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
     final bgColor = _isGlobal ? const Color(0xFF161B22) : t.bgCard;
     final dividerColor =
         _isGlobal ? const Color(0xFF30363D) : t.bgRule;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isCompact = isMobile || screenWidth < 800;
 
     return AppBar(
       backgroundColor: bgColor,
@@ -425,26 +454,27 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
         bgColor: _isGlobal ? const Color(0xFF21262D) : t.accent.withValues(alpha: 0.08),
         onPressed: () => Navigator.pop(context),
       ),
-      leadingWidth: 52,
+      leadingWidth: 50,
+      titleSpacing: 4,
       title: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(5),
+            padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
               color: t.accent.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(8),
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(6),
               child: Image.asset(
                 'assets/logo/gmwf-1.webp',
-                width: 22,
-                height: 22,
+                width: 20,
+                height: 20,
                 fit: BoxFit.contain,
               ),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -455,32 +485,35 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
                   style: TextStyle(
                     color: _isGlobal ? const Color(0xFFE6EDF3) : t.textPrimary,
                     fontWeight: FontWeight.w800,
-                    fontSize: 16,
+                    fontSize: isCompact ? 14 : 16,
                     letterSpacing: -0.3,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                if (!_needsBranch && _selectedBranchName != null)
+                if (!isCompact && !_needsBranch && _selectedBranchName != null)
                   FadeTransition(
                     opacity: _pillFade,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
-                          width: 6,
-                          height: 6,
+                          width: 5,
+                          height: 5,
                           decoration: BoxDecoration(
                             color: t.accent,
                             shape: BoxShape.circle,
                           ),
                         ),
-                        const SizedBox(width: 5),
-                        Text(
-                          _selectedBranchName!,
-                          style: TextStyle(
-                            color: t.accent,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            _selectedBranchName!,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: t.accent,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       ],
@@ -492,31 +525,32 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
         ],
       ),
       actions: [
-        // Version pill
-        Container(
-          margin: const EdgeInsets.only(right: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-          decoration: BoxDecoration(
-            color: t.accent.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(4),
+        // Version pill (hide on very narrow screens < 420px to save space)
+        if (screenWidth >= 420)
+          Container(
+            margin: const EdgeInsets.only(right: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(
+              color: t.accent.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text('v${AutoUpdateService.currentVersion}',
+                style: TextStyle(
+                    color: t.accent,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold)),
           ),
-          child: Text('v${AutoUpdateService.currentVersion}',
-              style: TextStyle(
-                  color: t.accent,
-                  fontSize: 9,
-                  fontWeight: FontWeight.bold)),
-        ),
         // Branch-scoped roles or finance module see only a read-only branch label, no selector.
         if (widget.module.isBranchDependent && (_isBranchScoped || widget.module.id == 'finance'))
           _LockedBranchLabel(branchName: _selectedBranchName ?? '', t: t),
         if (widget.module.isBranchDependent && !_isBranchScoped && widget.module.id != 'finance') ...[
-          isMobile
+          isCompact
               ? _MobileBranchButton(state: this, t: t)
               : _DesktopBranchDropdown(state: this, t: t),
-          if (CampSessionService.hasCampsForBranch(_selectedBranchId ?? '') || (_selectedBranchId ?? '').toLowerCase().contains('karachi'))
+          if (screenWidth >= 950 && widget.module.id != 'donations' && (CampSessionService.hasCampsForBranch(_selectedBranchId ?? '') || (_selectedBranchId ?? '').toLowerCase().contains('karachi')))
             _DesktopCampDropdown(state: this, t: t),
         ],
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
       ],
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
@@ -542,21 +576,25 @@ class _LockedBranchLabel extends StatelessWidget {
     if (branchName.isEmpty) return const SizedBox.shrink();
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      constraints: const BoxConstraints(maxWidth: 150),
       decoration: BoxDecoration(
         color: t.accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: t.accent.withValues(alpha: 0.25)),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.lock_outline_rounded, color: t.accent, size: 13),
-        const SizedBox(width: 6),
-        Text(
-          branchName,
-          style: TextStyle(
-              color: t.accent,
-              fontSize: 13,
-              fontWeight: FontWeight.w700),
+        Icon(Icons.lock_outline_rounded, color: t.accent, size: 12),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            branchName,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                color: t.accent,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700),
+          ),
         ),
       ]),
     );
@@ -586,7 +624,8 @@ class _DesktopBranchDropdown extends StatelessWidget {
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      constraints: const BoxConstraints(maxWidth: 200),
       decoration: BoxDecoration(
         color: state._isGlobal
             ? const Color(0xFF21262D)
@@ -610,7 +649,10 @@ class _DesktopBranchDropdown extends StatelessWidget {
           final items = uniqueMap.entries
               .map((e) => DropdownMenuItem<String>(
                     value: e.key,
-                    child: Text(e.value),
+                    child: Text(
+                      e.value,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ))
               .toList();
 
@@ -620,16 +662,18 @@ class _DesktopBranchDropdown extends StatelessWidget {
 
           return DropdownButtonHideUnderline(
             child: DropdownButton<String>(
+              isExpanded: true,
               value: safeValue,
               hint: Text('Select Branch',
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                       color: state._isGlobal
                           ? const Color(0xFF8B949E)
                           : t.textTertiary,
-                      fontSize: 13,
+                      fontSize: 12,
                       fontWeight: FontWeight.w600)),
               icon: Icon(Icons.keyboard_arrow_down_rounded,
-                  color: t.accent, size: 18),
+                  color: t.accent, size: 16),
               dropdownColor: state._isGlobal
                   ? const Color(0xFF161B22)
                   : t.bgCard,
@@ -637,7 +681,7 @@ class _DesktopBranchDropdown extends StatelessWidget {
                   color: state._isGlobal
                       ? const Color(0xFFE6EDF3)
                       : t.textPrimary,
-                  fontSize: 13,
+                  fontSize: 12,
                   fontWeight: FontWeight.w600),
               items: items,
               onChanged: (val) {
@@ -747,22 +791,26 @@ class _MobileBranchButton extends StatelessWidget {
     return GestureDetector(
       onTap: () => _showSheet(context),
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        constraints: const BoxConstraints(maxWidth: 140),
         decoration: BoxDecoration(
           color: t.accent.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: t.accent.withValues(alpha: 0.3)),
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.storefront_rounded, color: t.accent, size: 14),
+          Icon(Icons.storefront_rounded, color: t.accent, size: 13),
           const SizedBox(width: 4),
-          Text(
-            state._selectedBranchName ?? 'Branch',
-            style: TextStyle(
-                color: t.accent,
-                fontSize: 12,
-                fontWeight: FontWeight.w700),
+          Flexible(
+            child: Text(
+              state._selectedBranchName ?? 'Branch',
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: t.accent,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700),
+            ),
           ),
           const SizedBox(width: 2),
           Icon(Icons.expand_more_rounded, color: t.accent, size: 14),

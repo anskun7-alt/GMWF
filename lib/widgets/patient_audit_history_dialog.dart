@@ -74,7 +74,6 @@ class PatientAuditHistoryDialog extends StatelessWidget {
               decoration: BoxDecoration(
                 color: bgHeader,
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-                border: Border(bottom: BorderSide(color: borderCol)),
               ),
               child: Row(
                 children: [
@@ -139,6 +138,7 @@ class PatientAuditHistoryDialog extends StatelessWidget {
                 ],
               ),
             ),
+            Divider(height: 1, thickness: 1, color: borderCol),
 
             // Content Body
             Expanded(
@@ -176,12 +176,12 @@ class PatientAuditHistoryDialog extends StatelessWidget {
             ),
 
             // Footer
+            Divider(height: 1, thickness: 1, color: borderCol),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               decoration: BoxDecoration(
                 color: bgHeader,
                 borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20)),
-                border: Border(top: BorderSide(color: borderCol)),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,

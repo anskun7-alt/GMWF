@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../realtime/connection_manager.dart';
+import 'lan_server_config_dialog.dart';
 
 class ConnectionStatusBadge extends StatelessWidget {
   final ConnectionStatus status;
@@ -45,7 +46,9 @@ class ConnectionStatusBadge extends StatelessWidget {
         }
 
         return InkWell(
-          onTap: !isConnected ? onRetry : null,
+          onTap: () {
+            LanServerConfigDialog.show(context);
+          },
           borderRadius: BorderRadius.circular(16),
           child: Container(
             height: 44,

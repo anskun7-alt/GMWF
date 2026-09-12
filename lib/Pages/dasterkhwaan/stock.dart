@@ -1,9 +1,9 @@
-// lib/pages/dasterkhwaan/stock.dart
-
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/local_storage_service.dart';
 import '../../models/stock_item.dart';
 import 'widgets/cook_dialog.dart';
 
@@ -960,22 +960,28 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
       );
     }
 
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('branches')
-          .doc(_branchId)
-          .collection('dasterkhwaan_stock_logs')
-          .orderBy('timestamp', descending: true)
-          .limit(100)
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const SliverFillRemaining(
-            child: Center(child: CircularProgressIndicator(color: _primary)),
-          );
+    return ValueListenableBuilder(
+      valueListenable: Hive.box(LocalStorageService.auditLogsBox).listenable(),
+      builder: (context, Box box, _) {
+        final normBranch = _branchId!.toLowerCase().trim();
+        final List<Map<String, dynamic>> logs = [];
+        for (final val in box.values) {
+          if (val is! Map) continue;
+          final m = Map<String, dynamic>.from(val);
+          final mod = m['module']?.toString().toLowerCase();
+          final b = (m['branchId'] ?? m['branchContext'])?.toString().toLowerCase().trim();
+          if (mod == 'dasterkhwaan' || mod == 'dasterkhwan' || m['entityType'] == 'stock') {
+            if (b == null || b.isEmpty || b == 'all' || b == normBranch) {
+              logs.add(m);
+            }
+          }
         }
-
-        final docs = snapshot.data?.docs ?? [];
+        logs.sort((a, b) {
+          final tA = a['timestamp']?.toString() ?? a['date']?.toString() ?? '';
+          final tB = b['timestamp']?.toString() ?? b['date']?.toString() ?? '';
+          return tB.compareTo(tA);
+        });
+        final docs = logs.take(100).toList();
         if (docs.isEmpty) {
           return SliverFillRemaining(
             child: Center(
@@ -997,14 +1003,22 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
           sliver: SliverList(
             delegate: SliverChildBuilderDelegate(
               (context, index) {
-                final data = docs[index].data() as Map<String, dynamic>;
+                final data = docs[index] is Map ? (docs[index] as Map<String, dynamic>) : (docs[index] as dynamic).data() as Map<String, dynamic>;
                 final itemName = data['itemName'] ?? 'Item';
                 final changeType = (data['changeType'] ?? 'consumed').toString();
                 final qtyChanged = (data['quantityChanged'] as num? ?? 0.0).toDouble();
                 final unit = data['unit'] ?? 'kg';
                 final notes = data['notes'] ?? '';
                 final auditedBy = data['auditedBy'] ?? 'Staff';
-                final ts = (data['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
+                final dynamic rawTs = data['timestamp'] ?? data['date'] ?? data['createdAt'];
+                DateTime ts = DateTime.now();
+                if (rawTs is Timestamp) {
+                  ts = rawTs.toDate();
+                } else if (rawTs is String) {
+                  ts = DateTime.tryParse(rawTs) ?? DateTime.now();
+                } else if (rawTs is DateTime) {
+                  ts = rawTs;
+                }
 
                 Color badgeColor;
                 String typeLabel;

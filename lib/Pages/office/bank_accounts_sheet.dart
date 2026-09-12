@@ -89,6 +89,7 @@ class _BankAccountsSheetState extends State<BankAccountsSheet> {
   @override
   Widget build(BuildContext context) {
     final existingAccounts = FinanceLedgerStorage.getOrgBankAccounts();
+    final balances = FinanceLedgerStorage.getAllAccountBalancesPaisa();
 
     return Container(
       height: MediaQuery.of(context).size.height * 0.85,
@@ -129,7 +130,7 @@ class _BankAccountsSheetState extends State<BankAccountsSheet> {
                     separatorBuilder: (_, __) => const SizedBox(height: 8),
                     itemBuilder: (context, idx) {
                       final acc = existingAccounts[idx];
-                      final balancePaisa = FinanceLedgerStorage.getBankAccountBalancePaisa(acc.accountCode);
+                      final balancePaisa = balances[acc.accountCode] ?? 0;
                       final balanceStr = NumberFormat.currency(symbol: 'PKR ', decimalDigits: 0).format(balancePaisa / 100);
 
                       return Container(

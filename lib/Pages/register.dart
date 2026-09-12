@@ -7,11 +7,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:image_cropper/image_cropper.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/role_theme_provider.dart';
 import '../services/auth_service.dart';
+import '../services/camp_session_service.dart';
 import '../services/finance_local_storage.dart';
 import '../services/local_storage_service.dart';
 import '../services/image_upload_service.dart';
@@ -52,7 +52,6 @@ class _RegisterState extends State<Register>
   final TextEditingController _biometricPinController   = TextEditingController();
   final TextEditingController _customDegreeController   = TextEditingController();
   final TextEditingController _salaryController         = TextEditingController();
-  final TextEditingController _studentRollSearchController = TextEditingController();
 
   String? _selectedStudentId;
   List<Map<String, dynamic>> _branchStudents = [];
@@ -88,10 +87,8 @@ class _RegisterState extends State<Register>
 
   XFile?        _profileImageXFile;
   Uint8List?    _profileImageBytes;
-  PlatformFile? _identificationFile;
   PlatformFile? _degreeFile;
   String?       _profilePictureBase64;
-  String?       _identificationBase64;
   String?       _degreeBase64;
 
   bool _loading         = false;
@@ -146,17 +143,17 @@ class _RegisterState extends State<Register>
       'name': 'Madrassa',
       'icon': Icons.menu_book_rounded,
       'roles': [
-        {'label': 'Madrassa Admin',   'icon': Icons.menu_book_rounded,            'type': 'madrassa', 'value': 'Madrassa Admin'},
-        {'label': 'Madrassa Teacher', 'icon': Icons.school_rounded,               'type': 'madrassa', 'value': 'Madrassa Teacher'},
+        {'label': 'Madrassa Principal / Admin', 'icon': Icons.menu_book_rounded, 'type': 'madrassa', 'value': 'Madrassa Admin'},
+        {'label': 'Madrassa Teacher',           'icon': Icons.school_rounded,    'type': 'madrassa', 'value': 'Madrassa Teacher'},
       ],
     },
     {
       'name': 'School',
       'icon': Icons.school_rounded,
       'roles': [
-        {'label': 'Principal',        'icon': Icons.stars_rounded,                'type': 'crown',    'value': 'Principal'},
-        {'label': 'School Admin',     'icon': Icons.school_rounded,               'type': 'school',   'value': 'School Admin'},
-        {'label': 'School Teacher',   'icon': Icons.co_present_rounded,           'type': 'school',   'value': 'School Teacher'},
+        {'label': 'School Principal',           'icon': Icons.stars_rounded,      'type': 'crown',    'value': 'School Principal'},
+        {'label': 'School Admin',               'icon': Icons.school_rounded,     'type': 'school',   'value': 'School Admin'},
+        {'label': 'School Teacher',             'icon': Icons.co_present_rounded, 'type': 'school',   'value': 'School Teacher'},
       ],
     },
   ];
@@ -297,18 +294,6 @@ class _RegisterState extends State<Register>
   void _removeProfileImage() =>
       setState(() { _profileImageXFile = null; _profileImageBytes = null; _profilePictureBase64 = null; });
 
-  Future<void> _pickDocument(String type) async {
-    final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom, allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png']);
-    if (result != null && result.files.isNotEmpty) {
-      setState(() {
-        if (type == 'identification') {
-          _identificationFile = result.files.first;
-        } else if (type == 'degree')    _degreeFile          = result.files.first;
-      });
-    }
-  }
-
   Future<void> _registerUser() async {
     if (!_formKey.currentState!.validate()) {
       _snack('Please fill all required fields', error: true);
@@ -379,6 +364,7 @@ class _RegisterState extends State<Register>
         degree:             degree.isNotEmpty ? degree : null,
         salary:             salary,
         biometricPin:       enteredPin.isNotEmpty ? enteredPin : null,
+        linkedEmployeeId:   _selectedLinkedEmployeeId,
         studentId:          _selectedStudentId, // Pass the student ID
         dispensaryId:       _selectedDispensary, // Pass dispensary sub-location ('kapayya', 'haji_camp')
         dispensaryIds:      _selectedDispensaries.toList(), // Pass multi-camp assignments
@@ -388,10 +374,8 @@ class _RegisterState extends State<Register>
                             }).toList(),
         profileImageXFile:  _profileImageXFile,
         profileImageBytes:  _profileImageBytes,
-        identificationFile: _identificationFile,
         degreeFile:         _degreeFile,
         profilePictureBase64: _profilePictureBase64,
-        identificationBase64: _identificationBase64,
         degreeBase64:         _degreeBase64,
       );
 
@@ -414,20 +398,14 @@ class _RegisterState extends State<Register>
         _selectedRole         = null;
         _profileImageBytes    = null;
         _profileImageXFile    = null;
-        _identificationFile   = null;
         _degreeFile           = null;
         _profilePictureBase64 = null;
-        _identificationBase64 = null;
         _degreeBase64         = null;
         _selectedBranch       = null;
         _selectedDispensary   = null;
         _selectedDispensaries.clear();
         _selectedDegree       = null;
         _selectedStudentId    = null;
-        _profileImageXFile    = null;
-        _profileImageBytes    = null;
-        _identificationFile   = null;
-        _degreeFile           = null;
         _usernameError        = null;
       });
       for (final c in [
@@ -681,30 +659,19 @@ class _RegisterState extends State<Register>
 
                             const SizedBox(height: 16),
 
-                            _buildCard(t,
-                              title: 'Documents & Attachments',
-                              icon: Icons.folder_outlined,
-                              accent: const Color(0xFF37474F),
-                              child: Column(children: [
-                                MediaUploadTile(
-                                  label: 'Identification / CNIC Document',
-                                  icon: Icons.badge_outlined,
-                                  initialValue: _identificationBase64,
+                            if (isDoctor)
+                              _buildCard(t,
+                                title: 'Degree & Qualifications',
+                                icon: Icons.school_outlined,
+                                accent: const Color(0xFF37474F),
+                                child: MediaUploadTile(
+                                  label: 'Degree Certificate / PMDC',
+                                  icon: Icons.school_outlined,
+                                  initialValue: _degreeBase64,
                                   isDocument: true,
-                                  onChanged: (val) => setState(() => _identificationBase64 = val),
+                                  onChanged: (val) => setState(() => _degreeBase64 = val),
                                 ),
-                                if (isDoctor) ...[
-                                  const SizedBox(height: 12),
-                                  MediaUploadTile(
-                                    label: 'Degree Certificate',
-                                    icon: Icons.school_outlined,
-                                    initialValue: _degreeBase64,
-                                    isDocument: true,
-                                    onChanged: (val) => setState(() => _degreeBase64 = val),
-                                  ),
-                                ],
-                              ]),
-                            ),
+                              ),
 
                             const SizedBox(height: 32),
                             _buildSubmitButton(t),
@@ -1110,23 +1077,7 @@ class _RegisterState extends State<Register>
     String bId = '';
     try { bId = _getBranchId().toLowerCase().trim(); } catch (_) {}
 
-    List<Map<String, dynamic>> rawDispensaries = [];
-    try {
-      if (Hive.isBoxOpen('local_branches')) {
-        final raw = Hive.box('local_branches').get('branch:$bId');
-        if (raw is Map && raw['dispensaries'] is List) {
-          rawDispensaries = List<Map<String, dynamic>>.from(raw['dispensaries']);
-        }
-      }
-    } catch (_) {}
-
-    // Default for Karachi if not in local box yet
-    if (bId == 'karachi' && rawDispensaries.isEmpty) {
-      rawDispensaries = [
-        {'id': 'saddar', 'name': 'Saddar Dispensary'},
-        {'id': 'haji_camp', 'name': 'Haji Camp Dispensary'},
-      ];
-    }
+    List<Map<String, dynamic>> rawDispensaries = CampSessionService.getCampsForBranch(bId, includeClosed: false);
 
     if (rawDispensaries.isEmpty) return const SizedBox.shrink();
 
@@ -1461,60 +1412,6 @@ class _RegisterState extends State<Register>
           ))).toList(),
       onChanged: onChanged,
       validator: validator,
-    );
-  }
-
-  Widget _buildFileCard(RoleThemeData t, {
-    required String title,
-    required String subtitle,
-    required PlatformFile? file,
-    required VoidCallback onTap,
-    required VoidCallback onRemove,
-    required IconData icon,
-  }) {
-    final has = file != null;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: has ? t.accentMuted : t.bgCardAlt,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: has ? t.accent.withValues(alpha: 0.4) : t.bgRule, width: 1.5),
-        ),
-        child: Row(children: [
-          Container(
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-              color: has ? t.accent.withValues(alpha: 0.15) : t.bgRule.withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(has ? Icons.check_rounded : icon, color: has ? t.accent : t.textTertiary, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: has ? t.accent : t.textPrimary)),
-              const SizedBox(height: 3),
-              Text(has ? file.name : subtitle,
-                  style: TextStyle(fontSize: 12, color: has ? t.accent.withValues(alpha: 0.7) : t.textTertiary),
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-            ]),
-          ),
-          if (has)
-            GestureDetector(
-              onTap: onRemove,
-              child: Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(color: t.danger.withValues(alpha: 0.10), borderRadius: BorderRadius.circular(8)),
-                child: Icon(Icons.close_rounded, color: t.danger, size: 18),
-              ),
-            )
-          else
-            Icon(Icons.upload_file_rounded, color: t.textTertiary, size: 22),
-        ]),
-      ),
     );
   }
 

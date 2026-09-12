@@ -1,5 +1,6 @@
 // lib/pages/dispensary/dispensar/universal_proforma_sheet.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -79,8 +80,30 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
   }
 
   bool get _canManageProforma {
-    if (widget.isAdmin) return true;
-    return MasterProformaService.canManageProformaCatalog(userData: _getUserData());
+    if (widget.isDispenser && !widget.isAdmin) return false;
+    final uData = _getUserData();
+    final role = (uData['role'] ?? uData['userRole'] ?? uData['roleType'] ?? '').toString().toLowerCase().trim();
+    if (role.contains('dispenser') || role.contains('dispensary') || role.contains('doctor') || role.contains('pharmacist') || role.contains('receptionist')) {
+      if (!role.contains('admin') && !role.contains('chairman') && !role.contains('hq') && !role.contains('manager') && !role.contains('super')) {
+        return false;
+      }
+    }
+    return widget.isAdmin || role.contains('admin') || role.contains('chairman') || role.contains('hq') || role.contains('manager') || role.contains('super');
+  }
+
+    Timer? _stockDebounce;
+  StreamSubscription<Map<String, dynamic>>? _realtimeSub;
+
+  // [FIX-REACTIVE-STOCK] Recompute in-stock badges/colors whenever stockBox
+  // changes — local edits, LAN broadcasts, or catch-up pushes — instead of
+  // only once in initState() or after a manual batch save. Without this,
+  // the "In Stock: N" badge and row highlighting go stale the moment any
+  // other screen or device updates stock while this sheet is open.
+  void _debouncedReloadProforma() {
+    _stockDebounce?.cancel();
+    _stockDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (mounted) _loadProformaData();
+    });
   }
 
   @override
@@ -88,10 +111,42 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     super.initState();
     _loadProformaData();
     _searchCtrl.addListener(_filterData);
+
+        if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+      Hive.box(LocalStorageService.stockBox)
+          .listenable()
+          .addListener(_debouncedReloadProforma);
+    } else {
+      LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
+        if (mounted && box.isOpen) {
+          box.listenable().addListener(_debouncedReloadProforma);
+          _loadProformaData();
+        }
+      });
+    }
+
+    _realtimeSub = RealtimeManager().messageStream.listen((event) {
+      final type = event['event_type'] as String?;
+      if (type == RealtimeEvents.saveProformaItem ||
+          type == 'save_proforma_item' ||
+          type == RealtimeEvents.proformaItemUpdated ||
+          type == 'proforma_item_updated') {
+        if (mounted) _loadProformaData();
+      }
+    });
   }
 
-  @override
+    @override
   void dispose() {
+    _realtimeSub?.cancel();
+    _stockDebounce?.cancel();
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+        Hive.box(LocalStorageService.stockBox)
+            .listenable()
+            .removeListener(_debouncedReloadProforma);
+      }
+    } catch (_) {}
     _searchCtrl.removeListener(_filterData);
     _searchCtrl.dispose();
     for (final ctrl in _qtyControllers.values) {
@@ -1143,7 +1198,10 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     setState(() => _isSavingBatch = true);
 
     try {
-      final String activeBranch = widget.branchId.isEmpty ? 'default' : widget.branchId;
+      String activeBranch = widget.branchId.trim();
+      if (activeBranch.isEmpty || activeBranch.toLowerCase() == 'default' || activeBranch.toLowerCase() == 'all') {
+        activeBranch = LocalStorageService.getActiveBranchId() ?? 'karachi';
+      }
       final stockBox = Hive.box(LocalStorageService.stockBox);
       final user = FirebaseAuth.instance.currentUser;
       String addedBy = 'Dispenser';
@@ -1179,6 +1237,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
       int totalAdded = 0;
       int totalNewCount = 0;
 
+      final String activeCamp = CampSessionService.getActiveCamp(activeBranch) ?? '';
+
       for (final entry in itemsToSave) {
         final rawProf = entry['proforma'];
         final prof = (rawProf is Map) ? Map<String, dynamic>.from(rawProf) : <String, dynamic>{};
@@ -1190,8 +1250,6 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         final int qty = entry['qty'] as int;
         final double price = entry['price'] as double;
         final String exp = entry['expiryDate'] as String;
-
-        final String activeCamp = CampSessionService.getActiveCamp() ?? '';
 
         // Search stockBox for an existing item matching Name/Formula + Type + Dose (or exact barcode)
         final cleanCode = code.trim().toLowerCase();
@@ -1279,31 +1337,26 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
 
           await LocalStorageService.saveLocalInventoryLog(logData);
 
-          RealtimeManager().sendMessage({
+                   RealtimeManager().sendMessage({
             'event_type': RealtimeEvents.saveStockItem,
-            'data': updatedStock,
+            'branchId': activeBranch,
+            'data': {
+              ...updatedStock,
+              '_quantityDelta': qty,   // the amount being added this restock, NOT newTotalQty
+            },
             'logData': logData,
           });
 
-          try {
-            await FirebaseFirestore.instance
-                .collection('branches')
-                .doc(activeBranch)
-                .collection('inventory')
-                .doc(existingDocId)
-                .set(updatedStock, SetOptions(merge: true));
-
-            await FirebaseFirestore.instance
-                .collection('branches')
-                .doc(activeBranch)
-                .collection('inventory_log')
-                .add(logData);
-          } catch (_) {
+          // LAN Server First routing: the server syncs to Firestore.
+          // If offline or LAN disconnected, enqueue locally for background sync without blocking UI.
+          if (!RealtimeManager().isConnected) {
             await LocalStorageService.enqueueSync({
               'type': 'add_inventory_stock',
               'branchId': activeBranch,
               'medicineId': existingDocId,
               'quantity': qty,
+              'campId': activeCamp,
+              'dispensaryId': activeCamp,
               'data': updatedStock,
               'logData': logData,
             });
@@ -1380,25 +1433,13 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         // LAN Broadcast
         RealtimeManager().sendMessage({
           'event_type': RealtimeEvents.saveStockItem,
+          'branchId': activeBranch,
           'data': stockData,
           'logData': logData,
         });
 
-        // Try direct Firestore update or enqueue offline sync
-        try {
-          await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(activeBranch)
-              .collection('inventory')
-              .doc(docId)
-              .set(stockData, SetOptions(merge: true));
-
-          await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(activeBranch)
-              .collection('inventory_log')
-              .add(logData);
-        } catch (_) {
+        // Offline resilience: if LAN disconnected, enqueue locally without blocking UI
+        if (!RealtimeManager().isConnected) {
           await LocalStorageService.enqueueSync({
             'type': 'add_proforma_stock',
             'branchId': activeBranch,
@@ -1420,6 +1461,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         }
         _selectAllChecked = false;
       });
+
+      _loadProformaData();
 
       showDialog(
         context: context,
@@ -1709,7 +1752,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
 
   Widget _buildExcelGridSheet([double? availableHeight]) {
     final isDark = _isDark;
-    const double tableWidth = 1360;
+    final double tableWidth = _canManageProforma ? 1360 : 1240;
 
     final headerBg = isDark ? const Color(0xFF0F766E) : _headerBg;
     final headerTextColor = isDark ? Colors.white : _tealDark;
@@ -1761,8 +1804,10 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                       SizedBox(width: 145, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Code / Barcode', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
                       _vDivider(borderColor),
                       Expanded(flex: 4, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Medicine Formula (Generic)', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
-                      _vDivider(borderColor),
-                      SizedBox(width: 120, child: Center(child: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      if (_canManageProforma) ...[
+                        _vDivider(borderColor),
+                        SizedBox(width: 120, child: Center(child: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      ],
                       _vDivider(borderColor),
                       SizedBox(width: 125, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Type', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
                       _vDivider(borderColor),
@@ -1890,15 +1935,14 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                 ),
                               ),
                             ),
-                            _vDivider(borderColor),
-
-                            // Actions / Audit Column (Edit, Delete, History)
-                            SizedBox(
-                              width: 120,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  if (_canManageProforma) ...[
+                            if (_canManageProforma) ...[
+                              _vDivider(borderColor),
+                              // Actions / Audit Column (Edit, Delete, History)
+                              SizedBox(
+                                width: 120,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
                                     IconButton(
                                       icon: Icon(Icons.edit_note_rounded, size: 20, color: isDark ? const Color(0xFF38BDF8) : _teal),
                                       tooltip: 'Edit Formula Name (HQ/Chairman)',
@@ -1915,18 +1959,17 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                       constraints: const BoxConstraints(),
                                     ),
                                     const SizedBox(width: 8),
+                                    IconButton(
+                                      icon: Icon(Icons.history_rounded, size: 18, color: isDark ? const Color(0xFF94A3B8) : Colors.grey.shade600),
+                                      tooltip: 'View Audit Log & Change Reasons',
+                                      onPressed: () => _showAuditTrailDialog(item),
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                    ),
                                   ],
-                                  if (_canManageProforma)
-                                  IconButton(
-                                    icon: Icon(Icons.history_rounded, size: 18, color: isDark ? const Color(0xFF94A3B8) : Colors.grey.shade600),
-                                    tooltip: 'View Audit Log & Change Reasons',
-                                    onPressed: () => _showAuditTrailDialog(item),
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                  ),
-                                ],
+                                ),
                               ),
-                            ),
+                            ],
                             _vDivider(borderColor),
 
                             // Type

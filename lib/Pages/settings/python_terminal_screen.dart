@@ -1,4 +1,4 @@
-// lib/pages/settings/python_terminal_screen.dart
+// lib/pages/settings/python_terminal_screen.dart - Terminal runner screen
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -10,72 +10,89 @@ class PythonTerminalScreen extends StatelessWidget {
   final String? initialScript;
   final List<String>? initialArgs;
   final bool autoStart;
+  final VoidCallback? onBack;
 
   const PythonTerminalScreen({
     super.key,
     this.initialScript,
     this.initialArgs,
     this.autoStart = false,
+    this.onBack,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0B0F19), // Deepest Onyx/Slate
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF0F172A), // Slate 900
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: const Color(0xFF38BDF8).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFF38BDF8).withValues(alpha: 0.3)),
+    return PopScope(
+      canPop: onBack == null && Navigator.canPop(context),
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (onBack != null) {
+          onBack!();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF0B0F19), // Deepest Onyx/Slate
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF0F172A), // Slate 900
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+            onPressed: () {
+              if (onBack != null) {
+                onBack!();
+              } else if (Navigator.canPop(context)) {
+                Navigator.pop(context);
+              }
+            },
+          ),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF38BDF8).withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF38BDF8).withValues(alpha: 0.3)),
+                ),
+                child: const Icon(Icons.terminal_rounded, color: Color(0xFF38BDF8), size: 20),
               ),
-              child: const Icon(Icons.terminal_rounded, color: Color(0xFF38BDF8), size: 20),
-            ),
-            const SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Python Biometric & Hardware Terminal',
-                  style: GoogleFonts.outfit(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    fontSize: 17,
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Python Biometric & Hardware Terminal',
+                    style: GoogleFonts.outfit(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      fontSize: 17,
+                    ),
                   ),
-                ),
-                Text(
-                  'Live execution console for ZKTeco hardware daemons & scripts',
-                  style: GoogleFonts.inter(
-                    color: const Color(0xFF94A3B8),
-                    fontSize: 11,
+                  Text(
+                    'Live execution console for ZKTeco hardware daemons & scripts',
+                    style: GoogleFonts.inter(
+                      color: const Color(0xFF94A3B8),
+                      fontSize: 11,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.help_outline_rounded, color: Color(0xFF94A3B8)),
+              tooltip: 'Terminal Guide & Help',
+              onPressed: () => _showHelpDialog(context),
             ),
+            const SizedBox(width: 8),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.help_outline_rounded, color: Color(0xFF94A3B8)),
-            tooltip: 'Terminal Guide & Help',
-            onPressed: () => _showHelpDialog(context),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: PythonTerminalView(
-        initialScript: initialScript,
-        initialArgs: initialArgs,
-        autoStart: autoStart,
+        body: PythonTerminalView(
+          initialScript: initialScript,
+          initialArgs: initialArgs,
+          autoStart: autoStart,
+        ),
       ),
     );
   }

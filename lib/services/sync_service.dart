@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
+import 'package:intl/intl.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -21,6 +23,8 @@ import 'package:gmwf/services/offline_auth_service.dart';
 
 import 'package:gmwf/services/network_health_service.dart';
 import 'package:gmwf/services/auto_update_service.dart';
+import 'package:gmwf/services/zkteco_network_service.dart';
+import 'package:gmwf/realtime/connection_manager.dart';
 
 class SyncService {
   static final SyncService _instance = SyncService._internal();
@@ -34,13 +38,25 @@ class SyncService {
   List<String> _authorizedBranches = [];
   String? _currentUserRole;
 
+  /// Ensures any branch string is strictly sanitized so 'all', 'global', or CNIC IDs are NEVER used as branch documents.
+  String _cleanBranch(dynamic b, {String? fallback}) {
+    return LocalStorageService.sanitizeBranchId(
+      b?.toString(),
+      fallback: fallback ?? _currentBranchId ?? 'karachi',
+    );
+  }
+
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   Timer? _dailyTokenTimer;
   Timer? _periodicSyncTimer;
 
   void start(String branchId, {List<String>? authorizedBranches}) {
-    _currentBranchId = branchId;
-    _authorizedBranches = authorizedBranches ?? [];
+    _currentBranchId = _cleanBranch(branchId);
+    _authorizedBranches = (authorizedBranches ?? [])
+        .map((b) => _cleanBranch(b))
+        .where((b) => LocalStorageService.isValidBranchId(b))
+        .toSet()
+        .toList();
 
     NetworkHealthService().start();
     
@@ -54,9 +70,14 @@ class SyncService {
     _setupDailyTokenRefresh(branchId);
     
     _periodicSyncTimer?.cancel();
-    // 2-hour periodic sync for historical/report data delta syncing.
-    // Live operational updates use scoped snapshot listeners.
-    _periodicSyncTimer = Timer.periodic(const Duration(hours: 2), (_) {
+    // 4-hour periodic sync for historical/report data delta syncing with overnight silence (22:00 - 06:00).
+    // Live operational updates use LAN WebSockets and reactive local storage.
+    _periodicSyncTimer = Timer.periodic(const Duration(hours: 4), (_) {
+      final now = DateTime.now();
+      if (now.hour >= 22 || now.hour < 6) {
+        Logger().d("SyncService: Periodic sync skipped during overnight silence window (22:00 - 06:00)");
+        return;
+      }
       triggerUpload();
     });
 
@@ -140,6 +161,17 @@ class SyncService {
     }
 
     if (isOnline && !_isUploading) {
+      // Dual Sync Rule:
+      // If local LAN server is running on this machine, ServerSyncManager handles the scheduled cloud sync passes.
+      // If this is a client station connected to the LAN server, ServerSyncManager on the server handles the cloud sync passes.
+      // BUT if the server is NOT connected at the time of sync (standalone/offsite), the client independently runs its sync pass!
+      final bool isLocalServer = ZkTecoNetworkService.isServerRunningNotifier.value;
+      final bool isServerConnected = ConnectionManager().isConnected;
+
+      if (!force && !isLocalServer && isServerConnected) {
+        Logger().d("SyncService: LAN server is connected and active. Scheduled sync deferred to ServerSyncManager on the server.");
+        return;
+      }
       if (_currentUserRole == null) {
         try {
           final userData = await OfflineAuthService.getCachedUserData();
@@ -169,12 +201,12 @@ class SyncService {
             final now = DateTime.now();
             // Cooldown raised to 2 hours to match historical periodic timer
             // and prevent redundant full/delta scans on rapid connectivity events.
-            if (force || lastRefresh == null || now.difference(lastRefresh) > const Duration(hours: 2)) {
+            if (force) {
               await settings.put('last_refresh_$bId', now.toIso8601String());
               await _refreshDataForBranch(bId);
               await Future.delayed(const Duration(milliseconds: 50));
             } else {
-              Logger().d("[SyncService] Skipping automatic refresh for branch $bId (2-hour cooldown active)");
+              Logger().d("[SyncService] Automatic post-upload refresh skipped (zero-read architecture)");
             }
           }
         } catch (e) {
@@ -212,6 +244,7 @@ class SyncService {
         await MadrassaLocalStorage.downloadStudents(branchId);
         await MadrassaLocalStorage.downloadLogsForMonth(branchId, DateTime.now().year, DateTime.now().month);
         await MadrassaLocalStorage.downloadHolidays(branchId);
+        await MadrassaLocalStorage.downloadFeePaymentsForMonth(branchId, DateTime.now().year, DateTime.now().month);
       }
 
       // Finance bulk downloads (heavy collectionGroup scans) are intentionally
@@ -273,14 +306,18 @@ class SyncService {
         debugPrint('[SyncService] Version check warning: $e');
       }
 
-      final sortedKeys = queueBox.keys.toList()
-        ..sort((a, b) {
-          final ta = DateTime.tryParse(queueBox.get(a)?['createdAt'] ?? '2000-01-01T00:00:00Z') ?? DateTime(2000);
-          final tb = DateTime.tryParse(queueBox.get(b)?['createdAt'] ?? '2000-01-01T00:00:00Z') ?? DateTime(2000);
-          return ta.compareTo(tb);
-        });
+      // Fast purge bloated duplicates before processing
+      if (queueBox.length > 50) {
+        await LocalStorageService.purgeBloatedSyncQueue();
+      }
 
-      for (final key in sortedKeys) {
+      final allKeys = queueBox.keys.toList();
+      if (allKeys.isEmpty) return;
+
+      // Process in batches of up to 100 to avoid locking the isolate
+      final batchKeys = allKeys.take(100).toList();
+
+      for (final key in batchKeys) {
         final raw = queueBox.get(key);
         if (raw == null || raw is! Map) {
           await queueBox.delete(key);
@@ -291,34 +328,90 @@ class SyncService {
         final type     = action['type'] as String? ?? 'unknown';
         final attempts = (action['attempts'] as int?) ?? 0;
 
-        if (attempts >= 5) {
-          action['lastFailureLoggedAt'] = DateTime.now().toIso8601String();
-          await _flagPersistentSyncFailure(key, action, type);
-          
-          final retryForeverTypes = {
-            'save_patient', 'save_entry', 'save_prescription', 'update_serial_status', 'save_dispensary_charge',
-            'save_donation', 'update_donation', 'delete_donation', 'save_bank_slip',
-            'update_inventory', 'add_inventory_stock', 'register_medicine',
-            'save_token_exception_request', 'approve_token_exception',
-            'save_biometric_log', 'save_employee_attendance', 'save_faculty_attendance', 'save_student_attendance',
-            'save_madrassa_admission', 'save_madrassa_fee', 'save_madrassa_logs', 'save_exam_result',
-            'save_expense', 'save_loan', 'save_finance_entry', 'save_donor', 'save_donation_collection',
-          };
-          if (retryForeverTypes.contains(type)) {
-            action['attempts'] = 0;
-            await queueBox.put(key, action);
-            continue;
-          } else {
-            // Dead-letter preserved in sync_failures before removing from hot queue
-            await queueBox.delete(key);
-            continue;
+        // Exponential backoff check (Pillar 2-C)
+        final nextRetryAtStr = action['nextRetryAt'] as String?;
+        if (nextRetryAtStr != null) {
+          final nextRetry = DateTime.tryParse(nextRetryAtStr);
+          if (nextRetry != null && DateTime.now().isBefore(nextRetry)) {
+            continue; // Skip key until backoff window expires
           }
         }
 
-        try {
-          final branchId = (action['branchId'] as String?) ?? _currentBranchId!;
+        // Bounded retry: Route to dead letter queue after 20 attempts (Pillar 2-C)
+        if (attempts >= 20) {
+          action['lastFailureLoggedAt'] = DateTime.now().toIso8601String();
+          await _flagPersistentSyncFailure(key, action, type);
+          await LocalStorageService.moveToDeadLetterQueue(
+            LocalStorageService.syncBox,
+            key,
+            action,
+            reason: action['lastError']?.toString() ?? 'Exceeded max retry attempts (20)',
+          );
+          continue;
+        }
 
-          if (type == 'save_patient') {
+        try {
+          final branchId = _cleanBranch(action['branchId']);
+
+          if (action['collection'] != null) {
+            final colPath = action['collection'].toString().trim();
+            final docId = action['docId']?.toString().trim();
+            final act = (action['action'] ?? 'set').toString().toLowerCase().trim();
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+
+            if (colPath.isNotEmpty && docId != null && docId.isNotEmpty) {
+              final DocumentReference<Map<String, dynamic>> docRef;
+              if (colPath.contains('/')) {
+                docRef = _db.doc('$colPath/$docId');
+              } else {
+                docRef = _db.collection('branches').doc(branchId).collection(colPath).doc(docId);
+              }
+
+              if (act == 'delete') {
+                await docRef.delete();
+              } else {
+                final fsData = Map<String, dynamic>.from(data)..remove('syncStatus');
+                await docRef.set(fsData, SetOptions(merge: true));
+              }
+
+              // Update local cache status for school records
+              try {
+                final bId = branchId.toLowerCase().trim();
+                if (colPath.contains('school_students') && Hive.isBoxOpen(LocalStorageService.schoolStudentsBox)) {
+                  final sBox = Hive.box(LocalStorageService.schoolStudentsBox);
+                  final key = '${bId}__$docId';
+                  final r = sBox.get(key);
+                  if (r is Map) await sBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                } else if (colPath.contains('school_teachers') && Hive.isBoxOpen(LocalStorageService.schoolTeachersBox)) {
+                  final tBox = Hive.box(LocalStorageService.schoolTeachersBox);
+                  final key = '${bId}__$docId';
+                  final r = tBox.get(key);
+                  if (r is Map) await tBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                } else if (colPath.contains('school_books') && Hive.isBoxOpen(LocalStorageService.schoolBooksBox)) {
+                  final bBox = Hive.box(LocalStorageService.schoolBooksBox);
+                  final key = '${bId}__$docId';
+                  final r = bBox.get(key);
+                  if (r is Map) await bBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                } else if (colPath.contains('school_book_loans') && Hive.isBoxOpen(LocalStorageService.schoolBookLoansBox)) {
+                  final lBox = Hive.box(LocalStorageService.schoolBookLoansBox);
+                  final key = '${bId}__$docId';
+                  final r = lBox.get(key);
+                  if (r is Map) await lBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                } else if (colPath.contains('school_grades') && Hive.isBoxOpen('school_grades')) {
+                  final gBox = Hive.box('school_grades');
+                  final key = '${bId}__$docId';
+                  final r = gBox.get(key);
+                  if (r is Map) await gBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                } else if (colPath.contains('school_fees') && Hive.isBoxOpen('school_fees')) {
+                  final fBox = Hive.box('school_fees');
+                  final key = '${bId}__$docId';
+                  final r = fBox.get(key);
+                  if (r is Map) await fBox.put(key, Map<String, dynamic>.from(r)..['syncStatus'] = 'synced');
+                }
+              } catch (_) {}
+            }
+          }
+          else if (type == 'save_patient') {
             final data      = Map<String, dynamic>.from(action['data'] ?? {});
             final patientId = (action['patientId'] ?? data['patientId'])?.toString();
             final bId       = (action['branchId'] ?? data['branchId'] ?? branchId).toString();
@@ -332,6 +425,58 @@ class SyncService {
             final fsData = Map<String, dynamic>.from(data)..remove('syncStatus')..remove('hiveKey');
             await _db.collection('branches').doc(bId).collection('patients').doc(patientId).set(fsData, SetOptions(merge: true));
             await Hive.box('app_flags').put('patient_synced_$patientId', true);
+          }
+          else if (type == 'delete_patient') {
+            final patientId = action['patientId']?.toString();
+            final bId       = (action['branchId'] ?? branchId).toString();
+            if (patientId != null && patientId.isNotEmpty) {
+              await _db.collection('branches').doc(bId).collection('patients').doc(patientId).delete();
+              await Hive.box('app_flags').delete('patient_synced_$patientId');
+            }
+          }
+          else if (type == 'delete_prescription') {
+            final bId = (action['branchId'] ?? branchId).toString();
+            final pCnic = action['patientCnic']?.toString() ?? '';
+            final serial = action['serial']?.toString() ?? '';
+            final path = action['path']?.toString() ?? '';
+            if (path.isNotEmpty) {
+              try {
+                await _db.doc(path).delete();
+              } catch (_) {}
+            }
+            if (pCnic.isNotEmpty && serial.isNotEmpty) {
+              try {
+                await _db.collection('branches').doc(bId).collection('patients').doc(pCnic).collection('prescriptions').doc(serial).delete();
+              } catch (_) {}
+              try {
+                await _db.collection('branches').doc(bId).collection('prescriptions').doc(pCnic).collection('prescriptions').doc(serial).delete();
+              } catch (_) {}
+              try {
+                await _db.collection('prescriptions').doc(pCnic).collection('prescriptions').doc(serial).delete();
+              } catch (_) {}
+            }
+          }
+          else if (type == 'delete_dispensary') {
+            final bId     = (action['branchId'] ?? branchId).toString();
+            final dateKey = action['dateKey']?.toString() ?? '';
+            final serial  = action['serial']?.toString() ?? '';
+            final path    = action['path']?.toString() ?? '';
+            if (path.isNotEmpty) {
+              try {
+                await _db.doc(path).delete();
+              } catch (_) {}
+            }
+            if (bId.isNotEmpty && dateKey.isNotEmpty && serial.isNotEmpty) {
+              try {
+                await _db.collection('branches').doc(bId).collection('dispensary').doc(dateKey).collection(dateKey).doc(serial).delete();
+              } catch (_) {}
+              try {
+                await _db.collection('branches').doc(bId).collection('dispensary').doc(dateKey).collection('dispensed').doc(serial).delete();
+              } catch (_) {}
+              try {
+                await _db.collection('branches').doc(bId).collection('dispensary').doc(serial).delete();
+              } catch (_) {}
+            }
           }
           else if (type == 'save_entry') {
             final data    = Map<String, dynamic>.from(action['data'] ?? {});
@@ -358,6 +503,29 @@ class SyncService {
             } else {
               final upperSerial = serial.trim().toUpperCase();
               data['serial'] = upperSerial;
+
+              // Terminal Status Protection: Never overwrite completed/dispensed with waiting
+              try {
+                if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+                  final eBox = Hive.box(LocalStorageService.entriesBox);
+                  final localE = eBox.get('$branchId-$upperSerial') ?? eBox.get('$branchId-$serial');
+                  if (localE is Map) {
+                    final lDisp = (localE['dispenseStatus'] ?? '').toString().toLowerCase();
+                    final lStat = (localE['status'] ?? '').toString().toLowerCase();
+                    if (lDisp == 'dispensed' || lStat == 'completed') {
+                      data['status'] = 'completed';
+                      if (lDisp == 'dispensed') {
+                        data['dispenseStatus'] = 'dispensed';
+                        if (localE['dispensedAt'] != null) data['dispensedAt'] = localE['dispensedAt'];
+                      }
+                      if (localE['prescription'] != null) data['prescription'] = localE['prescription'];
+                      if (localE['doctorName'] != null) data['doctorName'] = localE['doctorName'];
+                      if (localE['completedAt'] != null) data['completedAt'] = localE['completedAt'];
+                    }
+                  }
+                }
+              } catch (_) {}
+
               final campDocKey = CampSessionService.getCampDateDocId(
                 branchId: branchId,
                 dateKey: dateKey,
@@ -395,6 +563,18 @@ class SyncService {
               'completedAt':    data['completedAt'] ?? DateTime.now().toUtc().toIso8601String(),
               'dispenseStatus': data['dispenseStatus'] ?? 'pending',
             };
+
+            // Terminal Status Protection: Preserve dispensed status if already dispensed locally
+            try {
+              if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+                final localE = Hive.box(LocalStorageService.entriesBox).get('$branchId-$serial');
+                if (localE is Map && (localE['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed') {
+                  updateMap['dispenseStatus'] = 'dispensed';
+                  if (localE['dispensedAt'] != null) updateMap['dispensedAt'] = localE['dispensedAt'];
+                }
+              }
+            } catch (_) {}
+
             for (final f in ['doctorName', 'doctorId', 'daysOfMedicine', 'extraCharge', 'vitals', 'prescription', 'medicines', 'diagnosis', 'complaints']) {
               if (data.containsKey(f) && data[f] != null) {
                 updateMap[f] = data[f];
@@ -414,6 +594,19 @@ class SyncService {
             if (serial == null) throw Exception('Missing serial');
             final entryKey = '$branchId-$serial';
             final localEntry = Hive.box(LocalStorageService.entriesBox).get(entryKey);
+
+            // Terminal Status Protection
+            try {
+              if (localEntry is Map) {
+                final lDisp = (localEntry['dispenseStatus'] ?? '').toString().toLowerCase();
+                final dDisp = (data['dispenseStatus'] ?? '').toString().toLowerCase();
+                if (lDisp == 'dispensed' && dDisp != 'dispensed') {
+                  data['dispenseStatus'] = 'dispensed';
+                  data['status'] = 'completed';
+                }
+              }
+            } catch (_) {}
+
             final queueType = resolveQueueType(action['queueType']?.toString() ?? localEntry?['queueType']?.toString(), branchId: branchId);
             final dateKey   = action['dateKey']?.toString() ?? localEntry?['dateKey']?.toString() ?? LocalStorageService.getTodayDateKey();
             final campDocKey = CampSessionService.getCampDateDocId(
@@ -447,77 +640,49 @@ class SyncService {
             await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(serial).set({'daysOfMedicine': (data['daysOfMedicine'] as num?)?.toInt() ?? 1}, SetOptions(merge: true));
           }
           else if (type == 'update_inventory') {
-            final medicineId = (action['medicineId'] ?? (action['data'] as Map?)?['medicineId'])?.toString().trim();
-            final delta = (action['delta'] ?? (action['data'] as Map?)?['delta'] as num?)?.toDouble() ?? 0.0;
-            final txId = action['txId'] as String? ?? key;
+            final nestedData = action['data'] is Map
+                ? Map<String, dynamic>.from(action['data'] as Map)
+                : <String, dynamic>{};
+            final medicineId = (action['medicineId'] ?? nestedData['medicineId'])?.toString().trim();
+            final deltaValue = action['delta'] ?? nestedData['delta'];
+            final delta = deltaValue is num
+                ? deltaValue.toDouble()
+                : double.tryParse(deltaValue?.toString() ?? '') ?? 0.0;
             if (medicineId != null && delta != 0) {
               final invCol = CampSessionService.getCampInventoryPath(
                 branchId: branchId,
-                campId: action['campId']?.toString(),
-                serial: action['serial']?.toString(),
+                campId: (action['campId'] ?? nestedData['campId'] ?? nestedData['dispensaryId'])?.toString(),
+                dispensaryTag: (action['dispensaryTag'] ?? nestedData['dispensaryTag'])?.toString(),
+                serial: (action['serial'] ?? nestedData['serial'])?.toString(),
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
-              await _db.runTransaction((transaction) async {
-                final snapshot = await transaction.get(docRef);
-                if (!snapshot.exists) {
-                  throw Exception('Inventory doc $medicineId not found yet in $invCol — will retry');
-                }
-                final data = snapshot.data() ?? {};
-                final processedTx = Map<String, dynamic>.from(data['processedTx'] ?? {});
-                if (processedTx.containsKey(txId)) {
-                  debugPrint('[SyncService] Transaction $txId already applied to $medicineId — skipping');
-                  return;
-                }
-                final current = (data['quantity'] as num?)?.toDouble() ?? 0.0;
-                final updated = (current + delta).clamp(0.0, double.infinity);
-
-                // Prune entries older than 48h
-                final cutoff = DateTime.now().subtract(const Duration(hours: 48)).toIso8601String();
-                processedTx.removeWhere((_, v) => (v is String && v.compareTo(cutoff) < 0));
-                processedTx[txId] = DateTime.now().toIso8601String();
-
-                transaction.update(docRef, {
-                  'quantity': updated,
-                  'processedTx': processedTx,
-                });
-              });
+              // Zero-read atomic update using FieldValue.increment
+              await docRef.set({
+                'quantity': FieldValue.increment(delta),
+                'lastUpdated': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
             }
           }
           else if (type == 'add_inventory_stock') {
-            final medicineId = action['medicineId']?.toString().trim();
+            final nestedData = action['data'] is Map
+                ? Map<String, dynamic>.from(action['data'] as Map)
+                : <String, dynamic>{};
+            final medicineId = (action['medicineId'] ?? nestedData['medicineId'])?.toString().trim();
             final qty = (action['quantity'] as num?)?.toInt() ?? 0;
             final txId = action['txId'] as String? ?? key;
             if (medicineId != null && qty > 0) {
               final invCol = CampSessionService.getCampInventoryPath(
                 branchId: branchId,
-                campId: action['campId']?.toString(),
-                serial: action['serial']?.toString(),
+                campId: (action['campId'] ?? nestedData['campId'] ?? nestedData['dispensaryId'])?.toString(),
+                dispensaryTag: (action['dispensaryTag'] ?? nestedData['dispensaryTag'])?.toString(),
+                serial: (action['serial'] ?? nestedData['serial'])?.toString(),
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
-              await _db.runTransaction((transaction) async {
-                final snapshot = await transaction.get(docRef);
-                if (!snapshot.exists) {
-                  throw Exception('Inventory doc $medicineId not found yet — will retry');
-                }
-                final data = snapshot.data() ?? {};
-                final processedTx = Map<String, dynamic>.from(data['processedTx'] ?? {});
-                if (processedTx.containsKey(txId)) {
-                  debugPrint('[SyncService] Restock Transaction $txId already applied to $medicineId — skipping');
-                  return;
-                }
-                final current = (data['quantity'] as num?)?.toDouble() ?? 0.0;
-                final updated = current + qty;
-
-                // Prune entries older than 48h
-                final cutoff = DateTime.now().subtract(const Duration(hours: 48)).toIso8601String();
-                processedTx.removeWhere((_, v) => (v is String && v.compareTo(cutoff) < 0));
-                processedTx[txId] = DateTime.now().toIso8601String();
-
-                transaction.update(docRef, {
-                  'quantity': updated,
-                  'processedTx': processedTx,
-                });
-              });
+              // Zero-read atomic update using FieldValue.increment
+              await docRef.set({
+                'quantity': FieldValue.increment(qty),
+                'lastUpdated': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
 
               // Add to audit log using txId as document ID to prevent duplicate log items on retry
               await _db
@@ -758,8 +923,12 @@ class SyncService {
           }
           else if (type == 'save_employee') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
+            if (FinanceLocalStorage.isPlaceholderEmployee(data)) {
+              // Silently discard placeholder employee from syncing
+              continue;
+            }
             final localId = action['localId']?.toString() ?? data['localId']?.toString();
-            final bId = action['branchId']?.toString() ?? data['branchId']?.toString() ?? branchId;
+            final bId = _cleanBranch(action['branchId'] ?? data['branchId'] ?? branchId);
             if (localId == null || localId.isEmpty) throw Exception('Missing localId');
 
             for (final f in ['dob', 'cnicExpiry', 'joiningDate', 'exitDate']) {
@@ -790,11 +959,10 @@ class SyncService {
           }
           else if (type == 'delete_employee') {
             final localId = action['localId']?.toString();
-            final bId = action['branchId']?.toString() ?? branchId;
+            final bId = _cleanBranch(action['branchId'] ?? branchId);
             if (localId == null || localId.isEmpty) throw Exception('Missing localId');
 
             await _db.collection('branches').doc(bId).collection('employees').doc(localId).delete();
-            await _db.collection('employees').doc(localId).delete();
           }
           else if (type == 'save_user') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
@@ -862,37 +1030,78 @@ class SyncService {
               await box.put(key, updated);
             }
           }
-          else if (type == 'save_attendance_record') {
+          else if (type == 'save_attendance_record' ||
+              type == 'save_biometric_log' ||
+              type == 'save_employee_attendance' ||
+              type == 'save_attendance') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
-            final dateStr = action['date']?.toString();
-            final employeeId = action['employeeId']?.toString();
-            final bId = action['branchId']?.toString() ?? branchId;
-            if (dateStr == null || employeeId == null) throw Exception('Missing date/employeeId');
+            final dateStr = (action['date'] ??
+                    action['dateKey'] ??
+                    data['date'] ??
+                    data['dateKey'] ??
+                    DateFormat('yyyy-MM-dd').format(DateTime.now()))
+                .toString();
+            final employeeId = (action['employeeId'] ??
+                    data['employeeId'] ??
+                    data['empId'] ??
+                    data['userId'])
+                ?.toString();
+            final bId = (action['branchId'] ?? data['branchId'] ?? branchId).toString();
+            final logId = (action['localId'] ?? data['id'] ?? data['logId'] ?? key).toString();
+            if (employeeId == null || employeeId.isEmpty) throw Exception('Missing employeeId');
 
             if (data['markedAt'] is String) {
               try {
                 data['markedAt'] = Timestamp.fromDate(DateTime.parse(data['markedAt'] as String));
               } catch (_) {}
             }
+            if (data['timestamp'] is String) {
+              try {
+                data['timestamp'] = Timestamp.fromDate(DateTime.parse(data['timestamp'] as String));
+              } catch (_) {}
+            }
 
             final fsData = Map<String, dynamic>.from(data)..remove('syncStatus');
+            fsData['lastSyncedAt'] = FieldValue.serverTimestamp();
+
             await _db.collection('branches').doc(bId).collection('employee_attendance').doc(dateStr).set({
               'date': dateStr,
               'branchId': bId,
               'lastUpdated': FieldValue.serverTimestamp(),
             }, SetOptions(merge: true));
-            await _db.collection('branches').doc(bId).collection('employee_attendance').doc(dateStr).collection('records').doc(employeeId).set(fsData, SetOptions(merge: true));
+            await _db
+                .collection('branches')
+                .doc(bId)
+                .collection('employee_attendance')
+                .doc(dateStr)
+                .collection('records')
+                .doc(employeeId)
+                .set(fsData, SetOptions(merge: true));
+
+            if (type == 'save_biometric_log' || action['punchSequence'] != null) {
+              await _db.collection('branches').doc(bId).collection('biometric_logs').doc(logId).set(fsData, SetOptions(merge: true));
+            }
 
             final box = Hive.box(LocalStorageService.attendanceBox);
-            final key = '${employeeId}_$dateStr';
-            final localRecord = box.get(key);
+            final hKey = '${employeeId}_$dateStr';
+            final localRecord = box.get(hKey);
             if (localRecord is Map) {
               final updated = Map<String, dynamic>.from(localRecord)
                 ..['syncStatus'] = 'synced'
                 ..['remoteId'] = employeeId
                 ..['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
-              await box.put(key, updated);
+              await box.put(hKey, updated);
             }
+          }
+          else if (type == 'send_notification') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final notifId = (action['localId'] ?? data['id'] ?? const Uuid().v4()).toString();
+            final bId = (action['branchId'] ?? data['branchId'] ?? branchId).toString();
+
+            final fsData = Map<String, dynamic>.from(data);
+            fsData['timestamp'] = FieldValue.serverTimestamp();
+
+            await _db.collection('branches').doc(bId).collection('notifications').doc(notifId).set(fsData, SetOptions(merge: true));
           }
           else if (type == 'save_salary_ledger') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
@@ -1029,6 +1238,79 @@ class SyncService {
                 ..['remoteId'] = transferId
                 ..['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
               await box.put(transferId, updated);
+            }
+          }
+          else if (type == 'save_employee') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final empId = (action['localId'] ?? data['localId'] ?? data['id'])?.toString().trim();
+            final bId = LocalStorageService.sanitizeBranchId(action['branchId'] ?? data['branchId'], fallback: 'karachi');
+            if (empId == null || empId.isEmpty) throw Exception('Missing employeeId');
+
+            for (final f in ['dob', 'cnicExpiry', 'joiningDate', 'exitDate', 'createdAt', 'updatedAt']) {
+              if (data[f] is String) {
+                try {
+                  data[f] = Timestamp.fromDate(DateTime.parse(data[f] as String));
+                } catch (_) {}
+              }
+            }
+
+            final fsData = Map<String, dynamic>.from(data)..remove('syncStatus');
+            await _db.collection('branches').doc(bId).collection('employees').doc(empId).set(fsData, SetOptions(merge: true));
+
+            if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+              final box = Hive.box(LocalStorageService.employeesBox);
+              final local = box.get(empId);
+              if (local is Map) {
+                await box.put(empId, Map<String, dynamic>.from(local)..['syncStatus'] = 'synced');
+              }
+            }
+          }
+          else if (type == 'delete_employee') {
+            final empId = (action['localId'] ?? action['employeeId'])?.toString().trim();
+            final bId = LocalStorageService.sanitizeBranchId(action['branchId'], fallback: 'karachi');
+            if (empId != null && empId.isNotEmpty) {
+              final candidateBranches = <String>{bId, 'karachi', 'saddar', 'haji_camp', 'main'};
+              for (final cand in candidateBranches) {
+                try {
+                  await _db.collection('branches').doc(cand).collection('employees').doc(empId).delete();
+                } catch (_) {}
+                try {
+                  await _db.collection('branches').doc(cand).collection('biometric_credentials').doc(empId).delete();
+                } catch (_) {}
+              }
+            }
+          }
+          else if (type == 'delete_biometric_device') {
+            final deviceId = (action['deviceId'] ?? action['id'] ?? action['localId'])?.toString().trim();
+            final bId = LocalStorageService.sanitizeBranchId(action['branchId'], fallback: 'karachi');
+            if (deviceId != null && deviceId.isNotEmpty) {
+              final candidateBranches = <String>{bId, 'karachi', 'saddar', 'haji_camp', 'main'};
+              for (final cand in candidateBranches) {
+                try {
+                  await _db.collection('branches').doc(cand).collection('biometric_devices').doc(deviceId).delete();
+                } catch (_) {}
+              }
+              try {
+                await _db.collection('biometric_devices').doc(deviceId).delete();
+              } catch (_) {}
+              try {
+                final groupSnap = await _db.collectionGroup('biometric_devices').get();
+                for (final doc in groupSnap.docs) {
+                  final d = doc.data();
+                  if (doc.id == deviceId || d['deviceId'] == deviceId) {
+                    await doc.reference.delete();
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+          else if (type == 'save_biometric_device') {
+            final deviceId = (action['deviceId'] ?? action['id'])?.toString().trim();
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final bId = LocalStorageService.sanitizeBranchId(action['branchId'] ?? data['branchId'], fallback: 'karachi');
+            if (deviceId != null && deviceId.isNotEmpty) {
+              data['updatedAt'] = FieldValue.serverTimestamp();
+              await _db.collection('branches').doc(bId).collection('biometric_devices').doc(deviceId).set(data, SetOptions(merge: true));
             }
           }
           else if (type == 'save_finance_holiday') {
@@ -1173,6 +1455,115 @@ class SyncService {
               await box.put(logId, updated);
             }
           }
+          else if (type == 'save_dasterkhwan_tokens') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final bId = action['branchId']?.toString() ?? branchId;
+            final dateKey = (action['dateKey'] ?? data['dateKey'] ?? DateTime.now().toIso8601String().substring(0, 10)).toString();
+            final tokensList = List<dynamic>.from(data['tokens'] as List? ?? []);
+            final qty = (data['quantity'] as num?)?.toInt() ?? tokensList.length;
+            final session = data['session']?.toString() ?? 'lunch';
+
+            final dayDocRef = _db
+                .collection('branches')
+                .doc(bId)
+                .collection('dasterkhwaan')
+                .doc(dateKey);
+
+            final tokensColRef = dayDocRef.collection('tokens');
+
+            final batch = _db.batch();
+            for (final t in tokensList) {
+              if (t is Map) {
+                final tMap = Map<String, dynamic>.from(t);
+                final tokenId = tMap['id']?.toString() ?? tokensColRef.doc().id;
+                final fsToken = {
+                  'number': tMap['number'] ?? 1,
+                  'served': tMap['served'] == true,
+                  'session': tMap['session'] ?? session,
+                  'time': tMap['time'] != null
+                      ? Timestamp.fromDate(DateTime.tryParse(tMap['time'].toString()) ?? DateTime.now())
+                      : FieldValue.serverTimestamp(),
+                  'issuedBy': tMap['issuedBy'] ?? '',
+                  'localId': tokenId,
+                };
+                batch.set(tokensColRef.doc(tokenId), fsToken, SetOptions(merge: true));
+              }
+            }
+
+            final dayUpdate = <String, dynamic>{
+              'totalTokens': FieldValue.increment(qty),
+              'session_${session}_total': FieldValue.increment(qty),
+              'lastUpdated': FieldValue.serverTimestamp(),
+            };
+            batch.set(dayDocRef, dayUpdate, SetOptions(merge: true));
+            await batch.commit();
+          }
+          else if (type == 'reverse_dasterkhwan_tokens') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final bId = action['branchId']?.toString() ?? branchId;
+            final dateKey = (action['dateKey'] ?? data['dateKey'] ?? DateTime.now().toIso8601String().substring(0, 10)).toString();
+            final tokenIds = List<String>.from((data['tokenIds'] as List? ?? []).map((e) => e.toString()));
+            final qty = (data['quantity'] as num?)?.toInt() ?? tokenIds.length;
+            final sessionCounts = Map<String, dynamic>.from(data['sessionCounts'] ?? {});
+
+            final dayDocRef = _db
+                .collection('branches')
+                .doc(bId)
+                .collection('dasterkhwaan')
+                .doc(dateKey);
+
+            final tokensColRef = dayDocRef.collection('tokens');
+            final batch = _db.batch();
+
+            for (final id in tokenIds) {
+              batch.delete(tokensColRef.doc(id));
+            }
+
+            final dayUpdate = <String, dynamic>{
+              'totalTokens': FieldValue.increment(-qty),
+              'lastUpdated': FieldValue.serverTimestamp(),
+            };
+            sessionCounts.forEach((s, count) {
+              final cnt = (count as num?)?.toInt() ?? 0;
+              if (cnt > 0) {
+                dayUpdate['session_${s}_total'] = FieldValue.increment(-cnt);
+              }
+            });
+
+            batch.set(dayDocRef, dayUpdate, SetOptions(merge: true));
+            await batch.commit();
+          }
+          else if (type == 'serve_dasterkhwan_token') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final bId = action['branchId']?.toString() ?? branchId;
+            final dateKey = (action['dateKey'] ?? data['dateKey'] ?? DateTime.now().toIso8601String().substring(0, 10)).toString();
+            final tokenId = data['tokenId']?.toString();
+            final session = data['session']?.toString() ?? 'lunch';
+
+            if (tokenId != null && tokenId.isNotEmpty) {
+              final dayDocRef = _db
+                  .collection('branches')
+                  .doc(bId)
+                  .collection('dasterkhwaan')
+                  .doc(dateKey);
+
+              final tokensColRef = dayDocRef.collection('tokens');
+
+              final batch = _db.batch();
+              batch.set(tokensColRef.doc(tokenId), {
+                'served': true,
+                'servedTime': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+
+              batch.set(dayDocRef, {
+                'servedTokens': FieldValue.increment(1),
+                'session_${session}_served': FieldValue.increment(1),
+                'lastUpdated': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+
+              await batch.commit();
+            }
+          }
           else if (type == 'save_madrassa_log') {
             final dateKey = action['dateKey'] as String?;
             final data = Map<String, dynamic>.from(action['data'] ?? {});
@@ -1210,6 +1601,34 @@ class SyncService {
               'currentLines': currentLines,
               'lastUpdatedAt': FieldValue.serverTimestamp(),
             });
+          }
+          else if (type == 'save_madrassa_fee_payment' || type == 'save_madrassa_fee') {
+            final bId = (action['branchId']?.toString() ?? branchId).toLowerCase().trim();
+            final docId = action['id']?.toString() ?? '${action['year']}_${action['month']}_${action['studentId']}';
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            data['lastUpdatedAt'] = FieldValue.serverTimestamp();
+            await _db.collection('branches').doc(bId).collection('madrassa_fee_payments').doc(docId).set(data, SetOptions(merge: true));
+          }
+          else if (type == 'save_user') {
+            final uid = action['uid'] as String?;
+            final bId = (action['branchId']?.toString() ?? branchId).toLowerCase().trim();
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            if (uid != null && uid.isNotEmpty) {
+              await _db.collection('users').doc(uid).set(data, SetOptions(merge: true));
+              if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+                await _db.collection('branches').doc(bId).collection('users').doc(uid).set(data, SetOptions(merge: true));
+              }
+            }
+          }
+          else if (type == 'delete_user') {
+            final uid = action['uid'] as String?;
+            final bId = (action['branchId']?.toString() ?? branchId).toLowerCase().trim();
+            if (uid != null && uid.isNotEmpty) {
+              await _db.collection('users').doc(uid).delete();
+              if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+                await _db.collection('branches').doc(bId).collection('users').doc(uid).delete();
+              }
+            }
           }
           else if (type == 'save_expense' || type == 'void_expense') {
             final expenseId = action['expenseId'] as String?;
@@ -1260,9 +1679,27 @@ class SyncService {
           if (QuotaService.isQuotaError(e)) {
             QuotaService.recordQuotaExceeded(error: e);
           }
-          action['attempts'] = attempts + 1;
-          await queueBox.put(key, action);
-          Logger().d("[SyncService] ❌ Upload failed for key: $key (type: $type, attempt: ${attempts + 1}). Error: $e");
+          final nextAttempts = attempts + 1;
+          action['attempts'] = nextAttempts;
+          action['lastAttempt'] = DateTime.now().toIso8601String();
+          action['lastError'] = e.toString();
+
+          // Exponential backoff (1s, 2s, 4s, 8s, 16s ... capped at 5 mins) - Pillar 2-C
+          final backoffSeconds = min(300, pow(2, min(nextAttempts, 8)).toInt());
+          action['nextRetryAt'] = DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
+
+          if (nextAttempts >= 20) {
+            await LocalStorageService.moveToDeadLetterQueue(
+              LocalStorageService.syncBox,
+              key,
+              action,
+              reason: e.toString(),
+            );
+          } else {
+            await queueBox.put(key, action);
+          }
+
+          Logger().d("[SyncService] ❌ Upload failed for key: $key (type: $type, attempt: $nextAttempts, backoff: ${backoffSeconds}s). Error: $e");
           debugPrint(stackTrace.toString());
           if (['update_inventory', 'add_inventory_stock', 'register_medicine', 'save_token_exception_request', 'approve_token_exception'].contains(type)) {
             await _logInventorySyncFailure(key, action, type, e.toString());
@@ -1298,15 +1735,18 @@ class SyncService {
       return;
     }
     try {
-      final patientsSnap = await _db.collection('branches').doc(normBranchId).collection('patients').get();
-      final List<Map<String, dynamic>> patientsList = [];
-      for (final doc in patientsSnap.docs) {
-        final d = doc.data();
-        d['patientId'] = doc.id;
-        d['branchId'] = normBranchId;
-        patientsList.add(d);
+      if (!Hive.isBoxOpen(LocalStorageService.patientsBox) ||
+          Hive.box(LocalStorageService.patientsBox).isEmpty) {
+        final patientsSnap = await _db.collection('branches').doc(normBranchId).collection('patients').get();
+        final List<Map<String, dynamic>> patientsList = [];
+        for (final doc in patientsSnap.docs) {
+          final d = doc.data();
+          d['patientId'] = doc.id;
+          d['branchId'] = normBranchId;
+          patientsList.add(d);
+        }
+        await LocalStorageService.saveAllLocalPatients(patientsList);
       }
-      await LocalStorageService.saveAllLocalPatients(patientsList);
 
       await LocalStorageService.downloadTodayTokens(normBranchId);
       await LocalStorageService.downloadInventory(normBranchId);
@@ -1323,6 +1763,18 @@ class SyncService {
   Future<void> forceFullRefresh(String branchId) async {
     final normBranchId = branchId.toLowerCase().trim();
     final settings = Hive.box('app_settings');
+    final lastForceKey = 'last_force_full_refresh_$normBranchId';
+    final lastForceStr = settings.get(lastForceKey) as String?;
+    if (lastForceStr != null) {
+      final lastForce = DateTime.tryParse(lastForceStr);
+      if (lastForce != null && DateTime.now().difference(lastForce).inHours < 6) {
+        Logger().d('SyncService: forceFullRefresh skipped — cooldown active (6h)');
+        await syncTodayOnly(normBranchId);
+        await triggerUpload();
+        return;
+      }
+    }
+    await settings.put(lastForceKey, DateTime.now().toIso8601String());
     await settings.delete('initial_download_done_$normBranchId');
     await initialFullDownload(normBranchId);
     await triggerUpload();

@@ -22,6 +22,7 @@ import '../services/camp_session_service.dart';
 import '../services/role_simulator_service.dart';
 
 class AuthService {
+  static void Function()? onSignOutCallback;
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseStorage _storage = FirebaseStorage.instance;
@@ -64,6 +65,7 @@ class AuthService {
     List<String> dispensaryIds = const [], // Sub-location dispensary identifiers
     List<Map<String, String>> campSchedule = const [], // Time-based camp schedule
     String? biometricPin,
+    String? linkedEmployeeId,
   }) async {
     try {
       final lowerUsername = username.trim().toLowerCase();
@@ -212,23 +214,11 @@ class AuthService {
         setAsLastLoggedIn: currentAdminUser == null,
       );
 
-      // Automatic Unified Employee Sync:
-      // If user role is an employee/staff role, automatically create/sync Employee profile in Finance & HR
-      final isStudentOrParent = role.toLowerCase().contains('student') || role.toLowerCase().contains('parent');
-      if (!isStudentOrParent) {
-        final cnicVal = (cnic.isNotEmpty ? cnic : (identification ?? '')).trim();
-        await FinanceLocalStorage.createOrUpdateUnifiedEmployeeProfile(
+      // Explicit Employee Link:
+      if (linkedEmployeeId != null && linkedEmployeeId.isNotEmpty) {
+        await FinanceLocalStorage.linkUserToEmployee(
           userId: uid,
-          username: username,
-          email: email,
-          role: role,
-          branchId: branchId,
-          cnic: cnicVal,
-          phone: phone,
-          baseSalary: salary,
-          bankName: bankName,
-          bankAccount: bankAccount,
-          profilePictureUrl: userData['profilePictureUrl']?.toString(),
+          employeeId: linkedEmployeeId,
         );
       }
       return uid;
@@ -306,9 +296,29 @@ class AuthService {
         // connect silently to the central Branch Server via ConnectionManager & RealtimeManager.
         try {
           final username = user.displayName ?? user.email?.split('@').first ?? role;
+          // Executive roles (chairman, CEO) may have branchId='all'. Resolve to
+          // the first known real branch for server discovery.
+          String connBranchId = branchId;
+          if (connBranchId.isEmpty || connBranchId == 'all' || connBranchId == 'global') {
+            try {
+              if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+                final box = Hive.box(LocalStorageService.branchesBox);
+                for (final val in box.values) {
+                  if (val is Map) {
+                    final id = (val['id'] ?? '').toString().trim().toLowerCase();
+                    final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+                    if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+                      connBranchId = id;
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
           ConnectionManager().start(
             role: role,
-            branchId: branchId,
+            branchId: connBranchId,
             username: username,
           );
         } catch (e) {
@@ -337,6 +347,10 @@ class AuthService {
     debugPrint('[AuthService] Starting sign out');
 
     try {
+      onSignOutCallback?.call();
+    } catch (_) {}
+
+    try {
       RoleSimulatorService.reset();
     } catch (_) {}
 
@@ -349,6 +363,7 @@ class AuthService {
         await box.delete('user');
         await box.delete('role');
         await box.delete('auth_token');
+        await box.delete('server_authenticated');
         await box.flush();
       }
     } catch (e) {

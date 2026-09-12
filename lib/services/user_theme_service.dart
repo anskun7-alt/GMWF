@@ -3,12 +3,25 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+class ThemeValueNotifier extends ValueNotifier<bool> {
+  ThemeValueNotifier(super.value);
+  void notifyTheme() {
+    notifyListeners();
+  }
+}
+
 /// Service to manage Per-User Theme Preferences (Dark / Light mode).
 /// Light Mode is ALWAYS the default.
 /// Preferences of User A do NOT affect User B on the same device.
 class UserThemeService {
   static const String _globalThemeKey = 'is_dark_mode';
-  static final ValueNotifier<bool> currentThemeNotifier = ValueNotifier<bool>(false);
+  static final ThemeValueNotifier currentThemeNotifier = ThemeValueNotifier(false);
+
+  /// Notifies all active theme listeners that custom accent color or theme settings changed
+  static void notifyThemeChanged() {
+    currentThemeNotifier.value = isDarkMode();
+    currentThemeNotifier.notifyTheme();
+  }
 
   /// Resolved active user key (UID, email, or guest)
   static String getActiveUserKey([String? explicitUserKey]) {

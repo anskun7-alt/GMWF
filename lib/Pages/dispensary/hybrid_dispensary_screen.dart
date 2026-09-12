@@ -84,6 +84,9 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
       if (mounted) setState(() => _connectionStatus = status);
     });
 
+    // Ensure all role boxes (patients, entries, stock, prescriptions) are opened on desk entry
+    LocalStorageService.initForRoles([widget.role, 'receptionist', 'dispenser']);
+
     // Run receptionist bootstrap if "rec" is included in role
     if (widget.role.toLowerCase().contains('rec')) {
       _bootstrapReceptionistData(widget.branchId);
@@ -288,7 +291,8 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
       // 2. If online, sync with cloud
       if (_online) {
-        await SyncService().forceFullRefresh(widget.branchId);
+        await SyncService().syncTodayOnly(widget.branchId);
+        await SyncService().triggerUpload();
       }
       if (mounted) {
         Flushbar(
@@ -316,36 +320,18 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
     final firestoreService = FirestoreService();
     try {
-      final existingPatientIds = LocalStorageService.getAllLocalPatients(
-              branchId: branchId)
-          .map((m) => m['patientId'] as String?)
-          .whereType<String>()
-          .toSet();
-
-      final List<Patient> patients =
-          await firestoreService.getAllPatientsForBranch(branchId);
-      for (final patient in patients) {
-        final map = patient.toMap();
-        final patientId = map['patientId'] as String?;
-        if (patientId != null && !existingPatientIds.contains(patientId)) {
-          await LocalStorageService.saveLocalPatient(map);
-        }
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.patientsBox);
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
+      // Only do a bulk patient download if local storage is fresh/empty (< 5 patients)
+      final localCount = LocalStorageService.getAllLocalPatients(branchId: branchId).length;
+      if (localCount < 5) {
+        final List<Patient> patients =
+            await firestoreService.getAllPatientsForBranch(branchId);
+        final patientsList = patients.map((p) => p.toMap()).toList();
+        await LocalStorageService.saveAllLocalPatients(patientsList);
       }
 
-      final existingSerials = LocalStorageService.getLocalEntries(branchId)
-          .map((m) => m['serial'] as String?)
-          .whereType<String>()
-          .toSet();
-
-      final List<Token> tokens =
-          await firestoreService.getTodayTokensForBranch(branchId);
-      for (final token in tokens) {
-        final map = token.toMap();
-        final serial = map['serial'] as String?;
-        if (serial != null && !existingSerials.contains(serial)) {
-          await LocalStorageService.saveEntryLocal(branchId, serial, map);
-        }
-      }
+      await LocalStorageService.downloadTodayTokens(branchId);
     } catch (e) {
       debugPrint("Warning: Error bootstrapping receptionist data: $e");
     }
@@ -399,11 +385,31 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
     final screenWidth = MediaQuery.of(context).size.width;
     final isMobile = screenWidth < 700;
 
+    if (!Hive.isBoxOpen('app_settings')) {
+      return FutureBuilder<Box>(
+        future: LocalStorageService.ensureBoxOpen('app_settings'),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData || snapshot.data == null || !snapshot.data!.isOpen) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator(color: _teal)),
+            );
+          }
+          final isDark = snapshot.data!.get('is_dark_mode', defaultValue: false) == true;
+          return _buildThemedScaffold(context, isDark, isMobile);
+        },
+      );
+    }
+
     return ValueListenableBuilder<Box>(
       valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
       builder: (context, box, _) {
-        final isDark = box.get('is_dark_mode', defaultValue: false) == true;
-        final headerBg = isDark ? const Color(0xFF0F172A) : _teal;
+        final isDark = box.isOpen ? (box.get('is_dark_mode', defaultValue: false) == true) : false;
+        return _buildThemedScaffold(context, isDark, isMobile);
+      },
+    );
+  }
+
+  Widget _buildThemedScaffold(BuildContext context, bool isDark, bool isMobile) {
 
         return Scaffold(
           backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F8F5),
@@ -428,100 +434,187 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
             isSyncing: _isSyncing,
             onSync: _forceSync,
             onLogout: _logout,
-            bottom: PreferredSize(
-              preferredSize: const Size.fromHeight(48),
-              child: AnimatedBuilder(
-                animation: _tabController,
-                builder: (context, _) {
-                  final activeIndex = _tabController.index;
-                  return Container(
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E293B) : Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
-                        width: 1.2,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.03),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: TabBar(
-                      controller: _tabController,
-                      isScrollable: false,
-                      indicator: BoxDecoration(
-                        color: isDark ? const Color(0xFF0F766E).withValues(alpha: 0.35) : const Color(0xFFE8F5E9),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: const Color(0xFF10B981),
-                          width: 1.2,
-                        ),
-                      ),
-                      indicatorSize: TabBarIndicatorSize.tab,
-                      splashFactory: NoSplash.splashFactory,
-                      overlayColor: WidgetStateProperty.all(Colors.transparent),
-                      dividerColor: Colors.transparent,
-                      labelPadding: const EdgeInsets.symmetric(horizontal: 2),
-                      tabs: _tabs.asMap().entries.map((entry) {
-                        final idx = entry.key;
-                        final t = entry.value;
-                        final isSelected = activeIndex == idx;
-                        return Tab(
-                          height: 38,
-                          child: Container(
-                            alignment: Alignment.center,
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  t['icon'] as IconData,
-                                  size: 18,
-                                  color: isSelected
-                                      ? (isDark ? const Color(0xFF34D399) : const Color(0xFF00875A))
-                                      : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  t['title'] as String,
-                                  style: TextStyle(
-                                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
-                                    fontSize: 14,
-                                    color: isSelected
-                                        ? (isDark ? const Color(0xFF34D399) : const Color(0xFF00875A))
-                                        : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+            bottom: isMobile
+                ? null
+                : PreferredSize(
+                    preferredSize: const Size.fromHeight(48),
+                    child: AnimatedBuilder(
+                      animation: _tabController,
+                      builder: (context, _) {
+                        final activeIndex = _tabController.index;
+                        return Container(
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF1E293B) : Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                              width: 1.2,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.03),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                          child: TabBar(
+                            controller: _tabController,
+                            isScrollable: false,
+                            indicator: BoxDecoration(
+                              color: isDark ? const Color(0xFF0F766E).withValues(alpha: 0.35) : const Color(0xFFE8F5E9),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: const Color(0xFF10B981),
+                                width: 1.2,
+                              ),
+                            ),
+                            indicatorSize: TabBarIndicatorSize.tab,
+                            splashFactory: NoSplash.splashFactory,
+                            overlayColor: WidgetStateProperty.all(Colors.transparent),
+                            dividerColor: Colors.transparent,
+                            labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                            tabs: _tabs.asMap().entries.map((entry) {
+                              final idx = entry.key;
+                              final t = entry.value;
+                              final isSelected = activeIndex == idx;
+                              return Tab(
+                                height: 38,
+                                child: Container(
+                                  alignment: Alignment.center,
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        t['icon'] as IconData,
+                                        size: 18,
+                                        color: isSelected
+                                            ? (isDark ? const Color(0xFF34D399) : const Color(0xFF00875A))
+                                            : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        t['title'] as String,
+                                        style: TextStyle(
+                                          fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                                          fontSize: 14,
+                                          color: isSelected
+                                              ? (isDark ? const Color(0xFF34D399) : const Color(0xFF00875A))
+                                              : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ],
-                            ),
+                              );
+                            }).toList(),
                           ),
                         );
-                      }).toList(),
+                      },
+                    ),
+                  ),
+          ),
+          body: AnimatedBuilder(
+            animation: _tabController,
+            builder: (context, _) {
+              final safeIndex = _tabs.isEmpty ? 0 : _tabController.index.clamp(0, _tabs.length - 1);
+              return IndexedStack(
+                index: safeIndex,
+                children: _tabs.map((t) => t['widget'] as Widget).toList(),
+              );
+            },
+          ),
+          bottomNavigationBar: isMobile ? _buildMobileBottomBar(isDark) : null,
+        );
+  }
+
+  Widget _buildMobileBottomBar(bool isDark) {
+    final activeColor = isDark ? const Color(0xFF34D399) : const Color(0xFF00875A);
+    final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+    final activeBg = isDark ? const Color(0xFF0F766E).withValues(alpha: 0.3) : const Color(0xFFE8F5E9);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        border: Border(
+          top: BorderSide(
+            color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+            width: 1.2,
+          ),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.08),
+            blurRadius: 10,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: AnimatedBuilder(
+          animation: _tabController,
+          builder: (context, _) {
+            final activeIndex = _tabs.isEmpty ? 0 : _tabController.index.clamp(0, _tabs.length - 1);
+            return SizedBox(
+              height: 58,
+              child: Row(
+                children: _tabs.asMap().entries.map((entry) {
+                  final idx = entry.key;
+                  final t = entry.value;
+                  final isSelected = activeIndex == idx;
+
+                  return Expanded(
+                    child: InkWell(
+                      onTap: () {
+                        if (_tabController.index != idx) {
+                          _tabController.animateTo(idx);
+                        }
+                      },
+                      splashColor: activeColor.withValues(alpha: 0.12),
+                      highlightColor: Colors.transparent,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: isSelected ? activeBg : Colors.transparent,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              t['icon'] as IconData,
+                              size: 20,
+                              color: isSelected ? activeColor : inactiveColor,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            t['title'] as String,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                              color: isSelected ? activeColor : inactiveColor,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   );
-                },
+                }).toList(),
               ),
-            ),
-          ),
-      body: AnimatedBuilder(
-        animation: _tabController,
-        builder: (context, _) {
-          final safeIndex = _tabs.isEmpty ? 0 : _tabController.index.clamp(0, _tabs.length - 1);
-          return IndexedStack(
-            index: safeIndex,
-            children: _tabs.map((t) => t['widget'] as Widget).toList(),
-          );
-        },
+            );
+          },
+        ),
       ),
-    );
-      },
     );
   }
 }

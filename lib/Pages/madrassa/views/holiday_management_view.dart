@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
-import '../models/holiday.dart';
 import '../madrassa_strings.dart';
+import '../utils/madrassa_local_storage.dart';
 
 class HolidayManagementView extends StatefulWidget {
   final String branchId;
@@ -38,40 +37,24 @@ class _HolidayManagementViewState extends State<HolidayManagementView> {
                     children: [
                       TextSpan(
                         text: context.t('Holiday Name'),
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: const Color(0xFF1E293B),
-                          fontFamily: context.isUrdu ? 'Noori' : null,
-                        ),
+                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87),
                       ),
                       const TextSpan(
                         text: ' *',
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFFD32F2F)),
+                        style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 8),
                 TextField(
                   controller: nameController,
-                  style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null),
                   decoration: InputDecoration(
-                    hintText: context.t('Holiday Name'),
-                    hintStyle: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null),
+                    hintText: context.t('Enter holiday name (e.g. Eid-ul-Fitr)'),
                     errorText: nameError,
-                    errorStyle: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: nameError != null ? const Color(0xFFD32F2F) : const Color(0xFFD0D3D9)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFF008080), width: 2),
-                    ),
                   ),
-                  onChanged: (v) {
+                  onChanged: (val) {
                     if (nameError != null) setStateDialog(() => nameError = null);
                   },
                 ),
@@ -81,72 +64,62 @@ class _HolidayManagementViewState extends State<HolidayManagementView> {
                     children: [
                       TextSpan(
                         text: context.t('Holiday Date'),
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: const Color(0xFF1E293B),
-                          fontFamily: context.isUrdu ? 'Noori' : null,
-                        ),
+                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87),
                       ),
                       const TextSpan(
                         text: ' *',
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFFD32F2F)),
+                        style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        selectedDate == null
-                            ? context.t('No date chosen')
-                            : DateFormat('yyyy-MM-dd').format(selectedDate!),
-                        style: TextStyle(
-                          color: selectedDate == null ? Colors.grey[600] : Colors.black,
-                          fontWeight: selectedDate == null ? FontWeight.normal : FontWeight.bold,
-                          fontFamily: context.isUrdu ? 'Noori' : null,
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: selectedDate ?? DateTime.now(),
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2030),
+                    );
+                    if (picked != null) {
+                      setStateDialog(() {
+                        selectedDate = picked;
+                        dateError = null;
+                      });
+                    }
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: dateError != null ? Colors.red : Colors.grey),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          selectedDate == null
+                              ? context.t('Select Date')
+                              : DateFormat('yyyy-MM-dd').format(selectedDate!),
+                          style: TextStyle(
+                            color: selectedDate == null ? Colors.grey : Colors.black87,
+                          ),
                         ),
-                      ),
-                    ),
-                    TextButton.icon(
-                      icon: const Icon(Icons.date_range, color: Color(0xFF008080)),
-                      onPressed: () async {
-                        final now = DateTime.now();
-                        final picked = await showDatePicker(
-                          context: ctx,
-                          initialDate: now,
-                          firstDate: DateTime(now.year - 5),
-                          lastDate: DateTime(now.year + 5),
-                        );
-                        if (picked != null) {
-                          setStateDialog(() {
-                            selectedDate = picked;
-                            dateError = null;
-                          });
-                        }
-                      },
-                      label: Text(
-                        context.t('Select Date'),
-                        style: TextStyle(color: const Color(0xFF008080), fontFamily: context.isUrdu ? 'Noori' : null),
-                      ),
-                    ),
-                  ],
-                ),
-                if (dateError != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      dateError!,
-                      style: TextStyle(color: const Color(0xFFD32F2F), fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
+                        const Icon(Icons.calendar_today, size: 20, color: Color(0xFF008080)),
+                      ],
                     ),
                   ),
+                ),
+                if (dateError != null) ...[
+                  const SizedBox(height: 4),
+                  Text(dateError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ],
               ],
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
+                onPressed: () => Navigator.pop(ctx),
                 child: Text(context.t('Cancel'), style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
               ),
               ElevatedButton(
@@ -175,14 +148,11 @@ class _HolidayManagementViewState extends State<HolidayManagementView> {
                   }
 
                   final nav = Navigator.of(ctx);
-                  await FirebaseFirestore.instance
-                      .collection('branches')
-                      .doc(widget.branchId)
-                      .collection('madrassa_holidays')
-                      .add({
-                    'name': nameController.text.trim(),
-                    'date': Timestamp.fromDate(selectedDate!),
-                  });
+                  await MadrassaLocalStorage.saveHolidayLocalAndSync(
+                    branchId: widget.branchId,
+                    name: nameController.text.trim(),
+                    date: selectedDate!,
+                  );
                   nav.pop();
                 },
                 style: ElevatedButton.styleFrom(
@@ -198,13 +168,11 @@ class _HolidayManagementViewState extends State<HolidayManagementView> {
     );
   }
 
-  Future<void> _deleteHoliday(String docId) async {
-    await FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('madrassa_holidays')
-        .doc(docId)
-        .delete();
+  Future<void> _deleteHoliday(String holidayId) async {
+    await MadrassaLocalStorage.deleteHolidayLocalAndSync(
+      branchId: widget.branchId,
+      holidayId: holidayId,
+    );
   }
 
   @override
@@ -216,30 +184,41 @@ class _HolidayManagementViewState extends State<HolidayManagementView> {
           IconButton(icon: const Icon(Icons.add), onPressed: _showAddHolidayDialog),
         ],
       ),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('branches')
-            .doc(widget.branchId)
-            .collection('madrassa_holidays')
-            .orderBy('date')
-            .snapshots(),
+      body: StreamBuilder<List<Map<String, dynamic>>>(
+        stream: MadrassaLocalStorage.streamHolidaysCached(widget.branchId),
         builder: (ctx, snapshot) {
           if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-          final docs = snapshot.data!.docs;
-          if (docs.isEmpty) {
+          final holidays = snapshot.data!;
+          if (holidays.isEmpty) {
             return const Center(child: Text('No holidays added yet.'));
           }
+
+          final sortedHolidays = List<Map<String, dynamic>>.from(holidays)..sort((a, b) {
+            final da = a['date']?.toString() ?? a['id']?.toString() ?? '';
+            final db = b['date']?.toString() ?? b['id']?.toString() ?? '';
+            return da.compareTo(db);
+          });
+
           return ListView.builder(
-            itemCount: docs.length,
+            itemCount: sortedHolidays.length,
             itemBuilder: (c, i) {
-               final holiday = Holiday.fromFirestore(docs[i]);
+              final h = sortedHolidays[i];
+              final name = h['name']?.toString() ?? 'Holiday';
+              final dateStr = h['date']?.toString() ?? h['id']?.toString() ?? '';
+              DateTime? parsedDate;
+              if (dateStr.isNotEmpty) {
+                parsedDate = DateTime.tryParse(dateStr);
+              }
+              final displayDate = parsedDate != null ? DateFormat('yyyy-MM-dd').format(parsedDate) : dateStr;
+              final hId = h['id']?.toString() ?? '';
+
               return ListTile(
-                leading: const Icon(Icons.event_note),
-                title: Text(holiday.name),
-                subtitle: Text(DateFormat('yyyy-MM-dd').format(holiday.date)),
+                leading: const Icon(Icons.event_note, color: Color(0xFF008080)),
+                title: Text(name),
+                subtitle: Text(displayDate),
                 trailing: IconButton(
                   icon: const Icon(Icons.delete, color: Colors.red),
-                  onPressed: () => _deleteHoliday(docs[i].id),
+                  onPressed: () => _deleteHoliday(hId),
                 ),
               );
             },
