@@ -132,8 +132,12 @@ class _DonationBoxesWidgetState extends State<DonationBoxesWidget> {
     setState(() => _loading = true);
     try {
       await DonationBoxStorage.init();
-      if (widget.branchId.isNotEmpty && widget.branchId != 'all') {
+      final local = DonationBoxStorage.getBoxes(widget.branchId);
+      if (local.isNotEmpty) {
+        _boxes = local;
+      } else if (widget.branchId.isNotEmpty && widget.branchId != 'all') {
         await DonationBoxStorage.downloadBoxes(widget.branchId);
+        _boxes = DonationBoxStorage.getBoxes(widget.branchId);
       }
     } catch (_) {}
     if (!mounted) return;
