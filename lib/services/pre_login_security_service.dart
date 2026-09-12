@@ -44,6 +44,15 @@ class PreLoginSecurityService {
   /// Logs pre-login app launches to Firestore security_access_logs.
   static Future<void> logAppLaunch() async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final lastLogMs = prefs.getInt('pre_login_last_logged_at') ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - lastLogMs < 2 * 60 * 60 * 1000) {
+        // Logged within the last 2 hours; skip writing to Firestore to conserve quota
+        return;
+      }
+      await prefs.setInt('pre_login_last_logged_at', nowMs);
+
       final deviceId = await getDeviceId();
       final publicIp = await fetchPublicIp();
       final deviceInfo = await DeviceInfoService.getDeviceInfo();

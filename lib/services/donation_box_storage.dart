@@ -666,8 +666,18 @@ class DonationBoxStorage {
   // FIRESTORE SYNC
   // ══════════════════════════════════════════════════════════════════════════
 
-  static Future<void> downloadBoxes(String branchId) async {
+  static final Map<String, DateTime> _lastDownloadTimes = {};
+
+  static Future<void> downloadBoxes(String branchId, {bool force = false}) async {
     try {
+      final now = DateTime.now();
+      final last = _lastDownloadTimes[branchId];
+      if (!force && last != null && now.difference(last).inHours < 2) {
+        debugPrint('[DonationBoxStorage] downloadBoxes skipped for $branchId: cooldown active');
+        return;
+      }
+      _lastDownloadTimes[branchId] = now;
+
       final db = FirebaseFirestore.instance;
       List<String> targetBranches = [];
       if (branchId == 'all' || branchId.isEmpty) {
