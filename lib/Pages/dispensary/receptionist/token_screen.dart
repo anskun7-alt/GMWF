@@ -11,6 +11,8 @@ import 'package:intl/intl.dart';
 
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
+import 'package:gmwf/services/network_health_service.dart';
+import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/widgets/patient_audit_history_dialog.dart';
@@ -1165,8 +1167,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
     bool written = false;
     try {
-      final conn   = await Connectivity().checkConnectivity();
-      final online = !conn.contains(ConnectivityResult.none);
+      final online = NetworkHealthService().isStableOnline;
       if (online) {
         final campDocKey = CampSessionService.getCampDateDocId(
           branchId: widget.branchId,
@@ -1183,7 +1184,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         await dayRef
             .collection(queueType)
             .doc(serial)
-            .set(entryData, SetOptions(merge: true));
+            .set(entryData, SetOptions(merge: true))
+            .timeout(const Duration(seconds: 4));
         await dayRef.set(
           {'lastSerialNumber': int.tryParse(serial.split('-').last) ?? 0},
           SetOptions(merge: true),
@@ -1207,6 +1209,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           'data':      entryData,
         });
         debugPrint('[TokenScreen] 📥 Queued for sync: $queueType/$serial');
+        SyncService().triggerUpload();
       } catch (e) {
         debugPrint('[TokenScreen] Enqueue failed: $e');
       }

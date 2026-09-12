@@ -235,6 +235,7 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
   final shiftKey = (shift != null && shift.isNotEmpty && shift != 'all') ? shift.toLowerCase().trim() : 'all';
   final cacheKey = 'v2|$normBranchId|$subKey|$shiftKey|$ds|serials_summary';
   
+  // 1. For past days, check Hive cache first
   if (ds != todayKey) {
     try {
       if (!Hive.isBoxOpen('branch_data_cache')) {
@@ -248,98 +249,199 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
     } catch (_) {}
   }
   
-  // Fetch from Firestore
-  int pending = 0;
-  int dispensed = 0;
-  int zakatRevenue = 0;
-  int nonZakatRevenue = 0;
-  int prescWaiting = 0;
-  int prescPrescribed = 0;
-  int dispPending = 0;
-  int dispDispensed = 0;
-  
-  final queues = ['zakat', 'non-zakat', 'gmwf'];
-  final dateDocs = CampSessionService.getAllCampDateDocIds(
-    branchId: normBranchId,
-    dateKey: ds,
-    selectedCamp: subDispensary,
-  );
-  final futures = <Future<QuerySnapshot<Map<String, dynamic>>>>[];
-  final queryQueues = <String>[];
-  for (final docKey in dateDocs) {
-    for (final q in queues) {
-      futures.add(FirebaseFirestore.instance
-          .collection('branches/$normBranchId/serials/$docKey/$q')
-          .get());
-      queryQueues.add(q);
-    }
-  }
-      
-  final snaps = await Future.wait(futures);
-
-  final Map<String, Map<String, dynamic>> activeTokenMap = {};
+  // 2. LOCAL-FIRST: Count from local Hive boxes (entriesBox + dispensaryBox)
+  final Map<String, Map<String, dynamic>> localTokenMap = {};
   final Set<String> zakatSerials = {};
   final Set<String> nonZakatSerials = {};
   final Set<String> gmwfSerials = {};
 
-  for (int i = 0; i < snaps.length; i++) {
-    final q = queryQueues[i];
-    final snap = snaps[i];
-    for (final doc in snap.docs) {
-      final data = doc.data();
-      final status = (data['status'] ?? '').toString().toLowerCase().trim();
-      final syncStatus = (data['syncStatus'] ?? '').toString().toLowerCase().trim();
-      final isDeleted = data['isDeleted'] == true || status == 'deleted' || syncStatus == 'deleted' || status == 'void' || status == 'cancelled';
-      if (isDeleted) continue;
+  void processLocalEntry(Map<String, dynamic> data, String fallbackId) {
+    final status = (data['status'] ?? '').toString().toLowerCase().trim();
+    final syncStatus = (data['syncStatus'] ?? '').toString().toLowerCase().trim();
+    final isDeleted = data['isDeleted'] == true || status == 'deleted' || syncStatus == 'deleted' || status == 'void' || status == 'cancelled';
+    if (isDeleted) return;
 
-      if (!_matchesSubDispensary(data, subDispensary, doc.id)) continue;
-      if (!_matchesShift(data, shift)) continue;
+    if (!_matchesSubDispensary(data, subDispensary, fallbackId)) return;
+    if (!_matchesShift(data, shift)) return;
 
-      final facilityKey = (data['campId'] ?? data['dispensaryId'] ?? data['dispensaryTag'] ?? doc.reference.parent.parent?.id ?? '').toString().toLowerCase().trim();
-      final rawSerial = (data['serial'] ?? data['tokenSerial'] ?? data['id'] ?? data['tokenNumber'] ?? doc.id).toString().trim();
-      final cleanNum = int.tryParse(rawSerial.replaceAll(RegExp(r'[^0-9]'), ''));
-      final prefix = q == 'non-zakat' ? 'NZ' : (q == 'zakat' ? 'Z' : 'G');
-      final uniqueKey = (rawSerial.isNotEmpty && rawSerial.contains('-'))
-          ? rawSerial
-          : ((cleanNum != null && cleanNum > 0) ? '$facilityKey-$prefix-${cleanNum % 1000}' : '${facilityKey}_${q}_${doc.id}');
+    final rawSerial = (data['serial'] ?? data['tokenSerial'] ?? data['id'] ?? fallbackId).toString().trim();
+    if (rawSerial.isEmpty) return;
+    final upperSerial = rawSerial.toUpperCase();
 
-      if (activeTokenMap.containsKey(uniqueKey)) continue;
-      activeTokenMap[uniqueKey] = data;
+    // Determine queue type
+    final qt = (data['queueType'] ?? data['type'] ?? '').toString().toLowerCase().trim();
+    String resolvedQueue;
+    if (qt.contains('non') || qt.contains('nz') || upperSerial.contains('NZ-')) {
+      resolvedQueue = 'non-zakat';
+    } else if (qt.contains('gmwf') || qt.contains('free') || upperSerial.contains('G-')) {
+      resolvedQueue = 'gmwf';
+    } else {
+      resolvedQueue = 'zakat';
+    }
 
-      if (q == 'zakat') zakatSerials.add(uniqueKey);
-      else if (q == 'non-zakat') nonZakatSerials.add(uniqueKey);
-      else gmwfSerials.add(uniqueKey);
+    if (localTokenMap.containsKey(upperSerial)) return;
+    localTokenMap[upperSerial] = data;
 
-      final daysOfMedicine = (data['daysOfMedicine'] as num?)?.toInt() ?? 1;
-      if (q == 'zakat') {
-        zakatRevenue += 20 * daysOfMedicine;
-      } else if (q == 'non-zakat') {
-        nonZakatRevenue += 100 * daysOfMedicine;
+    if (resolvedQueue == 'zakat') {
+      zakatSerials.add(upperSerial);
+    } else if (resolvedQueue == 'non-zakat') {
+      nonZakatSerials.add(upperSerial);
+    } else {
+      gmwfSerials.add(upperSerial);
+    }
+  }
+
+  // Scan entriesBox
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+      final eBox = Hive.box(LocalStorageService.entriesBox);
+      for (final k in eBox.keys) {
+        final val = eBox.get(k);
+        if (val is! Map) continue;
+        final d = Map<String, dynamic>.from(val);
+        final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
+        final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
+        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty;
+        if (matchBranch && dk == ds) {
+          processLocalEntry(d, k.toString());
+        }
       }
-      
-      final dispenseStatus = (data['dispenseStatus'] ?? '').toString().toLowerCase().trim();
-      
-      final hasPrescription = data['prescription'] is Map ||
-          data['prescriptions'] is List ||
-          data['prescriptionId'] != null;
-      if (status == 'dispensed' || dispenseStatus == 'dispensed') {
-        dispensed++;
-        dispDispensed++;
-        if (hasPrescription || status == 'dispensed') prescPrescribed++;
-      } else if (status == 'completed' || status == 'prescribed' || hasPrescription) {
-        prescPrescribed++;
-        dispPending++;
-      } else {
-        pending++;
-        prescWaiting++;
+    }
+  } catch (_) {}
+
+  // Scan dispensaryBox
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+      final dBox = Hive.box(LocalStorageService.dispensaryBox);
+      for (final k in dBox.keys) {
+        final val = dBox.get(k);
+        if (val is! Map) continue;
+        final d = Map<String, dynamic>.from(val);
+        final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
+        final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
+        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty;
+        if (matchBranch && dk == ds) {
+          processLocalEntry(d, k.toString());
+        }
       }
+    }
+  } catch (_) {}
+
+  // 3. If local data found, compute summary from it
+  if (localTokenMap.isNotEmpty) {
+    return _buildSummaryFromTokenMap(localTokenMap, zakatSerials, nonZakatSerials, gmwfSerials, ds, todayKey, cacheKey);
+  }
+
+  // 4. FALLBACK: Only query Firestore if local Hive is completely empty for this day
+  try {
+    final queues = ['zakat', 'non-zakat', 'gmwf'];
+    final dateDocs = CampSessionService.getAllCampDateDocIds(
+      branchId: normBranchId,
+      dateKey: ds,
+      selectedCamp: subDispensary,
+    );
+    final futures = <Future<QuerySnapshot<Map<String, dynamic>>>>[];
+    final queryQueues = <String>[];
+    for (final docKey in dateDocs) {
+      for (final q in queues) {
+        futures.add(FirebaseFirestore.instance
+            .collection('branches/$normBranchId/serials/$docKey/$q')
+            .get()
+            .timeout(const Duration(seconds: 4))
+            .catchError((_) => FirebaseFirestore.instance
+                .collection('_empty_')
+                .limit(0)
+                .get()));
+        queryQueues.add(q);
+      }
+    }
+
+    final snaps = await Future.wait(futures);
+
+    for (int i = 0; i < snaps.length; i++) {
+      final q = queryQueues[i];
+      final snap = snaps[i];
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final status = (data['status'] ?? '').toString().toLowerCase().trim();
+        final syncStatus = (data['syncStatus'] ?? '').toString().toLowerCase().trim();
+        final isDeleted = data['isDeleted'] == true || status == 'deleted' || syncStatus == 'deleted' || status == 'void' || status == 'cancelled';
+        if (isDeleted) continue;
+
+        if (!_matchesSubDispensary(data, subDispensary, doc.id)) continue;
+        if (!_matchesShift(data, shift)) continue;
+
+        final rawSerial = (data['serial'] ?? data['tokenSerial'] ?? data['id'] ?? data['tokenNumber'] ?? doc.id).toString().trim();
+        final cleanNum = int.tryParse(rawSerial.replaceAll(RegExp(r'[^0-9]'), ''));
+        final facilityKey = (data['campId'] ?? data['dispensaryId'] ?? data['dispensaryTag'] ?? doc.reference.parent.parent?.id ?? '').toString().toLowerCase().trim();
+        final prefix = q == 'non-zakat' ? 'NZ' : (q == 'zakat' ? 'Z' : 'G');
+        final uniqueKey = (rawSerial.isNotEmpty && rawSerial.contains('-'))
+            ? rawSerial
+            : ((cleanNum != null && cleanNum > 0) ? '$facilityKey-$prefix-${cleanNum % 1000}' : '${facilityKey}_${q}_${doc.id}');
+
+        if (localTokenMap.containsKey(uniqueKey)) continue;
+        localTokenMap[uniqueKey] = data;
+
+        if (q == 'zakat') zakatSerials.add(uniqueKey);
+        else if (q == 'non-zakat') nonZakatSerials.add(uniqueKey);
+        else gmwfSerials.add(uniqueKey);
+      }
+    }
+  } catch (e) {
+    debugPrint('[SerialsService] Firestore fallback query failed: $e');
+  }
+
+  return _buildSummaryFromTokenMap(localTokenMap, zakatSerials, nonZakatSerials, gmwfSerials, ds, todayKey, cacheKey);
+}
+
+Map<String, int> _buildSummaryFromTokenMap(
+  Map<String, Map<String, dynamic>> tokenMap,
+  Set<String> zakatSerials,
+  Set<String> nonZakatSerials,
+  Set<String> gmwfSerials,
+  String ds,
+  String todayKey,
+  String cacheKey,
+) {
+  int pending = 0, dispensed = 0;
+  int zakatRevenue = 0, nonZakatRevenue = 0;
+  int prescWaiting = 0, prescPrescribed = 0;
+  int dispPending = 0, dispDispensed = 0;
+
+  for (final entry in tokenMap.entries) {
+    final data = entry.value;
+    final serial = entry.key;
+    final daysOfMedicine = (data['daysOfMedicine'] as num?)?.toInt() ?? 1;
+
+    if (zakatSerials.contains(serial)) {
+      zakatRevenue += 20 * daysOfMedicine;
+    } else if (nonZakatSerials.contains(serial)) {
+      nonZakatRevenue += 100 * daysOfMedicine;
+    }
+
+    final status = (data['status'] ?? '').toString().toLowerCase().trim();
+    final dispenseStatus = (data['dispenseStatus'] ?? '').toString().toLowerCase().trim();
+    final hasPrescription = data['prescription'] is Map ||
+        data['prescriptions'] is List ||
+        data['prescriptionId'] != null;
+
+    if (status == 'dispensed' || dispenseStatus == 'dispensed') {
+      dispensed++;
+      dispDispensed++;
+      if (hasPrescription || status == 'dispensed') prescPrescribed++;
+    } else if (status == 'completed' || status == 'prescribed' || hasPrescription) {
+      prescPrescribed++;
+      dispPending++;
+    } else {
+      pending++;
+      prescWaiting++;
     }
   }
 
   final zakatCount = zakatSerials.length;
   final nonZakatCount = nonZakatSerials.length;
   final gmwfCount = gmwfSerials.length;
-  
+
   final daySummary = {
     'v1': zakatCount,
     'v1_sub': zakatRevenue,
@@ -356,17 +458,16 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
     'disp_pending': dispPending,
     'disp_dispensed': dispDispensed,
   };
-  
+
   if (ds != todayKey) {
     try {
-      if (!Hive.isBoxOpen('branch_data_cache')) {
-        await Hive.openBox('branch_data_cache');
+      if (Hive.isBoxOpen('branch_data_cache')) {
+        final box = Hive.box('branch_data_cache');
+        box.put(cacheKey, daySummary);
       }
-      final box = Hive.box('branch_data_cache');
-      await box.put(cacheKey, daySummary);
     } catch (_) {}
   }
-  
+
   return daySummary;
 }
 

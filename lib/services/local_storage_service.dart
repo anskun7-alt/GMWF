@@ -5146,6 +5146,16 @@ class LocalStorageService {
               d['campId'] = 'haji_camp';
               d['dispensaryId'] = 'haji_camp';
             }
+
+            // Heal Diclofenac Sodium 50mg Tablet barcode mismatch (MED-DIC-INJ -> MED-DIC-50)
+            final name = (d['name'] ?? '').toString().toLowerCase();
+            final dose = (d['dose'] ?? '').toString().toLowerCase();
+            final type = (d['type'] ?? d['dosageForm'] ?? '').toString().toLowerCase();
+            final code = (d['code'] ?? d['barcode'] ?? '').toString();
+            if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab') && code == 'MED-DIC-INJ') {
+              d['code'] = 'MED-DIC-50';
+              d['barcode'] = 'MED-DIC-50';
+            }
             return d;
           }).toList();
           await saveAllLocalStockItems(items);
@@ -5168,8 +5178,156 @@ class LocalStorageService {
           }
         }
       }
+
+      if (branchId == 'karachi') {
+        unawaited(healKarachiSplitInventory());
+      }
     } catch (e) {
       debugPrint('[LocalStorage] downloadInventory error: $e');
+    }
+  }
+
+  /// Consolidates Karachi's split inventory across Firestore & Hive:
+  /// - Migrates hajicamp-- docs into inventory_haji
+  /// - Migrates saddar-- docs into inventory_saddar
+  /// - Fixes Diclofenac 50mg barcode from MED-DIC-INJ to MED-DIC-50
+  /// - Removes redundant duplicates from generic inventory
+  static Future<void> healKarachiSplitInventory({bool force = false}) async {
+    try {
+      if (!Hive.isBoxOpen('app_settings')) {
+        await Hive.openBox('app_settings');
+      }
+      final settings = Hive.box('app_settings');
+      if (!force && settings.get('karachi_split_inventory_healed_v2', defaultValue: false) == true) {
+        return;
+      }
+      debugPrint('[LocalStorage] 🩺 Starting healKarachiSplitInventory...');
+
+      final db = FirebaseFirestore.instance;
+      final karachiRef = db.collection('branches').doc('karachi');
+
+      final invSnap = await karachiRef.collection('inventory').get().catchError((_) => karachiRef.collection('inventory').limit(1).get());
+      final hajiBatch = db.batch();
+      final saddarBatch = db.batch();
+      final deleteBatch = db.batch();
+
+      int hajiCount = 0;
+      int saddarCount = 0;
+      int deleteCount = 0;
+
+      if (invSnap.docs.isNotEmpty) {
+        for (final doc in invSnap.docs) {
+          final d = Map<String, dynamic>.from(doc.data());
+          final docId = doc.id;
+          final docIdLower = docId.toLowerCase();
+          final rawCamp = (d['campId'] ?? d['dispensaryId'] ?? '').toString().toLowerCase();
+
+          // Fix Diclofenac barcode
+          final name = (d['name'] ?? '').toString().toLowerCase();
+          final dose = (d['dose'] ?? '').toString().toLowerCase();
+          final type = (d['type'] ?? d['dosageForm'] ?? '').toString().toLowerCase();
+          if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab')) {
+            d['code'] = 'MED-DIC-50';
+            d['barcode'] = 'MED-DIC-50';
+          }
+
+          if (docIdLower.startsWith('hajicamp--') || docIdLower.startsWith('haji--') || rawCamp.contains('haji')) {
+            d['campId'] = 'haji_camp';
+            d['dispensaryId'] = 'haji_camp';
+            hajiBatch.set(karachiRef.collection('inventory_haji').doc(docId), d, SetOptions(merge: true));
+            hajiCount++;
+            deleteBatch.delete(doc.reference);
+            deleteCount++;
+          } else if (docIdLower.startsWith('saddar--') || docIdLower.startsWith('kapayya--') || rawCamp.contains('sadd') || rawCamp.contains('kap')) {
+            d['campId'] = 'saddar';
+            d['dispensaryId'] = 'saddar';
+            saddarBatch.set(karachiRef.collection('inventory_saddar').doc(docId), d, SetOptions(merge: true));
+            saddarCount++;
+            deleteBatch.delete(doc.reference);
+            deleteCount++;
+          } else {
+            // General syrup / non-prefixed doc -> provide isolated copy for each camp
+            final hajiDocId = 'hajicamp--$docId';
+            final saddarDocId = 'saddar--$docId';
+            final hajiData = Map<String, dynamic>.from(d)..['campId'] = 'haji_camp'..['dispensaryId'] = 'haji_camp'..['id'] = hajiDocId;
+            final saddarData = Map<String, dynamic>.from(d)..['campId'] = 'saddar'..['dispensaryId'] = 'saddar'..['id'] = saddarDocId;
+            hajiBatch.set(karachiRef.collection('inventory_haji').doc(hajiDocId), hajiData, SetOptions(merge: true));
+            saddarBatch.set(karachiRef.collection('inventory_saddar').doc(saddarDocId), saddarData, SetOptions(merge: true));
+            hajiCount++;
+            saddarCount++;
+            deleteBatch.delete(doc.reference);
+            deleteCount++;
+          }
+        }
+      }
+
+      // Check misplaced items in inventory_saddar that have hajicamp prefix
+      try {
+        final saddarSnap = await karachiRef.collection('inventory_saddar').get();
+        for (final doc in saddarSnap.docs) {
+          final docId = doc.id;
+          final docIdLower = docId.toLowerCase();
+          if (docIdLower.startsWith('hajicamp--') || docIdLower.startsWith('haji--')) {
+            final d = Map<String, dynamic>.from(doc.data());
+            d['campId'] = 'haji_camp';
+            d['dispensaryId'] = 'haji_camp';
+            hajiBatch.set(karachiRef.collection('inventory_haji').doc(docId), d, SetOptions(merge: true));
+            hajiCount++;
+            deleteBatch.delete(doc.reference);
+            deleteCount++;
+          }
+        }
+      } catch (_) {}
+
+      // Commit batches
+      if (hajiCount > 0) await hajiBatch.commit();
+      if (saddarCount > 0) await saddarBatch.commit();
+      if (deleteCount > 0) await deleteBatch.commit();
+
+      // Heal local Hive stockBox
+      if (Hive.isBoxOpen(stockBox)) {
+        final box = Hive.box(stockBox);
+        for (final key in box.keys.toList()) {
+          final val = box.get(key);
+          if (val is Map) {
+            final m = Map<String, dynamic>.from(val);
+            final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'] ?? key).toString().toLowerCase();
+            final name = (m['name'] ?? '').toString().toLowerCase();
+            final dose = (m['dose'] ?? '').toString().toLowerCase();
+            final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase();
+            bool changed = false;
+
+            if (rawId.startsWith('hajicamp--') || rawId.startsWith('haji--')) {
+              if (m['campId'] != 'haji_camp') {
+                m['campId'] = 'haji_camp';
+                m['dispensaryId'] = 'haji_camp';
+                changed = true;
+              }
+            } else if (rawId.startsWith('saddar--') || rawId.startsWith('kapayya--')) {
+              if (m['campId'] != 'saddar') {
+                m['campId'] = 'saddar';
+                m['dispensaryId'] = 'saddar';
+                changed = true;
+              }
+            }
+
+            if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab') && m['code'] == 'MED-DIC-INJ') {
+              m['code'] = 'MED-DIC-50';
+              m['barcode'] = 'MED-DIC-50';
+              changed = true;
+            }
+
+            if (changed) {
+              await box.put(key, m);
+            }
+          }
+        }
+      }
+
+      await settings.put('karachi_split_inventory_healed_v2', true);
+      debugPrint('[LocalStorage] ✅ Successfully healed Karachi inventory ($hajiCount haji, $saddarCount saddar migrated, $deleteCount cleaned)');
+    } catch (e) {
+      debugPrint('[LocalStorage] healKarachiSplitInventory error: $e');
     }
   }
 

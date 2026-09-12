@@ -13,6 +13,7 @@ import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/sync_service.dart';
+import 'package:gmwf/services/network_health_service.dart';
 import 'package:gmwf/services/prescription_template_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
@@ -338,7 +339,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       filterByCamp: shouldFilterByCamp,
     ).where((m) => !_isSyringeItem(m)).toList();
 
-    if (localItems.isEmpty) {
+    if (localItems.isEmpty && !hasCamps) {
       localItems = LocalStorageService.getAllLocalStockItems(
         branchId: widget.branchId,
         filterByCamp: false,
@@ -3685,8 +3686,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     }
 
     try {
-      final result   = await Connectivity().checkConnectivity();
-      final isOnline = !result.contains(ConnectivityResult.none);
+      final isOnline = NetworkHealthService().isStableOnline;
 
       if (isOnline) {
         final branchRef = FirebaseFirestore.instance.collection('branches').doc(widget.branchId);
@@ -3712,7 +3712,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               'extraCharge':     fullData['extraCharge'],
               'prescription':    medicalData,
               'dispenseStatus':  'pending',
-            }, SetOptions(merge: true));
+            }, SetOptions(merge: true))
+            .timeout(const Duration(seconds: 4));
       } else {
         await _enqueueSync(dateKey, queueType, serial, patientCnic, fullData, medicalData);
       }

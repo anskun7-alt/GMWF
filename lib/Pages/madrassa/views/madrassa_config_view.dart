@@ -297,7 +297,8 @@ class _MadrassaConfigViewState extends State<MadrassaConfigView> {
           .doc(widget.branchId)
           .collection('madrassa_config')
           .doc('current')
-          .set(updateData, SetOptions(merge: true));
+          .set(updateData, SetOptions(merge: true))
+          .timeout(const Duration(seconds: 5));
 
       if (isRescheduled) {
         await _migratePtmAttendance(oldPtmDay, _ptmDay, _year, _month);

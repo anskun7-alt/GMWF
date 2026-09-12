@@ -22,6 +22,7 @@ class UniversalProformaSheetPage extends StatefulWidget {
   final bool isDispenser;
   final bool isAdmin;
   final bool isEmbedded;
+  final VoidCallback? onBackToInventory;
 
   const UniversalProformaSheetPage({
     super.key,
@@ -29,6 +30,7 @@ class UniversalProformaSheetPage extends StatefulWidget {
     this.isDispenser = true,
     this.isAdmin = false,
     this.isEmbedded = false,
+    this.onBackToInventory,
   });
 
   @override
@@ -1254,6 +1256,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         // Search stockBox for an existing item matching Name/Formula + Type + Dose (or exact barcode)
         final cleanCode = code.trim().toLowerCase();
         final cleanN = (formula.isNotEmpty ? formula : name).trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+        final cleanF = formula.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
         final cleanT = type.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
         final cleanD = dose.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
 
@@ -1270,14 +1273,15 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
               continue;
             }
 
+            final itemN = MasterProformaService.cleanBrandToFormula((map['name'] ?? '').toString().toLowerCase().trim());
+            final itemF = MasterProformaService.cleanBrandToFormula((map['formula'] ?? '').toString().toLowerCase().trim());
+            final itemT = (map['type'] ?? map['dosageForm'] ?? '').toString().toLowerCase().trim();
+            final itemD = (map['dose'] ?? '').toString().toLowerCase().trim();
             final itemCode = (map['code'] ?? map['barcode'] ?? '').toString().trim().toLowerCase();
-            final itemN = (map['name'] ?? map['formula'] ?? '').toString().trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-            final itemT = (map['type'] ?? '').toString().trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
-            final itemD = (map['dose'] ?? '').toString().trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
 
             bool isMatch = false;
-            // Match Name/Formula + Type + Dose FIRST to avoid creating duplicate medicine records when barcodes differ
-            if (itemN == cleanN && itemT == cleanT && (cleanD.isEmpty || itemD == cleanD || itemD == 'standard')) {
+            if ((itemN == cleanN || itemF == cleanN || itemN == cleanF || (map['name']?.toString().toLowerCase().trim() == cleanN)) &&
+                itemT == cleanT && (cleanD.isEmpty || itemD == cleanD || itemD == 'standard')) {
               isMatch = true;
             } else if (cleanCode.isNotEmpty && itemCode.isNotEmpty && itemCode == cleanCode) {
               isMatch = true;
@@ -1486,8 +1490,12 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
               onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.of(context).pop(true); // Return success to caller
+                Navigator.of(context, rootNavigator: true).pop(); // Safely dismiss dialog
+                if (widget.isEmbedded) {
+                  widget.onBackToInventory?.call();
+                } else if (Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop(true);
+                }
               },
               child: const Text('Back to Inventory', style: TextStyle(color: Colors.white)),
             ),

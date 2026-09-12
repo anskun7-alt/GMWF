@@ -167,8 +167,10 @@ class SyncService {
       // BUT if the server is NOT connected at the time of sync (standalone/offsite), the client independently runs its sync pass!
       final bool isLocalServer = ZkTecoNetworkService.isServerRunningNotifier.value;
       final bool isServerConnected = ConnectionManager().isConnected;
+      final bool hasLocalPending = Hive.isBoxOpen(LocalStorageService.syncBox) &&
+          Hive.box(LocalStorageService.syncBox).isNotEmpty;
 
-      if (!force && !isLocalServer && isServerConnected) {
+      if (!force && !isLocalServer && isServerConnected && !hasLocalPending) {
         Logger().d("SyncService: LAN server is connected and active. Scheduled sync deferred to ServerSyncManager on the server.");
         return;
       }
@@ -643,17 +645,20 @@ class SyncService {
             final nestedData = action['data'] is Map
                 ? Map<String, dynamic>.from(action['data'] as Map)
                 : <String, dynamic>{};
-            final medicineId = (action['medicineId'] ?? nestedData['medicineId'])?.toString().trim();
+            final medicineId = (action['medicineId'] ?? action['inventoryId'] ?? nestedData['medicineId'] ?? nestedData['inventoryId'] ?? nestedData['id'] ?? nestedData['docId'])?.toString().trim();
             final deltaValue = action['delta'] ?? nestedData['delta'];
             final delta = deltaValue is num
                 ? deltaValue.toDouble()
                 : double.tryParse(deltaValue?.toString() ?? '') ?? 0.0;
-            if (medicineId != null && delta != 0) {
+            if (medicineId != null && medicineId.isNotEmpty && delta != 0) {
+              final serialHint = medicineId.startsWith('hajicamp--')
+                  ? 'HAJI'
+                  : (medicineId.startsWith('saddar--') ? 'SADDAR' : (action['serial'] ?? nestedData['serial'])?.toString());
               final invCol = CampSessionService.getCampInventoryPath(
                 branchId: branchId,
                 campId: (action['campId'] ?? nestedData['campId'] ?? nestedData['dispensaryId'])?.toString(),
                 dispensaryTag: (action['dispensaryTag'] ?? nestedData['dispensaryTag'])?.toString(),
-                serial: (action['serial'] ?? nestedData['serial'])?.toString(),
+                serial: serialHint,
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
               // Zero-read atomic update using FieldValue.increment
@@ -667,15 +672,18 @@ class SyncService {
             final nestedData = action['data'] is Map
                 ? Map<String, dynamic>.from(action['data'] as Map)
                 : <String, dynamic>{};
-            final medicineId = (action['medicineId'] ?? nestedData['medicineId'])?.toString().trim();
+            final medicineId = (action['medicineId'] ?? action['inventoryId'] ?? nestedData['medicineId'] ?? nestedData['inventoryId'] ?? nestedData['id'] ?? nestedData['docId'])?.toString().trim();
             final qty = (action['quantity'] as num?)?.toInt() ?? 0;
             final txId = action['txId'] as String? ?? key;
-            if (medicineId != null && qty > 0) {
+            if (medicineId != null && medicineId.isNotEmpty && qty > 0) {
+              final serialHint = medicineId.startsWith('hajicamp--')
+                  ? 'HAJI'
+                  : (medicineId.startsWith('saddar--') ? 'SADDAR' : (action['serial'] ?? nestedData['serial'])?.toString());
               final invCol = CampSessionService.getCampInventoryPath(
                 branchId: branchId,
                 campId: (action['campId'] ?? nestedData['campId'] ?? nestedData['dispensaryId'])?.toString(),
                 dispensaryTag: (action['dispensaryTag'] ?? nestedData['dispensaryTag'])?.toString(),
-                serial: (action['serial'] ?? nestedData['serial'])?.toString(),
+                serial: serialHint,
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
               // Zero-read atomic update using FieldValue.increment

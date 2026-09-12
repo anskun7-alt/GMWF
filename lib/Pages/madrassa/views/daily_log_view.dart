@@ -1170,12 +1170,18 @@ _changeNotifier.value++;
                       setState(() {
                         _localAllowStudentLeave = newAllowState;
                       });
-                      await FirebaseFirestore.instance
-                          .collection('branches')
-                          .doc(widget.branchId)
-                          .collection('madrassa_config')
-                          .doc('current')
-                          .set({'allowStudentLeave': newAllowState}, SetOptions(merge: true));
+                      unawaited(
+                        FirebaseFirestore.instance
+                            .collection('branches')
+                            .doc(widget.branchId)
+                            .collection('madrassa_config')
+                            .doc('current')
+                            .set({'allowStudentLeave': newAllowState}, SetOptions(merge: true))
+                            .timeout(const Duration(seconds: 4))
+                            .catchError((err) {
+                              debugPrint('[DailyLogView] Update allowStudentLeave error: $err');
+                            })
+                      );
 
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(

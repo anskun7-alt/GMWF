@@ -4045,7 +4045,7 @@ class ServerSyncManager {
       }
 
       box.put(targetKey, {
-        'type':      isSerialType ? 'save_entry' : mappedType,
+        'type':      mappedType,
         'branchId':  bId,
         'queueType': opQueueType,
         'dateKey':   message['dateKey'] ?? (message['data'] is Map ? message['data']['dateKey'] : null),
@@ -4056,6 +4056,7 @@ class ServerSyncManager {
         'status':    'pending',
       });
       debugPrint('[SSM] Queued for sync: $mappedType | key: $targetKey | serial: $rawSerial (queue: ${box.length})');
+      unawaited(triggerSync());
     } catch (e) {
       debugPrint('[SSM] Error queuing message: $e');
     }
@@ -4396,6 +4397,7 @@ class ServerSyncManager {
             .collection(qt).doc(s)
             .set(statusPatch, SetOptions(merge: true));
         debugPrint('✅ update_serial_status → serials/$campDocKey/$qt/$s');
+        break;
       // ── Delete patient ───────────────────────────────────────────────────
       case 'delete_patient':
         final pid = (cleanData['patientId'] as String? ?? cleanData['id'] as String? ?? '').trim();

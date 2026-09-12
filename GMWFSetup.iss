@@ -39,6 +39,8 @@ PrivilegesRequired=admin
 WizardStyle=modern
 WizardSizePercent=100
 WizardResizable=no
+WizardImageFile=Installer\gmwf_wizard_large.bmp
+WizardSmallImageFile=Installer\gmwf_wizard_small.bmp
 DisableDirPage=no
 DisableProgramGroupPage=yes
 SetupLogging=yes
@@ -255,6 +257,31 @@ begin
     S := S + MemoTasksInfo + NewLine + NewLine;
 
   Result := S;
+end;
+
+procedure InitializeWizard();
+begin
+  // Set clean modern typography across the wizard
+  WizardForm.Font.Name := 'Segoe UI';
+
+  // Style Welcome page title with GMWF Brand Emerald Green
+  WizardForm.WelcomeLabel1.Font.Name := 'Segoe UI';
+  WizardForm.WelcomeLabel1.Font.Size := 13;
+  WizardForm.WelcomeLabel1.Font.Style := [fsBold];
+  WizardForm.WelcomeLabel1.Font.Color := $00404D00; // GMWF Emerald Green BGR ($00404D00 = #004D40)
+
+  // Style Finished page title
+  WizardForm.FinishedHeadingLabel.Font.Name := 'Segoe UI';
+  WizardForm.FinishedHeadingLabel.Font.Size := 13;
+  WizardForm.FinishedHeadingLabel.Font.Style := [fsBold];
+  WizardForm.FinishedHeadingLabel.Font.Color := $00404D00;
+
+  // Style Header Page
+  WizardForm.MainPanel.Color := clWhite;
+  WizardForm.PageNameLabel.Font.Name := 'Segoe UI';
+  WizardForm.PageNameLabel.Font.Style := [fsBold];
+  WizardForm.PageNameLabel.Font.Color := $00404D00;
+  WizardForm.PageDescriptionLabel.Font.Name := 'Segoe UI';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

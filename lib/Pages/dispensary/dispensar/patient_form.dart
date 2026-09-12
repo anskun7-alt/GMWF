@@ -12,6 +12,7 @@ import 'package:intl/intl.dart';
 import 'dart:ui' as ui;
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
+import 'package:gmwf/services/master_proforma_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'patient_form_helper.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
@@ -562,6 +563,10 @@ class _PatientFormState extends State<PatientForm> {
 
   Future<void> _deductInventoryLocally(
       String branchId, String serial, List<dynamic> medicines, int days) async {
+    final activeCamp = widget.queueEntry['campId']?.toString() ??
+        widget.queueEntry['dispensaryId']?.toString() ??
+        CampSessionService.getActiveCamp(branchId) ??
+        '';
     for (final med in medicines) {
       if (med is! Map) continue;
       final medMap = Map<String, dynamic>.from(med);
@@ -588,16 +593,36 @@ class _PatientFormState extends State<PatientForm> {
             keyUsed = medicineId;
           }
         }
-        // Name fallback
+        // Name & Formula fallback with brand cleaning and camp isolation
         if (existing == null) {
+          final mName = MasterProformaService.cleanBrandToFormula((medMap['name'] ?? medMap['formula'] ?? '').toString().toLowerCase().trim());
+          final mType = (medMap['type'] ?? medMap['dosageForm'] ?? '').toString().toLowerCase().trim();
+          final hasCamps = CampSessionService.hasCampsForBranch(branchId);
+
           for (final key in stockBox.keys) {
             final val = stockBox.get(key);
-            if (val is Map && (val['name']?.toString().toLowerCase().trim() == medMap['name']?.toString().toLowerCase().trim())) {
-              existing = val;
-              keyUsed = key.toString();
-              // Update medicineId for Firestore deduction to match the correct ID
-              medicineId = (val['id'] ?? val['medicineId'] ?? medicineId).toString();
-              break;
+            if (val is Map) {
+              final vName = MasterProformaService.cleanBrandToFormula((val['name'] ?? val['formula'] ?? '').toString().toLowerCase().trim());
+              final vType = (val['type'] ?? val['dosageForm'] ?? '').toString().toLowerCase().trim();
+
+              bool campMatch = true;
+              if (hasCamps && activeCamp.isNotEmpty && activeCamp != 'all') {
+                campMatch = CampSessionService.matchesCamp(
+                  selectedCamp: activeCamp,
+                  dispensaryId: val['dispensaryId']?.toString(),
+                  campId: val['campId']?.toString(),
+                  serial: (val['barcode'] ?? val['code'] ?? val['id'])?.toString(),
+                );
+              }
+
+              if (campMatch && (vName == mName || (vName.isNotEmpty && mName.isNotEmpty && (vName.contains(mName) || mName.contains(vName)))) &&
+                  (vType.isEmpty || mType.isEmpty || vType == mType)) {
+                existing = val;
+                keyUsed = key.toString();
+                // Update medicineId for Firestore deduction to match the correct ID
+                medicineId = (val['id'] ?? val['medicineId'] ?? val['docId'] ?? medicineId).toString();
+                break;
+              }
             }
           }
         }
@@ -622,19 +647,15 @@ class _PatientFormState extends State<PatientForm> {
         continue;
       }
 
-      final invCol = CampSessionService.getCampInventoryPath(
-        branchId: branchId,
-        campId: patientCampId,
-        serial: patientSerial,
-      );
-
       // Enqueue sync for background processing without UI lag
       LocalStorageService.enqueueSync({
         'type': 'update_inventory',
         'branchId': branchId,
+        'medicineId': medicineId,
         'inventoryId': medicineId,
         'delta': -qtyNum,
         'campId': patientCampId,
+        'dispensaryId': patientCampId,
         'serial': patientSerial,
       });
 

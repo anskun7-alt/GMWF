@@ -1217,11 +1217,11 @@ class CampSessionService {
 
     final sel = (selectedCamp ?? '').toLowerCase().trim();
     if (sel == 'saddar' || sel == 'kapayya' || sel == 'kap') {
-      return ['inventory_saddar', 'inventory'];
+      return ['inventory_saddar'];
     } else if (sel == 'haji_camp' || sel == 'haji' || sel == 'hc') {
-      return ['inventory_haji', 'inventory'];
+      return ['inventory_haji'];
     }
-    return ['inventory_saddar', 'inventory_haji', 'inventory'];
+    return ['inventory_saddar', 'inventory_haji'];
   }
 
   /// Validates keyword tag uniqueness when creating/editing a dispensary.

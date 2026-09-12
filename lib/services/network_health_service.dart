@@ -56,7 +56,8 @@ class NetworkHealthService {
       final results = await Connectivity().checkConnectivity();
       final hasInterface = results.any((r) => r != ConnectivityResult.none);
 
-      if (!hasInterface) {
+      final isDesktop = !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+      if (!hasInterface && !isDesktop) {
         _consecutiveStablePings = 0;
         _updateState(NetworkQualityState.offline);
         return;

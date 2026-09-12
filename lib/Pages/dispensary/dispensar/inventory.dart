@@ -250,6 +250,9 @@ class _InventoryPageState extends State<InventoryPage>
     RealtimeManager.isLanHealthyNotifier.addListener(_onLanHealthChanged);
 
     _initSync();
+    if (widget.branchId.toLowerCase().contains('karachi')) {
+      LocalStorageService.healKarachiSplitInventory();
+    }
 
     // Cache database loading
     if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
@@ -1174,6 +1177,10 @@ class _InventoryPageState extends State<InventoryPage>
                         isAdmin: widget.isAdmin,
                         isDispenser: widget.isDispenser,
                         isEmbedded: true,
+                        onBackToInventory: () {
+                          _tabCtrl.animateTo(0);
+                          _loadDataFromHive();
+                        },
                       ),
                       MedicineLedgerPage(
                         branchId: widget.branchId,
@@ -1357,6 +1364,7 @@ class _InventoryPageState extends State<InventoryPage>
           }
 
           if (widget.branchId.toLowerCase().contains('karachi')) {
+            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji'));
             collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji_camp'));
             collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_saddar'));
           }

@@ -559,13 +559,18 @@ class DispensaryNotifier
       }
     } catch (_) {}
 
+    // If local data is already populated, return it without hitting Firestore
+    if (combined.isNotEmpty) {
+      return combined.values.toList();
+    }
+
     final connectivity = await Connectivity().checkConnectivity();
     final hasNetwork = connectivity.any((r) => r != ConnectivityResult.none);
     if (!hasNetwork) {
       return combined.values.toList();
     }
 
-    // 2. Only fetch remote data when the device has connectivity and local data is missing.
+    // 2. FALLBACK: Only fetch remote data when local data is completely empty.
     final firestoreBranch = (targetBranchId.isEmpty || targetBranchId == 'all') ? 'karachi' : targetBranchId;
     try {
       final snap = await FirebaseFirestore.instance

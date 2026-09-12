@@ -1,5 +1,6 @@
 // lib/pages/madrassa/widgets/parent_report_card.dart
 
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -107,14 +108,18 @@ class _ParentReportCardState extends State<ParentReportCard> {
     try {
       if (widget.branchId.isNotEmpty) {
         if (widget.studentId.isNotEmpty) {
-          await MadrassaLocalStorage.downloadStudentsForGuardian(widget.branchId, [widget.studentId]);
+          await MadrassaLocalStorage.downloadStudentsForGuardian(widget.branchId, [widget.studentId])
+              .timeout(const Duration(seconds: 5), onTimeout: () {});
         }
         final now = DateTime.now();
-        await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month);
-        await MadrassaLocalStorage.downloadHolidays(widget.branchId);
-        await MadrassaLocalStorage.downloadConfig(widget.branchId);
+        await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month)
+            .timeout(const Duration(seconds: 5), onTimeout: () {});
+        await MadrassaLocalStorage.downloadHolidays(widget.branchId)
+            .timeout(const Duration(seconds: 5), onTimeout: () {});
+        await MadrassaLocalStorage.downloadConfig(widget.branchId)
+            .timeout(const Duration(seconds: 5), onTimeout: () {});
       }
-      await SyncService().triggerUpload();
+      await SyncService().triggerUpload().timeout(const Duration(seconds: 5), onTimeout: () {});
     } catch (_) {}
 
     if (mounted) {
@@ -241,18 +246,43 @@ class _ParentReportCardState extends State<ParentReportCard> {
 
   Future<void> _submitParentReply(BuildContext context, String branchId, String dateStr, String studentId) async {
     try {
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('madrassa_daily_logs')
-          .doc(dateStr)
-          .set({
-        studentId: {
-          'parentReplied': true,
-          'parentRepliedRequested': true,
-          'timestamp': FieldValue.serverTimestamp()
-        }
-      }, SetOptions(merge: true));
+      await MadrassaLocalStorage.saveLogRecordLocal(
+        branchId: branchId,
+        dateKey: dateStr,
+        logData: {
+          studentId: {
+            'parentReplied': true,
+            'parentRepliedRequested': true,
+            'timestamp': DateTime.now().toIso8601String(),
+          }
+        },
+        editorName: 'Parent/Guardian',
+        editorRole: 'guardian',
+      ).timeout(const Duration(seconds: 3), onTimeout: () {});
+
+      unawaited(
+        FirebaseFirestore.instance
+            .collection('branches')
+            .doc(branchId)
+            .collection('madrassa_daily_logs')
+            .doc(dateStr)
+            .set({
+          studentId: {
+            'parentReplied': true,
+            'parentRepliedRequested': true,
+            'timestamp': FieldValue.serverTimestamp()
+          }
+        }, SetOptions(merge: true))
+        .timeout(const Duration(seconds: 4))
+        .catchError((err) {
+          debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
+        })
+      );
+
+      if (mounted) {
+        setState(() {});
+      }
+
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -440,6 +470,24 @@ class _ParentReportCardState extends State<ParentReportCard> {
                           while (!curr.isAfter(endDate)) {
                             totalDays++;
                             final dStr = DateFormat('yyyy-MM-dd').format(curr);
+
+                            // Save to local storage & enqueue sync
+                            await MadrassaLocalStorage.saveLogRecordLocal(
+                              branchId: branchId,
+                              dateKey: dStr,
+                              logData: {
+                                studentId: {
+                                  'attendance': 'leave_requested',
+                                  'isParentRequested': true,
+                                  'leaveReason': reasonText,
+                                  'leaveStatus': 'pending',
+                                  'timestamp': DateTime.now().toIso8601String(),
+                                }
+                              },
+                              editorName: 'Parent/Guardian',
+                              editorRole: 'guardian',
+                            ).timeout(const Duration(seconds: 3), onTimeout: () {});
+
                             final docRef = FirebaseFirestore.instance
                                 .collection('branches')
                                 .doc(branchId)
@@ -463,7 +511,17 @@ class _ParentReportCardState extends State<ParentReportCard> {
                             curr = curr.add(const Duration(days: 1));
                           }
 
-                          await batch.commit();
+                          unawaited(
+                            batch.commit()
+                              .timeout(const Duration(seconds: 4))
+                              .catchError((err) {
+                                debugPrint('[ParentReportCard] Direct Firestore leave batch note: $err');
+                              })
+                          );
+
+                          if (mounted) {
+                            setState(() {});
+                          }
 
                           if (ctx.mounted) {
                             Navigator.pop(ctx);
@@ -578,16 +636,42 @@ class _ParentReportCardState extends State<ParentReportCard> {
                     setDs(() => reasonError = 'Rejoining reason is required');
                     return;
                   }
-                  await FirebaseFirestore.instance
-                      .collection('branches')
-                      .doc(widget.branchId)
-                      .collection('madrassa_students')
-                      .doc(widget.studentId)
-                      .update({
-                    'rejoinRequestStatus': 'pending',
-                    'rejoinRequestReason': reasonCtrl.text.trim(),
-                    'rejoinRequestDate': FieldValue.serverTimestamp(),
+
+                  // 1. Update student cache locally
+                  final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId) ?? {};
+                  cached['rejoinRequestStatus'] = 'pending';
+                  cached['rejoinRequestReason'] = reasonCtrl.text.trim();
+                  cached['rejoinRequestDate'] = DateTime.now().toIso8601String();
+                  await MadrassaLocalStorage.cacheStudent(widget.branchId, widget.studentId, cached);
+
+                  // 2. Enqueue sync
+                  await LocalStorageService.enqueueSync({
+                    'type': 'save_madrassa_student',
+                    'branchId': widget.branchId,
+                    'studentId': widget.studentId,
+                    'data': cached,
                   });
+                  unawaited(SyncService().triggerUpload());
+
+                  // 3. Direct Firestore update in background with timeout
+                  unawaited(
+                    FirebaseFirestore.instance
+                        .collection('branches')
+                        .doc(widget.branchId)
+                        .collection('madrassa_students')
+                        .doc(widget.studentId)
+                        .update({
+                      'rejoinRequestStatus': 'pending',
+                      'rejoinRequestReason': reasonCtrl.text.trim(),
+                      'rejoinRequestDate': FieldValue.serverTimestamp(),
+                    })
+                    .timeout(const Duration(seconds: 4))
+                    .catchError((err) {
+                      debugPrint('[ParentReportCard] Rejoin update note: $err');
+                    })
+                  );
+
+                  if (mounted) setState(() {});
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
                 style: ElevatedButton.styleFrom(
@@ -676,16 +760,42 @@ class _ParentReportCardState extends State<ParentReportCard> {
                     setDs(() => reasonError = 'Reason is required');
                     return;
                   }
-                  await FirebaseFirestore.instance
-                      .collection('branches')
-                      .doc(widget.branchId)
-                      .collection('madrassa_students')
-                      .doc(widget.studentId)
-                      .update({
-                    'rejoinRequestStatus': 'pending',
-                    'rejoinRequestReason': reasonCtrl.text.trim(),
-                    'rejoinRequestDate': FieldValue.serverTimestamp(),
+
+                  // 1. Update student cache locally
+                  final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId) ?? {};
+                  cached['rejoinRequestStatus'] = 'pending';
+                  cached['rejoinRequestReason'] = reasonCtrl.text.trim();
+                  cached['rejoinRequestDate'] = DateTime.now().toIso8601String();
+                  await MadrassaLocalStorage.cacheStudent(widget.branchId, widget.studentId, cached);
+
+                  // 2. Enqueue sync
+                  await LocalStorageService.enqueueSync({
+                    'type': 'save_madrassa_student',
+                    'branchId': widget.branchId,
+                    'studentId': widget.studentId,
+                    'data': cached,
                   });
+                  unawaited(SyncService().triggerUpload());
+
+                  // 3. Direct Firestore update in background with timeout
+                  unawaited(
+                    FirebaseFirestore.instance
+                        .collection('branches')
+                        .doc(widget.branchId)
+                        .collection('madrassa_students')
+                        .doc(widget.studentId)
+                        .update({
+                      'rejoinRequestStatus': 'pending',
+                      'rejoinRequestReason': reasonCtrl.text.trim(),
+                      'rejoinRequestDate': FieldValue.serverTimestamp(),
+                    })
+                    .timeout(const Duration(seconds: 4))
+                    .catchError((err) {
+                      debugPrint('[ParentReportCard] Rejoin update note: $err');
+                    })
+                  );
+
+                  if (mounted) setState(() {});
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
                 style: ElevatedButton.styleFrom(
@@ -824,10 +934,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             email: email,
                             password: oldPwCtrl.text.trim(),
                           );
-                          await currentUser.reauthenticateWithCredential(cred);
+                          await currentUser.reauthenticateWithCredential(cred).timeout(const Duration(seconds: 5));
 
                           // Update Auth Password
-                          await currentUser.updatePassword(newPwCtrl.text.trim());
+                          await currentUser.updatePassword(newPwCtrl.text.trim()).timeout(const Duration(seconds: 5));
 
                           // Update offline auth cache password
                           await OfflineAuthService.updateCachedPassword(
@@ -835,20 +945,28 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             usernameOrEmail: email,
                           );
 
-                          // Update Firestore documents copy
+                          // Update Firestore documents copy in background with timeout
                           final uid = currentUser.uid;
                           final updates = {
                             'password': newPwCtrl.text.trim(),
                             'passwordHash': LocalStorageService.hashPassword(newPwCtrl.text.trim()),
                             'lastUpdatedAt': FieldValue.serverTimestamp(),
                           };
-                          await FirebaseFirestore.instance.collection('users').doc(uid).set(updates, SetOptions(merge: true));
-                          await FirebaseFirestore.instance
-                              .collection('branches')
-                              .doc(widget.branchId)
-                              .collection('users')
-                              .doc(uid)
-                              .set(updates, SetOptions(merge: true));
+                          unawaited(
+                            FirebaseFirestore.instance.collection('users').doc(uid).set(updates, SetOptions(merge: true))
+                                .timeout(const Duration(seconds: 4))
+                                .catchError((_) {})
+                          );
+                          unawaited(
+                            FirebaseFirestore.instance
+                                .collection('branches')
+                                .doc(widget.branchId)
+                                .collection('users')
+                                .doc(uid)
+                                .set(updates, SetOptions(merge: true))
+                                .timeout(const Duration(seconds: 4))
+                                .catchError((_) {})
+                          );
 
                           if (ctx.mounted) {
                             navigator.pop();
@@ -973,11 +1091,13 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             logData: replyData,
                             editorName: 'Parent/Guardian',
                             editorRole: 'guardian',
-                          );
+                          ).timeout(const Duration(seconds: 4), onTimeout: () {
+                            debugPrint('[ParentReportCard] Local log save timeout note');
+                          });
 
-                          // 2. Direct Firestore update for cloud instant reflection
-                          try {
-                            await FirebaseFirestore.instance
+                          // 2. Direct Firestore update for cloud instant reflection in background
+                          unawaited(
+                            FirebaseFirestore.instance
                                 .collection('branches')
                                 .doc(widget.branchId)
                                 .collection('madrassa_daily_logs')
@@ -990,10 +1110,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 'parentReplyMessage': text,
                                 'parentReplyTime': FieldValue.serverTimestamp(),
                               }
-                            }, SetOptions(merge: true));
-                          } catch (err) {
-                            debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
-                          }
+                            }, SetOptions(merge: true))
+                            .timeout(const Duration(seconds: 4))
+                            .catchError((err) {
+                              debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
+                            })
+                          );
 
                           if (mounted) {
                             setState(() {});
@@ -1282,12 +1404,28 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             'lastUpdatedAt': FieldValue.serverTimestamp(),
                           };
 
-                          await FirebaseFirestore.instance
-                              .collection('branches')
-                              .doc(widget.branchId)
-                              .collection('madrassa_students')
-                              .doc(widget.studentId)
-                              .update(studentUpdates);
+                          // Update student in local cache and enqueue sync
+                          final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId) ?? {};
+                          cached.addAll(studentUpdates);
+                          await MadrassaLocalStorage.cacheStudent(widget.branchId, widget.studentId, cached);
+                          await LocalStorageService.enqueueSync({
+                            'type': 'save_madrassa_student',
+                            'branchId': widget.branchId,
+                            'studentId': widget.studentId,
+                            'data': cached,
+                          });
+                          unawaited(SyncService().triggerUpload());
+
+                          unawaited(
+                            FirebaseFirestore.instance
+                                .collection('branches')
+                                .doc(widget.branchId)
+                                .collection('madrassa_students')
+                                .doc(widget.studentId)
+                                .update(studentUpdates)
+                                .timeout(const Duration(seconds: 4))
+                                .catchError((_) {})
+                          );
 
                           // Also update user document if authenticated
                           if (user != null) {
@@ -1300,13 +1438,21 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                               if (newPw.isNotEmpty) 'passwordHash': LocalStorageService.hashPassword(newPw),
                               'lastUpdatedAt': FieldValue.serverTimestamp(),
                             };
-                            await FirebaseFirestore.instance.collection('users').doc(user.uid).set(userUpdates, SetOptions(merge: true));
-                            await FirebaseFirestore.instance
-                                .collection('branches')
-                                .doc(widget.branchId)
-                                .collection('users')
-                                .doc(user.uid)
-                                .set(userUpdates, SetOptions(merge: true));
+                            unawaited(
+                              FirebaseFirestore.instance.collection('users').doc(user.uid).set(userUpdates, SetOptions(merge: true))
+                                  .timeout(const Duration(seconds: 4))
+                                  .catchError((_) {})
+                            );
+                            unawaited(
+                              FirebaseFirestore.instance
+                                  .collection('branches')
+                                  .doc(widget.branchId)
+                                  .collection('users')
+                                  .doc(user.uid)
+                                  .set(userUpdates, SetOptions(merge: true))
+                                  .timeout(const Duration(seconds: 4))
+                                  .catchError((_) {})
+                            );
                           }
 
                           if (ctx.mounted) {
@@ -1356,17 +1502,39 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   Future<void> _claimPtmJoin(BuildContext context) async {
     final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
     try {
-      await FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('madrassa_daily_logs')
-          .doc(todayStr)
-          .set({
-        widget.studentId: {
-          'ptmRequestStatus': 'claimed',
-          'timestamp': FieldValue.serverTimestamp()
-        }
-      }, SetOptions(merge: true));
+      await MadrassaLocalStorage.saveLogRecordLocal(
+        branchId: widget.branchId,
+        dateKey: todayStr,
+        logData: {
+          widget.studentId: {
+            'ptmRequestStatus': 'claimed',
+            'timestamp': DateTime.now().toIso8601String(),
+          }
+        },
+        editorName: 'Parent/Guardian',
+        editorRole: 'guardian',
+      ).timeout(const Duration(seconds: 3), onTimeout: () {});
+
+      unawaited(
+        FirebaseFirestore.instance
+            .collection('branches')
+            .doc(widget.branchId)
+            .collection('madrassa_daily_logs')
+            .doc(todayStr)
+            .set({
+          widget.studentId: {
+            'ptmRequestStatus': 'claimed',
+            'timestamp': FieldValue.serverTimestamp()
+          }
+        }, SetOptions(merge: true))
+        .timeout(const Duration(seconds: 4))
+        .catchError((err) {
+          debugPrint('[ParentReportCard] Claim PTM join note: $err');
+        })
+      );
+
+      if (mounted) setState(() {});
+
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1389,6 +1557,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   Future<void> _showReplyTextDialog(BuildContext context, String todayStr) async {
     final replyCtrl = TextEditingController();
     String? replyError;
+    bool isSaving = false;
 
     await showDialog(
       context: context,
@@ -1423,38 +1592,70 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(ctx),
+                onPressed: isSaving ? null : () => Navigator.pop(ctx),
                 child: Text(context.t('Cancel'), style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
               ),
               ElevatedButton(
-                onPressed: () async {
-                  if (replyCtrl.text.trim().isEmpty) {
-                    setDs(() => replyError = 'Reply cannot be empty');
-                    return;
-                  }
-                  
-                  await FirebaseFirestore.instance
-                      .collection('branches')
-                      .doc(widget.branchId)
-                      .collection('madrassa_daily_logs')
-                      .doc(todayStr)
-                      .set({
-                    widget.studentId: {
-                      'parentReplied': true,
-                      'parentRepliedRequested': true,
-                      'parentReplyText': replyCtrl.text.trim(),
-                      'parentReplyMessage': replyCtrl.text.trim(),
-                      'timestamp': FieldValue.serverTimestamp()
-                    }
-                  }, SetOptions(merge: true));
+                onPressed: isSaving
+                    ? null
+                    : () async {
+                        if (replyCtrl.text.trim().isEmpty) {
+                          setDs(() => replyError = 'Reply cannot be empty');
+                          return;
+                        }
+                        setDs(() => isSaving = true);
+                        try {
+                          final text = replyCtrl.text.trim();
+                          await MadrassaLocalStorage.saveLogRecordLocal(
+                            branchId: widget.branchId,
+                            dateKey: todayStr,
+                            logData: {
+                              widget.studentId: {
+                                'parentReplied': true,
+                                'parentRepliedRequested': true,
+                                'parentReplyText': text,
+                                'parentReplyMessage': text,
+                                'parentReplyTime': DateTime.now().toIso8601String(),
+                              }
+                            },
+                            editorName: 'Parent/Guardian',
+                            editorRole: 'guardian',
+                          ).timeout(const Duration(seconds: 3), onTimeout: () {});
 
-                  if (ctx.mounted) Navigator.pop(ctx);
-                },
+                          unawaited(
+                            FirebaseFirestore.instance
+                                .collection('branches')
+                                .doc(widget.branchId)
+                                .collection('madrassa_daily_logs')
+                                .doc(todayStr)
+                                .set({
+                              widget.studentId: {
+                                'parentReplied': true,
+                                'parentRepliedRequested': true,
+                                'parentReplyText': text,
+                                'parentReplyMessage': text,
+                                'parentReplyTime': FieldValue.serverTimestamp(),
+                              }
+                            }, SetOptions(merge: true))
+                            .timeout(const Duration(seconds: 4))
+                            .catchError((err) {
+                              debugPrint('[ParentReportCard] Reply text note: $err');
+                            })
+                          );
+
+                          if (mounted) setState(() {});
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        } catch (e) {
+                          if (ctx.mounted) setDs(() => isSaving = false);
+                        }
+                      },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: ParentReportCard.primaryColor,
                   foregroundColor: Colors.white,
                 ),
-                child: Text(context.t('Submit'), style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
+                child: isSaving
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Text(context.t('Submit'), style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
               ),
             ],
           );
@@ -4380,7 +4581,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           ),
           const SizedBox(height: 12),
           InkWell(
-            onTap: () => _submitParentReply(context, branchId, dateStr, studentId),
+            onTap: () => _showSendReplyDialog(context, dateStr),
             borderRadius: BorderRadius.circular(12),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -7563,35 +7764,79 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   }
 
   Future<void> _approveLeaveRequest(String branchId, String dateStr, String targetStudentId) async {
-    await FirebaseFirestore.instance
-        .collection('branches')
-        .doc(branchId)
-        .collection('madrassa_daily_logs')
-        .doc(dateStr)
-        .set({
-      targetStudentId: {
-        'attendance': 'leave',
-        'leaveStatus': 'approved',
-        'leaveApprovedBy': studentData['guardianName'] ?? 'Teacher',
-        'leaveApprovalTime': FieldValue.serverTimestamp(),
-      }
-    }, SetOptions(merge: true));
+    await MadrassaLocalStorage.saveLogRecordLocal(
+      branchId: branchId,
+      dateKey: dateStr,
+      logData: {
+        targetStudentId: {
+          'attendance': 'leave',
+          'leaveStatus': 'approved',
+          'leaveApprovedBy': studentData['guardianName'] ?? 'Teacher',
+          'leaveApprovalTime': DateTime.now().toIso8601String(),
+        }
+      },
+      editorName: 'Teacher',
+      editorRole: 'teacher',
+    ).timeout(const Duration(seconds: 3), onTimeout: () {});
+
+    unawaited(
+      FirebaseFirestore.instance
+          .collection('branches')
+          .doc(branchId)
+          .collection('madrassa_daily_logs')
+          .doc(dateStr)
+          .set({
+        targetStudentId: {
+          'attendance': 'leave',
+          'leaveStatus': 'approved',
+          'leaveApprovedBy': studentData['guardianName'] ?? 'Teacher',
+          'leaveApprovalTime': FieldValue.serverTimestamp(),
+        }
+      }, SetOptions(merge: true))
+      .timeout(const Duration(seconds: 4))
+      .catchError((err) {
+        debugPrint('[ParentReportCard] Approve leave request note: $err');
+      })
+    );
+    if (mounted) setState(() {});
   }
 
   Future<void> _denyLeaveRequest(String branchId, String dateStr, String targetStudentId) async {
-    await FirebaseFirestore.instance
-        .collection('branches')
-        .doc(branchId)
-        .collection('madrassa_daily_logs')
-        .doc(dateStr)
-        .set({
-      targetStudentId: {
-        'attendance': 'absent',
-        'leaveStatus': 'denied',
-        'leaveDeniedBy': studentData['guardianName'] ?? 'Teacher',
-        'leaveDenialTime': FieldValue.serverTimestamp(),
-      }
-    }, SetOptions(merge: true));
+    await MadrassaLocalStorage.saveLogRecordLocal(
+      branchId: branchId,
+      dateKey: dateStr,
+      logData: {
+        targetStudentId: {
+          'attendance': 'absent',
+          'leaveStatus': 'denied',
+          'leaveDeniedBy': studentData['guardianName'] ?? 'Teacher',
+          'leaveDenialTime': DateTime.now().toIso8601String(),
+        }
+      },
+      editorName: 'Teacher',
+      editorRole: 'teacher',
+    ).timeout(const Duration(seconds: 3), onTimeout: () {});
+
+    unawaited(
+      FirebaseFirestore.instance
+          .collection('branches')
+          .doc(branchId)
+          .collection('madrassa_daily_logs')
+          .doc(dateStr)
+          .set({
+        targetStudentId: {
+          'attendance': 'absent',
+          'leaveStatus': 'denied',
+          'leaveDeniedBy': studentData['guardianName'] ?? 'Teacher',
+          'leaveDenialTime': FieldValue.serverTimestamp(),
+        }
+      }, SetOptions(merge: true))
+      .timeout(const Duration(seconds: 4))
+      .catchError((err) {
+        debugPrint('[ParentReportCard] Deny leave request note: $err');
+      })
+    );
+    if (mounted) setState(() {});
   }
 
   Widget _buildRequestsTab({
