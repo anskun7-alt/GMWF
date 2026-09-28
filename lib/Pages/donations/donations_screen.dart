@@ -563,9 +563,11 @@ class _DonationsScreenState extends ConsumerState<DonationsScreen> with TickerPr
                       children: [
                         Flexible(
                           child: Text(
-                            "$displayBranch Donations",
+                            (isMobile && displayBranch.toLowerCase().contains('consolidated'))
+                                ? 'All Donations'
+                                : "$displayBranch Donations",
                             style: TextStyle(
-                              fontSize: isMobile ? 18 : 22,
+                              fontSize: isMobile ? 17 : 22,
                               fontWeight: FontWeight.w800,
                               color: t.textPrimary,
                               letterSpacing: -0.5,

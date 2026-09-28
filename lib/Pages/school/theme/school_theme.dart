@@ -1,6 +1,7 @@
 // lib/pages/school/theme/school_theme.dart
 
 import 'package:flutter/material.dart';
+import '../../../theme/role_theme_provider.dart';
 
 class SchoolTheme {
   // ── Brand Colors ──────────────────────────────────────────────────────────
@@ -80,12 +81,23 @@ class SchoolTheme {
   static const double r14 = 14.0;
   static const double r16 = 16.0;
   static const double r20 = 20.0;
+  static const double r24 = 24.0;
 
   static BorderRadius radius8  = BorderRadius.circular(r8);
   static BorderRadius radius12 = BorderRadius.circular(r12);
   static BorderRadius radius14 = BorderRadius.circular(r14);
   static BorderRadius radius16 = BorderRadius.circular(r16);
   static BorderRadius radius20 = BorderRadius.circular(r20);
+  static BorderRadius radius24 = BorderRadius.circular(r24);
+
+  // ── Card Shadows ──────────────────────────────────────────────────────────
+  static List<BoxShadow> cardShadow = [
+    BoxShadow(
+      color: const Color(0xFF0F172A).withValues(alpha: 0.05),
+      blurRadius: 16,
+      offset: const Offset(0, 4),
+    ),
+  ];
 
   // ── Typography Scale ──────────────────────────────────────────────────────
   static const TextStyle titleStyle = TextStyle(
@@ -118,4 +130,246 @@ class SchoolTheme {
     letterSpacing: 1.1,
     color: textMuted,
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reusable School UI Components (Themed with original app design system)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Status badge with soft background and subtle border.
+class SchoolBadge extends StatelessWidget {
+  final String label;
+  final Color color;
+  final Color? backgroundColor;
+  final IconData? icon;
+  final double fontSize;
+
+  const SchoolBadge({
+    super.key,
+    required this.label,
+    required this.color,
+    this.backgroundColor,
+    this.icon,
+    this.fontSize = 11.5,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = backgroundColor ?? color.withValues(alpha: 0.12);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.35), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: fontSize + 1, color: color),
+            const SizedBox(width: 4),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: fontSize,
+              fontWeight: FontWeight.w700,
+              color: color,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Stat Card aligned with the app design system and RoleThemeData.
+class SchoolMetricCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final String? subtitle;
+  final IconData icon;
+  final Color accentColor;
+  final Color? bgColor;
+  final VoidCallback? onTap;
+
+  const SchoolMetricCard({
+    super.key,
+    required this.title,
+    required this.value,
+    this.subtitle,
+    required this.icon,
+    this.accentColor = SchoolTheme.primary,
+    this.bgColor,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = RoleThemeScope.dataOf(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: bgColor ?? t.bgCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: t.bgRule),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.02),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: t.textSecondary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(icon, size: 16, color: accentColor),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                color: t.textPrimary,
+                letterSpacing: -0.4,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                subtitle!,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: t.textTertiary,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Access Restricted / Data Isolation view shown when a user (e.g. teacher) attempts
+/// to access restricted modules like fee management or audit trails.
+class SchoolAccessDenied extends StatelessWidget {
+  final String title;
+  final String message;
+  final VoidCallback? onBack;
+
+  const SchoolAccessDenied({
+    super.key,
+    this.title = 'Access Restricted / رسائی ممنوع',
+    this.message = 'This school module is restricted to School Administration and Principal. Contact system administration if you require access.',
+    this.onBack,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = RoleThemeScope.dataOf(context);
+    return Center(
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 480),
+        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 36),
+        padding: const EdgeInsets.all(32),
+        decoration: BoxDecoration(
+          color: t.bgCard,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: t.bgRule),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 20,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.lock_rounded, size: 36, color: Colors.redAccent),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.w800,
+                color: t.textPrimary,
+                letterSpacing: -0.3,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: t.textSecondary,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: onBack ?? () => Navigator.maybePop(context),
+              icon: const Icon(Icons.arrow_back_rounded, size: 16),
+              label: const Text('Return Back', style: TextStyle(fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: t.accent,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                elevation: 0,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

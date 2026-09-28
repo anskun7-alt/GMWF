@@ -14,6 +14,7 @@ import '../theme/role_theme_provider.dart';
 import '../theme/app_theme.dart';
 import '../services/local_storage_service.dart';
 import '../services/offline_auth_service.dart';
+import '../services/auth_service.dart';
 import '../services/image_upload_service.dart';
 import '../widgets/global_module_wrapper.dart';
 import '../widgets/app_back_button.dart';
@@ -73,17 +74,44 @@ class _UsersScreenState extends State<UsersScreen>
 
   Future<void> _initHive() async => _localBox = await Hive.openBox('local');
 
+  bool get _isGlobalExec {
+    final roleLower = (widget.currentUserRole ?? '').toLowerCase().trim();
+    return [
+      'chairman', 'ceo', 'admin', 'administrator', 'super admin',
+      'global admin', 'hq manager', 'hqmanager', 'hq_manager',
+      'president', 'founder', 'director'
+    ].contains(roleLower);
+  }
+
   Future<void> _loadBranches() async {
     // 1. Instant load from local cache if available
     try {
       if (_localBox != null && _localBox!.containsKey('cached_branches_list')) {
         final cached = _localBox!.get('cached_branches_list');
         if (cached is List && cached.isNotEmpty) {
-          final list = cached.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+          var list = cached.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+          final userBranch = (widget.branchId ?? '').toLowerCase().trim();
+          if (!_isGlobalExec && userBranch.isNotEmpty && userBranch != 'all' && userBranch != 'global' && userBranch != 'unknown') {
+            list = list.where((b) {
+              final bId = (b['id'] as String).toLowerCase().trim();
+              return bId == userBranch || bId.contains(userBranch) || userBranch.contains(bId);
+            }).toList();
+          } else {
+            // Ensure All Branches is at index 0 for executives
+            if (!list.any((b) => b['id'] == 'all')) {
+              list.insert(0, {'id': 'all', 'name': 'All Branches'});
+            }
+          }
+
           if (mounted && _branches.isEmpty) {
+            int initIdx = 0;
+            if (userBranch.isNotEmpty && userBranch != 'all' && userBranch != 'global') {
+              final found = list.indexWhere((b) => (b['id'] as String).toLowerCase().trim() == userBranch);
+              if (found != -1) initIdx = found;
+            }
             setState(() {
               _branches = list;
-              _tabController = TabController(length: list.length, vsync: this);
+              _tabController = TabController(length: list.length, vsync: this, initialIndex: initIdx);
             });
           }
         }
@@ -94,7 +122,7 @@ class _UsersScreenState extends State<UsersScreen>
     try {
       final snap = await FirebaseFirestore.instance.collection('branches').get();
 
-      var branches = snap.docs.where((d) {
+      var rawBranches = snap.docs.where((d) {
         final idLower = d.id.toLowerCase().trim();
         final nameLower = (d.data()['name'] as String? ?? '').toLowerCase().trim();
         return idLower != 'all' && idLower != 'global' && nameLower != 'all' && nameLower != 'global';
@@ -103,41 +131,61 @@ class _UsersScreenState extends State<UsersScreen>
         return {'id': d.id, 'name': data['name'] as String? ?? d.id};
       }).toList();
 
-      final roleLower = (widget.currentUserRole ?? '').toLowerCase().trim();
-      final userBranch = (widget.branchId ?? '').toLowerCase().trim();
-      final isGlobalExec = ['chairman', 'ceo', 'admin', 'administrator', 'super admin', 'global admin', 'hq manager', 'president', 'founder'].contains(roleLower) && (userBranch == 'all' || userBranch == 'global' || userBranch.isEmpty);
+      rawBranches.sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
 
-      if (!isGlobalExec && userBranch.isNotEmpty && userBranch != 'all' && userBranch != 'global' && userBranch != 'unknown') {
+      // Cache branches locally
+      try {
+        _localBox?.put('cached_branches_list', rawBranches);
+      } catch (_) {}
+
+      final userBranch = (widget.branchId ?? '').toLowerCase().trim();
+      var branches = rawBranches;
+      if (!_isGlobalExec && userBranch.isNotEmpty && userBranch != 'all' && userBranch != 'global' && userBranch != 'unknown') {
         branches = branches.where((b) {
           final bId = (b['id'] as String).toLowerCase().trim();
           return bId == userBranch || bId.contains(userBranch) || userBranch.contains(bId);
         }).toList();
+      } else {
+        branches = [
+          {'id': 'all', 'name': 'All Branches'},
+          ...branches,
+        ];
       }
 
-      branches.sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
-
-      // Cache branches locally
-      try {
-        _localBox?.put('cached_branches_list', branches);
-      } catch (_) {}
+      int initIdx = 0;
+      if (userBranch.isNotEmpty && userBranch != 'all' && userBranch != 'global') {
+        final found = branches.indexWhere((b) => (b['id'] as String).toLowerCase().trim() == userBranch);
+        if (found != -1) initIdx = found;
+      }
 
       if (mounted) {
         final oldLen = _tabController?.length ?? 0;
         if (oldLen != branches.length) {
-          _tabController?.dispose();
-          _tabController = TabController(length: branches.length, vsync: this);
+          final old = _tabController;
+          _tabController = TabController(
+            length: branches.length,
+            vsync: this,
+            initialIndex: initIdx.clamp(0, branches.length - 1),
+          );
+          old?.dispose();
         }
         setState(() {
           _branches = branches;
         });
+        if (!widget.isPatientMode && !widget.isGuardianMode) {
+          unawaited(LocalStorageService.pushLocalUsersToFirestore());
+        }
       }
     } catch (e) {
       if (mounted && _branches.isEmpty) {
         // Fallback default branch if completely offline with no cache
         final fallbackBranch = widget.branchId ?? 'main';
         setState(() {
-          _branches = [{'id': fallbackBranch, 'name': fallbackBranch.toUpperCase()}];
-          _tabController = TabController(length: 1, vsync: this);
+          _branches = [
+            if (_isGlobalExec || fallbackBranch == 'all') {'id': 'all', 'name': 'All Branches'},
+            {'id': fallbackBranch, 'name': fallbackBranch.toUpperCase()}
+          ];
+          _tabController = TabController(length: _branches.length, vsync: this);
         });
       }
     }
@@ -218,6 +266,7 @@ class _UsersScreenState extends State<UsersScreen>
             color: t.bgCard,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: TabBar(
+              key: ValueKey(_tabController),
               controller: _tabController!,
               isScrollable: true,
               tabAlignment: TabAlignment.start,
@@ -261,6 +310,7 @@ class _UsersScreenState extends State<UsersScreen>
         // ── Content ──
         Expanded(
           child: TabBarView(
+            key: ValueKey(_tabController),
             controller: _tabController!,
             children: _branches.map((b) => _buildList(b['id'] as String, t)).toList(),
           ),
@@ -276,6 +326,7 @@ class _UsersScreenState extends State<UsersScreen>
         await _syncPatientsForBranch(bId);
       } else {
         await _syncUsersForBranch(bId);
+        await LocalStorageService.repairAndSanitizeLocalAccounts();
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -291,9 +342,169 @@ class _UsersScreenState extends State<UsersScreen>
     }
   }
 
+  Future<void> _repairLocalAccounts() async {
+    try {
+      final res = await LocalStorageService.repairAndSanitizeLocalAccounts(force: true);
+      final pushed = await LocalStorageService.pushLocalUsersToFirestore();
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Accounts Repaired: ${res["canonicalUsers"]} verified, ${res["rolesRepaired"]} roles fixed, $pushed synced to Firestore.',
+            ),
+            backgroundColor: const Color(0xFF10B981),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Repair error: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _pushUsersToCloud() async {
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Restoring local users to Firestore...'), duration: Duration(seconds: 1)),
+        );
+      }
+      final pushed = await LocalStorageService.pushLocalUsersToFirestore();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ $pushed local users successfully restored to Firestore!'),
+            backgroundColor: const Color(0xFF10B981),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
+  }
+
+  Future<void> _healSingleAccount(Map<String, dynamic> data) async {
+    try {
+      final rawUid = (data['uid'] ?? data['id'] ?? '').toString().trim();
+      final branch = (data['branchId'] ?? data['branch'] ?? 'all').toString().trim();
+      final sanitized = LocalStorageService.sanitizeForCloudUpload(data);
+      final email = (sanitized['email'] ?? data['email'] ?? '').toString().trim().toLowerCase();
+      final username = (sanitized['username'] ?? data['username'] ?? (email.isNotEmpty ? email.split('@').first : '')).toString().trim();
+      final uid = rawUid.isNotEmpty ? rawUid : (username.isNotEmpty ? 'local_$username' : '');
+
+      sanitized['uid'] = uid;
+      sanitized['id'] = uid;
+      sanitized['status'] = 'active';
+      sanitized['accountStatus'] = 'active';
+      sanitized['isActive'] = true;
+      sanitized['isRevoked'] = false;
+      sanitized['accessRevoked'] = false;
+      sanitized['isCorruptedOrOrphanAuth'] = false;
+      sanitized['isDeleted'] = false;
+      sanitized.remove('deletedAt');
+      sanitized.remove(null);
+      sanitized.remove('null');
+      if (username.isNotEmpty) {
+        sanitized['username'] = username;
+        sanitized['usernameLower'] = username.toLowerCase();
+      }
+      sanitized['updatedAt'] = DateTime.now().toIso8601String();
+
+      // Save locally
+      await LocalStorageService.saveLocalUser(sanitized);
+
+      // Enqueue for guaranteed background sync
+      await LocalStorageService.enqueueSync({
+        'type': 'save_user',
+        'branchId': branch,
+        'uid': uid,
+        'data': sanitized,
+      });
+      SyncService().triggerUpload(force: true);
+
+      // Attempt direct push to Firestore
+      bool directWriteSucceeded = false;
+      if (uid.isNotEmpty) {
+        final fsPayload = Map<String, dynamic>.from(sanitized);
+        for (final k in ['profilePictureBase64', 'identificationBase64', 'degreeCertificateBase64']) {
+          final v = fsPayload[k]?.toString() ?? '';
+          if (v.length > 500000) {
+            fsPayload.remove(k);
+          }
+        }
+        try {
+          await FirebaseFirestore.instance.collection('users').doc(uid).set(
+            fsPayload,
+            SetOptions(merge: true),
+          ).timeout(const Duration(seconds: 15));
+
+          if (branch.isNotEmpty && branch != 'all' && branch != 'global') {
+            await FirebaseFirestore.instance
+                .collection('branches')
+                .doc(branch)
+                .collection('users')
+                .doc(uid)
+                .set(fsPayload, SetOptions(merge: true))
+                .timeout(const Duration(seconds: 10))
+                .catchError((_) {});
+          }
+          directWriteSucceeded = true;
+        } catch (cloudErr) {
+          debugPrint('[_healSingleAccount] Direct write notice (queued for sync): $cloudErr');
+        }
+      }
+
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              directWriteSucceeded
+                  ? '✅ Account active and confirmed in Cloud Firestore!'
+                  : '✅ Account healed locally & enqueued for Cloud sync!',
+            ),
+            backgroundColor: const Color(0xFF10B981),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to heal account: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _syncUsersForBranch(String branchId) async {
     try {
-      await LocalStorageService.downloadUsers(branchId);
+      if (branchId == 'all' || branchId == 'global') {
+        for (final b in _branches) {
+          final bId = (b['id'] as String? ?? '').trim();
+          if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+            await LocalStorageService.downloadUsers(bId);
+          }
+        }
+      } else {
+        await LocalStorageService.downloadUsers(branchId);
+      }
 
       // Explicitly pull any pending access restore requests across the board
       try {
@@ -391,7 +602,7 @@ class _UsersScreenState extends State<UsersScreen>
               ),
             ),
           ),
-          if (!widget.isGuardianMode) ...[
+          if (widget.isPatientMode) ...[
             const SizedBox(width: 8),
             GestureDetector(
               onTap: () => setState(() => _filtersExpanded = !_filtersExpanded),
@@ -438,16 +649,45 @@ class _UsersScreenState extends State<UsersScreen>
               onPressed: () => _openAccessControlMatrixSheet(context, t),
             ),
           ],
+          if (!widget.isGuardianMode && !widget.isPatientMode) ...[
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0284C7),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                elevation: 0,
+              ),
+              icon: const Icon(Icons.cloud_upload_rounded, size: 18),
+              label: const Text('Restore Cloud', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              onPressed: () => _pushUsersToCloud(),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E293B),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                elevation: 0,
+              ),
+              icon: const Icon(Icons.auto_fix_high_rounded, size: 18, color: Color(0xFF38BDF8)),
+              label: const Text('Repair Accounts', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              onPressed: () => _repairLocalAccounts(),
+            ),
+          ],
         ]),
-        AnimatedCrossFade(
-          duration: const Duration(milliseconds: 250),
-          crossFadeState: _filtersExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-          firstChild: const SizedBox.shrink(),
-          secondChild: Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: widget.isPatientMode ? _buildPatientFilters(t) : _buildStaffFilters(t),
+        if (widget.isPatientMode)
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 250),
+            crossFadeState: _filtersExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+            firstChild: const SizedBox.shrink(),
+            secondChild: Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: _buildPatientFilters(t),
+            ),
           ),
-        ),
       ]),
     );
   }
@@ -505,25 +745,6 @@ class _UsersScreenState extends State<UsersScreen>
         ]),
       ),
     ]);
-  }
-
-  Widget _buildStaffFilters(RoleThemeData t) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(children: [
-        _chip(t, 'All Roles', _roleFilter == null, () => setState(() => _roleFilter = null)),
-        const SizedBox(width: 6),
-        ...{
-          'doctor': 'Doctor', 'receptionist': 'Receptionist',
-          'dispenser': 'Dispenser', 'supervisor': 'Supervisor',
-          'food token generator': 'Food Token', 'kitchen': 'Kitchen',
-        }.entries.map((e) => Padding(
-          padding: const EdgeInsets.only(left: 6),
-          child: _chip(t, e.value, _roleFilter == e.key,
-              () => setState(() => _roleFilter = _roleFilter == e.key ? null : e.key)),
-        )),
-      ]),
-    );
   }
 
   Widget _chip(RoleThemeData t, String label, bool active, VoidCallback onTap) {
@@ -675,35 +896,58 @@ class _UsersScreenState extends State<UsersScreen>
           _syncUsersForBranch(branchId);
         }
 
-        final Map<String, Map<String, dynamic>> mergedMap = {};
-
-        String getDedupKey(Map<String, dynamic> u, String defaultId) {
-          final usernameLower = (u['usernameLower'] ?? u['username'])?.toString().trim().toLowerCase() ?? '';
-          if (!widget.isPatientMode && usernameLower.isNotEmpty) {
-            return 'user:$usernameLower';
-          }
-          final email = u['email']?.toString().trim().toLowerCase() ?? '';
-          if (!widget.isPatientMode && email.isNotEmpty) {
-            return 'email:$email';
-          }
-          final uid = (u['uid'] ?? u['id'] ?? u['patientId'] ?? defaultId).toString();
-          return 'id:$uid';
-        }
+        final List<Map<String, dynamic>> canonicalUsers = [];
+        final Map<String, int> uidIndex = {};
+        final Map<String, int> emailIndex = {};
+        final Map<String, int> usernameIndex = {};
 
         for (final val in box.values) {
-          if (val is Map) {
-            final Map<String, dynamic> u = Map<String, dynamic>.from(val);
-            final uid = u['uid']?.toString() ?? u['id']?.toString() ?? '';
-            final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
-            final isDeleted = u['isDeleted'] == true || status == 'deleted';
-            if (isDeleted) continue; // NEVER SHOW DELETED USERS
-            if (uid.isNotEmpty) {
-              mergedMap[getDedupKey(u, uid)] = u;
-            }
+          if (val is! Map) continue;
+          final Map<String, dynamic> u = Map<String, dynamic>.from(val);
+          final uid = (u['uid'] ?? u['id'] ?? u['patientId'] ?? '').toString().trim();
+          final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
+          final isDeleted = u['isDeleted'] == true || status == 'deleted' || status == 'purged';
+          if (isDeleted) continue; // NEVER SHOW DELETED USERS
+
+          final email = (u['email'] ?? '').toString().trim().toLowerCase();
+          final username = (u['usernameLower'] ?? u['username'] ?? '').toString().trim().toLowerCase();
+
+          // Check if we've already seen this exact user by ANY identifier
+          int? existingIdx;
+          if (uid.isNotEmpty && uidIndex.containsKey(uid)) {
+            existingIdx = uidIndex[uid];
+          } else if (email.isNotEmpty && emailIndex.containsKey(email)) {
+            existingIdx = emailIndex[email];
+          } else if (username.isNotEmpty && usernameIndex.containsKey(username)) {
+            existingIdx = usernameIndex[username];
+          }
+
+          if (existingIdx != null) {
+            // Merge with existing card, preserving richer non-empty fields
+            final existing = canonicalUsers[existingIdx];
+            final merged = <String, dynamic>{...existing};
+            u.forEach((k, v) {
+              if (v != null && v.toString().trim().isNotEmpty && v != 'null') {
+                final exVal = merged[k];
+                if (exVal == null || exVal.toString().trim().isEmpty || exVal == 'null' || exVal == 'unknown' || exVal == 'staff') {
+                  merged[k] = v;
+                }
+              }
+            });
+            canonicalUsers[existingIdx] = merged;
+            if (uid.isNotEmpty) uidIndex[uid] = existingIdx;
+            if (email.isNotEmpty) emailIndex[email] = existingIdx;
+            if (username.isNotEmpty) usernameIndex[username] = existingIdx;
+          } else {
+            final newIdx = canonicalUsers.length;
+            canonicalUsers.add(u);
+            if (uid.isNotEmpty) uidIndex[uid] = newIdx;
+            if (email.isNotEmpty) emailIndex[email] = newIdx;
+            if (username.isNotEmpty) usernameIndex[username] = newIdx;
           }
         }
 
-        var list = mergedMap.values.toList();
+        var list = canonicalUsers;
 
         if (branchId != 'all' && branchId != 'global') {
           final targetBranch = branchId.trim().toLowerCase();
@@ -1419,6 +1663,30 @@ class _UsersScreenState extends State<UsersScreen>
                                 style: TextStyle(color: Colors.redAccent, fontSize: 9, fontWeight: FontWeight.bold),
                               ),
                             )
+                          else if (status == 'corrupted' || data['isCorruptedOrOrphanAuth'] == true)
+                            InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () => _healSingleAccount(data),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.redAccent, width: 0.8),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.auto_fix_high_rounded, size: 10, color: Colors.redAccent),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'CORRUPTED · HEAL',
+                                      style: TextStyle(color: Colors.redAccent, fontSize: 9, fontWeight: FontWeight.bold),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            )
                           else if (status != 'active' && status.isNotEmpty)
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1547,6 +1815,27 @@ class _UsersScreenState extends State<UsersScreen>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (!widget.isPatientMode && _canManageUserAccess(data)) ...[
+                      if (status == 'corrupted' || data['isCorruptedOrOrphanAuth'] == true) ...[
+                        Tooltip(
+                          message: 'Heal & Upload Account to Cloud',
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () => _healSingleAccount(data),
+                            child: Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF10B981).withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFF10B981), width: 1.2),
+                              ),
+                              alignment: Alignment.center,
+                              child: const Icon(Icons.auto_fix_high_rounded, size: 18, color: Color(0xFF10B981)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       // Quick Lock/Unlock toggle
                       if (!isGuardianRole)
                         Tooltip(
@@ -1642,6 +1931,8 @@ class _UsersScreenState extends State<UsersScreen>
                         onSelected: (val) {
                           if (val == 'detail') {
                             _openDetail(itemId, branchId);
+                          } else if (val == 'sync_cloud') {
+                            _healSingleAccount(data);
                           } else if (val == 'medical') {
                             StaffPatientLinkService.openStaffMedicalHistory(
                               context,
@@ -1664,6 +1955,16 @@ class _UsersScreenState extends State<UsersScreen>
                                 Icon(Icons.person_pin_rounded, size: 17, color: t.accent),
                                 const SizedBox(width: 10),
                                 Text('View Profile', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'sync_cloud',
+                            child: Row(
+                              children: [
+                                Icon(Icons.cloud_upload_rounded, size: 17, color: const Color(0xFF10B981)),
+                                const SizedBox(width: 10),
+                                Text('Sync to Cloud', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
                               ],
                             ),
                           ),
@@ -2176,6 +2477,15 @@ class _UsersScreenState extends State<UsersScreen>
         if (email.isNotEmpty) await OfflineAuthService.clearCredentialsForUser(email);
         if (usernameLower.isNotEmpty) await OfflineAuthService.clearCredentialsForUser(usernameLower);
       } catch (_) {}
+
+      // Permanent Firebase Auth deletion
+      await AuthService.deleteAuthUser(
+        uid: targetUid,
+        email: email,
+        username: usernameLower,
+        password: (data['password'] ?? '').toString(),
+        branchId: branchId,
+      );
 
       await LocalStorageService.deleteUserOffline(
         uid: targetUid,

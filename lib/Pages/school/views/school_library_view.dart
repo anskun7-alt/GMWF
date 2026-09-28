@@ -6,6 +6,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../../services/local_storage_service.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
+import '../theme/school_theme.dart';
 
 class CnicInputFormatter extends TextInputFormatter {
   @override
@@ -28,11 +30,13 @@ class CnicInputFormatter extends TextInputFormatter {
 class SchoolLibraryView extends StatefulWidget {
   final String branchId;
   final String userName;
+  final String userRole;
 
   const SchoolLibraryView({
     super.key,
     required this.branchId,
     this.userName = 'Library Admin',
+    this.userRole = 'School Admin',
   });
 
   @override
@@ -45,6 +49,8 @@ class _SchoolLibraryViewState extends State<SchoolLibraryView> {
 
   String _selectedCategory = 'All';
   String _selectedLoanStatusFilter = 'All';
+
+  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
 
   final List<String> _categories = [
     'All',
@@ -581,18 +587,20 @@ class _SchoolLibraryViewState extends State<SchoolLibraryView> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        ElevatedButton.icon(
-                          onPressed: () => _openAddBookDialog(),
-                          icon: const Icon(Icons.add_rounded, size: 16),
-                          label: const Text('Add Book', style: TextStyle(fontSize: 12)),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF6366F1),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        if (!_isTeacher) ...[
+                          const SizedBox(width: 8),
+                          ElevatedButton.icon(
+                            onPressed: () => _openAddBookDialog(),
+                            icon: const Icon(Icons.add_rounded, size: 16),
+                            label: const Text('Add Book', style: TextStyle(fontSize: 12)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: SchoolTheme.primary,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ],
@@ -607,11 +615,11 @@ class _SchoolLibraryViewState extends State<SchoolLibraryView> {
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
                         hintText: 'Search books by title, author, or ISBN...',
-                        prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF6366F1)),
+                        prefixIcon: const Icon(Icons.search_rounded, color: SchoolTheme.primary),
                         filled: true,
                         fillColor: const Color(0xFFF8FAFC),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(10),
                           borderSide: BorderSide.none,
                         ),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -637,18 +645,20 @@ class _SchoolLibraryViewState extends State<SchoolLibraryView> {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  ElevatedButton.icon(
-                    onPressed: () => _openAddBookDialog(),
-                    icon: const Icon(Icons.add_rounded),
-                    label: const Text('Add Book'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF6366F1),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  if (!_isTeacher) ...[
+                    const SizedBox(width: 16),
+                    ElevatedButton.icon(
+                      onPressed: () => _openAddBookDialog(),
+                      icon: const Icon(Icons.add_rounded, size: 16),
+                      label: const Text('Add Book', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: SchoolTheme.primary,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               );
             },

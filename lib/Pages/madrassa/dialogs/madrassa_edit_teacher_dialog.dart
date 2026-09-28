@@ -11,6 +11,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../../services/image_upload_service.dart';
 import '../../../services/offline_auth_service.dart';
+import '../../../services/local_storage_service.dart';
 import '../utils/madrassa_local_storage.dart';
 
 /// Shows the Edit Teacher dialog. Returns `true` if changes were saved.
@@ -84,7 +85,12 @@ class _MadrassaEditTeacherDialogState extends State<MadrassaEditTeacherDialog>
     _anim.forward();
 
     final t = widget.teacher;
-    final initialName = (t['displayName'] ?? t['name'] ?? t['username'] ?? '').toString();
+    var initialName = (t['displayName'] ?? t['name'] ?? t['username'] ?? '').toString();
+    final lowerInitial = initialName.toLowerCase().trim();
+    if (lowerInitial == 'hifz' || lowerInitial == 'nazra' || lowerInitial == 'both' || lowerInitial == 'hifz & nazra') {
+      final fallback = (t['displayName'] ?? t['username'] ?? '').toString();
+      initialName = (fallback.toLowerCase().trim() == lowerInitial) ? '' : fallback;
+    }
     _nameCtrl = TextEditingController(text: initialName);
     _usernameCtrl = TextEditingController(text: (t['username'] ?? '').toString());
     _emailCtrl = TextEditingController(text: (t['email'] ?? '').toString());
@@ -195,10 +201,15 @@ class _MadrassaEditTeacherDialogState extends State<MadrassaEditTeacherDialog>
 
     final newPass = _passwordCtrl.text.trim();
 
+    final cleanUsername = _usernameCtrl.text.trim();
+    final cleanUsernameLower = cleanUsername.toLowerCase();
+    final cleanEmail = _emailCtrl.text.trim().toLowerCase();
+
     updatedData['displayName'] = _nameCtrl.text.trim();
     updatedData['name'] = _nameCtrl.text.trim();
-    updatedData['username'] = _usernameCtrl.text.trim();
-    updatedData['email'] = _emailCtrl.text.trim().toLowerCase();
+    updatedData['username'] = cleanUsername;
+    updatedData['usernameLower'] = cleanUsernameLower;
+    updatedData['email'] = cleanEmail;
     updatedData['phone'] = _phoneCtrl.text.trim();
     updatedData['identification'] = _cnicCtrl.text.trim();
     updatedData['cnic'] = _cnicCtrl.text.trim();
@@ -209,6 +220,7 @@ class _MadrassaEditTeacherDialogState extends State<MadrassaEditTeacherDialog>
     updatedData['sessions'] = _session == 'all' ? ['morning', 'evening', 'night'] : [_session];
     updatedData['isActive'] = _isActive;
     updatedData['status'] = _isActive ? 'active' : 'inactive';
+    updatedData['accountStatus'] = _isActive ? 'active' : 'inactive';
     updatedData['lastUpdatedBy'] = widget.principalUsername;
     updatedData['lastUpdatedAt'] = DateTime.now().toIso8601String();
 
@@ -225,18 +237,35 @@ class _MadrassaEditTeacherDialogState extends State<MadrassaEditTeacherDialog>
     try {
       // 1. Password change if requested
       if (newPass.isNotEmpty) {
-        await OfflineAuthService.saveCredentials(
-          usernameOrEmail: _emailCtrl.text.trim().toLowerCase(),
-          password: newPass,
-          userData: updatedData,
-          setAsLastLoggedIn: false,
-        );
+        updatedData['password'] = newPass;
+        updatedData['passwordHash'] = LocalStorageService.hashPassword(newPass);
+        if (cleanEmail.isNotEmpty) {
+          await OfflineAuthService.saveCredentials(
+            usernameOrEmail: cleanEmail,
+            password: newPass,
+            userData: updatedData,
+            setAsLastLoggedIn: false,
+          );
+        }
+        if (cleanUsernameLower.isNotEmpty && cleanUsernameLower != cleanEmail) {
+          await OfflineAuthService.saveCredentials(
+            usernameOrEmail: cleanUsernameLower,
+            password: newPass,
+            userData: updatedData,
+            setAsLastLoggedIn: false,
+          );
+        }
         try {
           await FirebaseFirestore.instance.collection('users').doc(teacherId.toString()).set({
             'password': newPass,
+            'passwordHash': LocalStorageService.hashPassword(newPass),
+            'updatedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
         } catch (_) {}
       }
+
+      // Also ensure LocalStorageService indexes the updated user offline across all key variants
+      await LocalStorageService.saveLocalUser(updatedData);
 
       // 2. Save profile in Madrassa Local Storage and enqueue sync
       await MadrassaLocalStorage.saveTeacherProfileLocalAndSync(

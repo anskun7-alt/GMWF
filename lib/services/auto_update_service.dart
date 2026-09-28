@@ -34,7 +34,15 @@ class UpdateInfo {
 
 class AutoUpdateService {
   /// Default fallback version of the GMWF application if PackageInfo is unavailable.
-  static const String currentVersion = '1.5.4';
+  static const String fallbackVersion = '1.5.7';
+
+  /// Dynamically retrieves current installed application version (from pubspec.yaml via PackageInfo).
+  /// Falls back to [fallbackVersion] if not yet resolved.
+  static String get currentVersion => _cachedVersion.isNotEmpty ? _cachedVersion : fallbackVersion;
+
+  /// Alias for [currentVersion] for backward compatibility.
+  static String get resolvedVersion => currentVersion;
+
   static const int protocolVersion = 2;
   static const String minSupportedVersion = '1.4.8';
 
@@ -44,7 +52,7 @@ class AutoUpdateService {
 
   static String _cachedVersion = '';
 
-  /// Dynamically retrieves current installed application version from package_info_plus.
+  /// Dynamically retrieves current installed application version from package_info_plus (pubspec.yaml).
   static Future<String> getAppVersion() async {
     if (_cachedVersion.isNotEmpty) return _cachedVersion;
     try {
@@ -56,11 +64,8 @@ class AutoUpdateService {
     } catch (e) {
       debugPrint('[AutoUpdateService] Error fetching PackageInfo: $e');
     }
-    return currentVersion;
+    return fallbackVersion;
   }
-
-  /// Synchronous getter returning cached dynamic version if available, else static [currentVersion].
-  static String get resolvedVersion => _cachedVersion.isNotEmpty ? _cachedVersion : currentVersion;
 
   /// Compares two semver strings (e.g. "1.2.4" vs "1.2.5").
   /// Returns 1 if v2 > v1 (update available), -1 if v1 > v2, 0 if equal.

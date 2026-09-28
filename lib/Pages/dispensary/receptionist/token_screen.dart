@@ -84,16 +84,29 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     if (widget.dispensaryId != null && widget.dispensaryId!.trim().isNotEmpty) {
       return widget.dispensaryId!.trim().toLowerCase();
     }
-    try {
-      if (Hive.isBoxOpen('app_settings')) {
-        final userData = Hive.box('app_settings').get('user_data');
-        if (userData is Map && userData['dispensaryId'] != null) {
-          final d = userData['dispensaryId'].toString().trim();
-          if (d.isNotEmpty && d.toLowerCase() != 'all') return d.toLowerCase();
-        }
-      }
-    } catch (_) {}
     return null;
+  }
+
+  void _onActiveCampChanged() {
+    if (!mounted) return;
+    final active = CampSessionService.getActiveCamp(widget.branchId);
+    if (active != null && active.isNotEmpty && active != _capturedDispensaryId) {
+      setState(() {
+        _capturedDispensaryId = active;
+      });
+      _estimateNextSerial();
+    }
+  }
+
+  void updateDispensaryId(String campId) {
+    if (_capturedDispensaryId != campId) {
+      if (mounted) {
+        setState(() {
+          _capturedDispensaryId = campId;
+        });
+        _estimateNextSerial();
+      }
+    }
   }
 
   static const Color _teal  = Color(0xFF00695C);
@@ -109,11 +122,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     LocalStorageService.ensureBoxOpen(LocalStorageService.patientsBox);
     LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
-    // FIX 5b: capture the camp once at screen start instead of listening to
-    // CampSessionService.activeCampNotifier — that listener was exactly the
-    // mechanism that let another tab's camp switch retroactively touch this
-    // screen's in-progress token issuance.
     _capturedDispensaryId = _computeInitialDispensaryId();
+    CampSessionService.activeCampNotifier.addListener(_onActiveCampChanged);
     _estimateNextSerial();
 
     if (widget.initialCnic != null && widget.initialCnic!.isNotEmpty) {
@@ -319,6 +329,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    CampSessionService.activeCampNotifier.removeListener(_onActiveCampChanged);
     _debounceListenerTimer?.cancel();  // ← HANG FIX: Clean up debounce timer
     WidgetsBinding.instance.removeObserver(this);
     _realtimeSub?.cancel();
@@ -666,7 +677,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     final shiftInfo = CampSessionService.resolveShiftAndDateKey(now, widget.branchId);
     final datePart = shiftInfo.dateKey;
     final session = shiftInfo.session;
-    final activeCamp = _capturedDispensaryId;
+    final activeCamp = _capturedDispensaryId ?? CampSessionService.getActiveCamp(widget.branchId);
     final nextSeq = await LocalStorageService.getNextLocalSerialSequence(
       widget.branchId,
       datePart,
@@ -980,7 +991,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       final shiftInfo = CampSessionService.resolveShiftAndDateKey(now, widget.branchId);
       final dateKey = shiftInfo.dateKey;
       final session = shiftInfo.session;
-      final activeCamp = _capturedDispensaryId;
+      final activeCamp = _capturedDispensaryId ?? CampSessionService.getActiveCamp(widget.branchId);
       final dispTag = CampSessionService.getDispensaryKeyword(activeCamp, branchId: widget.branchId);
 
       final rawStatus = _patientData!['status']?.toString();

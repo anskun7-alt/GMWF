@@ -14,6 +14,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../dialogs/madrassa_edit_teacher_dialog.dart';
 import '../dialogs/register_teacher_dialog.dart';
 import '../utils/madrassa_local_storage.dart';
+import '../utils/madrassa_report_helper.dart';
 import '../madrassa_strings.dart';
 
 class MadrassaTeachersView extends StatefulWidget {
@@ -181,6 +182,7 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
         final id = (t['id'] ?? t['uid'] ?? t['username']).toString();
         _localAttendanceChanges.putIfAbsent(id, () => {});
         _localAttendanceChanges[id]!['status'] = 'present';
+        _localAttendanceChanges[id]!['leaveReason'] = '';
         _localAttendanceChanges[id]!['markedAt'] = DateTime.now().toIso8601String();
       }
     });
@@ -193,24 +195,606 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
     );
   }
 
-  Future<void> _saveAttendanceLog(List<Map<String, dynamic>> teachers) async {
-    setState(() => _isSavingAttendance = true);
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+  // ── Mandatory Leave Reason Prompt ──────────────────────────────────────────
+  Future<String?> _promptLeaveReason({
+    required String teacherName,
+    String initialReason = '',
+  }) async {
+    final textCtrl = TextEditingController(text: initialReason);
+    String? selectedPreset;
 
+    final presets = [
+      context.isUrdu ? 'طبی معائنہ / بیماری' : 'Medical / Sick Leave',
+      context.isUrdu ? 'خاندانی ایمرجنسی' : 'Family Emergency',
+      context.isUrdu ? 'ذاتی ضروری کام' : 'Personal Urgent Work',
+      context.isUrdu ? 'سرکاری سفر / ڈیوٹی' : 'Official Duty / Travel',
+      context.isUrdu ? 'اتفاقی رخصت' : 'Casual Leave',
+    ];
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        final dark = _isDark(ctx);
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final isSaveDisabled = textCtrl.text.trim().isEmpty;
+
+            return AlertDialog(
+              backgroundColor: dark ? const Color(0xFF131B2E) : Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _leaveColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.event_note_rounded, color: _leaveColor, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          context.isUrdu ? 'رخصت کی وجہ' : 'Leave Reason Required',
+                          style: context.urduStyle(
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: dark ? Colors.white : const Color(0xFF0F172A),
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '$teacherName • ${DateFormat('d MMM yyyy').format(_selectedDate)}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: dark ? Colors.white60 : Colors.black54,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: _leaveColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: _leaveColor.withValues(alpha: 0.25)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.info_outline_rounded, size: 15, color: _leaveColor),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              context.isUrdu
+                                  ? 'استاد کی رخصت کے لیے وجہ درج کرنا لازمی ہے۔'
+                                  : 'A documented reason is mandatory to record teacher leave.',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: dark ? const Color(0xFFFBBF24) : const Color(0xFFB45309),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      context.isUrdu ? 'فوری وجوہات منتخب کریں:' : 'Quick Select Preset:',
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: dark ? Colors.white70 : Colors.black87),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: presets.map((p) {
+                        final isSel = selectedPreset == p || textCtrl.text == p;
+                        return InkWell(
+                          onTap: () {
+                            setDialogState(() {
+                              selectedPreset = p;
+                              textCtrl.text = p;
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(8),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: isSel
+                                  ? _leaveColor.withValues(alpha: 0.2)
+                                  : (dark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9)),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isSel ? _leaveColor : (dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                                width: isSel ? 1.2 : 1,
+                              ),
+                            ),
+                            child: Text(
+                              p,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: isSel ? FontWeight.bold : FontWeight.w500,
+                                color: isSel ? _leaveColor : (dark ? Colors.white70 : const Color(0xFF334155)),
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      context.isUrdu ? 'تفصیلی وجہ (لازمی):' : 'Detailed Reason (Mandatory):',
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: dark ? Colors.white70 : Colors.black87),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: textCtrl,
+                      maxLines: 3,
+                      autofocus: true,
+                      onChanged: (_) => setDialogState(() {}),
+                      decoration: InputDecoration(
+                        hintText: context.isUrdu ? 'رخصت کی تفصیل درج کریں...' : 'Enter reason for leave...',
+                        hintStyle: TextStyle(fontSize: 12, color: dark ? Colors.white38 : Colors.black38),
+                        filled: true,
+                        fillColor: dark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: dark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: dark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _leaveColor, width: 1.5)),
+                        contentPadding: const EdgeInsets.all(10),
+                      ),
+                      style: TextStyle(fontSize: 13, color: dark ? Colors.white : Colors.black87),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, null),
+                  child: Text(context.isUrdu ? 'منسوخ' : 'Cancel', style: TextStyle(color: dark ? Colors.white60 : Colors.black54)),
+                ),
+                ElevatedButton.icon(
+                  onPressed: isSaveDisabled ? null : () => Navigator.pop(ctx, textCtrl.text.trim()),
+                  icon: const Icon(Icons.check_rounded, size: 16),
+                  label: Text(context.isUrdu ? 'رخصت منظور کریں' : 'Confirm Leave'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _leaveColor,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.grey.shade400,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ── Monthly Presence & Leave Reason Report Modal ────────────────────────────
+  Future<void> _showMonthlyPresenceDialog(
+    BuildContext context, {
+    required List<Map<String, dynamic>> teachers,
+    Map<String, dynamic>? preselectedTeacher,
+  }) async {
+    int selectedYear = _selectedDate.year;
+    int selectedMonth = _selectedDate.month;
+    String selectedTeacherId = preselectedTeacher != null
+        ? (preselectedTeacher['id'] ?? preselectedTeacher['uid'] ?? preselectedTeacher['username']).toString()
+        : 'ALL';
+    bool isExporting = false;
+    String exportStatus = '';
+
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        final dark = _isDark(ctx);
+        return StatefulBuilder(
+          builder: (dialogCtx, setDialogState) {
+            final monthDisplay = DateFormat('MMMM yyyy').format(DateTime(selectedYear, selectedMonth));
+
+            return AlertDialog(
+              backgroundColor: dark ? const Color(0xFF131B2E) : Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F766E).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.file_download_rounded, color: Color(0xFF0F766E), size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          context.isUrdu ? 'ماہانہ حاضری رپورٹ' : 'Monthly Presence Download',
+                          style: context.urduStyle(
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: dark ? Colors.white : const Color(0xFF0F172A),
+                            ),
+                          ),
+                        ),
+                        Text(
+                          context.isUrdu ? 'حاضری اور رخصت کی تفصیلی رپورٹ' : 'Presence records with mandatory leave reasons',
+                          style: TextStyle(fontSize: 11.5, color: dark ? Colors.white60 : Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 440,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Month Picker Row
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: dark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: dark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.chevron_left_rounded),
+                            onPressed: () {
+                              setDialogState(() {
+                                if (selectedMonth == 1) {
+                                  selectedMonth = 12;
+                                  selectedYear--;
+                                } else {
+                                  selectedMonth--;
+                                }
+                              });
+                            },
+                          ),
+                          Row(
+                            children: [
+                              const Icon(Icons.calendar_month_rounded, size: 18, color: Color(0xFF0F766E)),
+                              const SizedBox(width: 8),
+                              Text(
+                                monthDisplay,
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.chevron_right_rounded),
+                            onPressed: () {
+                              setDialogState(() {
+                                if (selectedMonth == 12) {
+                                  selectedMonth = 1;
+                                  selectedYear++;
+                                } else {
+                                  selectedMonth++;
+                                }
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Teacher Selection
+                    Text(
+                      context.isUrdu ? 'استاد منتخب کریں:' : 'Select Faculty / Teacher:',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: dark ? Colors.white70 : Colors.black87),
+                    ),
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: dark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: dark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0)),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: selectedTeacherId,
+                          isExpanded: true,
+                          dropdownColor: dark ? const Color(0xFF1E293B) : Colors.white,
+                          items: [
+                            DropdownMenuItem(
+                              value: 'ALL',
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.groups_rounded, size: 18, color: Color(0xFF0F766E)),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    context.isUrdu ? 'تمام اساتذہ (پورے برانچ کا خلاصہ)' : 'All Faculty (Complete Branch Matrix)',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            ...teachers.map((t) {
+                              final id = (t['id'] ?? t['uid'] ?? t['username']).toString();
+                              final name = _extractUsername(t);
+                              final spec = _extractSpecialization(t).toUpperCase();
+                              return DropdownMenuItem(
+                                value: id,
+                                child: Text(
+                                  '$name ($spec)',
+                                  style: const TextStyle(fontSize: 13),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              );
+                            }),
+                          ],
+                          onChanged: (val) {
+                            if (val != null) setDialogState(() => selectedTeacherId = val);
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    if (isExporting) ...[
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Column(
+                            children: [
+                              const CircularProgressIndicator(color: Color(0xFF0F766E), strokeWidth: 2.5),
+                              const SizedBox(height: 10),
+                              Text(exportStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ] else ...[
+                      Text(
+                        context.isUrdu ? 'ڈاؤن لوڈ فارمیٹ:' : 'Export Format:',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: dark ? Colors.white70 : Colors.black87),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                setDialogState(() {
+                                  isExporting = true;
+                                  exportStatus = 'Preparing PDF Report...';
+                                });
+                                try {
+                                  final monthlyLogs = await MadrassaLocalStorage.getMonthlyTeacherAttendance(
+                                    branchId: widget.branchId,
+                                    year: selectedYear,
+                                    month: selectedMonth,
+                                  );
+
+                                  String branchDisplayName = widget.branchId.toUpperCase();
+                                  try {
+                                    if (Hive.isBoxOpen('app_settings')) {
+                                      final box = Hive.box('app_settings');
+                                      final bn = box.get('branch_name_${widget.branchId.toLowerCase()}');
+                                      if (bn is String && bn.isNotEmpty) branchDisplayName = bn;
+                                    }
+                                  } catch (_) {}
+
+                                  if (selectedTeacherId == 'ALL') {
+                                    await MadrassaReportHelper.generateAllTeachersMonthlyAttendancePdf(
+                                      branchId: widget.branchId,
+                                      branchName: branchDisplayName,
+                                      year: selectedYear,
+                                      month: selectedMonth,
+                                      teachers: teachers,
+                                      monthlyLogs: monthlyLogs,
+                                    );
+                                  } else {
+                                    final teacher = teachers.firstWhere(
+                                      (t) => (t['id'] ?? t['uid'] ?? t['username']).toString() == selectedTeacherId,
+                                      orElse: () => teachers.first,
+                                    );
+                                    await MadrassaReportHelper.generateTeacherMonthlyAttendancePdf(
+                                      branchId: widget.branchId,
+                                      branchName: branchDisplayName,
+                                      year: selectedYear,
+                                      month: selectedMonth,
+                                      teacher: teacher,
+                                      monthlyLogs: monthlyLogs,
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error generating PDF: $e')));
+                                  }
+                                } finally {
+                                  if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                                }
+                              },
+                              icon: const Icon(Icons.picture_as_pdf_rounded, size: 16),
+                              label: const Text('PDF Document'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF0F766E),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                setDialogState(() {
+                                  isExporting = true;
+                                  exportStatus = 'Preparing Excel Spreadsheet...';
+                                });
+                                try {
+                                  final monthlyLogs = await MadrassaLocalStorage.getMonthlyTeacherAttendance(
+                                    branchId: widget.branchId,
+                                    year: selectedYear,
+                                    month: selectedMonth,
+                                  );
+
+                                  String branchDisplayName = widget.branchId.toUpperCase();
+                                  try {
+                                    if (Hive.isBoxOpen('app_settings')) {
+                                      final box = Hive.box('app_settings');
+                                      final bn = box.get('branch_name_${widget.branchId.toLowerCase()}');
+                                      if (bn is String && bn.isNotEmpty) branchDisplayName = bn;
+                                    }
+                                  } catch (_) {}
+
+                                  if (selectedTeacherId == 'ALL') {
+                                    await MadrassaReportHelper.exportAllTeachersMonthlyAttendanceExcel(
+                                      branchId: widget.branchId,
+                                      branchName: branchDisplayName,
+                                      year: selectedYear,
+                                      month: selectedMonth,
+                                      teachers: teachers,
+                                      monthlyLogs: monthlyLogs,
+                                    );
+                                  } else {
+                                    final teacher = teachers.firstWhere(
+                                      (t) => (t['id'] ?? t['uid'] ?? t['username']).toString() == selectedTeacherId,
+                                      orElse: () => teachers.first,
+                                    );
+                                    await MadrassaReportHelper.exportTeacherMonthlyAttendanceExcel(
+                                      branchId: widget.branchId,
+                                      branchName: branchDisplayName,
+                                      year: selectedYear,
+                                      month: selectedMonth,
+                                      teacher: teacher,
+                                      monthlyLogs: monthlyLogs,
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error exporting Excel: $e')));
+                                  }
+                                } finally {
+                                  if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                                }
+                              },
+                              icon: const Icon(Icons.table_view_rounded, size: 16),
+                              label: const Text('Excel (.xlsx)'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF10B981),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(context.isUrdu ? 'بند کریں' : 'Close', style: TextStyle(color: dark ? Colors.white60 : Colors.black54)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ── Save Attendance Log with Mandatory Leave Reason Enforcement ─────────────
+  Future<void> _saveAttendanceLog(List<Map<String, dynamic>> teachers) async {
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
     final cachedLog = MadrassaLocalStorage.getTeacherAttendanceCached(widget.branchId, dateKey);
     final entries = Map<String, dynamic>.from((cachedLog?['entries'] as Map?) ?? {});
 
-    // Ensure all teachers have an entry (default to 'present' if untouched)
+    // STRICT VALIDATION: Ensure no teacher is marked on leave without a documented reason!
     for (final t in teachers) {
       final id = (t['id'] ?? t['uid'] ?? t['username']).toString();
       final existingStatus = entries[id]?['status']?.toString();
       final changedStatus = _localAttendanceChanges[id]?['status']?.toString();
-      final finalStatus = changedStatus ?? existingStatus ?? 'present';
+      final finalStatus = (changedStatus ?? existingStatus ?? 'present').toLowerCase();
+
+      if (finalStatus == 'leave') {
+        final reason = (_localAttendanceChanges[id]?['leaveReason'] ?? entries[id]?['leaveReason'] ?? '').toString().trim();
+        if (reason.isEmpty) {
+          final teacherName = _extractUsername(t);
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                title: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: _leaveColor, size: 24),
+                    const SizedBox(width: 8),
+                    Text(context.isUrdu ? 'رخصت کی وجہ لازمی ہے' : 'Leave Reason Required'),
+                  ],
+                ),
+                content: Text(
+                  context.isUrdu
+                      ? 'استاد "$teacherName" کو بغیر وجہ رخصت پر نشان زد نہیں کیا جا سکتا۔ براہ کرم رخصت کی وجہ درج کریں۔'
+                      : 'Teacher "$teacherName" is marked on leave without a documented reason. Leave cannot be included without a valid reason.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+          }
+          return;
+        }
+      }
+    }
+
+    setState(() => _isSavingAttendance = true);
+
+    // Build finalized entries
+    for (final t in teachers) {
+      final id = (t['id'] ?? t['uid'] ?? t['username']).toString();
+      final existingStatus = entries[id]?['status']?.toString();
+      final changedStatus = _localAttendanceChanges[id]?['status']?.toString();
+      final finalStatus = (changedStatus ?? existingStatus ?? 'present').toLowerCase();
+      final reason = (_localAttendanceChanges[id]?['leaveReason'] ?? entries[id]?['leaveReason'] ?? '').toString().trim();
 
       entries[id] = {
         ...?entries[id],
         ...?_localAttendanceChanges[id],
         'status': finalStatus,
+        'leaveReason': finalStatus == 'leave' ? reason : '',
         'teacherName': _extractUsername(t),
         'specialization': _extractSpecialization(t),
         'session': t['session'] ?? 'morning',
@@ -351,86 +935,115 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: _emerald.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.school_rounded, color: _emerald, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      context.isUrdu ? 'اساتذہ پورٹل' : 'Faculty & Teachers Hub',
-                      style: context.urduStyle(
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: textPrimary,
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final isVeryNarrow = constraints.maxWidth < 460;
+              return Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _emerald.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.school_rounded, color: _emerald, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          context.isUrdu ? 'اساتذہ پورٹل' : 'Faculty & Teachers Hub',
+                          style: context.urduStyle(
+                            style: TextStyle(
+                              fontSize: isVeryNarrow ? 15.5 : 18,
+                              fontWeight: FontWeight.bold,
+                              color: textPrimary,
+                            ),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
+                        Text(
+                          context.isUrdu
+                              ? 'حاضری، نظام الاوقات اور اساتذہ کی تفصیلات'
+                              : 'Daily attendance, profiles, shifts & teaching details',
+                          style: TextStyle(fontSize: 11.5, color: textMuted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (isVeryNarrow)
+                    IconButton(
+                      tooltip: context.isUrdu ? 'نیا استاد درج کریں' : 'Register Teacher',
+                      icon: const Icon(Icons.person_add_rounded, color: Colors.white, size: 18),
+                      style: IconButton.styleFrom(
+                        backgroundColor: _emerald,
+                        padding: const EdgeInsets.all(10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: _openRegisterDialog,
+                    )
+                  else
+                    ElevatedButton.icon(
+                      onPressed: _openRegisterDialog,
+                      icon: const Icon(Icons.person_add_rounded, size: 16),
+                      label: Text(
+                        context.isUrdu ? 'نیا استاد درج کریں' : 'Register Teacher',
+                        style: context.urduStyle(style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _emerald,
+                        foregroundColor: Colors.white,
+                        elevation: 1,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       ),
                     ),
-                    Text(
-                      context.isUrdu
-                          ? 'حاضری، نظام الاوقات اور اساتذہ کی تفصیلات'
-                          : 'Daily attendance, profiles, shifts & teaching details',
-                      style: TextStyle(fontSize: 12, color: textMuted),
-                    ),
-                  ],
-                ),
-              ),
-              ElevatedButton.icon(
-                onPressed: _openRegisterDialog,
-                icon: const Icon(Icons.person_add_rounded, size: 16),
-                label: Text(
-                  context.isUrdu ? 'نیا استاد درج کریں' : 'Register Teacher',
-                  style: context.urduStyle(style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _emerald,
-                  foregroundColor: Colors.white,
-                  elevation: 1,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ],
+                ],
+              );
+            },
           ),
           const SizedBox(height: 12),
-          // Tab bar
+          // Tab bar (overflow-proof)
           TabBar(
             controller: _tabController,
             isScrollable: false,
+            labelPadding: const EdgeInsets.symmetric(horizontal: 4),
             labelColor: dark ? const Color(0xFF2DD4BF) : _emerald,
             unselectedLabelColor: textMuted,
             indicatorColor: dark ? const Color(0xFF2DD4BF) : _emerald,
             indicatorWeight: 3,
-            labelStyle: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            labelStyle: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5)),
             tabs: [
               Tab(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.checklist_rounded, size: 18),
-                    const SizedBox(width: 8),
-                    Text(context.isUrdu ? 'اساتذہ کی حاضری' : 'Daily Attendance'),
-                  ],
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.checklist_rounded, size: 17),
+                      const SizedBox(width: 6),
+                      Text(context.isUrdu ? 'اساتذہ کی حاضری' : 'Daily Attendance'),
+                    ],
+                  ),
                 ),
               ),
               Tab(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.badge_outlined, size: 18),
-                    const SizedBox(width: 8),
-                    Text('${context.isUrdu ? "اساتذہ کی تفصیلات" : "Teacher Directory"} (${teachers.length})'),
-                  ],
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.badge_outlined, size: 17),
+                      const SizedBox(width: 6),
+                      Text('${context.isUrdu ? "اساتذہ کی تفصیلات" : "Teacher Directory"} (${teachers.length})'),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -612,6 +1225,11 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                               'present')
                           .toString()
                           .toLowerCase();
+                      final leaveReason = (_localAttendanceChanges[id]?['leaveReason'] ??
+                              entries[id]?['leaveReason'] ??
+                              '')
+                          .toString()
+                          .trim();
 
                       return _buildAttendanceCard(
                         context,
@@ -623,6 +1241,8 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                         teacher: t,
                         teacherId: id,
                         status: currentStatus,
+                        leaveReason: leaveReason,
+                        allTeachers: teachers,
                       );
                     },
                   ),
@@ -719,6 +1339,20 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                 style: OutlinedButton.styleFrom(
                   foregroundColor: _presentColor,
                   side: const BorderSide(color: _presentColor),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _showMonthlyPresenceDialog(context, teachers: teachers),
+                icon: const Icon(Icons.file_download_outlined, size: 16),
+                label: Text(
+                  context.isUrdu ? 'ماہانہ رپورٹ' : 'Monthly Presence',
+                  style: context.urduStyle(style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF0284C7),
+                  side: const BorderSide(color: Color(0xFF0284C7)),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 ),
@@ -1029,6 +1663,8 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
     required Map<String, dynamic> teacher,
     required String teacherId,
     required String status,
+    required String leaveReason,
+    required List<Map<String, dynamic>> allTeachers,
   }) {
     // Extract Teacher Username as primary identifier, plus real name if distinct
     final username = _extractUsername(teacher);
@@ -1124,15 +1760,98 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
             ),
           );
 
-          // STRICT STATUS CHIPS: ONLY Present, Absent, or Leave
+          // STRICT STATUS CHIPS: ONLY Present, Absent, or Leave + Monthly download button
           final statusChips = Wrap(
             spacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _statusChoiceChip(teacherId, 'present', context.isUrdu ? 'حاضر' : 'Present', _presentColor, status),
-              _statusChoiceChip(teacherId, 'absent', context.isUrdu ? 'غیر حاضر' : 'Absent', _absentColor, status),
-              _statusChoiceChip(teacherId, 'leave', context.isUrdu ? 'رخصت' : 'Leave', _leaveColor, status),
+              _statusChoiceChip(teacherId, username, 'present', context.isUrdu ? 'حاضر' : 'Present', _presentColor, status, leaveReason),
+              _statusChoiceChip(teacherId, username, 'absent', context.isUrdu ? 'غیر حاضر' : 'Absent', _absentColor, status, leaveReason),
+              _statusChoiceChip(teacherId, username, 'leave', context.isUrdu ? 'رخصت' : 'Leave', _leaveColor, status, leaveReason),
+              IconButton(
+                tooltip: 'Download Monthly Presence (${DateFormat('MMMM yyyy').format(_selectedDate)})',
+                icon: const Icon(Icons.file_download_outlined, size: 20, color: Color(0xFF0284C7)),
+                padding: const EdgeInsets.all(6),
+                constraints: const BoxConstraints(),
+                onPressed: () => _showMonthlyPresenceDialog(context, teachers: allTeachers, preselectedTeacher: teacher),
+              ),
             ],
           );
+
+          // Dedicated Leave Reason Banner (Mandatory reason indicator)
+          Widget? leaveReasonBanner;
+          if (status == 'leave') {
+            leaveReasonBanner = Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: _leaveColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _leaveColor.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.event_busy_rounded, size: 16, color: _leaveColor),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          context.isUrdu ? 'رخصت کی وجہ (لازمی):' : 'Documented Leave Reason (Mandatory):',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.bold,
+                            color: dark ? const Color(0xFFFBBF24) : const Color(0xFFB45309),
+                          ),
+                        ),
+                        Text(
+                          leaveReason.isNotEmpty
+                              ? leaveReason
+                              : (context.isUrdu ? 'کوئی وجہ درج نہیں ہے (براہ کرم وجہ درج کریں)' : 'No reason recorded (Tap to enter)'),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: textPrimary,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  InkWell(
+                    onTap: () async {
+                      final newReason = await _promptLeaveReason(teacherName: username, initialReason: leaveReason);
+                      if (newReason != null && newReason.isNotEmpty && mounted) {
+                        setState(() {
+                          _localAttendanceChanges.putIfAbsent(teacherId, () => {});
+                          _localAttendanceChanges[teacherId]!['status'] = 'leave';
+                          _localAttendanceChanges[teacherId]!['leaveReason'] = newReason;
+                          _localAttendanceChanges[teacherId]!['markedAt'] = DateTime.now().toIso8601String();
+                        });
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.edit_note_rounded, size: 16, color: _leaveColor),
+                          const SizedBox(width: 2),
+                          Text(
+                            context.isUrdu ? 'ترمیم' : 'Edit',
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _leaveColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
 
           if (isNarrow) {
             return Column(
@@ -1145,19 +1864,26 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                     details,
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 Center(child: statusChips),
+                if (leaveReasonBanner != null) leaveReasonBanner,
               ],
             );
           }
 
-          return Row(
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              avatar,
-              const SizedBox(width: 12),
-              details,
-              const SizedBox(width: 12),
-              statusChips,
+              Row(
+                children: [
+                  avatar,
+                  const SizedBox(width: 12),
+                  details,
+                  const SizedBox(width: 12),
+                  statusChips,
+                ],
+              ),
+              if (leaveReasonBanner != null) leaveReasonBanner,
             ],
           );
         },
@@ -1167,10 +1893,12 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
 
   Widget _statusChoiceChip(
     String teacherId,
+    String teacherName,
     String statusKey,
     String label,
     Color color,
     String currentStatus,
+    String currentLeaveReason,
   ) {
     final isSelected = currentStatus.toLowerCase() == statusKey;
 
@@ -1192,11 +1920,29 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
           width: 1.2,
         ),
       ),
-      onSelected: (selected) {
+      onSelected: (selected) async {
         if (selected) {
+          if (statusKey == 'leave') {
+            final reason = await _promptLeaveReason(teacherName: teacherName, initialReason: currentLeaveReason);
+            if (reason == null || reason.trim().isEmpty) {
+              // Abort! Leave CANNOT be included without a reason!
+              return;
+            }
+            if (mounted) {
+              setState(() {
+                _localAttendanceChanges.putIfAbsent(teacherId, () => {});
+                _localAttendanceChanges[teacherId]!['status'] = 'leave';
+                _localAttendanceChanges[teacherId]!['leaveReason'] = reason.trim();
+                _localAttendanceChanges[teacherId]!['markedAt'] = DateTime.now().toIso8601String();
+              });
+            }
+            return;
+          }
+
           setState(() {
             _localAttendanceChanges.putIfAbsent(teacherId, () => {});
             _localAttendanceChanges[teacherId]!['status'] = statusKey;
+            _localAttendanceChanges[teacherId]!['leaveReason'] = '';
             _localAttendanceChanges[teacherId]!['markedAt'] = DateTime.now().toIso8601String();
           });
         }
@@ -1358,6 +2104,7 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                     textPrimary,
                     textMuted,
                     teacher: filtered[idx],
+                    allTeachers: teachers,
                   );
                 },
               ),
@@ -1375,6 +2122,7 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
     Color textPrimary,
     Color textMuted, {
     required Map<String, dynamic> teacher,
+    required List<Map<String, dynamic>> allTeachers,
   }) {
     final username = _extractUsername(teacher);
     final realName = _extractRealName(teacher, username);
@@ -1484,21 +2232,34 @@ class _MadrassaTeachersViewState extends State<MadrassaTeachersView>
                   ],
                 ),
               ),
-              // Action button to edit details
-              ElevatedButton.icon(
-                onPressed: () => _openEditTeacherDialog(teacher),
-                icon: const Icon(Icons.edit_rounded, size: 14),
-                label: Text(context.isUrdu ? 'ترمیم کریں' : 'Edit Details'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _emerald.withValues(alpha: 0.12),
-                  foregroundColor: _emerald,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    side: BorderSide(color: _emerald.withValues(alpha: 0.25)),
+              // Action buttons: Monthly presence & edit details
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Download Monthly Presence',
+                    icon: const Icon(Icons.file_download_outlined, size: 20, color: Color(0xFF0284C7)),
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    onPressed: () => _showMonthlyPresenceDialog(context, teachers: allTeachers, preselectedTeacher: teacher),
                   ),
-                ),
+                  const SizedBox(width: 4),
+                  ElevatedButton.icon(
+                    onPressed: () => _openEditTeacherDialog(teacher),
+                    icon: const Icon(Icons.edit_rounded, size: 14),
+                    label: Text(context.isUrdu ? 'ترمیم کریں' : 'Edit Details'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _emerald.withValues(alpha: 0.12),
+                      foregroundColor: _emerald,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        side: BorderSide(color: _emerald.withValues(alpha: 0.25)),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

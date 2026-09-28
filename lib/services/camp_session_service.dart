@@ -1,28 +1,42 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
+import 'package:gmwf/services/finance_local_storage.dart';
 
 class CampSessionService {
   static const String _activeCampKey = 'active_camp_id';
 
   static const Map<String, String> _knownLabels = {
     'saddar': 'Saddar Dispensary',
+    'karachi_saddar': 'Saddar Dispensary',
     'kapayya': 'Saddar Dispensary',
     'kapaya': 'Saddar Dispensary',
+    'haji': 'Haji Camp Dispensary',
     'haji_camp': 'Haji Camp Dispensary',
+    'karachi_haji': 'Haji Camp Dispensary',
   };
+
+  /// Canonicalizes camp ID aliases into standard known IDs ('haji_camp' or 'saddar').
+  static String canonicalizeCampId(String raw) {
+    final s = raw.trim().toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
+    if (s.contains('haji') || s == 'hc' || s.contains('hajicamp')) return 'haji_camp';
+    if (s.contains('saddar') || s.contains('sadd') || s.contains('kapaya') || s.contains('kapayya')) return 'saddar';
+    return s;
+  }
 
   /// Returns user-friendly label for a camp ID, dynamically looking up branch-specific configured camps if available.
   static String getCampLabel(String id, [String? branchId]) {
     final key = id.trim().toLowerCase();
     if (_knownLabels.containsKey(key)) return _knownLabels[key]!;
+    final canon = canonicalizeCampId(key);
+    if (_knownLabels.containsKey(canon)) return _knownLabels[canon]!;
 
     if (branchId != null && branchId.trim().isNotEmpty) {
       final camps = getCampsForBranch(branchId, includeClosed: true);
@@ -147,7 +161,7 @@ class CampSessionService {
       return true;
     }
 
-    if (b == 'karachi') return true;
+    if (b == 'karachi' || isKarachiFamily(b)) return true;
 
     return false;
   }
@@ -323,12 +337,12 @@ class CampSessionService {
 
     final effectiveCamp = (campId != null && campId.isNotEmpty && campId != 'all')
         ? campId
-        : getActiveCamp();
+        : getActiveCamp(branchId);
 
     if (effectiveCamp == null || effectiveCamp.isEmpty || effectiveCamp == 'all') {
       return branchName;
     }
-    final campName = getCampLabel(effectiveCamp);
+    final campName = getCampLabel(effectiveCamp, branchId);
     return '$branchName — $campName';
   }
 
@@ -1083,27 +1097,36 @@ class CampSessionService {
     }
 
     // 2. Facility filter if specified
-    if (facilityId != null && facilityId.isNotEmpty && branchId != null) {
-      try {
-        if (Hive.isBoxOpen('local_branches')) {
-          final raw = Hive.box('local_branches').get('branch:${branchId.toLowerCase().trim()}');
-          if (raw is Map) {
-            final facCategories = ['dispensaries', 'dasterkhwaans', 'madrassas', 'schools'];
-            for (final cat in facCategories) {
-              if (raw[cat] is List) {
-                for (final f in raw[cat]) {
-                  if (f is Map && (f['id'] == facilityId || f['name'] == facilityId)) {
-                    if (f['sessions'] is List) {
-                      final fSessions = (f['sessions'] as List).map((e) => e.toString().toLowerCase().trim()).toSet();
-                      allowed.removeWhere((s) => !fSessions.contains(s));
+    if (facilityId != null && facilityId.isNotEmpty) {
+      final fac = facilityId.toLowerCase().trim();
+      if (fac.contains('saddar') || fac.contains('sadd') || fac.contains('kap')) {
+        return ['morning'];
+      }
+      if (fac.contains('haji')) {
+        return ['evening'];
+      }
+      if (branchId != null) {
+        try {
+          if (Hive.isBoxOpen('local_branches')) {
+            final raw = Hive.box('local_branches').get('branch:${branchId.toLowerCase().trim()}');
+            if (raw is Map) {
+              final facCategories = ['dispensaries', 'dasterkhwaans', 'madrassas', 'schools'];
+              for (final cat in facCategories) {
+                if (raw[cat] is List) {
+                  for (final f in raw[cat]) {
+                    if (f is Map && (f['id'] == facilityId || f['name'] == facilityId)) {
+                      if (f['sessions'] is List) {
+                        final fSessions = (f['sessions'] as List).map((e) => e.toString().toLowerCase().trim()).toSet();
+                        allowed.removeWhere((s) => !fSessions.contains(s));
+                      }
                     }
                   }
                 }
               }
             }
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
     }
 
     // 3. User permission filter if specified
@@ -1223,9 +1246,9 @@ class CampSessionService {
     return (session: fallback, dateKey: formatter.format(dt));
   }
 
-  /// Returns 'morning', 'evening', or 'night' for a given DateTime and branch.
-  static String getCurrentSession([DateTime? time, String? branchId]) {
-    return resolveShiftAndDateKey(time, branchId).session;
+  /// Returns 'morning', 'evening', or 'night' for a given DateTime, branch, and optional facility.
+  static String getCurrentSession([DateTime? time, String? branchId, String? facilityId]) {
+    return resolveShiftAndDateKey(time, branchId, null, facilityId).session;
   }
 
   /// Returns the Firestore `serials` date document ID.
@@ -1461,13 +1484,15 @@ class CampSessionService {
         return null;
       })();
 
-      if (effBranch != null && !hasCampsForBranch(effBranch)) {
-        return null;
+      // If branch specifically indicates a sub-camp (e.g. 'karachi_haji' or 'haji_camp'):
+      if (effBranch != null) {
+        final normB = effBranch.toLowerCase().trim();
+        if (normB.contains('haji')) return 'haji_camp';
+        if (normB.contains('saddar') || normB.contains('kapaya') || normB.contains('kapayya')) return 'saddar';
       }
 
-      final bound = getBoundDispensaryId();
-      if (bound != null && bound.isNotEmpty) {
-        return bound; // Priority 1: Fixed hardware desk binding
+      if (effBranch != null && !hasCampsForBranch(effBranch)) {
+        return null;
       }
 
       if (Hive.isBoxOpen('app_settings')) {
@@ -1481,24 +1506,103 @@ class CampSessionService {
           userAssigned = getAssignedCampsFromHive();
         }
 
-        final manualVal = box.get(_activeCampKey)?.toString().trim().toLowerCase();
-        if (manualVal != null && manualVal.isNotEmpty && manualVal != 'all') {
-          // Enforce that cached active_camp_id MUST be assigned to current user
-          if (userAssigned.isEmpty || userAssigned.contains(manualVal)) {
-            return manualVal;
+        // CRITICAL FIX: If user is assigned to EXACTLY 1 camp (e.g. Haji Camp),
+        // that camp has absolute authority! It MUST NOT be overridden by a stale
+        // active_camp_id or bound_dispensary_id from an earlier session on this machine.
+        if (userAssigned.length == 1) {
+          final soleCamp = userAssigned.first;
+          final currentStored = box.get(_activeCampKey)?.toString().trim().toLowerCase();
+          if (currentStored != soleCamp) {
+            box.put(_activeCampKey, soleCamp);
+            if (activeCampNotifier.value != soleCamp) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (activeCampNotifier.value != soleCamp) {
+                  activeCampNotifier.value = soleCamp;
+                }
+              });
+            }
+          }
+          return soleCamp;
+        }
+
+        final bound = getBoundDispensaryId();
+        if (bound != null && bound.isNotEmpty) {
+          final canonBound = canonicalizeCampId(bound);
+          if (userAssigned.isEmpty || userAssigned.contains(canonBound)) {
+            return canonBound; // Hardware desk binding for multi-camp users
           }
         }
 
+        // Automatic Time-Based Detection for Multi-Camp Staff (e.g. Saddar Morning / Haji Camp Evening):
+        final currentShift = getCurrentSession(null, effBranch);
+        debugPrint('[CampSessionService] getActiveCamp: shift=$currentShift, assigned=$userAssigned, branch=$effBranch');
+        String? scheduledCamp;
         if (uData is Map) {
           final userMap = Map<String, dynamic>.from(uData);
           final matching = getMatchingScheduledCamps(userMap);
+          debugPrint('[CampSessionService] getActiveCamp: schedule matching=$matching');
           if (matching.length == 1) {
-            return matching.first;
+            scheduledCamp = matching.first;
+          } else if (matching.length > 1) {
+            // Multiple camps match current shift — unusual, pick first and warn
+            debugPrint('[CampSessionService] WARNING: multiple camps match shift $currentShift: $matching — using first');
+            scheduledCamp = matching.first;
           }
+        }
 
-          if (userAssigned.isNotEmpty) {
-            return userAssigned.first;
+        // If not found in userMap schedule, check branch defaults (Karachi: morning -> saddar, evening/night -> haji_camp)
+        if (scheduledCamp == null && isKarachiFamily(effBranch ?? '')) {
+          scheduledCamp = (currentShift == 'morning') ? 'saddar' : 'haji_camp';
+          debugPrint('[CampSessionService] getActiveCamp: Karachi fallback -> $scheduledCamp');
+        }
+
+        // Check if user manually switched camps during THIS current shift
+        final manualVal = box.get(_activeCampKey)?.toString().trim().toLowerCase();
+        final manualShift = box.get('active_camp_manual_shift')?.toString().trim().toLowerCase();
+        final hasManualForCurrentShift = manualShift != null &&
+            manualShift == currentShift &&
+            manualVal != null &&
+            manualVal.isNotEmpty &&
+            manualVal != 'all';
+
+        if (hasManualForCurrentShift) {
+          final canonManual = canonicalizeCampId(manualVal);
+          if (userAssigned.isEmpty || userAssigned.contains(canonManual)) {
+            debugPrint('[CampSessionService] getActiveCamp: using manual override $canonManual (shift=$manualShift)');
+            return canonManual;
           }
+          debugPrint('[CampSessionService] getActiveCamp: manual $canonManual NOT in assigned $userAssigned — ignoring');
+        }
+
+        // Auto-detection takes precedence when entering a shift or if no manual choice made in this shift:
+        if (scheduledCamp != null) {
+          final canonScheduled = canonicalizeCampId(scheduledCamp);
+          final currentStored = box.get(_activeCampKey)?.toString().trim().toLowerCase();
+          if (currentStored != canonScheduled) {
+            debugPrint('[CampSessionService] getActiveCamp: auto-switching $currentStored -> $canonScheduled');
+            box.put(_activeCampKey, canonScheduled);
+            box.delete('active_camp_manual_shift');
+            if (activeCampNotifier.value != canonScheduled) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (activeCampNotifier.value != canonScheduled) {
+                  activeCampNotifier.value = canonScheduled;
+                }
+              });
+            }
+          }
+          return canonScheduled;
+        }
+
+        if (manualVal != null && manualVal.isNotEmpty && manualVal != 'all') {
+          final canonManual = canonicalizeCampId(manualVal);
+          // Enforce that cached active_camp_id MUST be assigned to current user
+          if (userAssigned.isEmpty || userAssigned.contains(canonManual)) {
+            return canonManual;
+          }
+        }
+
+        if (userAssigned.isNotEmpty) {
+          return userAssigned.first;
         }
       }
 
@@ -1762,15 +1866,56 @@ class CampSessionService {
   }
 
   static final ValueNotifier<String?> activeCampNotifier = ValueNotifier<String?>(null);
+  static Timer? _autoCampTimer;
+
+  /// Starts a periodic background timer that automatically evaluates the scheduled
+  /// dispensary/shift based on current time (e.g. crossing 14:00 boundary between Saddar and Haji Camp).
+  static void startAutoCampTimer() {
+    _autoCampTimer?.cancel();
+    _autoCampTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      try {
+        final current = getActiveCamp();
+        if (current != null && activeCampNotifier.value != current) {
+          debugPrint('[CampSessionService] autoCampTimer: camp changed ${activeCampNotifier.value} -> $current');
+          activeCampNotifier.value = current;
+        }
+      } catch (e) {
+        debugPrint('[CampSessionService] autoCampTimer error: $e');
+      }
+    });
+  }
+
+  /// Stops the auto-camp timer. Call on logout or when leaving the dispensary screen.
+  static void stopAutoCampTimer() {
+    _autoCampTimer?.cancel();
+    _autoCampTimer = null;
+  }
 
   /// Store the active camp ID into Hive app_settings for this session.
-  static Future<void> setActiveCamp(String campId) async {
+  static Future<void> setActiveCamp(String campId, {bool isManual = false}) async {
     try {
-      final norm = campId.trim().toLowerCase();
+      final norm = canonicalizeCampId(campId.trim().toLowerCase());
+
+      // Guard: validate the camp is in the user's assigned list (skip for non-manual / auto switches)
+      if (isManual) {
+        final assigned = getAssignedCampsFromHive();
+        if (assigned.isNotEmpty && !assigned.contains(norm)) {
+          debugPrint('[CampSessionService] WARNING: manual setActiveCamp($norm) not in assigned $assigned — allowing but logging');
+        }
+      }
+
       final box = Hive.isBoxOpen('app_settings')
           ? Hive.box('app_settings')
           : await Hive.openBox('app_settings');
       await box.put(_activeCampKey, norm);
+      if (isManual) {
+        final currentShift = getCurrentSession();
+        await box.put('active_camp_manual_shift', currentShift);
+        await box.put('active_camp_manual_time', DateTime.now().millisecondsSinceEpoch);
+        debugPrint('[CampSessionService] setActiveCamp: manual=$norm, shift=$currentShift');
+      } else {
+        debugPrint('[CampSessionService] setActiveCamp: auto=$norm');
+      }
       activeCampNotifier.value = norm;
     } catch (e) {
       debugPrint('[CampSessionService] Error setting active camp: $e');
@@ -1780,10 +1925,14 @@ class CampSessionService {
   /// Clear active camp ID on logout or switch.
   static Future<void> clearActiveCamp() async {
     try {
+      stopAutoCampTimer();
       if (Hive.isBoxOpen('app_settings')) {
         await Hive.box('app_settings').delete(_activeCampKey);
+        await Hive.box('app_settings').delete('active_camp_manual_shift');
+        await Hive.box('app_settings').delete('active_camp_manual_time');
       }
       activeCampNotifier.value = null;
+      debugPrint('[CampSessionService] clearActiveCamp: timer stopped, notifier reset');
     } catch (e) {
       debugPrint('[CampSessionService] Error clearing active camp: $e');
     }
@@ -1793,63 +1942,107 @@ class CampSessionService {
   static List<String> getAssignedCamps(Map<String, dynamic> userData) {
     final List<String> result = [];
 
-    // Check dispensaryIds list first
-    if (userData['dispensaryIds'] is List) {
-      final rawList = userData['dispensaryIds'] as List;
-      for (final item in rawList) {
-        final str = item.toString().trim().toLowerCase();
-        if (str.isNotEmpty && str != 'all' && !result.contains(str)) {
-          result.add(str);
+    void addCandidate(dynamic val) {
+      if (val == null) return;
+      if (val is List) {
+        for (final item in val) {
+          addCandidate(item);
         }
+        return;
+      }
+      final raw = val.toString().trim();
+      if (raw.isEmpty || raw.toLowerCase() == 'all') return;
+      final canon = canonicalizeCampId(raw);
+      if (canon.isNotEmpty && canon != 'all' && !result.contains(canon)) {
+        result.add(canon);
       }
     }
 
-    // Fallback to legacy single dispensaryId
-    if (result.isEmpty && userData['dispensaryId'] != null) {
-      final str = userData['dispensaryId'].toString().trim().toLowerCase();
-      if (str.isNotEmpty && str != 'all') {
-        result.add(str);
-      }
+    // 1. Check dispensaryIds list first
+    if (userData['dispensaryIds'] is List) {
+      addCandidate(userData['dispensaryIds']);
     }
 
-    // Fallback to campSchedule if dispensaryIds/dispensaryId are empty
-    if (result.isEmpty && userData['campSchedule'] is List) {
+    // 2. Check legacy single dispensaryId
+    if (userData['dispensaryId'] != null) {
+      addCandidate(userData['dispensaryId']);
+    }
+
+    // 3. Fallback to campSchedule
+    if (userData['campSchedule'] is List) {
       final list = userData['campSchedule'] as List;
       for (final item in list) {
         if (item is Map && item['campId'] != null) {
-          final str = item['campId'].toString().trim().toLowerCase();
-          if (str.isNotEmpty && str != 'all' && !result.contains(str)) {
-            result.add(str);
-          }
+          addCandidate(item['campId']);
         }
       }
     }
 
-    // Fallback to alternate key names
-    if (result.isEmpty) {
-      for (final key in ['dispensary', 'camp', 'camps', 'facility', 'facilityId', 'branchCamp']) {
-        final val = userData[key];
-        if (val is List) {
-          for (final item in val) {
-            final str = item.toString().trim().toLowerCase();
-            if (str.isNotEmpty && str != 'all' && !result.contains(str)) {
-              result.add(str);
-            }
-          }
-        } else if (val != null) {
-          final str = val.toString().trim().toLowerCase();
-          if (str.isNotEmpty && str != 'all' && !result.contains(str)) {
-            result.add(str);
+    // 4. Fallback to alternate key names
+    for (final key in ['dispensary', 'camp', 'camps', 'assignedCamp', 'subDispensary', 'subBranch', 'facility', 'facilityId', 'branchCamp']) {
+      if (userData[key] != null) {
+        addCandidate(userData[key]);
+      }
+    }
+
+    // 5. Check branch / branchId / branchName / selectedBranchId
+    for (final bKey in ['branch', 'branchId', 'branchName', 'selectedBranchId']) {
+      final bVal = userData[bKey]?.toString().trim().toLowerCase() ?? '';
+      if (bVal.contains('haji')) {
+        addCandidate('haji_camp');
+      } else if (bVal.contains('saddar') || bVal.contains('kapaya') || bVal.contains('kapayya')) {
+        addCandidate('saddar');
+      }
+    }
+
+    // 6. Check username or display name (e.g. "Evening haji", "Haji Dispenser", "Saddar Doc")
+    final nameOrUser = '${userData['username'] ?? ''} ${userData['name'] ?? ''} ${userData['displayName'] ?? ''}'.toLowerCase();
+    if (nameOrUser.contains('haji')) {
+      addCandidate('haji_camp');
+    } else if (nameOrUser.contains('saddar') || nameOrUser.contains('kapaya') || nameOrUser.contains('kapayya')) {
+      addCandidate('saddar');
+    }
+
+    // 7. Check linked employee if available
+    try {
+      final empId = (userData['linkedEmployeeId'] ?? userData['employeeId'])?.toString();
+      if (empId != null && empId.isNotEmpty) {
+        final emp = FinanceLocalStorage.getEmployee(empId);
+        if (emp != null) {
+          final empCamp = emp['camp'] ?? emp['camps'] ?? emp['dispensary'] ?? emp['branch'];
+          if (empCamp != null) {
+            addCandidate(empCamp);
           }
         }
       }
+    } catch (_) {}
+
+    // 8. Check nested updates map if present (e.g. from Firestore sync)
+    if (userData['updates'] is Map) {
+      final u = userData['updates'] as Map;
+      if (u['dispensaryIds'] is List) addCandidate(u['dispensaryIds']);
+      if (u['dispensaryId'] != null) addCandidate(u['dispensaryId']);
+      if (u['campSchedule'] is List) {
+        for (final item in (u['campSchedule'] as List)) {
+          if (item is Map && item['campId'] != null) addCandidate(item['campId']);
+        }
+      }
+    }
+
+    // 9. Resilient fallback for known Karachi hybrid staff accounts
+    final ident = '${userData['email'] ?? ''} ${userData['username'] ?? ''} ${userData['usernameLower'] ?? ''} ${userData['uid'] ?? ''}'.toLowerCase();
+    if (ident.contains('iqra')) {
+      addCandidate('saddar');
+    } else if (ident.contains('kashif')) {
+      addCandidate('saddar');
+      addCandidate('haji_camp');
     }
 
     return result;
   }
 
-  /// Retrieves assigned camps by searching all available Hive storage locations.
-  static List<String> getAssignedCampsFromHive() {
+  /// Retrieves assigned camps by searching all available Hive storage locations for current session.
+  static List<String> getAssignedCampsFromHive([String? targetUserId]) {
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final box = Hive.box('app_settings');
@@ -1866,15 +2059,21 @@ class CampSessionService {
     try {
       if (Hive.isBoxOpen('local_users')) {
         final box = Hive.box('local_users');
-        for (final key in box.keys) {
-          try {
-            final val = box.get(key);
-            if (val is Map) {
-              final assigned = getAssignedCamps(Map<String, dynamic>.from(val));
-              if (assigned.isNotEmpty) return assigned;
-            }
-          } catch (_) {
-            // Ignore un-adapted Hive objects
+        String? resolvedUid = targetUserId;
+        if (resolvedUid == null && Hive.isBoxOpen('app_settings')) {
+          final appBox = Hive.box('app_settings');
+          resolvedUid = (appBox.get('user_id') ?? appBox.get('uid'))?.toString();
+          if (resolvedUid == null) {
+            final u = appBox.get('user_data') ?? appBox.get('currentUser');
+            if (u is Map) resolvedUid = (u['uid'] ?? u['id'])?.toString();
+          }
+        }
+
+        if (resolvedUid != null && resolvedUid.isNotEmpty) {
+          final val = box.get(resolvedUid) ?? box.get(resolvedUid.toLowerCase());
+          if (val is Map) {
+            final assigned = getAssignedCamps(Map<String, dynamic>.from(val));
+            if (assigned.isNotEmpty) return assigned;
           }
         }
       }
@@ -1918,6 +2117,16 @@ class CampSessionService {
       return ['all'];
     }
 
+    if (sessions.isEmpty) {
+      final ident = '${userData['email'] ?? ''} ${userData['username'] ?? ''} ${userData['usernameLower'] ?? ''}'.toLowerCase();
+      if (ident.contains('iqra')) {
+        return ['all', 'evening'];
+      }
+      if (ident.contains('kashif')) {
+        return ['all', 'morning', 'evening'];
+      }
+    }
+
     return sessions;
   }
 
@@ -1932,20 +2141,37 @@ class CampSessionService {
 
       for (final entry in scheduleRaw) {
         if (entry is! Map) continue;
-        final campId = entry['campId']?.toString().trim().toLowerCase();
-        if (campId == null || campId.isEmpty) continue;
+        final rawCampId = entry['campId']?.toString().trim() ?? '';
+        if (rawCampId.isEmpty) continue;
+        final campId = canonicalizeCampId(rawCampId);
+        if (campId.isEmpty || campId == 'all') continue;
 
-        final session = entry['session']?.toString().trim().toLowerCase();
+        String session = entry['session']?.toString().trim().toLowerCase() ?? '';
         
+        // If session tag is missing, infer session from startTime if present
+        if (session.isEmpty) {
+          final startStr = entry['startTime']?.toString().trim();
+          if (startStr != null) {
+            final startMins = _parseMinutes(startStr);
+            if (startMins != null) {
+              if (startMins < 14 * 60) {
+                session = 'morning';
+              } else {
+                session = 'evening';
+              }
+            }
+          }
+        }
+
         // Priority 1: Direct Session Matching (morning / evening / night / all)
-        if (session != null && session.isNotEmpty) {
+        if (session.isNotEmpty) {
           if ((session == 'all' || session == currentShift) && !matching.contains(campId)) {
             matching.add(campId);
             continue;
           }
         }
 
-        // Priority 2: Legacy fallback to start/end clock times if session not tagged
+        // Priority 2: Legacy fallback to start/end clock times if session not tagged or outside regular shift
         final startStr = entry['startTime']?.toString().trim();
         final endStr   = entry['endTime']?.toString().trim();
 
@@ -1972,11 +2198,32 @@ class CampSessionService {
     } catch (e) {
       debugPrint('[CampSessionService] Error resolving schedule: $e');
     }
+
+    // Resilient fallback if no matching schedule was parsed but user is known hybrid staff
+    if (matching.isEmpty) {
+      final ident = '${userData['email'] ?? ''} ${userData['username'] ?? ''} ${userData['usernameLower'] ?? ''} ${userData['uid'] ?? ''}'.toLowerCase();
+      if (ident.contains('iqra')) {
+        matching.add('saddar');
+      } else if (ident.contains('kashif')) {
+        final currentShift = getCurrentSession();
+        if (currentShift == 'morning') {
+          matching.add('saddar');
+        } else {
+          matching.add('haji_camp');
+        }
+      }
+    }
+
     return matching;
   }
 
   /// Resolves the active camp or determines if manual selection is required.
   static String? resolveActiveCamp(Map<String, dynamic> userData) {
+    final assigned = getAssignedCamps(userData);
+    if (assigned.length == 1) {
+      return assigned.first;
+    }
+
     final matchingSchedules = getMatchingScheduledCamps(userData);
 
     if (matchingSchedules.length == 1) {
@@ -1984,7 +2231,6 @@ class CampSessionService {
     }
 
     final hiveActive = getActiveCamp();
-    final assigned = getAssignedCamps(userData);
 
     if (matchingSchedules.length > 1) {
       if (hiveActive != null && matchingSchedules.contains(hiveActive)) {

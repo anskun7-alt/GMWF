@@ -22,7 +22,6 @@ import '../services/cloud_messaging_service.dart';
 import '../services/offline_auth_service.dart' as offline_auth;
 import '../models/patient.dart';
 import '../models/token.dart';
-import '../services/finance_local_storage.dart';
 
 import '../services/camp_session_service.dart';
 import '../widgets/camp_selection_dialog.dart';
@@ -140,16 +139,31 @@ class _HomeRouterState extends State<HomeRouter> {
     super.dispose();
   }
 
-  /// Returns true if the given status string represents a revoked account.
+  /// Returns true if the given status string represents a revoked or deleted account.
   static bool _isStatusRevoked(String status, Map<String, dynamic>? data) {
-    return status == 'inactive' ||
-        status == 'suspended' ||
-        status == 'terminated' ||
-        status == 'resigned' ||
-        status == 'retired' ||
-        status == 'offboarded' ||
-        status == 'revoked' ||
-        (data != null && data['isActive'] == false);
+    final s = status.toLowerCase().trim();
+    if (s == 'deleted' ||
+        s == 'inactive' ||
+        s == 'suspended' ||
+        s == 'terminated' ||
+        s == 'resigned' ||
+        s == 'retired' ||
+        s == 'offboarded' ||
+        s == 'revoked' ||
+        s == 'corrupted') {
+      return true;
+    }
+    if (data != null) {
+      if (data['isDeleted'] == true ||
+          data['isRevoked'] == true ||
+          data['accessRevoked'] == true ||
+          data['isCorruptedOrOrphanAuth'] == true ||
+          data['isActive'] == false ||
+          data['deletedAt'] != null) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Start listening to local Hive storage and LAN RealtimeManager for revocation events (zero Firestore snapshots).
@@ -371,8 +385,17 @@ class _HomeRouterState extends State<HomeRouter> {
     if (rawRole == 'dispensar' || rawRole == 'pharmacist' || rawRole == 'chemist' || rawRole == 'pharmacy') return 'dispenser';
     if (rawRole == 'reception' || rawRole == 'front desk' || rawRole == 'receptionist') return 'receptionist';
     if (rawRole == 'doc' || rawRole == 'dr' || rawRole == 'medical officer' || rawRole == 'mo') return 'doctor';
-    if (rawRole == 'rec + dispenser' || rawRole == 'rec_dis' || rawRole == 'receptionist+dispenser' || rawRole == 'dispenser+receptionist') return 'rec+dis';
     if (rawRole == 'hqmanager' || rawRole == 'hq_manager' || rawRole == 'hq' || rawRole == 'general manager' || rawRole == 'gm') return 'hq manager';
+    if (rawRole == 'guardian' ||
+        rawRole == 'parent' ||
+        rawRole == 'madrassa parent' ||
+        rawRole == 'madrassa guardian' ||
+        rawRole == 'school guardian' ||
+        rawRole == 'school parent' ||
+        rawRole.contains('guardian') ||
+        rawRole.contains('parent')) {
+      return 'madrassa guardian';
+    }
     if (rawRole == 'madrassa principal' || rawRole == 'madrassa admin' || rawRole == 'madrassa_principal' || rawRole == 'madrassa_admin' || rawRole == 'qari') return 'madrassa admin';
     if (rawRole == 'principal' ||
         rawRole == 'school principal' ||
@@ -397,29 +420,29 @@ class _HomeRouterState extends State<HomeRouter> {
     if (rawRole == 'store' || rawRole == 'storekeeper' || rawRole == 'store incharge') return 'inventory';
     if (rawRole == 'server' || rawRole == 'server core') return 'server';
 
-    // 6. If still unassigned or generic, map by branch type or fallback safely to 'admin'
+    // 6. If still unassigned or generic, map by branch type or fallback safely to 'unassigned' (NEVER admin!)
     if (rawRole.isEmpty || rawRole == 'unknown' || rawRole == 'user' || rawRole == 'staff' || rawRole == 'employee' || rawRole == 'standard' || rawRole == 'unassigned') {
       final bType = (data['branchType'] ?? data['branchId'] ?? '').toString().toLowerCase();
       if (bType.contains('school')) return 'school teacher';
       if (bType.contains('madrassa')) return 'madrassa teacher';
       if (bType.contains('dispensary') || bType.contains('clinic')) return 'receptionist';
-      return 'admin';
+      return 'unassigned';
     }
 
     return rawRole;
   }
 
   Future<Map<String, dynamic>?> _fetchUserData() async {
+    // 1. Fast path: If widget.localUser is provided with a valid role, use it IMMEDIATELY (<1ms)
     if (widget.localUser != null && widget.localUser!.isNotEmpty) {
       final passedRole = resolveRoleFromData(widget.localUser!);
       if (passedRole.isNotEmpty && passedRole != 'unknown') {
-        debugPrint("HomeRouter: Using passed localUser data (resolved role: $passedRole)");
+        debugPrint("HomeRouter: ⚡ Fast authentic role resolution from widget.localUser (role: $passedRole)");
         final effectiveUser = Map<String, dynamic>.from(widget.localUser!);
         effectiveUser['role'] = passedRole;
         await _cacheUserDataLocally(effectiveUser);
         return effectiveUser;
       }
-      debugPrint("HomeRouter: Passed localUser has unassigned role — querying authoritative sources");
     }
 
     final currentUser = widget.user;
@@ -431,6 +454,38 @@ class _HomeRouterState extends State<HomeRouter> {
     if (currentUser == null && uid.isEmpty && emailLower.isEmpty && usernameHint.isEmpty) {
       debugPrint("HomeRouter: No active user session -> routing to login page");
       return null;
+    }
+
+    // Normalization helper for resilient fuzzy matching (ignoring spaces, underscores, dashes)
+    String norm(dynamic s) => (s ?? '')
+        .toString()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+    final normUid = norm(uid);
+    final normEmail = norm(emailLower);
+    final normPrefix = norm(emailPrefix);
+    final normUsername = norm(usernameHint);
+
+    bool matchesIdentity(Map<String, dynamic> candidate) {
+      final cUid = norm(candidate['uid'] ?? candidate['id']);
+      final cEmail = norm(candidate['email']);
+      final cUser = norm(candidate['username'] ?? candidate['userName'] ?? candidate['usernameLower']);
+      final cName = norm(candidate['name']);
+
+      if (normUid.isNotEmpty && cUid.isNotEmpty && (cUid == normUid || normUid.contains(cUid) || cUid.contains(normUid))) return true;
+      if (normEmail.isNotEmpty && cEmail.isNotEmpty && (cEmail == normEmail || normEmail.contains(cEmail) || cEmail.contains(normEmail))) return true;
+      if (normPrefix.isNotEmpty && cUser.isNotEmpty && (cUser == normPrefix || normPrefix.contains(cUser) || cUser.contains(normPrefix))) return true;
+      if (normUsername.isNotEmpty && cUser.isNotEmpty && (cUser == normUsername || normUsername.contains(cUser) || cUser.contains(normUsername))) return true;
+      if (normPrefix.isNotEmpty && cName.isNotEmpty && (cName == normPrefix || normPrefix.contains(cName) || cName.contains(normPrefix))) return true;
+      if (normUsername.isNotEmpty && cName.isNotEmpty && (cName == normUsername || normUsername.contains(cName) || cName.contains(normUsername))) return true;
+
+      final rawCandEmail = (candidate['email'] ?? '').toString().toLowerCase();
+      if (rawCandEmail.contains('@')) {
+        final cPrefix = norm(rawCandEmail.split('@').first);
+        if (cPrefix.isNotEmpty && (cPrefix == normPrefix || cPrefix == normUsername)) return true;
+      }
+      return false;
     }
 
     // Fast check for system accounts (online or offline)
@@ -476,8 +531,74 @@ class _HomeRouterState extends State<HomeRouter> {
       return data;
     }
 
-    // ── Fast Local Storage Pre-Check ───────────────────────────────────────────
-    // If local storage already has a definitive profile with a valid role, use it immediately
+    // 2. Fast check from Hive app_settings cache (<1ms)
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        final cached = box.get('user_data') ?? box.get('currentUser');
+        if (cached is Map) {
+          final m = Map<String, dynamic>.from(cached);
+          final r = resolveRoleFromData(m);
+          if (r.isNotEmpty && r != 'unknown') {
+            final isMatch = matchesIdentity(m) ||
+                (currentUser == null && uid.isEmpty) ||
+                (normUid.isNotEmpty && norm(m['uid']).isEmpty && norm(m['email']).isEmpty);
+            if (isMatch) {
+              m['role'] = r;
+              debugPrint("HomeRouter: ⚡ Fast authentic role resolution from app_settings (role=$r)");
+              return m;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3. Fast check from Hive local_users cache scan (<1ms)
+    try {
+      if (Hive.isBoxOpen('local_users')) {
+        final box = Hive.box('local_users');
+        for (final val in box.values) {
+          if (val is Map) {
+            final u = Map<String, dynamic>.from(val);
+            final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
+            if (u['isDeleted'] == true || status == 'deleted' || status == 'revoked') continue;
+            if (matchesIdentity(u)) {
+              final r = resolveRoleFromData(u);
+              if (r.isNotEmpty && r != 'unknown') {
+                u['role'] = r;
+                u['uid'] = uid.isNotEmpty ? uid : (u['uid'] ?? u['id'] ?? 'user');
+                u['email'] = currentUser?.email ?? emailLower;
+                debugPrint("HomeRouter: ⚡ Fast authentic role resolution from local_users scan (role=$r)");
+                await _cacheUserDataLocally(u);
+                final bId = u['branchId']?.toString();
+                if (bId != null && bId.isNotEmpty) {
+                  unawaited(LocalStorageService.downloadUsers(bId));
+                }
+                return u;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("HomeRouter: local_users scan notice: $e");
+    }
+
+    // 4. Fast check from OfflineAuthService & LocalStorageService lookups
+    try {
+      final cachedOffline = await offline_auth.OfflineAuthService.getCachedUserData(
+        usernameOrEmail: emailLower.isNotEmpty ? emailLower : (emailPrefix.isNotEmpty ? emailPrefix : uid),
+      );
+      if (cachedOffline != null && cachedOffline.isNotEmpty) {
+        final r = resolveRoleFromData(cachedOffline);
+        if (r.isNotEmpty && r != 'unknown') {
+          cachedOffline['role'] = r;
+          debugPrint("HomeRouter: ⚡ Fast resolution from OfflineAuthService (role=$r)");
+          return cachedOffline;
+        }
+      }
+    } catch (_) {}
+
     try {
       final localUserPre = (uid.isNotEmpty ? LocalStorageService.getLocalUserByUid(uid) : null) ??
           (emailLower.isNotEmpty ? LocalStorageService.getLocalUserByEmail(emailLower) : null) ??
@@ -486,7 +607,7 @@ class _HomeRouterState extends State<HomeRouter> {
       if (localUserPre != null) {
         final r = resolveRoleFromData(localUserPre);
         if (r.isNotEmpty && r != 'unknown') {
-          debugPrint("HomeRouter: ⚡ Fast authentic role resolution from local storage (role=$r)");
+          debugPrint("HomeRouter: ⚡ Fast authentic role resolution from LocalStorageService (role=$r)");
           final effective = Map<String, dynamic>.from(localUserPre);
           effective['role'] = r;
           effective['uid'] = uid.isNotEmpty ? uid : (effective['uid'] ?? effective['id'] ?? 'user');
@@ -500,6 +621,7 @@ class _HomeRouterState extends State<HomeRouter> {
       debugPrint("HomeRouter: Local pre-check notice: $e");
     }
 
+    // 5. Remote Firestore fetch with strict 3.5s total timeout (never hang or freeze!)
     final isOnline = await _checkConnectivity();
 
     if (isOnline) {
@@ -507,378 +629,78 @@ class _HomeRouterState extends State<HomeRouter> {
         DeviceInfoService.recordUserSession(userId: uid, email: currentUser?.email ?? emailLower);
       }
 
-      // 1. Top-level /users
       try {
-        if (uid.isNotEmpty) {
-          final userDoc = await FirebaseFirestore.instance
-              .collection('users')
-              .doc(uid)
-              .get()
-              .timeout(const Duration(seconds: 4));
-          if (userDoc.exists && userDoc.data() != null) {
-            final data = userDoc.data()!;
-            final resolvedRole = resolveRoleFromData(data);
-            if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-              final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-              final userData = {
-                ...data,
-                'uid': uid,
-                'email': currentUser?.email ?? emailLower,
-                'role': resolvedRole,
-                'name': resolvedName,
-                'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                    ? (data['username'] ?? data['userName'])
-                    : resolvedName,
-              };
-              await _cacheUserDataLocally(userData);
-              return userData;
-            }
-          }
-        }
+        final remoteUser = await _fetchFromRemoteFirestore(
+          uid: uid,
+          emailLower: emailLower,
+          emailPrefix: emailPrefix,
+          currentUser: currentUser,
+        ).timeout(const Duration(milliseconds: 8000), onTimeout: () => null);
 
-        // Top-level /users by email
-        if (emailLower.isNotEmpty) {
-          final qEmail = await FirebaseFirestore.instance
-              .collection('users')
-              .where('email', isEqualTo: emailLower)
-              .limit(1)
-              .get()
-              .timeout(const Duration(seconds: 4));
-          if (qEmail.docs.isNotEmpty) {
-            final doc = qEmail.docs.first;
-            final data = doc.data();
-            final resolvedRole = resolveRoleFromData(data);
-            if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-              final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-              final userData = {
-                ...data,
-                'uid': uid.isNotEmpty ? uid : doc.id,
-                'email': currentUser?.email ?? emailLower,
-                'role': resolvedRole,
-                'name': resolvedName,
-                'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                    ? (data['username'] ?? data['userName'])
-                    : resolvedName,
-              };
-              await _cacheUserDataLocally(userData);
-              return userData;
-            }
+        if (remoteUser != null) {
+          await _cacheUserDataLocally(remoteUser);
+          final bId = remoteUser['branchId']?.toString();
+          if (bId != null && bId.isNotEmpty) {
+            unawaited(LocalStorageService.downloadUsers(bId));
           }
-        }
-
-        // Top-level /users by username
-        if (emailPrefix.isNotEmpty) {
-          final qUsername = await FirebaseFirestore.instance
-              .collection('users')
-              .where('usernameLower', isEqualTo: emailPrefix)
-              .limit(1)
-              .get()
-              .timeout(const Duration(seconds: 4));
-          if (qUsername.docs.isNotEmpty) {
-            final doc = qUsername.docs.first;
-            final data = doc.data();
-            final resolvedRole = resolveRoleFromData(data);
-            if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-              final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix);
-              final userData = {
-                ...data,
-                'uid': uid.isNotEmpty ? uid : doc.id,
-                'email': currentUser?.email ?? emailLower,
-                'role': resolvedRole,
-                'name': resolvedName,
-                'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                    ? (data['username'] ?? data['userName'])
-                    : resolvedName,
-              };
-              await _cacheUserDataLocally(userData);
-              return userData;
-            }
-          }
+          return remoteUser;
         }
       } catch (e) {
-        debugPrint("HomeRouter: Top-level /users fetch failed: $e");
-      }
-
-      // 2. Branch subcollections query
-      try {
-        final localUser = uid.isNotEmpty ? LocalStorageService.getLocalUserByUid(uid) : null;
-        final cachedBranchId = localUser?['branchId'] as String?;
-
-        final candidateBranches = <String>{
-          if (cachedBranchId != null && cachedBranchId.isNotEmpty && cachedBranchId != 'all') cachedBranchId,
-          'karachi', 'khi', 'saddar', 'haji_camp', 'main',
-          'gujrat', 'grt', 'sialkot', 'skt', 'rawalpindi', 'rwp',
-          'lahore', 'lhr', 'islamabad', 'isb', 'jalalpurjattan', 'jlj',
-        };
-
-        if (emailLower.contains('@')) {
-          final domain = emailLower.split('@').last.split('.').first.trim().toLowerCase();
-          if (domain.isNotEmpty && domain != 'gmail' && domain != 'yahoo' && domain != 'hotmail') {
-            candidateBranches.add(domain);
-            if (domain == 'khi') candidateBranches.add('karachi');
-            if (domain == 'grt') candidateBranches.add('gujrat');
-            if (domain == 'skt') candidateBranches.add('sialkot');
-            if (domain == 'rwp') candidateBranches.add('rawalpindi');
-            if (domain == 'lhr') candidateBranches.add('lahore');
-            if (domain == 'isb') candidateBranches.add('islamabad');
-            if (domain == 'jlj') candidateBranches.add('jalalpurjattan');
-          }
-        }
-
-        try {
-          final all = FinanceLocalStorage.getAllBranches([]);
-          for (final b in all) {
-            final id = (b['id'] ?? '').toString().toLowerCase().trim();
-            if (id.isNotEmpty && id != 'all' && id != 'global') candidateBranches.add(id);
-          }
-        } catch (_) {}
-
-        for (final bId in candidateBranches) {
-          try {
-            final branchUserDocs = <Future<DocumentSnapshot<Map<String, dynamic>>?>>[
-              if (uid.isNotEmpty)
-                FirebaseFirestore.instance.collection('branches').doc(bId).collection('users').doc(uid).get().timeout(const Duration(seconds: 3)).then<DocumentSnapshot<Map<String, dynamic>>?>((s) => s, onError: (_) => null),
-              if (emailLower.isNotEmpty)
-                FirebaseFirestore.instance.collection('branches').doc(bId).collection('users').doc(emailLower).get().timeout(const Duration(seconds: 3)).then<DocumentSnapshot<Map<String, dynamic>>?>((s) => s, onError: (_) => null),
-              if (emailPrefix.isNotEmpty)
-                FirebaseFirestore.instance.collection('branches').doc(bId).collection('users').doc(emailPrefix).get().timeout(const Duration(seconds: 3)).then<DocumentSnapshot<Map<String, dynamic>>?>((s) => s, onError: (_) => null),
-            ];
-
-            final snaps = await Future.wait(branchUserDocs);
-            for (final docSnap in snaps) {
-              if (docSnap != null && docSnap.exists && docSnap.data() != null) {
-                final data = docSnap.data()!;
-                final resolvedRole = resolveRoleFromData(data);
-                if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-                  final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-                  final userData = {
-                    ...data,
-                    "branchId": bId,
-                    "uid": uid.isNotEmpty ? uid : docSnap.id,
-                    "email": currentUser?.email ?? emailLower,
-                    "role": resolvedRole,
-                    "name": resolvedName,
-                    "username": (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                        ? (data['username'] ?? data['userName'])
-                        : resolvedName,
-                  };
-                  await _cacheUserDataLocally(userData);
-                  unawaited(LocalStorageService.downloadUsers(bId));
-                  return userData;
-                }
-              }
-            }
-
-            if (emailLower.isNotEmpty) {
-              final qEmail = await FirebaseFirestore.instance
-                  .collection('branches')
-                  .doc(bId)
-                  .collection('users')
-                  .where('email', isEqualTo: emailLower)
-                  .limit(1)
-                  .get()
-                  .timeout(const Duration(seconds: 3));
-              if (qEmail.docs.isNotEmpty) {
-                final doc = qEmail.docs.first;
-                final data = doc.data();
-                final resolvedRole = resolveRoleFromData(data);
-                if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-                  final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-                  final userData = {
-                    ...data,
-                    "branchId": bId,
-                    "uid": uid.isNotEmpty ? uid : doc.id,
-                    "email": currentUser?.email ?? emailLower,
-                    "role": resolvedRole,
-                    "name": resolvedName,
-                    "username": (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                        ? (data['username'] ?? data['userName'])
-                        : resolvedName,
-                  };
-                  await _cacheUserDataLocally(userData);
-                  unawaited(LocalStorageService.downloadUsers(bId));
-                  return userData;
-                }
-              }
-            }
-
-            if (emailPrefix.isNotEmpty) {
-              final qUser = await FirebaseFirestore.instance
-                  .collection('branches')
-                  .doc(bId)
-                  .collection('users')
-                  .where('usernameLower', isEqualTo: emailPrefix)
-                  .limit(1)
-                  .get()
-                  .timeout(const Duration(seconds: 3));
-              if (qUser.docs.isNotEmpty) {
-                final doc = qUser.docs.first;
-                final data = doc.data();
-                final resolvedRole = resolveRoleFromData(data);
-                if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-                  final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix);
-                  final userData = {
-                    ...data,
-                    "branchId": bId,
-                    "uid": uid.isNotEmpty ? uid : doc.id,
-                    "email": currentUser?.email ?? emailLower,
-                    "role": resolvedRole,
-                    "name": resolvedName,
-                    "username": (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                        ? (data['username'] ?? data['userName'])
-                        : resolvedName,
-                  };
-                  await _cacheUserDataLocally(userData);
-                  unawaited(LocalStorageService.downloadUsers(bId));
-                  return userData;
-                }
-              }
-            }
-          } catch (_) {}
-        }
-
-        // 3. collectionGroup('users')
-        if (uid.isNotEmpty) {
-          final querySnap = await FirebaseFirestore.instance
-              .collectionGroup('users')
-              .where('uid', isEqualTo: uid)
-              .limit(1)
-              .get()
-              .timeout(const Duration(seconds: 4));
-          if (querySnap.docs.isNotEmpty) {
-            final doc = querySnap.docs.first;
-            final data = doc.data();
-            final pathParts = doc.reference.path.split('/');
-            final branchId = pathParts.length >= 2 ? pathParts[1] : 'unknown';
-            final resolvedRole = resolveRoleFromData(data);
-            if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-              final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-              final userData = {
-                ...data,
-                "branchId": branchId,
-                "uid": uid,
-                "email": currentUser?.email ?? emailLower,
-                "role": resolvedRole,
-                "name": resolvedName,
-                "username": (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                    ? (data['username'] ?? data['userName'])
-                    : resolvedName,
-              };
-              await _cacheUserDataLocally(userData);
-              unawaited(LocalStorageService.downloadUsers(branchId));
-              return userData;
-            }
-          }
-        }
-
-        if (emailLower.isNotEmpty) {
-          final querySnapEmail = await FirebaseFirestore.instance
-              .collectionGroup('users')
-              .where('email', isEqualTo: emailLower)
-              .limit(1)
-              .get()
-              .timeout(const Duration(seconds: 4));
-          if (querySnapEmail.docs.isNotEmpty) {
-            final doc = querySnapEmail.docs.first;
-            final data = doc.data();
-            final pathParts = doc.reference.path.split('/');
-            final branchId = pathParts.length >= 2 ? pathParts[1] : 'unknown';
-            final resolvedRole = resolveRoleFromData(data);
-            if (resolvedRole.isNotEmpty && resolvedRole != 'unknown') {
-              final resolvedName = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
-              final userData = {
-                ...data,
-                "branchId": branchId,
-                "uid": uid.isNotEmpty ? uid : doc.id,
-                "email": currentUser?.email ?? emailLower,
-                "role": resolvedRole,
-                "name": resolvedName,
-                "username": (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
-                    ? (data['username'] ?? data['userName'])
-                    : resolvedName,
-              };
-              await _cacheUserDataLocally(userData);
-              unawaited(LocalStorageService.downloadUsers(branchId));
-              return userData;
-            }
-          }
-        }
-      } catch (e) {
-        debugPrint('HomeRouter: Error fetching user from Firestore branches: $e');
+        debugPrint("HomeRouter: Remote lookup timed out or failed: $e");
       }
     }
 
-    // ── Local Hive & Offline fallback ──
+    // 6. Safe Local Hive & Offline fallback
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final appSettingsUser = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
         if (appSettingsUser is Map) {
           final m = Map<String, dynamic>.from(appSettingsUser);
-          final r = resolveRoleFromData(m);
-          final mUid = (m['uid'] ?? m['id'] ?? '').toString();
-          final mEmail = (m['email'] ?? '').toString().toLowerCase().trim();
-          final mUser = (m['username'] ?? '').toString().toLowerCase().trim();
-          if (r.isNotEmpty && r != 'unknown' &&
-              ((uid.isNotEmpty && mUid == uid) ||
-               (emailLower.isNotEmpty && mEmail == emailLower) ||
-               (emailPrefix.isNotEmpty && mUser == emailPrefix))) {
-            m['role'] = r;
-            debugPrint("HomeRouter: Fallback resolution from app_settings (role=$r)");
-            return m;
+          if (matchesIdentity(m)) {
+            final status = (m['status'] ?? m['accountStatus'] ?? '').toString().toLowerCase().trim();
+            if (m['isDeleted'] == true || status == 'deleted' || status == 'revoked') {
+              return {
+                ...m,
+                'isDeleted': true,
+                'status': 'deleted',
+                'accountStatus': 'deleted',
+              };
+            }
+            final r = resolveRoleFromData(m);
+            if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+              m['role'] = r;
+              m['status'] = 'active';
+              m['accountStatus'] = 'active';
+              m['isCorruptedOrOrphanAuth'] = false;
+              debugPrint("HomeRouter: Fallback resolution from app_settings (role=$r)");
+              return m;
+            }
           }
         }
       }
 
-      final cachedData = await offline_auth.OfflineAuthService.getCachedUserData(
-          usernameOrEmail: emailLower.isNotEmpty ? emailLower : (emailPrefix.isNotEmpty ? emailPrefix : uid));
-      if (cachedData != null && cachedData.isNotEmpty) {
-        final r = resolveRoleFromData(cachedData);
-        if (r.isNotEmpty && r != 'unknown') {
-          cachedData['role'] = r;
-          debugPrint("HomeRouter: Fallback resolution from OfflineAuthService (role=$r)");
-          return cachedData;
-        }
-      }
-
-      final localUserFallback = (uid.isNotEmpty ? LocalStorageService.getLocalUserByUid(uid) : null) ??
-          (uid.isNotEmpty ? LocalStorageService.findLocalUser(uid) : null) ??
-          (emailLower.isNotEmpty ? LocalStorageService.getLocalUserByEmail(emailLower) : null) ??
-          (emailLower.isNotEmpty ? LocalStorageService.findLocalUser(emailLower) : null) ??
-          (emailPrefix.isNotEmpty ? LocalStorageService.findLocalUser(emailPrefix) : null);
-      if (localUserFallback != null) {
-        final r = resolveRoleFromData(localUserFallback);
-        localUserFallback['role'] = r.isNotEmpty && r != 'unknown' ? r : 'admin';
-        debugPrint("HomeRouter: Fallback resolution from local_users (role=${localUserFallback['role']})");
-        return {
-          ...localUserFallback,
-          'uid': uid.isNotEmpty ? uid : (localUserFallback['uid'] ?? localUserFallback['id'] ?? 'user'),
-          'email': currentUser?.email ?? emailLower,
-        };
-      }
-
-      // Scan all entries in local_users
       if (Hive.isBoxOpen('local_users')) {
         final box = Hive.box('local_users');
         for (final val in box.values) {
           if (val is Map) {
             final u = Map<String, dynamic>.from(val);
+            if (!matchesIdentity(u)) continue;
             final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
-            if (u['isDeleted'] == true || status == 'deleted') continue;
-
-            final uEmail = (u['email'] ?? '').toString().toLowerCase().trim();
-            final uName = (u['username'] ?? u['usernameLower'] ?? '').toString().toLowerCase().trim();
-            final uUid = (u['uid'] ?? u['id'] ?? '').toString().trim();
-
-            if ((uid.isNotEmpty && uUid == uid) ||
-                (emailLower.isNotEmpty && uEmail == emailLower) ||
-                (emailPrefix.isNotEmpty && uName == emailPrefix)) {
-              final r = resolveRoleFromData(u);
-              u['role'] = r.isNotEmpty && r != 'unknown' ? r : 'admin';
+            if (u['isDeleted'] == true || status == 'deleted' || status == 'revoked') {
               return {
                 ...u,
-                'uid': uid.isNotEmpty ? uid : uUid,
-                'email': currentUser?.email ?? emailLower,
+                'isDeleted': true,
+                'status': 'deleted',
+                'accountStatus': 'deleted',
               };
+            }
+            final r = resolveRoleFromData(u);
+            if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+              u['role'] = r;
+              u['status'] = 'active';
+              u['accountStatus'] = 'active';
+              u['isCorruptedOrOrphanAuth'] = false;
+              return u;
             }
           }
         }
@@ -887,28 +709,339 @@ class _HomeRouterState extends State<HomeRouter> {
       debugPrint("HomeRouter: Error during fallback local user check: $e");
     }
 
-    // Last resort: if user has an active authenticated session, synthesize a basic profile
-    // rather than letting them hit a dead-end
-    if (uid.isNotEmpty || emailLower.isNotEmpty || usernameHint.isNotEmpty) {
-      final heuristicRole = resolveRoleFromData({
-        'uid': uid,
-        'email': emailLower,
-        'username': usernameHint,
-      });
-      final syntheticUser = <String, dynamic>{
-        'uid': uid.isNotEmpty ? uid : (emailPrefix.isNotEmpty ? emailPrefix : 'local-user'),
-        'email': emailLower,
+    // 7. Guard: If Firebase Auth is authenticated, but NO active user document exists in database:
+    // Before giving up, do a comprehensive search across local storage and heal if possible
+    try {
+      final fallbackLocal = (emailLower.isNotEmpty ? LocalStorageService.findLocalUser(emailLower) : null) ??
+          (emailPrefix.isNotEmpty ? LocalStorageService.findLocalUser(emailPrefix) : null) ??
+          (usernameHint.isNotEmpty ? LocalStorageService.findLocalUser(usernameHint) : null);
+      if (fallbackLocal != null) {
+        final r = resolveRoleFromData(fallbackLocal);
+        if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+          final healed = Map<String, dynamic>.from(fallbackLocal);
+          healed['uid'] = uid.isNotEmpty ? uid : (healed['uid'] ?? healed['id'] ?? 'user');
+          healed['email'] = currentUser?.email ?? emailLower;
+          healed['role'] = r;
+          healed['status'] = 'active';
+          healed['accountStatus'] = 'active';
+          healed['isActive'] = true;
+          healed['isCorruptedOrOrphanAuth'] = false;
+          unawaited(LocalStorageService.saveLocalUser(healed));
+          if (uid.isNotEmpty) {
+            unawaited(FirebaseFirestore.instance.collection('users').doc(uid).set(healed, SetOptions(merge: true)).catchError((_) {}));
+          }
+          debugPrint("HomeRouter: 🛡️ Auto-healed account for $uid ($emailLower) with role $r");
+          return healed;
+        }
+      }
+    } catch (_) {}
+
+    if (currentUser != null || uid.isNotEmpty || emailLower.isNotEmpty) {
+      debugPrint("HomeRouter: ⚠️ Guard Triggered — Firebase Auth exists, but NO profile was found. User is marked corrupted/orphan.");
+      return {
+        'uid': uid.isNotEmpty ? uid : 'orphan-user',
+        'email': currentUser?.email ?? emailLower,
         'username': usernameHint.isNotEmpty ? usernameHint : (emailPrefix.isNotEmpty ? emailPrefix : 'User'),
         'name': usernameHint.isNotEmpty ? usernameHint : (emailPrefix.isNotEmpty ? emailPrefix : 'User'),
-        'role': heuristicRole.isNotEmpty && heuristicRole != 'unknown' ? heuristicRole : 'admin',
-        'branchId': 'all',
-        'status': 'active',
+        'role': 'unknown',
+        'branchId': '',
+        'status': 'corrupted',
+        'accountStatus': 'corrupted',
+        'isCorruptedOrOrphanAuth': true,
       };
-      await _cacheUserDataLocally(syntheticUser);
-      debugPrint("HomeRouter: Synthesized active session profile: $syntheticUser");
-      return syntheticUser;
     }
 
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _fetchFromRemoteFirestore({
+    required String uid,
+    required String emailLower,
+    required String emailPrefix,
+    required User? currentUser,
+  }) async {
+    final futures = <Future<Map<String, dynamic>?>>[];
+
+    // 1. Top-level /users by uid and /deleted_auth_users by uid
+    if (uid.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collection('deleted_auth_users')
+          .doc(uid)
+          .get()
+          .then((doc) {
+        if (doc.exists && doc.data() != null) {
+          return {
+            ...doc.data()!,
+            'uid': uid,
+            'isDeleted': true,
+            'status': 'deleted',
+            'accountStatus': 'deleted',
+          };
+        }
+        return null;
+      }).catchError((_) => null));
+
+      futures.add(FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get()
+          .then((doc) {
+        if (doc.exists && doc.data() != null) {
+          final data = doc.data()!;
+          final isDel = data['isDeleted'] == true || (data['status'] ?? data['accountStatus']) == 'deleted';
+          if (isDel) {
+            return {
+              ...data,
+              'uid': uid,
+              'isDeleted': true,
+              'status': 'deleted',
+              'accountStatus': 'deleted',
+            };
+          }
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown' && role != 'unassigned') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
+            return {
+              ...data,
+              'uid': uid,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 2. Direct top-level /users by email
+    if (emailLower.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collection('users')
+          .where('email', isEqualTo: emailLower)
+          .limit(1)
+          .get()
+          .then((snap) {
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          final data = doc.data();
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown' && role != 'unassigned') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
+            final res = {
+              ...data,
+              'uid': uid.isNotEmpty ? uid : doc.id,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+            if (uid.isNotEmpty && doc.id != uid) {
+              unawaited(FirebaseFirestore.instance.collection('users').doc(uid).set(res, SetOptions(merge: true)).catchError((_) {}));
+            }
+            return res;
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 3. Direct top-level /users by usernameLower
+    if (emailPrefix.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collection('users')
+          .where('usernameLower', isEqualTo: emailPrefix)
+          .limit(1)
+          .get()
+          .then((snap) {
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          final data = doc.data();
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown' && role != 'unassigned') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix);
+            final res = {
+              ...data,
+              'uid': uid.isNotEmpty ? uid : doc.id,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+            if (uid.isNotEmpty && doc.id != uid) {
+              unawaited(FirebaseFirestore.instance.collection('users').doc(uid).set(res, SetOptions(merge: true)).catchError((_) {}));
+            }
+            return res;
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 4. CollectionGroup('users') by uid
+    if (uid.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collectionGroup('users')
+          .where('uid', isEqualTo: uid)
+          .limit(1)
+          .get()
+          .then((snap) {
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          final data = doc.data();
+          final parts = doc.reference.path.split('/');
+          final branchId = parts.length >= 2 ? parts[1] : 'unknown';
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
+            return {
+              ...data,
+              'branchId': branchId,
+              'uid': uid,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 5. CollectionGroup('users') by email
+    if (emailLower.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collectionGroup('users')
+          .where('email', isEqualTo: emailLower)
+          .limit(1)
+          .get()
+          .then((snap) {
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          final data = doc.data();
+          final parts = doc.reference.path.split('/');
+          final branchId = parts.length >= 2 ? parts[1] : 'unknown';
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
+            return {
+              ...data,
+              'branchId': branchId,
+              'uid': uid.isNotEmpty ? uid : doc.id,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 6. CollectionGroup('users') by usernameLower
+    if (emailPrefix.isNotEmpty) {
+      futures.add(FirebaseFirestore.instance
+          .collectionGroup('users')
+          .where('usernameLower', isEqualTo: emailPrefix)
+          .limit(1)
+          .get()
+          .then((snap) {
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          final data = doc.data();
+          final parts = doc.reference.path.split('/');
+          final branchId = parts.length >= 2 ? parts[1] : 'unknown';
+          final role = resolveRoleFromData(data);
+          if (role.isNotEmpty && role != 'unknown') {
+            final name = resolveUserDisplayName(data, fallback: emailPrefix);
+            return {
+              ...data,
+              'branchId': branchId,
+              'uid': uid.isNotEmpty ? uid : doc.id,
+              'email': currentUser?.email ?? emailLower,
+              'role': role,
+              'name': name,
+              'status': 'active',
+              'accountStatus': 'active',
+              'isCorruptedOrOrphanAuth': false,
+              'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                  ? (data['username'] ?? data['userName'])
+                  : name,
+            };
+          }
+        }
+        return null;
+      }).catchError((_) => null));
+    }
+
+    // 5. Check primary branch subcollection if known
+    try {
+      final activeBranch = LocalStorageService.getActiveBranchId();
+      if (activeBranch != null && activeBranch.isNotEmpty && activeBranch != 'all') {
+        if (uid.isNotEmpty) {
+          futures.add(FirebaseFirestore.instance
+              .collection('branches')
+              .doc(activeBranch)
+              .collection('users')
+              .doc(uid)
+              .get()
+              .then((doc) {
+            if (doc.exists && doc.data() != null) {
+              final data = doc.data()!;
+              final role = resolveRoleFromData(data);
+              if (role.isNotEmpty && role != 'unknown') {
+                final name = resolveUserDisplayName(data, fallback: emailPrefix.isNotEmpty ? emailPrefix : 'User');
+                return {
+                  ...data,
+                  'branchId': activeBranch,
+                  'uid': uid,
+                  'email': currentUser?.email ?? emailLower,
+                  'role': role,
+                  'name': name,
+                  'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
+                      ? (data['username'] ?? data['userName'])
+                      : name,
+                };
+              }
+            }
+            return null;
+          }).catchError((_) => null));
+        }
+      }
+    } catch (_) {}
+
+    final results = await Future.wait(futures);
+    for (final res in results) {
+      if (res != null) return res;
+    }
     return null;
   }
 
@@ -1098,6 +1231,12 @@ class _HomeRouterState extends State<HomeRouter> {
 
       case 'madrassa parent':
       case 'madrassa guardian':
+      case 'madrassa_parent':
+      case 'madrassa_guardian':
+      case 'guardian':
+      case 'parent':
+      case 'school guardian':
+      case 'school parent':
         return MadrassaGuardianScreen(userData: userData);
 
       case 'supervisor':
@@ -1287,11 +1426,46 @@ class _HomeRouterState extends State<HomeRouter> {
           );
         }
 
+        // ── Normalize Role (handles lists, legacy synonyms, nulls, heuristics) ──
+        final role = resolveRoleFromData(data);
+        final hasValidRole = role.isNotEmpty && role != 'unknown' && role != 'unassigned';
+
+        // Auto-heal if previously falsely flagged as corrupted or orphan auth
+        if ((data['isCorruptedOrOrphanAuth'] == true ||
+             data['status'] == 'corrupted' ||
+             data['accountStatus'] == 'corrupted') &&
+            hasValidRole &&
+            data['isDeleted'] != true) {
+          debugPrint("HomeRouter: 🩹 Auto-healing corrupted flag for account '${data['email'] ?? data['username']}' with role '$role'");
+          data['isCorruptedOrOrphanAuth'] = false;
+          data['status'] = 'active';
+          data['accountStatus'] = 'active';
+          data['isActive'] = true;
+
+          final uidToHeal = (data['uid'] ?? data['id'] ?? widget.user?.uid ?? '').toString();
+          if (uidToHeal.isNotEmpty) {
+            try {
+              if (Hive.isBoxOpen('local_users')) {
+                Hive.box('local_users').put(uidToHeal, Map<String, dynamic>.from(data));
+              }
+              FirebaseFirestore.instance.collection('users').doc(uidToHeal).set({
+                'isCorruptedOrOrphanAuth': false,
+                'status': 'active',
+                'accountStatus': 'active',
+                'updatedAt': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true)).catchError((_) {});
+            } catch (_) {}
+          }
+        }
+
         final userStatus = (data['status'] ?? data['accountStatus'] ?? 'active').toString().toLowerCase().trim();
         final isRevoked = _isStatusRevoked(userStatus, data);
 
-        if (isRevoked) {
-          return AccessRevokedScreen(userData: data, reason: userStatus);
+        if (isRevoked || (!hasValidRole && data['isCorruptedOrOrphanAuth'] == true) || data['isDeleted'] == true) {
+          final reason = data['isCorruptedOrOrphanAuth'] == true
+              ? 'corrupted'
+              : (data['isDeleted'] == true ? 'deleted' : userStatus);
+          return AccessRevokedScreen(userData: data, reason: reason);
         }
 
         // Start real-time listener for revocation (runs once per session)
@@ -1301,8 +1475,9 @@ class _HomeRouterState extends State<HomeRouter> {
           _startRevokeListener(revokeUid, revokeBranch.isNotEmpty && revokeBranch != 'all' ? revokeBranch : null);
         }
 
-        // ── Normalize Role (handles lists, legacy synonyms, nulls, heuristics) ──
-        final role = resolveRoleFromData(data);
+        if (!hasValidRole) {
+          return AccessRevokedScreen(userData: data, reason: 'corrupted');
+        }
 
         // ── Normalize Branch ID (handles null, 'null', empty strings) ──
         String rawBranch = (data['branchId']?.toString() ?? '').trim();
@@ -1388,6 +1563,19 @@ class _HomeRouterState extends State<HomeRouter> {
                       setState(() {});
                     },
                   );
+                } else {
+                  if (CampSessionService.activeCampNotifier.value != activeCamp) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      CampSessionService.setActiveCamp(activeCamp);
+                    });
+                  }
+                }
+              } else if (assignedCamps.length == 1) {
+                final soleCamp = assignedCamps.first;
+                if (CampSessionService.activeCampNotifier.value != soleCamp) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    CampSessionService.setActiveCamp(soleCamp);
+                  });
                 }
               }
             }
@@ -1552,7 +1740,6 @@ class _UnassignedRoleRecoveryScreen extends StatefulWidget {
   final VoidCallback onRetry;
 
   const _UnassignedRoleRecoveryScreen({
-    super.key,
     required this.userName,
     required this.uid,
     required this.userData,

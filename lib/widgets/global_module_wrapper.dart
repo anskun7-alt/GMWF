@@ -76,8 +76,14 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
   void initState() {
     super.initState();
     final rawBranchId = (widget.userData['branchId'] as String? ?? '').trim();
-    final normalizedBranchId = (rawBranchId == 'global' || rawBranchId.isEmpty) ? 'all' : rawBranchId;
-    if (widget.module.id == 'finance' && !_isBranchScoped) {
+    final role = (widget.userData['role'] as String? ?? '').toLowerCase().trim();
+    final isExecutive = [
+      'ceo', 'chairman', 'global user', 'global admin', 'admin',
+      'administrator', 'super admin', 'hq manager', 'hqmanager',
+      'hq_manager', 'director', 'president', 'founder'
+    ].contains(role);
+    final normalizedBranchId = (isExecutive || rawBranchId == 'global' || rawBranchId.isEmpty) ? 'all' : rawBranchId;
+    if ((widget.module.id == 'finance' || isExecutive) && !_isBranchScoped) {
       _selectedBranchId = 'all';
       _selectedBranchName = 'All Branches (Consolidated)';
     } else {
@@ -367,7 +373,16 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
   String get _role =>
       (widget.userData['role'] as String? ?? '').toLowerCase();
 
-  bool get _isGlobal => ['ceo', 'chairman', 'global user'].contains(_role);
+  bool get _isExecutiveRole {
+    final r = _role.toLowerCase().trim();
+    return [
+      'ceo', 'chairman', 'global user', 'global admin', 'admin',
+      'administrator', 'super admin', 'hq manager', 'hqmanager',
+      'hq_manager', 'director', 'president', 'founder'
+    ].contains(r);
+  }
+
+  bool get _isGlobal => _isExecutiveRole;
 
   @override
   void dispose() {

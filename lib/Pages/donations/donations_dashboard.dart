@@ -2590,13 +2590,13 @@ class _HeaderActionButtonState extends State<_HeaderActionButton> {
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             curve: Curves.easeOutCubic,
-            height: 50,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: hasFilters || isActive
                   ? AppColors.primary.withValues(alpha: _isHovered ? 0.10 : 0.06)
                   : (_isHovered ? AppColors.gray50 : Colors.white),
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: hasFilters || isActive
                     ? AppColors.primary

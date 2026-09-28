@@ -8,17 +8,20 @@ import '../dialogs/school_enrollment_dialog.dart';
 import '../theme/school_theme.dart';
 import '../models/school_student.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 import '../utils/school_admission_pdf_service.dart';
 import '../constants/school_constants.dart';
 
 class SchoolStudentManagementView extends StatefulWidget {
   final String branchId;
   final String userRole;
+  final String userName;
 
   const SchoolStudentManagementView({
     super.key,
     required this.branchId,
     this.userRole = 'School Admin',
+    this.userName = 'User',
   });
 
   @override
@@ -30,11 +33,48 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
   String _selectedGradeFilter = 'All';
   String _selectedStatusFilter = 'All';
 
-  final List<String> _gradeOptions = SchoolConstants.filterGrades;
+  List<String> _gradeOptions = SchoolConstants.filterGrades;
 
-  bool get _isTeacher {
-    final r = widget.userRole.toLowerCase().trim();
-    return r.contains('teacher') && !r.contains('admin') && !r.contains('principal');
+  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+
+  @override
+  void initState() {
+    super.initState();
+    _initGradeFilters();
+  }
+
+  @override
+  void didUpdateWidget(covariant SchoolStudentManagementView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.userRole != widget.userRole ||
+        oldWidget.userName != widget.userName ||
+        oldWidget.branchId != widget.branchId) {
+      _initGradeFilters();
+    }
+  }
+
+  void _initGradeFilters() {
+    if (_isTeacher) {
+      final assigned = SchoolAuthHelper.getTeacherAssignedGrades(
+        widget.branchId,
+        widget.userRole,
+        widget.userName,
+      );
+      if (assigned.isNotEmpty) {
+        _gradeOptions = assigned;
+        if (!_gradeOptions.contains(_selectedGradeFilter)) {
+          _selectedGradeFilter = _gradeOptions.first;
+        }
+      } else {
+        _gradeOptions = [];
+        _selectedGradeFilter = 'Unassigned';
+      }
+    } else {
+      _gradeOptions = SchoolConstants.filterGrades;
+      if (_selectedGradeFilter == 'Unassigned') {
+        _selectedGradeFilter = 'All';
+      }
+    }
   }
 
   @override
@@ -44,6 +84,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
   }
 
   void _openEnrollmentDialog([SchoolStudent? student]) async {
+    if (_isTeacher) return; // Teachers cannot enroll students
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => SchoolEnrollmentDialog(
@@ -73,7 +114,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                   onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(
                     hintText: 'Search student by name, roll no, father name or CNIC / B-Form...',
-                    prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF0F766E)),
+                    prefixIcon: const Icon(Icons.search_rounded, color: SchoolTheme.primary),
                     filled: true,
                     fillColor: const Color(0xFFF8FAFC),
                     border: OutlineInputBorder(
@@ -134,14 +175,14 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                 // Add Student Button
                 ElevatedButton.icon(
                   onPressed: () => _openEnrollmentDialog(),
-                  icon: const Icon(Icons.person_add_alt_1_rounded),
-                  label: const Text('New Admission / داخلہ نیا طالب علم'),
+                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                  label: const Text('New Admission / داخلہ نیا طالب علم', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0F766E),
+                    backgroundColor: SchoolTheme.primary,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    elevation: 2,
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
                   ),
                 ),
               ],
@@ -160,6 +201,12 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
               final query = _searchCtrl.text.trim().toLowerCase();
 
               var filtered = rawList.map((m) => SchoolStudent.fromMap(m['id'] ?? '', m)).toList();
+
+              // Teacher Data Isolation:
+              // Teachers can ONLY see students belonging to their assigned class(es)!
+              if (_isTeacher) {
+                filtered = filtered.where((s) => _gradeOptions.contains(s.grade)).toList();
+              }
 
               if (query.isNotEmpty) {
                 filtered = filtered.where((s) {
@@ -186,15 +233,19 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                     children: [
                       Icon(Icons.school_outlined, size: 64, color: Colors.grey.shade300),
                       const SizedBox(height: 12),
-                      const Text(
-                        'No school students found / کوئی طالب علم موجود نہیں',
-                        style: TextStyle(color: Colors.grey, fontSize: 16, fontWeight: FontWeight.bold),
+                      Text(
+                        _isTeacher
+                            ? 'No students found in your assigned class roster ($_selectedGradeFilter).'
+                            : 'No school students found / کوئی طالب علم موجود نہیں',
+                        style: const TextStyle(color: SchoolTheme.textMid, fontSize: 15, fontWeight: FontWeight.bold),
                       ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Click "+ New Admission" to enroll a student.',
-                        style: TextStyle(color: Colors.grey),
-                      ),
+                      if (!_isTeacher) ...[
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Click "+ New Admission" to enroll a student.',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
                     ],
                   ),
                 );
@@ -221,23 +272,23 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
     if (bytes != null && bytes.isNotEmpty) {
       return CircleAvatar(
         radius: 26,
-        backgroundColor: const Color(0xFF0F766E).withValues(alpha: 0.1),
+        backgroundColor: SchoolTheme.primary.withValues(alpha: 0.1),
         backgroundImage: MemoryImage(bytes),
       );
     } else if (student.photoUrl.startsWith('http')) {
       return CircleAvatar(
         radius: 26,
-        backgroundColor: const Color(0xFF0F766E).withValues(alpha: 0.1),
+        backgroundColor: SchoolTheme.primary.withValues(alpha: 0.1),
         backgroundImage: NetworkImage(student.photoUrl),
       );
     }
     return CircleAvatar(
       radius: 26,
-      backgroundColor: const Color(0xFF0F766E).withValues(alpha: 0.1),
+      backgroundColor: SchoolTheme.primary.withValues(alpha: 0.1),
       child: Text(
         student.rollNo.isNotEmpty ? student.rollNo : 'N/A',
         style: const TextStyle(
-          color: Color(0xFF0F766E),
+          color: SchoolTheme.primary,
           fontWeight: FontWeight.bold,
           fontSize: 14,
         ),
@@ -257,7 +308,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: [
-            const Icon(Icons.folder_shared_rounded, color: Color(0xFF0F766E)),
+            const Icon(Icons.folder_shared_rounded, color: SchoolTheme.primary),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -365,7 +416,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                           Image.asset(
                             'assets/logo/twt.webp',
                             height: 38,
-                            errorBuilder: (_, __, ___) => const Icon(Icons.school_rounded, color: Color(0xFF0F766E)),
+                            errorBuilder: (_, __, ___) => const Icon(Icons.school_rounded, color: SchoolTheme.primary),
                           ),
                           const SizedBox(width: 10),
                           Text(
@@ -428,8 +479,8 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                       icon: const Icon(Icons.print_rounded, size: 16),
                       label: const Text('Print / Download PDF (پرنٹ / پی ڈی ایف)'),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF0F766E),
-                        side: const BorderSide(color: Color(0xFF0F766E), width: 1.2),
+                        foregroundColor: SchoolTheme.primary,
+                        side: const BorderSide(color: SchoolTheme.primary, width: 1.2),
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -441,7 +492,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                         },
                         icon: const Icon(Icons.edit_rounded, size: 16),
                         label: const Text('Edit Admission Form'),
-                        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white),
+                        style: ElevatedButton.styleFrom(backgroundColor: SchoolTheme.primary, foregroundColor: Colors.white),
                       ),
                   ],
                 ),
@@ -527,12 +578,12 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0F766E).withValues(alpha: 0.1),
+                        color: SchoolTheme.primary.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
                         'Roll: ${student.rollNo}',
-                        style: const TextStyle(color: Color(0xFF0F766E), fontSize: 11, fontWeight: FontWeight.bold),
+                        style: const TextStyle(color: SchoolTheme.primary, fontSize: 11, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ],
@@ -596,11 +647,11 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
                     padding: const EdgeInsets.only(top: 2.0),
                     child: Row(
                       children: [
-                        const Icon(Icons.fingerprint_rounded, size: 13, color: Color(0xFF0F766E)),
+                        const Icon(Icons.fingerprint_rounded, size: 13, color: SchoolTheme.primary),
                         const SizedBox(width: 4),
                         Text(
                           'PIN: ${student.biometricPin}',
-                          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF0F766E)),
+                          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: SchoolTheme.primary),
                         ),
                       ],
                     ),
@@ -630,7 +681,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
           // View Admission Slip Action
           IconButton(
             tooltip: 'View / Print Admission Form (داخلہ فارم)',
-            icon: const Icon(Icons.receipt_long_rounded, color: Color(0xFF0F766E)),
+            icon: const Icon(Icons.receipt_long_rounded, color: SchoolTheme.primary),
             onPressed: () => _showAdmissionSlipDialog(student),
           ),
 

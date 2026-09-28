@@ -5,29 +5,40 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../../services/local_storage_service.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
+import '../theme/school_theme.dart';
 
 class SchoolAuditLogView extends StatelessWidget {
   final String branchId;
+  final String userRole;
 
   const SchoolAuditLogView({
     super.key,
     required this.branchId,
+    this.userRole = 'School Admin',
   }); 
 
   @override
   Widget build(BuildContext context) {
+    if (SchoolAuthHelper.isTeacher(userRole)) {
+      return const SchoolAccessDenied(
+        title: 'Audit Trail Restricted',
+        message: 'The institutional audit trail contains confidential administrative logs and is reserved strictly for School Principal and Administration.',
+      );
+    }
+
     return FutureBuilder<void>(
       future: SchoolLocalStorage.ensureBoxesOpen(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            backgroundColor: Color(0xFFF8FAFC),
-            body: Center(child: CircularProgressIndicator(color: Color(0xFF6366F1))),
+            backgroundColor: SchoolTheme.bgLight,
+            body: Center(child: CircularProgressIndicator(color: SchoolTheme.primary)),
           );
         }
 
         return Scaffold(
-          backgroundColor: const Color(0xFFF8FAFC),
+          backgroundColor: SchoolTheme.bgLight,
           body: Padding(
             padding: const EdgeInsets.all(24.0),
             child: Column(

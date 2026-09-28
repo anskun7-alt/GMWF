@@ -8,7 +8,7 @@
 [Setup]
 AppId={{A1B2C3D4-9F23-4C11-8ABC-1234567890AB}
 AppName=GMWF
-AppVersion=1.5.4
+AppVersion=1.5.7
 AppPublisher=GMWF
 AppPublisherURL=https://gmwf.pk/
 AppSupportURL=https://gmwf.pk/
@@ -25,7 +25,7 @@ DefaultGroupName=GMWF
 
 ; Output
 OutputDir=installer
-OutputBaseFilename=GMWF-v1.5.4-x64
+OutputBaseFilename=GMWF-v1.5.7-x64
 SetupIconFile=Installer\gmwf.ico
 
 ; Compression
@@ -316,7 +316,7 @@ begin
   BrandFooterLabel.Parent := WizardForm;
   BrandFooterLabel.Left := ScaleX(16);
   BrandFooterLabel.Top := WizardForm.CancelButton.Top + ScaleY(4);
-  BrandFooterLabel.Caption := Chr($E2)+Chr($9C)+Chr($A6) + ' GMWF Management System v1.5.4';
+  BrandFooterLabel.Caption := Chr($E2)+Chr($9C)+Chr($A6) + ' GMWF Management System v1.5.7';
   BrandFooterLabel.Font.Name := 'Segoe UI';
   BrandFooterLabel.Font.Size := 8;
   BrandFooterLabel.Font.Style := [fsBold];

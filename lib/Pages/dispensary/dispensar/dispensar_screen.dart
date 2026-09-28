@@ -529,9 +529,9 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
       isFloating: false,
       title: 'Dispensary – ${_dispenserName ?? widget.dispenserName ?? 'Loading...'}',
       subtitle: CampSessionService.getBranchAndCampDisplayName(
-        branchName: _branchName ?? 'Free Dispensary',
+        branchName: _branchName ?? LocalStorageService.getBranchName(widget.branchId),
         branchId: widget.branchId,
-        campId: CampSessionService.getActiveCamp(),
+        campId: CampSessionService.getActiveCamp(widget.branchId),
       ),
       onTitleLongPress: () => DispensaryUserSettingsDialog.show(
         context,

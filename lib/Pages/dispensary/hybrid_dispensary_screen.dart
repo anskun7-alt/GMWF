@@ -13,13 +13,12 @@ import 'package:gmwf/services/auth_service.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
-import 'package:gmwf/widgets/connection_status_widget.dart';
 import 'package:gmwf/widgets/gmwf_app_bar.dart';
 import 'package:gmwf/services/camp_session_service.dart';
+import 'package:gmwf/widgets/camp_selector_chip.dart';
 import 'user_settings_dialog.dart';
 
 import 'package:gmwf/models/patient.dart';
-import 'package:gmwf/models/token.dart';
 import 'package:gmwf/services/firestore_service.dart';
 import 'package:gmwf/design/design_system.dart';
 
@@ -104,10 +103,22 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
     // Ensure all role boxes (patients, entries, stock, prescriptions) are opened on desk entry
     LocalStorageService.initForRoles([widget.role, 'receptionist', 'dispenser']);
 
+    // Ensure active camp is resolved — getActiveCamp() now handles time-based detection automatically
+    if (CampSessionService.hasCampsForBranch(widget.branchId)) {
+      CampSessionService.getActiveCamp(widget.branchId);
+      CampSessionService.startAutoCampTimer();
+    }
+
+    CampSessionService.activeCampNotifier.addListener(_onCampChanged);
+
     // Run receptionist bootstrap if "rec" is included in role
     if (widget.role.toLowerCase().contains('rec')) {
       _bootstrapReceptionistData(widget.branchId);
     }
+  }
+
+  void _onCampChanged() {
+    if (mounted) setState(() {});
   }
 
   void _parseRole([String? effectiveName]) {
@@ -273,30 +284,25 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
   Future<void> _loadBranchName() async {
     if (widget.branchId.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _branchName = 'Free Dispensary';
-        });
-      }
+      if (mounted) setState(() => _branchName = 'Free Dispensary');
       return;
+    }
+    final localName = LocalStorageService.getBranchName(widget.branchId);
+    if (localName.isNotEmpty && localName != 'Free Dispensary') {
+      if (mounted) setState(() => _branchName = localName);
     }
     try {
       final doc = await FirebaseFirestore.instance
           .collection('branches')
           .doc(widget.branchId)
           .get();
-      if (mounted) {
-        setState(() {
-          _branchName = doc.data()?['name'] ?? 'Free Dispensary';
-        });
+      if (mounted && doc.exists) {
+        final n = doc.data()?['name']?.toString();
+        if (n != null && n.isNotEmpty) {
+          setState(() => _branchName = n);
+        }
       }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _branchName = 'Free Dispensary';
-        });
-      }
-    }
+    } catch (_) {}
   }
 
   Future<void> _forceSync() async {
@@ -390,6 +396,8 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
   @override
   void dispose() {
+    CampSessionService.activeCampNotifier.removeListener(_onCampChanged);
+    CampSessionService.stopAutoCampTimer();
     _restockRealtimeSub?.cancel();
     _restockFirestoreSub?.cancel();
     _connSub?.cancel();
@@ -435,10 +443,18 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
             isFloating: false,
             title: 'Hybrid Desk – ${_resolvedName ?? widget.userName}',
             subtitle: CampSessionService.getBranchAndCampDisplayName(
-              branchName: _branchName ?? 'Free Dispensary',
+              branchName: _branchName ?? LocalStorageService.getBranchName(widget.branchId),
               branchId: widget.branchId,
-              campId: CampSessionService.getActiveCamp(),
+              campId: CampSessionService.getActiveCamp(widget.branchId),
             ),
+            extraActions: [
+              CampSelectorChip(
+                branchId: widget.branchId,
+                textColor: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0F5B46),
+                bgColor: isDark ? const Color(0xFF334155) : const Color(0xFFE8F5E9),
+                borderColor: isDark ? const Color(0xFF475569) : const Color(0xFFA7F3D0),
+              ),
+            ],
             onTitleLongPress: () => DispensaryUserSettingsDialog.show(
               context,
               branchId: widget.branchId,

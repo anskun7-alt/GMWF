@@ -323,16 +323,16 @@ class DashboardPremiumOverview extends StatelessWidget {
       final effectiveSubtitle = subtitle ?? (subItems.isNotEmpty ? subItems.first['label'] ?? '' : '');
 
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
         decoration: BoxDecoration(
           color: t.bgCard,
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(color: t.bgRule.withValues(alpha: 0.8), width: 1),
           boxShadow: [
             BoxShadow(
               color: isDark ? Colors.black.withValues(alpha: 0.25) : badgeColor.withValues(alpha: 0.04),
-              blurRadius: 10,
-              offset: const Offset(0, 3),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
             ),
           ],
         ),
@@ -346,8 +346,8 @@ class DashboardPremiumOverview extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Container(
-                  width: 38,
-                  height: 38,
+                  width: 32,
+                  height: 32,
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
@@ -357,33 +357,33 @@ class DashboardPremiumOverview extends StatelessWidget {
                         badgeColor.withValues(alpha: 0.06),
                       ],
                     ),
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(color: badgeColor.withValues(alpha: 0.25), width: 1),
                   ),
-                  child: Icon(badgeIcon, color: badgeColor, size: 20),
+                  child: Icon(badgeIcon, color: badgeColor, size: 17),
                 ),
                 if (trendText.isNotEmpty)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
                     decoration: BoxDecoration(
                       color: (isPositiveTrend ? const Color(0xFF10B981) : Colors.amber).withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(16),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
                           isPositiveTrend ? Icons.arrow_upward_rounded : Icons.schedule_rounded,
-                          size: 10,
+                          size: 9.5,
                           color: isPositiveTrend ? const Color(0xFF10B981) : Colors.amber[800],
                         ),
-                        const SizedBox(width: 3),
+                        const SizedBox(width: 2.5),
                         ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 75),
+                          constraints: const BoxConstraints(maxWidth: 70),
                           child: Text(
                             trendText,
                             style: TextStyle(
-                              fontSize: 9.5,
+                              fontSize: 9,
                               fontWeight: FontWeight.w700,
                               color: isPositiveTrend ? const Color(0xFF10B981) : Colors.amber[800],
                             ),
@@ -396,7 +396,7 @@ class DashboardPremiumOverview extends StatelessWidget {
                   ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
 
             // Large Value
             FittedBox(
@@ -405,20 +405,20 @@ class DashboardPremiumOverview extends StatelessWidget {
               child: Text(
                 mainCount,
                 style: TextStyle(
-                  fontSize: 19,
+                  fontSize: 17,
                   fontWeight: FontWeight.w900,
                   color: t.textPrimary,
-                  letterSpacing: -0.5,
+                  letterSpacing: -0.4,
                 ),
               ),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 3),
 
             // Label / Title
             Text(
               title,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 11,
                 fontWeight: FontWeight.w700,
                 color: t.textSecondary,
                 letterSpacing: 0.1,
@@ -426,13 +426,13 @@ class DashboardPremiumOverview extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: 1.5),
 
             // Subtitle / context
             Text(
               effectiveSubtitle,
               style: TextStyle(
-                fontSize: 10.5,
+                fontSize: 10,
                 fontWeight: FontWeight.w500,
                 color: t.textTertiary,
               ),

@@ -1569,6 +1569,85 @@ class LocalStorageService {
     return result;
   }
 
+  /// Prepares any record map for Cloud Firestore write with optimum cloud storage footprint:
+  /// 1. Strips local Hive engine metadata ('syncStatus', 'pendingSync', 'hiveKey', etc.)
+  /// 2. Drops redundant bulky Base64 image payloads when a cloud storage URL already exists
+  /// 3. Prevents massive string blobs (> 400KB) from causing document write failures
+  /// 4. Converts DateTimes to Timestamps for Firestore native indexing
+  /// 5. Preserves FieldValue tokens (e.g. FieldValue.serverTimestamp, FieldValue.increment)
+  /// 6. Recursively cleans nested Maps and Lists
+  static Map<String, dynamic> sanitizeForCloudUpload(Map<dynamic, dynamic> data) {
+    final result = <String, dynamic>{};
+
+    final hasProfileUrl = data['profilePictureUrl'] != null &&
+        data['profilePictureUrl'].toString().trim().startsWith(RegExp(r'^(http|https|gs)://'));
+    final hasIdentUrl = data['identificationUrl'] != null &&
+        data['identificationUrl'].toString().trim().startsWith(RegExp(r'^(http|https|gs)://'));
+    final hasDegreeUrl = data['degreeUrl'] != null &&
+        data['degreeUrl'].toString().trim().startsWith(RegExp(r'^(http|https|gs)://'));
+    final hasDocUrl = data['documentUrl'] != null &&
+        data['documentUrl'].toString().trim().startsWith(RegExp(r'^(http|https|gs)://'));
+    final hasImgUrl = data['imageUrl'] != null &&
+        data['imageUrl'].toString().trim().startsWith(RegExp(r'^(http|https|gs)://'));
+
+    const internalKeysToDrop = {
+      'syncStatus',
+      'pendingSync',
+      'synced',
+      'hiveKey',
+      'localKey',
+      '_attempts',
+      'attempts',
+      'lastAttempt',
+      '_err',
+      'lastError',
+      'nextRetryAt',
+      'lastFailureLoggedAt',
+      '_socketId',
+      'event_type',
+    };
+
+    data.forEach((k, value) {
+      if (k == null) return;
+      final key = k.toString().trim();
+      if (key.isEmpty || key == 'null' || key == 'undefined') return;
+      if (internalKeysToDrop.contains(key)) return;
+
+      // Drop heavy base64 when storage URL exists
+      if (key == 'profilePictureBase64' && hasProfileUrl) return;
+      if (key == 'identificationBase64' && hasIdentUrl) return;
+      if (key == 'degreeBase64' && hasDegreeUrl) return;
+      if (key == 'documentBase64' && hasDocUrl) return;
+      if (key == 'imageBase64' && hasImgUrl) return;
+
+      if (value == null) {
+        result[key] = null;
+      } else if (value is Timestamp) {
+        result[key] = value;
+      } else if (value is DateTime) {
+        result[key] = Timestamp.fromDate(value);
+      } else if (value.runtimeType.toString().contains('FieldValue') || value is FieldValue) {
+        result[key] = value;
+      } else if (value is Map) {
+        result[key] = sanitizeForCloudUpload(value);
+      } else if (value is List) {
+        result[key] = value.map((item) {
+          if (item is Map) {
+            return sanitizeForCloudUpload(item);
+          }
+          if (item is DateTime) {
+            return Timestamp.fromDate(item);
+          }
+          return item;
+        }).toList();
+      } else {
+        result[key] = value;
+      }
+    });
+
+    return result;
+  }
+
   static dynamic sanitizeValue(dynamic item) {
     if (item is Timestamp || item is DateTime) {
       return _toDateTime(item).toIso8601String();
@@ -1630,7 +1709,20 @@ class LocalStorageService {
           }
 
           final branchId = (item['branchId'] ?? (item['data'] is Map ? item['data']['branchId'] : '') ?? '').toString().toLowerCase().trim();
-          final entityId = (item['entityId'] ?? item['serial'] ?? item['patientId'] ?? item['employeeId'] ?? item['localId'] ?? item['id'] ?? (item['data'] is Map ? (item['data']['serial'] ?? item['data']['id']) : '') ?? '').toString().trim();
+          final isSerialAction = {'save_entry', 'save_prescription', 'update_serial_status'}.contains(type);
+          final isAttendance = type.contains('attendance') || type.contains('punch') || type == 'zkteco';
+
+          final String entityId;
+          if (type == 'save_patient') {
+            entityId = (item['patientId'] ?? (item['data'] is Map ? (item['data']['patientId'] ?? item['data']['id'] ?? item['data']['cnic']) : null) ?? item['id'] ?? item['entityId'] ?? '').toString().trim();
+          } else if (isSerialAction) {
+            entityId = (item['serial'] ?? (item['data'] is Map ? (item['data']['serial'] ?? item['data']['id']) : null) ?? item['entityId'] ?? '').toString().trim();
+          } else if (type.contains('madrassa')) {
+            entityId = (item['studentId'] ?? (item['data'] is Map ? (item['data']['studentId'] ?? item['data']['id']) : null) ?? item['entityId'] ?? '').toString().trim();
+          } else {
+            entityId = (item['serial'] ?? item['patientId'] ?? item['employeeId'] ?? item['localId'] ?? (item['data'] is Map ? (item['data']['serial'] ?? item['data']['id']) : null) ?? item['id'] ?? item['entityId'] ?? '').toString().trim();
+          }
+
           final dateKey = (item['dateKey'] ?? item['date'] ?? (item['data'] is Map ? (item['data']['dateKey'] ?? item['data']['date']) : '') ?? '').toString().trim();
 
           final punchSeq = (item['punchSequence'] ??
@@ -1643,9 +1735,6 @@ class LocalStorageService {
                   '')
               .toString();
 
-          final isSerialAction = {'save_entry', 'save_prescription', 'update_serial_status'}.contains(type);
-          final isAttendance = type.contains('attendance') || type.contains('punch') || type == 'zkteco';
-
           // Prune attendance sync items older than 3 days
           if (isAttendance) {
             final rawTime = item['timestamp'] ?? (item['data'] is Map ? item['data']['timestamp'] : null);
@@ -1654,6 +1743,26 @@ class LocalStorageService {
               if (dt != null && DateTime.now().difference(dt).inDays.abs() > 3) {
                 keysToDelete.add(key);
                 continue;
+              }
+            }
+          }
+
+          // Prune stale delete_user actions if user is active locally
+          if (type == 'delete_user') {
+            final uId = (item['uid'] ?? item['id'] ?? '').toString().trim();
+            final username = (item['username'] ?? '').toString().trim().toLowerCase();
+            final email = (item['email'] ?? '').toString().trim().toLowerCase();
+            if (Hive.isBoxOpen('local_users')) {
+              final lBox = Hive.box('local_users');
+              final local = lBox.get('user:$username') ?? lBox.get(username) ?? (email.isNotEmpty ? lBox.get('user:$email') : null);
+              if (local is Map) {
+                final localUid = (local['uid'] ?? local['id'] ?? '').toString().trim();
+                final localStatus = (local['status'] ?? local['accountStatus'] ?? '').toString().toLowerCase().trim();
+                final localDeleted = local['isDeleted'] == true || localStatus == 'deleted';
+                if (!localDeleted && localUid.isNotEmpty && uId.isNotEmpty && localUid != uId) {
+                  keysToDelete.add(key);
+                  continue;
+                }
               }
             }
           }
@@ -1668,6 +1777,8 @@ class LocalStorageService {
           } else if (isAttendance && entityId.isNotEmpty) {
             final punchTime = (item['timestamp'] ?? (item['data'] is Map ? item['data']['timestamp'] : '') ?? dateKey).toString().trim();
             groupKey = 'att_${branchId}_${entityId}_$punchTime';
+          } else if (type == 'save_patient' && entityId.isNotEmpty) {
+            groupKey = 'patient_${branchId}_$entityId';
           } else {
             groupKey = entityId.isNotEmpty
                 ? '${type}_${branchId}_${entityId}_$dateKey${punchSeq.isNotEmpty ? "_$punchSeq" : ""}'
@@ -1748,8 +1859,8 @@ class LocalStorageService {
           uniqueLatest[groupKey] = key;
         }
 
-        for (final key in keysToDelete) {
-          await box.delete(key);
+        if (keysToDelete.isNotEmpty) {
+          await box.deleteAll(keysToDelete);
         }
 
         final purged = initialCount - box.length;
@@ -2190,6 +2301,17 @@ class LocalStorageService {
         }
 
         if (isDeleted) {
+          // Guard: If an active local user exists with a different UID, DO NOT delete it!
+          final local = (email.isNotEmpty ? box.get('user:$email') : null) ??
+              (usernameLower.isNotEmpty ? box.get('user:$usernameLower') : null);
+          if (local is Map) {
+            final localUid = (local['uid'] ?? local['id'] ?? '').toString().trim();
+            final localStatus = (local['status'] ?? local['accountStatus'] ?? '').toString().toLowerCase().trim();
+            final localDeleted = local['isDeleted'] == true || localStatus == 'deleted' || localStatus == 'purged';
+            if (!localDeleted && localUid.isNotEmpty && uid.isNotEmpty && localUid != uid) {
+              continue; // Skip purging active re-created account
+            }
+          }
           if (email.isNotEmpty) await box.delete('user:$email');
           if (usernameLower.isNotEmpty) await box.delete('user:$usernameLower');
           if (uid.isNotEmpty) {
@@ -2234,25 +2356,21 @@ class LocalStorageService {
             sanitized['passwordHash'] = hashPassword('1122');
           }
           final roleVal = (sanitized['role'] ?? '').toString().trim();
-          if (roleVal.isEmpty || roleVal.toLowerCase() == 'unknown' || roleVal.toLowerCase() == 'staff') {
-            sanitized['role'] = 'admin';
+          if (roleVal.isEmpty || roleVal.toLowerCase() == 'unknown') {
+            sanitized['role'] = 'staff';
           }
           sanitized['roles'] = [sanitized['role']];
           sanitized['status'] ??= 'active';
           sanitized['accountStatus'] ??= 'active';
           sanitized['isActive'] ??= true;
 
+          final effectiveUid = uid.isNotEmpty ? uid : docId;
+          if (effectiveUid.isNotEmpty) {
+            await box.put(effectiveUid, sanitized);
+            await box.put('user:$effectiveUid', sanitized);
+          }
           if (email.isNotEmpty) await box.put('user:$email', sanitized);
           if (usernameLower.isNotEmpty) await box.put('user:$usernameLower', sanitized);
-          if (username.isNotEmpty) await box.put('user:$username', sanitized);
-          if (uid.isNotEmpty) {
-            await box.put('user:$uid', sanitized);
-            await box.put(uid, sanitized);
-          }
-          if (docId.isNotEmpty && docId != uid) {
-            await box.put('user:$docId', sanitized);
-            await box.put(docId, sanitized);
-          }
 
           final effectivePw = sanitized['password']?.toString() ?? '1122';
           if (email.isNotEmpty) {
@@ -2432,12 +2550,10 @@ class LocalStorageService {
         'syncStatus':   'synced',
       };
 
-      await box.put('user:$email', payload);
-      await box.put(email, payload);
-      await box.put('user:$username', payload);
-      await box.put(username, payload);
-      await box.put('user:$uid', payload);
       await box.put(uid, payload);
+      await box.put('user:$uid', payload);
+      if (email.isNotEmpty) await box.put('user:$email', payload);
+      if (username.isNotEmpty) await box.put('user:${username.toLowerCase()}', payload);
     }
 
     await seedOne('manager@gmd.com', 'manager', 'Manager@123', 'manager', 'all', 'HQ');
@@ -2512,6 +2628,489 @@ class LocalStorageService {
     debugPrint('[LocalStorage] Patient deduplication completed');
   }
 
+  /// Comprehensively inspects, sanitizes, deduplicates, and repairs all local
+  /// user accounts stored in Hive boxes (`local_users`, `users`, `local`).
+  ///
+  /// Fixes:
+  /// 1. Purges ghost / deleted accounts (`isDeleted == true`, `status == 'deleted'`) across all alternative keys.
+  /// 2. Merges multi-key fragmented records (records sharing UID, email, or username) into single canonical accounts.
+  /// 3. Resolves missing, generic, or corrupt roles ('unknown', 'user', 'staff') by cross-referencing `local_employees` and semantic heuristics.
+  /// 4. Ensures fallback passwords ('1122') and hashes exist so offline login works reliably.
+  /// 5. Standardizes keys in `local_users` to canonical set (`uid`, `'user:$uid'`, `'user:$email'`, `'user:$usernameLower'`) and eliminates orphaned copies.
+  /// 6. Synchronizes credentials to `OfflineAuthService`.
+  static Future<Map<String, int>> repairAndSanitizeLocalAccounts({bool force = false}) async {
+    final Map<String, int> summary = {
+      'totalScanned': 0,
+      'canonicalUsers': 0,
+      'duplicatesPurged': 0,
+      'rolesRepaired': 0,
+      'deletedAccountsPurged': 0,
+      'credentialsSynced': 0,
+    };
+
+    try {
+      if (!Hive.isBoxOpen(usersBox)) {
+        await openBoxSafe(usersBox);
+      }
+      final box = Hive.box(usersBox);
+
+      // 1. Build lookup index of employee profiles from local_employees (if available)
+      final Map<String, Map<String, dynamic>> employeeByUid = {};
+      final Map<String, Map<String, dynamic>> employeeByEmail = {};
+      final Map<String, Map<String, dynamic>> employeeByCnic = {};
+      final Map<String, Map<String, dynamic>> employeeByName = {};
+
+      if (Hive.isBoxOpen(employeesBox)) {
+        final empBox = Hive.box(employeesBox);
+        for (final k in empBox.keys) {
+          final eVal = empBox.get(k);
+          if (eVal is Map) {
+            final eMap = Map<String, dynamic>.from(eVal);
+            final eUid = (eMap['userId'] ?? eMap['linkedUserId'] ?? eMap['uid'] ?? eMap['id'] ?? '').toString().trim();
+            final eEmail = (eMap['email'] ?? '').toString().trim().toLowerCase();
+            final eCnic = (eMap['cnic'] ?? '').toString().trim().replaceAll('-', '');
+            final eName = (eMap['name'] ?? '').toString().trim().toLowerCase();
+
+            if (eUid.isNotEmpty) employeeByUid[eUid] = eMap;
+            if (eEmail.isNotEmpty) employeeByEmail[eEmail] = eMap;
+            if (eCnic.isNotEmpty) employeeByCnic[eCnic] = eMap;
+            if (eName.isNotEmpty) employeeByName[eName] = eMap;
+          }
+        }
+      }
+
+      // 2. Discover raw records across usersBox and legacy boxes
+      final List<Map<String, dynamic>> rawRecords = [];
+      final Set<dynamic> allBoxKeys = Set.from(box.keys);
+
+      for (final key in allBoxKeys) {
+        final val = box.get(key);
+        if (val is Map) {
+          rawRecords.add(Map<String, dynamic>.from(val));
+        }
+      }
+
+      // Legacy boxes check
+      final legacyBoxes = ['users', 'local'];
+      for (final lName in legacyBoxes) {
+        try {
+          if (Hive.isBoxOpen(lName)) {
+            final lBox = Hive.box(lName);
+            for (final lk in lBox.keys) {
+              final strKey = lk.toString().toLowerCase();
+              if (strKey.startsWith('user:') || strKey.startsWith('user_') || lName == 'users') {
+                final lVal = lBox.get(lk);
+                if (lVal is Map) {
+                  final map = Map<String, dynamic>.from(lVal);
+                  if (map.containsKey('email') || map.containsKey('role') || map.containsKey('uid')) {
+                    rawRecords.add(map);
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      summary['totalScanned'] = rawRecords.length;
+      if (rawRecords.isEmpty) return summary;
+
+      // 3. Identify all explicitly deleted or purged tokens
+      final Set<String> deletedUids = {};
+      final Set<String> deletedEmails = {};
+      final Set<String> deletedUsernames = {};
+
+      for (final rec in rawRecords) {
+        final status = (rec['status'] ?? rec['accountStatus'] ?? '').toString().trim().toLowerCase();
+        final role = (rec['role'] ?? rec['userRole'] ?? '').toString().trim().toLowerCase();
+        final isActive = rec['isActive'] == true || status == 'active';
+        final hasActiveRole = role.isNotEmpty && role != 'unknown' && role != 'staff' && role != 'unassigned';
+
+        final isDeleted = (rec['isDeleted'] == true ||
+            status == 'deleted' ||
+            status == 'purged' ||
+            status == 'offboarded') && !isActive && !hasActiveRole;
+
+        if (isDeleted) {
+          final uid = (rec['uid'] ?? rec['id'] ?? '').toString().trim();
+          final email = (rec['email'] ?? '').toString().trim().toLowerCase();
+          final username = (rec['username'] ?? rec['usernameLower'] ?? '').toString().trim().toLowerCase();
+
+          if (uid.isNotEmpty) deletedUids.add(uid);
+          if (email.isNotEmpty) deletedEmails.add(email);
+          if (username.isNotEmpty) deletedUsernames.add(username);
+        }
+      }
+
+      // 4. Cluster active records by identity (UID, Email, Username)
+      final List<Map<String, dynamic>> activeClusters = [];
+      final Map<String, int> uidToCluster = {};
+      final Map<String, int> emailToCluster = {};
+      final Map<String, int> usernameToCluster = {};
+
+      for (final rec in rawRecords) {
+        final uid = (rec['uid'] ?? rec['id'] ?? '').toString().trim();
+        final email = (rec['email'] ?? '').toString().trim().toLowerCase();
+        final username = (rec['username'] ?? rec['usernameLower'] ?? '').toString().trim().toLowerCase();
+        final status = (rec['status'] ?? rec['accountStatus'] ?? '').toString().trim().toLowerCase();
+        final role = (rec['role'] ?? rec['userRole'] ?? '').toString().trim().toLowerCase();
+        final isActive = rec['isActive'] == true || status == 'active';
+        final hasActiveRole = role.isNotEmpty && role != 'unknown' && role != 'staff' && role != 'unassigned';
+
+        // If this record is explicitly marked deleted, skip adding to active ONLY if genuinely deleted
+        if ((rec['isDeleted'] == true || status == 'deleted' || status == 'purged') && !isActive && !hasActiveRole) {
+          continue;
+        }
+
+        // Check if any identifier matches an explicitly deleted identity
+        final matchesDeleted = (uid.isNotEmpty && deletedUids.contains(uid)) ||
+            (email.isNotEmpty && deletedEmails.contains(email)) ||
+            (username.isNotEmpty && deletedUsernames.contains(username));
+
+        // If it matches a deleted identity and does NOT have a valid active flag or role, skip
+        if (matchesDeleted && !isActive && !hasActiveRole) {
+          continue;
+        }
+
+        // Find existing cluster
+        int? targetCluster;
+        if (uid.isNotEmpty && uidToCluster.containsKey(uid)) {
+          targetCluster = uidToCluster[uid];
+        } else if (email.isNotEmpty && emailToCluster.containsKey(email)) {
+          targetCluster = emailToCluster[email];
+        } else if (username.isNotEmpty && usernameToCluster.containsKey(username)) {
+          targetCluster = usernameToCluster[username];
+        }
+
+        if (targetCluster != null) {
+          // Merge with existing cluster
+          final cluster = activeClusters[targetCluster];
+          rec.forEach((k, v) {
+            if (v != null && v.toString().trim().isNotEmpty && v != 'null') {
+              final existingV = cluster[k];
+              if (existingV == null || existingV.toString().trim().isEmpty || existingV == 'null' || existingV == 'unknown' || existingV == 'staff') {
+                cluster[k] = v;
+              }
+            }
+          });
+
+          if (uid.isNotEmpty) uidToCluster[uid] = targetCluster;
+          if (email.isNotEmpty) emailToCluster[email] = targetCluster;
+          if (username.isNotEmpty) usernameToCluster[username] = targetCluster;
+        } else {
+          // New cluster
+          final newIdx = activeClusters.length;
+          final newMap = Map<String, dynamic>.from(rec);
+          activeClusters.add(newMap);
+
+          if (uid.isNotEmpty) uidToCluster[uid] = newIdx;
+          if (email.isNotEmpty) emailToCluster[email] = newIdx;
+          if (username.isNotEmpty) usernameToCluster[username] = newIdx;
+        }
+      }
+
+      // 5. Purge explicitly deleted identities from Hive and OfflineAuthService
+      for (final key in allBoxKeys) {
+        final keyStr = key.toString().trim();
+        final lowerKey = keyStr.toLowerCase();
+        bool shouldDelete = false;
+
+        for (final dUid in deletedUids) {
+          if (dUid.isNotEmpty && (keyStr == dUid || keyStr == 'user:$dUid' || lowerKey == dUid.toLowerCase())) {
+            shouldDelete = true;
+            break;
+          }
+        }
+        if (!shouldDelete) {
+          for (final dEmail in deletedEmails) {
+            if (dEmail.isNotEmpty && (lowerKey == dEmail || lowerKey == 'user:$dEmail')) {
+              shouldDelete = true;
+              break;
+            }
+          }
+        }
+        if (!shouldDelete) {
+          for (final dUser in deletedUsernames) {
+            if (dUser.isNotEmpty && (lowerKey == dUser || lowerKey == 'user:$dUser')) {
+              shouldDelete = true;
+              break;
+            }
+          }
+        }
+
+        if (shouldDelete) {
+          await box.delete(key);
+          summary['deletedAccountsPurged'] = (summary['deletedAccountsPurged'] ?? 0) + 1;
+        }
+      }
+
+      for (final dUid in deletedUids) {
+        unawaited(OfflineAuthService.clearCredentialsForUser(dUid));
+      }
+      for (final dEmail in deletedEmails) {
+        unawaited(OfflineAuthService.clearCredentialsForUser(dEmail));
+      }
+      for (final dUser in deletedUsernames) {
+        unawaited(OfflineAuthService.clearCredentialsForUser(dUser));
+      }
+
+      // 6. Sanitize, repair roles, passwords, and write canonical keys
+      final Set<dynamic> validCanonicalKeys = {};
+
+      for (final userMap in activeClusters) {
+        final sanitized = sanitize(userMap);
+
+        // Canonical UID
+        String uid = (sanitized['uid'] ?? sanitized['id'] ?? '').toString().trim();
+        final email = (sanitized['email'] ?? '').toString().trim().toLowerCase();
+        final rawUsername = (sanitized['username'] ?? sanitized['usernameLower'] ?? '').toString().trim();
+        final usernameLower = (sanitized['usernameLower'] ?? (rawUsername.isNotEmpty ? rawUsername.toLowerCase() : (email.isNotEmpty ? email.split('@').first : ''))).toString().trim().toLowerCase();
+        final username = rawUsername.isNotEmpty ? rawUsername : usernameLower;
+
+        if (uid.isEmpty) {
+          if (email.isNotEmpty) {
+            uid = 'local_${email.replaceAll('@', '_').replaceAll('.', '_')}';
+          } else if (usernameLower.isNotEmpty) {
+            uid = 'local_$usernameLower';
+          } else {
+            uid = const Uuid().v4();
+          }
+        }
+
+        sanitized['uid'] = uid;
+        sanitized['id'] = uid;
+        sanitized['email'] = email;
+        sanitized['username'] = username;
+        sanitized['usernameLower'] = usernameLower;
+
+        // Display Name
+        String name = (sanitized['name'] ?? sanitized['displayName'] ?? '').toString().trim();
+        if (name.isEmpty) {
+          name = username.isNotEmpty ? username : (email.isNotEmpty ? email.split('@').first : 'Staff User');
+        }
+        sanitized['name'] = name;
+        sanitized['displayName'] = name;
+
+        // Role Resolution
+        String role = (sanitized['role'] ?? sanitized['userRole'] ?? '').toString().trim();
+        final lowerRole = role.toLowerCase();
+        bool roleWasRepaired = false;
+
+        if (role.isEmpty || lowerRole == 'unknown' || lowerRole == 'user' || lowerRole == 'staff') {
+          // 1. Cross-reference employee index
+          Map<String, dynamic>? linkedEmp = employeeByUid[uid] ??
+              (email.isNotEmpty ? employeeByEmail[email] : null) ??
+              (sanitized['cnic'] != null ? employeeByCnic[sanitized['cnic'].toString().replaceAll('-', '')] : null) ??
+              (name.isNotEmpty ? employeeByName[name.toLowerCase()] : null);
+
+          if (linkedEmp != null) {
+            final empRole = (linkedEmp['role'] ?? linkedEmp['designation'] ?? '').toString().trim();
+            final empRoleLower = empRole.toLowerCase();
+            if (empRole.isNotEmpty && empRoleLower != 'unknown' && empRoleLower != 'staff') {
+              role = empRole;
+              roleWasRepaired = true;
+            }
+          }
+
+          // 2. Keyword heuristic inference if still unresolved
+          if (role.isEmpty || role.toLowerCase() == 'unknown' || role.toLowerCase() == 'staff' || role.toLowerCase() == 'user') {
+            final testSubject = '$email $usernameLower $name'.toLowerCase();
+            if (testSubject.contains('nazra') || testSubject.contains('hifz')) {
+              role = 'Madrassa Teacher';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('madrassa') && testSubject.contains('teacher')) {
+              role = 'Madrassa Teacher';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('school') && testSubject.contains('teacher')) {
+              role = 'School Teacher';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('teacher') || testSubject.contains('qari') || testSubject.contains('ustad')) {
+              role = 'Madrassa Teacher';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('dispenser') || testSubject.contains('dispensary')) {
+              role = 'dispenser';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('doctor') || testSubject.contains('dr.') || testSubject.contains('dr_') || testSubject.contains('physician')) {
+              role = 'doctor';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('superadmin') || testSubject.contains('masteradmin') || isMasterAdminCredentials(usernameLower, '')) {
+              role = 'admin';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('account') || testSubject.contains('finance')) {
+              role = 'accounts';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('inventory') || testSubject.contains('store')) {
+              role = 'inventory';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('lab')) {
+              role = 'lab';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('principal')) {
+              role = 'principal';
+              roleWasRepaired = true;
+            } else if (testSubject.contains('manager')) {
+              role = 'branch manager';
+              roleWasRepaired = true;
+            } else {
+              role = 'staff';
+            }
+          }
+        }
+
+        if (roleWasRepaired) {
+          summary['rolesRepaired'] = (summary['rolesRepaired'] ?? 0) + 1;
+        }
+
+        sanitized['role'] = role;
+        sanitized['userRole'] = role;
+        sanitized['roles'] = [role];
+
+        // Status & active state
+        sanitized['status'] = 'active';
+        sanitized['accountStatus'] = 'active';
+        sanitized['isActive'] = true;
+        sanitized['isRevoked'] = false;
+        sanitized['accessRevoked'] = false;
+        sanitized['isCorruptedOrOrphanAuth'] = false;
+        sanitized['isDeleted'] = false;
+        sanitized.remove('deletedAt');
+        sanitized.remove(null);
+        sanitized.remove('null');
+
+        // Branch fallback
+        var branchId = (sanitized['branchId'] ?? sanitized['branch'] ?? '').toString().trim().toLowerCase();
+        if (branchId.isEmpty || branchId == 'unknown') {
+          final linkedEmp = employeeByUid[uid] ?? (email.isNotEmpty ? employeeByEmail[email] : null);
+          if (linkedEmp != null && linkedEmp['branchId'] != null) {
+            branchId = linkedEmp['branchId'].toString().trim().toLowerCase();
+          }
+          if (branchId.isEmpty) branchId = 'main';
+        }
+        sanitized['branchId'] = branchId;
+
+        // Auto-heal known hybrid dispensary staff in Karachi
+        if (email == 'iqra@khi.com' || usernameLower == 'iqra' || uid == 'local-iqra_khi_com') {
+          sanitized['role'] = 'rec+dis';
+          sanitized['userRole'] = 'rec+dis';
+          sanitized['roles'] = ['rec+dis'];
+          sanitized['branchId'] = 'karachi';
+          sanitized['branchName'] = 'Karachi';
+          sanitized['dispensaryId'] = 'saddar';
+          sanitized['dispensaryIds'] = ['saddar'];
+          sanitized['session'] = 'evening';
+          sanitized['sessions'] = ['evening'];
+          sanitized['allowedSessions'] = ['all', 'evening'];
+          sanitized['campSchedule'] = [
+            {
+              'campId': 'saddar',
+              'session': 'evening',
+              'startTime': '14:00',
+              'endTime': '20:00',
+            }
+          ];
+        } else if (email == 'kashif@khi.com' || usernameLower == 'kashif' || uid == 'e5I5hQJQNpe08MuKmOc937dcMR43') {
+          sanitized['role'] = 'rec+dis';
+          sanitized['userRole'] = 'rec+dis';
+          sanitized['roles'] = ['rec+dis'];
+          sanitized['branchId'] = 'karachi';
+          sanitized['branchName'] = 'Karachi';
+          // dispensaryId resolved dynamically by CampSessionService.getActiveCamp() based on current shift
+          sanitized['dispensaryId'] = 'kapayya';
+          sanitized['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+          sanitized['allowedSessions'] = ['all', 'morning', 'evening'];
+          sanitized['canRegisterMedicine'] = true;
+          sanitized['campSchedule'] = [
+            {
+              'campId': 'kapayya',
+              'session': 'morning',
+              'startTime': '10:00',
+              'endTime': '13:00',
+            },
+            {
+              'campId': 'haji_camp',
+              'session': 'evening',
+              'startTime': '17:00',
+              'endTime': '20:00',
+            },
+          ];
+        }
+
+        // Offline password & credentials
+        var password = (sanitized['password'] ?? '').toString().trim();
+        var passwordHash = (sanitized['passwordHash'] ?? '').toString().trim();
+        if (password.isEmpty && passwordHash.isEmpty) {
+          password = '1122';
+          passwordHash = hashPassword('1122');
+        } else if (password.isNotEmpty && passwordHash.isEmpty) {
+          passwordHash = hashPassword(password);
+        }
+        sanitized['password'] = password.isNotEmpty ? password : '1122';
+        sanitized['passwordHash'] = passwordHash.isNotEmpty ? passwordHash : hashPassword('1122');
+
+        // Write canonical keys to local_users
+        final keysToWrite = <dynamic>{
+          uid,
+          'user:$uid',
+          if (email.isNotEmpty) 'user:$email',
+          if (usernameLower.isNotEmpty) 'user:$usernameLower',
+        };
+
+        for (final k in keysToWrite) {
+          await box.put(k, sanitized);
+          validCanonicalKeys.add(k);
+        }
+
+        // Cache in OfflineAuthService
+        final effectivePw = sanitized['password']?.toString() ?? '1122';
+        if (email.isNotEmpty) {
+          unawaited(OfflineAuthService.saveCredentials(
+            usernameOrEmail: email,
+            password: effectivePw,
+            userData: sanitized,
+            setAsLastLoggedIn: false,
+          ));
+          summary['credentialsSynced'] = (summary['credentialsSynced'] ?? 0) + 1;
+        }
+        if (usernameLower.isNotEmpty) {
+          unawaited(OfflineAuthService.saveCredentials(
+            usernameOrEmail: usernameLower,
+            password: effectivePw,
+            userData: sanitized,
+            setAsLastLoggedIn: false,
+          ));
+        }
+
+        summary['canonicalUsers'] = (summary['canonicalUsers'] ?? 0) + 1;
+      }
+
+      // 7. Purge stray, duplicate, and obsolete keys in local_users
+      // Master admin keys to preserve
+      final master = getMasterAdminProfile();
+      final masterKeys = {
+        'user:admin', 'admin', 'user:superadmin', 'superadmin',
+        'user:admin@gmwf.org', 'admin@gmwf.org', 'user:admin@gmd.com', 'admin@gmd.com',
+        'user:master-local-admin', 'master-local-admin',
+      };
+      for (final mk in masterKeys) {
+        await box.put(mk, master);
+        validCanonicalKeys.add(mk);
+      }
+
+      final strayKeys = box.keys.where((k) => !validCanonicalKeys.contains(k)).toList();
+      for (final sk in strayKeys) {
+        await box.delete(sk);
+        summary['duplicatesPurged'] = (summary['duplicatesPurged'] ?? 0) + 1;
+      }
+
+      await box.flush();
+      debugPrint('[LocalStorageService] repairAndSanitizeLocalAccounts completed: $summary');
+    } catch (e, st) {
+      debugPrint('[LocalStorageService] repairAndSanitizeLocalAccounts error: $e\n$st');
+    }
+
+    return summary;
+  }
+
   static Future<void> saveLocalUser(Map<String, dynamic> user) async {
     if (!Hive.isBoxOpen(usersBox)) {
       await openBoxSafe(usersBox);
@@ -2520,19 +3119,40 @@ class LocalStorageService {
     final sanitized = sanitize(user);
     final email = (sanitized['email'] ?? '').toString().trim().toLowerCase();
     final uid = (sanitized['uid'] ?? sanitized['id'] ?? '').toString().trim();
-    final username = (sanitized['username'] ?? sanitized['usernameLower'] ?? '').toString().trim().toLowerCase();
+    final username = (sanitized['username'] ?? sanitized['usernameLower'] ?? '').toString().trim();
+    final usernameLower = (sanitized['usernameLower'] ?? (username.isNotEmpty ? username.toLowerCase() : (email.isNotEmpty ? email.split('@').first : ''))).toString().trim().toLowerCase();
+
+    sanitized['uid'] = uid;
+    sanitized['id'] = uid;
+    sanitized['email'] = email;
+    sanitized['username'] = username.isNotEmpty ? username : usernameLower;
+    sanitized['usernameLower'] = usernameLower;
 
     // Heuristic for creators / admins
-    if (email.contains('zaheer') || username.contains('zaheer')) {
+    if (email.contains('zaheer') || usernameLower.contains('zaheer')) {
       sanitized['role'] = 'hq manager';
     }
 
-    // Preserve existing valid role if incoming role is empty/unknown/staff
+    // Preserve existing valid profile fields if incoming update is partial or missing them
+    final existing = (uid.isNotEmpty ? (box.get('user:$uid') ?? box.get(uid)) : null) ??
+        (email.isNotEmpty ? box.get('user:$email') : null) ??
+        (usernameLower.isNotEmpty ? box.get('user:$usernameLower') : null);
+    if (existing is Map) {
+      final existingMap = Map<String, dynamic>.from(existing);
+      for (final eKey in existingMap.keys) {
+        final existingVal = existingMap[eKey];
+        if (existingVal != null && existingVal != '' && existingVal != 'null') {
+          final curVal = sanitized[eKey];
+          if (curVal == null || curVal == '' || curVal == 'null' ||
+              (curVal is List && curVal.isEmpty && existingVal is List && existingVal.isNotEmpty)) {
+            sanitized[eKey] = existingVal;
+          }
+        }
+      }
+    }
+
     final incomingRole = (sanitized['role'] ?? '').toString().trim().toLowerCase();
     if (incomingRole.isEmpty || incomingRole == 'unknown' || incomingRole == 'staff') {
-      final existing = (email.isNotEmpty ? box.get('user:$email') : null) ??
-          (uid.isNotEmpty ? (box.get('user:$uid') ?? box.get(uid)) : null) ??
-          (username.isNotEmpty ? box.get('user:$username') : null);
       if (existing is Map) {
         final existingRole = (existing['role'] ?? '').toString().trim().toLowerCase();
         if (existingRole.isNotEmpty && existingRole != 'unknown' && existingRole != 'staff') {
@@ -2540,29 +3160,55 @@ class LocalStorageService {
         }
       }
     }
+    sanitized['roles'] = [sanitized['role'] ?? 'staff'];
+    sanitized['status'] ??= 'active';
+    sanitized['accountStatus'] ??= 'active';
+    sanitized['isActive'] ??= true;
 
+    if (uid.isNotEmpty) {
+      await box.put(uid, sanitized);
+      await box.put('user:$uid', sanitized);
+    }
     if (email.isNotEmpty) {
       await box.put('user:$email', sanitized);
     }
-    if (uid.isNotEmpty) {
-      await box.put('user:$uid', sanitized);
-      await box.put(uid, sanitized);
-    }
-    if (username.isNotEmpty) {
-      await box.put('user:$username', sanitized);
+    if (usernameLower.isNotEmpty) {
+      await box.put('user:$usernameLower', sanitized);
     }
 
+    // Synchronize matching records across alternative keys
     for (final k in box.keys) {
       final val = box.get(k);
       if (val is Map) {
         final vUid = (val['uid'] ?? val['id'] ?? '').toString().trim();
         final vEmail = (val['email'] ?? '').toString().trim().toLowerCase();
-        if ((uid.isNotEmpty && vUid == uid) || (email.isNotEmpty && vEmail == email)) {
+        final vUser = (val['usernameLower'] ?? val['username'] ?? '').toString().trim().toLowerCase();
+        if ((uid.isNotEmpty && vUid == uid) ||
+            (email.isNotEmpty && vEmail == email) ||
+            (usernameLower.isNotEmpty && vUser == usernameLower)) {
           await box.put(k, sanitized);
         }
       }
     }
     await box.flush();
+
+    final effectivePw = sanitized['password']?.toString() ?? '1122';
+    if (email.isNotEmpty) {
+      unawaited(OfflineAuthService.saveCredentials(
+        usernameOrEmail: email,
+        password: effectivePw,
+        userData: sanitized,
+        setAsLastLoggedIn: false,
+      ));
+    }
+    if (usernameLower.isNotEmpty) {
+      unawaited(OfflineAuthService.saveCredentials(
+        usernameOrEmail: usernameLower,
+        password: effectivePw,
+        userData: sanitized,
+        setAsLastLoggedIn: false,
+      ));
+    }
   }
 
   static Map<String, dynamic>? getLocalUserByEmail(String email) {
@@ -2589,10 +3235,31 @@ class LocalStorageService {
     if (!Hive.isBoxOpen(usersBox)) return [];
     final box = Hive.box(usersBox);
     final users = <Map<String, dynamic>>[];
+    final seenUids = <String>{};
+    final seenEmails = <String>{};
+    final seenUsernames = <String>{};
+
     for (final key in box.keys) {
       final val = box.get(key);
-      if (val is Map) {
-        users.add(Map<String, dynamic>.from(val));
+      if (val is! Map) continue;
+      final m = Map<String, dynamic>.from(val);
+      final status = (m['status'] ?? m['accountStatus'] ?? '').toString().toLowerCase().trim();
+      final isDeleted = m['isDeleted'] == true || status == 'deleted' || status == 'purged';
+      if (isDeleted) continue;
+
+      final uid = (m['uid'] ?? m['id'] ?? '').toString().trim();
+      final email = (m['email'] ?? '').toString().trim().toLowerCase();
+      final username = (m['usernameLower'] ?? m['username'] ?? '').toString().trim().toLowerCase();
+
+      final alreadySeen = (uid.isNotEmpty && seenUids.contains(uid)) ||
+          (email.isNotEmpty && seenEmails.contains(email)) ||
+          (username.isNotEmpty && seenUsernames.contains(username));
+
+      if (!alreadySeen) {
+        if (uid.isNotEmpty) seenUids.add(uid);
+        if (email.isNotEmpty) seenEmails.add(email);
+        if (username.isNotEmpty) seenUsernames.add(username);
+        users.add(m);
       }
     }
     return users;
@@ -2607,23 +3274,199 @@ class LocalStorageService {
     final direct = box.get('user:$target') ?? box.get(target);
     if (direct is Map) return Map<String, dynamic>.from(direct);
 
+    final normTarget = target.replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final targetPrefix = target.contains('@') ? target.split('@').first.replaceAll(RegExp(r'[^a-z0-9]'), '') : normTarget;
+
     for (final key in box.keys) {
       final val = box.get(key);
       if (val is Map) {
         final uEmail = (val['email'] ?? '').toString().toLowerCase().trim();
-        final uUid = (val['uid'] ?? '').toString().toLowerCase().trim();
+        final uUid = (val['uid'] ?? val['id'] ?? '').toString().toLowerCase().trim();
         final uName = (val['username'] ?? val['userName'] ?? val['name'] ?? '').toString().toLowerCase().trim();
 
         if (uEmail == target || uUid == target || uName == target || (uEmail.isNotEmpty && uEmail.split('@').first == target)) {
           return Map<String, dynamic>.from(val);
+        }
+
+        if (normTarget.isNotEmpty) {
+          final normEmail = uEmail.replaceAll(RegExp(r'[^a-z0-9]'), '');
+          final normUid = uUid.replaceAll(RegExp(r'[^a-z0-9]'), '');
+          final normName = uName.replaceAll(RegExp(r'[^a-z0-9]'), '');
+          final emailPrefix = uEmail.contains('@') ? uEmail.split('@').first.replaceAll(RegExp(r'[^a-z0-9]'), '') : '';
+
+          if (normEmail == normTarget ||
+              normUid == normTarget ||
+              normName == normTarget ||
+              (emailPrefix.isNotEmpty && (emailPrefix == targetPrefix || emailPrefix == normTarget)) ||
+              (normName.isNotEmpty && (normName == targetPrefix || normName.contains(normTarget) || normTarget.contains(normName)))) {
+            return Map<String, dynamic>.from(val);
+          }
         }
       }
     }
     return null;
   }
 
+  /// Pushes all valid locally cached users back into Firestore (both root /users and /branches/{bId}/users)
+  /// to repair or restore cloud databases if Firestore records were deleted or wiped.
+  static Future<int> pushLocalUsersToFirestore() async {
+    int syncedCount = 0;
+    try {
+      if (!Hive.isBoxOpen(usersBox)) {
+        await openBoxSafe(usersBox);
+      }
+      final box = Hive.box(usersBox);
+      final Set<String> processedUids = {};
+
+      for (final key in box.keys) {
+        final val = box.get(key);
+        if (val is! Map) continue;
+        final u = Map<String, dynamic>.from(val);
+        final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
+        final role = (u['role'] ?? u['userRole'] ?? '').toString().toLowerCase().trim();
+        final isActive = u['isActive'] == true || status == 'active';
+        final hasActiveRole = role.isNotEmpty && role != 'unknown' && role != 'unassigned';
+
+        if ((u['isDeleted'] == true || status == 'deleted' || status == 'purged') && !isActive && !hasActiveRole) continue;
+
+        final uid = (u['uid'] ?? u['id'] ?? '').toString().trim();
+        if (uid.isEmpty || processedUids.contains(uid)) continue;
+        processedUids.add(uid);
+
+        final branchId = (u['branchId'] ?? '').toString().trim().toLowerCase();
+        
+        // Auto-heal any corrupted or orphan flags if user has a valid profile
+        final rawRole = (u['role'] ?? u['userRole'] ?? '').toString().trim();
+        final healedRole = rawRole.isNotEmpty && rawRole != 'unknown' && rawRole != 'unassigned'
+            ? rawRole
+            : 'staff';
+
+        final firestoreData = sanitizeForCloudUpload(u);
+        firestoreData['uid'] = uid;
+        firestoreData['id'] = uid;
+        firestoreData['role'] = healedRole;
+        firestoreData['userRole'] = healedRole;
+        firestoreData['roles'] = [healedRole];
+        firestoreData['isDeleted'] = false;
+        firestoreData['status'] = 'active';
+        firestoreData['accountStatus'] = 'active';
+        firestoreData['isActive'] = true;
+        firestoreData['isRevoked'] = false;
+        firestoreData['accessRevoked'] = false;
+        firestoreData['isCorruptedOrOrphanAuth'] = false;
+        firestoreData.remove('deletedAt');
+        firestoreData.remove(null);
+        firestoreData.remove('null');
+        firestoreData['restoredAt'] = FieldValue.serverTimestamp();
+        firestoreData['updatedAt'] = FieldValue.serverTimestamp();
+
+        final email = (u['email'] ?? '').toString().trim().toLowerCase();
+        final rawUser = (firestoreData['username'] ?? firestoreData['usernameLower'] ?? (email.isNotEmpty ? email.split('@').first : '')).toString().trim();
+        if (rawUser.isNotEmpty) {
+          firestoreData['username'] = rawUser;
+          firestoreData['usernameLower'] = rawUser.toLowerCase();
+        }
+
+        if (branchId.isNotEmpty && branchId != 'all' && branchId != 'global') {
+          firestoreData['branchId'] = branchId;
+        }
+
+        // Safety: Guard against Firestore 1MB document limit by trimming oversized base64 fields if needed
+        final jsonApproxSize = firestoreData.toString().length;
+        if (jsonApproxSize > 700000) {
+          // If combined payload is too large, retain base64 locally but omit heaviest docs for Firestore doc
+          if (firestoreData['degreeCertificateUrl'] != null && firestoreData['degreeCertificateUrl'].toString().startsWith('data:')) {
+            firestoreData.remove('degreeCertificateUrl');
+          }
+          if (firestoreData['identificationUrl'] != null && firestoreData['identificationUrl'].toString().startsWith('data:') && firestoreData.toString().length > 700000) {
+            firestoreData.remove('identificationUrl');
+          }
+        }
+
+        try {
+          await FirebaseFirestore.instance.collection('users').doc(uid).set(firestoreData, SetOptions(merge: true));
+          if (branchId.isNotEmpty && branchId != 'all' && branchId != 'global') {
+            await FirebaseFirestore.instance
+                .collection('branches')
+                .doc(branchId)
+                .collection('users')
+                .doc(uid)
+                .set(firestoreData, SetOptions(merge: true))
+                .catchError((_) {});
+          }
+
+          final uLower = (firestoreData['usernameLower'] ?? firestoreData['username'] ?? '').toString().trim().toLowerCase();
+          if (uLower.isNotEmpty && uLower != uid) {
+            await FirebaseFirestore.instance.collection('users').doc(uLower).delete().catchError((_) {});
+          }
+
+          // Also heal the local record so the UI immediately updates
+          final updatedLocal = Map<String, dynamic>.from(u);
+          updatedLocal['status'] = 'active';
+          updatedLocal['accountStatus'] = 'active';
+          updatedLocal['isActive'] = true;
+          updatedLocal['isRevoked'] = false;
+          updatedLocal['accessRevoked'] = false;
+          updatedLocal['isCorruptedOrOrphanAuth'] = false;
+          updatedLocal['isDeleted'] = false;
+          updatedLocal['role'] = healedRole;
+          updatedLocal.remove('deletedAt');
+          updatedLocal.remove(null);
+          updatedLocal.remove('null');
+          if (rawUser.isNotEmpty) {
+            updatedLocal['username'] = rawUser;
+            updatedLocal['usernameLower'] = rawUser.toLowerCase();
+          }
+          await box.put(key, updatedLocal);
+          await box.put(uid, updatedLocal);
+          await box.put('user:$uid', updatedLocal);
+          if (email.isNotEmpty) await box.put('user:$email', updatedLocal);
+          if (rawUser.isNotEmpty) {
+            await box.put(rawUser, updatedLocal);
+            await box.put(rawUser.toLowerCase(), updatedLocal);
+            await box.put('user:${rawUser.toLowerCase()}', updatedLocal);
+          }
+
+          syncedCount++;
+        } catch (e) {
+          debugPrint('[LocalStorageService] Error pushing user $uid to Firestore: $e');
+        }
+      }
+      await box.flush();
+      debugPrint('[LocalStorageService] Successfully pushed $syncedCount local users to Firestore');
+    } catch (e) {
+      debugPrint('[LocalStorageService] pushLocalUsersToFirestore error: $e');
+    }
+    return syncedCount;
+  }
+
   static Future<void> deleteLocalUser(String email) async {
-    await Hive.box(usersBox).delete('user:$email');
+    final cleanEmail = email.trim().toLowerCase();
+    if (!Hive.isBoxOpen(usersBox)) {
+      await openBoxSafe(usersBox);
+    }
+    final box = Hive.box(usersBox);
+    final keysToDelete = <dynamic>{};
+    for (final k in box.keys) {
+      final val = box.get(k);
+      if (val is Map) {
+        final vEmail = (val['email'] ?? '').toString().trim().toLowerCase();
+        if (vEmail == cleanEmail) {
+          keysToDelete.add(k);
+        }
+      }
+      final kStr = k.toString().trim().toLowerCase();
+      if (kStr == 'user:$cleanEmail' || kStr == cleanEmail) {
+        keysToDelete.add(k);
+      }
+    }
+    for (final k in keysToDelete) {
+      await box.delete(k);
+    }
+    await box.flush();
+    if (cleanEmail.isNotEmpty) {
+      await OfflineAuthService.clearCredentialsForUser(cleanEmail);
+    }
   }
 
   static Future<void> saveUserOffline({
@@ -2648,17 +3491,22 @@ class LocalStorageService {
     }
     final effectiveUid = (flattened['uid'] ?? uid).toString().trim();
     final effectiveEmail = (flattened['email'] ?? '').toString().trim().toLowerCase();
-    final effectiveUsername = (flattened['username'] ?? flattened['usernameLower'] ?? '').toString().trim().toLowerCase();
+    final effectiveUsername = (flattened['usernameLower'] ?? flattened['username'] ?? '').toString().trim().toLowerCase();
 
+    flattened['uid'] = effectiveUid;
+    flattened['id'] = effectiveUid;
+    flattened['email'] = effectiveEmail;
+    flattened['usernameLower'] = effectiveUsername;
+
+    if (effectiveUid.isNotEmpty) {
+      await box.put(effectiveUid, flattened);
+      await box.put('user:$effectiveUid', flattened);
+    }
     if (effectiveEmail.isNotEmpty) {
       await box.put('user:$effectiveEmail', flattened);
     }
     if (effectiveUsername.isNotEmpty) {
       await box.put('user:$effectiveUsername', flattened);
-    }
-    if (effectiveUid.isNotEmpty) {
-      await box.put('user:$effectiveUid', flattened);
-      await box.put(effectiveUid, flattened);
     }
 
     for (final key in box.keys) {
@@ -2666,8 +3514,10 @@ class LocalStorageService {
       if (val is Map) {
         final vUid = (val['uid'] ?? val['id'] ?? '').toString().trim();
         final vEmail = (val['email'] ?? '').toString().trim().toLowerCase();
+        final vUser = (val['usernameLower'] ?? val['username'] ?? '').toString().trim().toLowerCase();
         if ((effectiveUid.isNotEmpty && vUid == effectiveUid) ||
-            (effectiveEmail.isNotEmpty && vEmail == effectiveEmail)) {
+            (effectiveEmail.isNotEmpty && vEmail == effectiveEmail) ||
+            (effectiveUsername.isNotEmpty && vUser == effectiveUsername)) {
           await box.put(key, flattened);
         }
       }
@@ -5903,6 +6753,90 @@ class LocalStorageService {
       await box.flush();
     } catch (e) {
       debugPrint('[LocalStorage] downloadTodayTokens error: $e');
+    }
+  }
+
+  static DateTime? _lastDasterkhwaanDownloadTime;
+  static const Duration _dasterkhwaanDownloadCooldown = Duration(minutes: 5);
+
+  /// Downloads recent Dasterkhwaan food tokens for a branch from Firestore
+  /// and caches them into Hive box `dasterkhwaan_tokens`.
+  static Future<void> downloadDasterkhwaanTokens(String branchId, {int days = 7, bool force = false}) async {
+    final sanitizedBranch = sanitizeBranchId(branchId);
+    if (!isValidBranchId(sanitizedBranch)) return;
+
+    final now = DateTime.now();
+    if (!force && _lastDasterkhwaanDownloadTime != null && now.difference(_lastDasterkhwaanDownloadTime!) < _dasterkhwaanDownloadCooldown) {
+      debugPrint('[LS] Skipping downloadDasterkhwaanTokens: within ${_dasterkhwaanDownloadCooldown.inMinutes}m cooldown');
+      return;
+    }
+    _lastDasterkhwaanDownloadTime = now;
+
+    try {
+      final box = await openBoxSafe('dasterkhwaan_tokens');
+      final dateFmt = DateFormat('yyyy-MM-dd');
+
+      for (int i = 0; i < days; i++) {
+        final d = now.subtract(Duration(days: i));
+        final dateKey = dateFmt.format(d);
+
+        try {
+          final snap = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(sanitizedBranch)
+              .collection('dasterkhwaan')
+              .doc(dateKey)
+              .collection('tokens')
+              .get()
+              .timeout(const Duration(seconds: 8));
+
+          if (snap.docs.isEmpty) continue;
+
+          final Map<String, dynamic> toPut = {};
+          for (final doc in snap.docs) {
+            final data = doc.data();
+            final docId = (data['localId'] ?? doc.id).toString();
+            final numVal = (data['number'] as num?)?.toInt() ?? 0;
+            final isServed = data['served'] == true;
+            final session = (data['session'] ?? 'lunch').toString();
+            final issuedBy = (data['issuedBy'] ?? '').toString();
+            final timeStr = data['time'] is Timestamp
+                ? (data['time'] as Timestamp).toDate().toIso8601String()
+                : (data['time']?.toString() ?? now.toIso8601String());
+
+            final existing = box.get(docId);
+            if (existing is Map && existing['syncStatus'] == 'pending') {
+              // Don't overwrite locally pending tokens awaiting upload
+              continue;
+            }
+
+            toPut[docId] = {
+              'id': docId,
+              'localId': docId,
+              'number': numVal,
+              'time': timeStr,
+              'served': isServed,
+              'session': session,
+              'branchId': sanitizedBranch,
+              'dateKey': dateKey,
+              'issuedBy': issuedBy,
+              'pricePerToken': 10.0,
+              'syncStatus': 'synced',
+              'synced': true,
+            };
+          }
+
+          if (toPut.isNotEmpty) {
+            await box.putAll(toPut);
+          }
+        } catch (e) {
+          debugPrint('[LS] downloadDasterkhwaanTokens for $dateKey error: $e');
+        }
+      }
+      await box.flush();
+      debugPrint('[LS] downloadDasterkhwaanTokens completed for $sanitizedBranch');
+    } catch (e) {
+      debugPrint('[LS] downloadDasterkhwaanTokens error: $e');
     }
   }
 

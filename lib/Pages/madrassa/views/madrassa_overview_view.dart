@@ -27,6 +27,16 @@ class MadrassaOverviewView extends ConsumerWidget {
     this.onAction,
   });
 
+  static bool _isNazraStudent(Map<String, dynamic> s, String branchId) {
+    if (LocalStorageService.isMadrassaNazraOnly(branchId)) return true;
+    if (s['isNazra'] == true) return true;
+    final prog = (s['program'] ?? s['course'] ?? s['class'] ?? s['className'] ?? s['track'] ?? '').toString().toLowerCase();
+    if (prog.contains('nazra') || prog.contains('qaida')) return true;
+    final lType = (s['learningType'] ?? s['teachingType'] ?? '').toString().toLowerCase();
+    if (lType.contains('nazra') || lType.contains('qaida')) return true;
+    return false;
+  }
+
   double _calculateRecentPace(String studentId, String branchId, double overallAvg) {
     try {
       if (!Hive.isBoxOpen(LocalStorageService.madrassaLogsBox)) return overallAvg;
@@ -147,15 +157,24 @@ class MadrassaOverviewView extends ConsumerWidget {
     int leave = 0;
     int totalLinesToday = 0;
 
+    int nazraStudentsCount = 0;
+    int nazraPresent = 0;
+
     final progressList = <Map<String, dynamic>>[];
 
     for (final s in activeStudents) {
       final sId = s['id']?.toString() ?? '';
+      final isNaz = _isNazraStudent(s, branchId);
+      if (isNaz) {
+        nazraStudentsCount++;
+      }
+
       if (logData.containsKey(sId)) {
         final entry = Map<String, dynamic>.from(logData[sId] as Map);
         final att = entry['attendance']?.toString() ?? 'absent';
         if (att == 'present') {
           present++;
+          if (isNaz) nazraPresent++;
           final currentLines = entry['currentLines'] as int? ?? 0;
           if (currentLines > 0) {
             final prevLines = _getPreviousLines(sId, DateTime.now(), currentLines);
@@ -167,6 +186,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                 'rollNumber': s['rollNumber']?.toString() ?? '?',
                 'diff': diff,
                 'currentLines': currentLines,
+                'isNazra': isNaz,
               });
             }
           }
@@ -309,13 +329,27 @@ class MadrassaOverviewView extends ConsumerWidget {
               _pillIndicator(context, context.isUrdu ? 'حاضر: $present' : 'Present: $present', const Color(0xFF10B981), const Color(0xFFD1FAE5), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
               _pillIndicator(context, context.isUrdu ? 'غیر حاضر: $absent' : 'Absent: $absent', const Color(0xFFEF4444), const Color(0xFFFEE2E2), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
               _pillIndicator(context, context.isUrdu ? 'رخصت: $leave' : 'Leave: $leave', const Color(0xFFF59E0B), const Color(0xFFFEF3C7), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              if (nazraStudentsCount > 0)
+                _pillIndicator(
+                  context,
+                  context.isUrdu ? 'ناظرہ حاضر: $nazraPresent / $nazraStudentsCount' : 'Nazra Present: $nazraPresent / $nazraStudentsCount',
+                  const Color(0xFF0284C7),
+                  const Color(0xFFE0F2FE),
+                  onTap: () => onAction?.call(isAdmin ? 2 : 1),
+                ),
             ],
           ),
           const SizedBox(height: 20),
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
           const SizedBox(height: 16),
           Text(
-            context.isUrdu ? 'آج کی حفظ کی تفصیلات' : 'Today\'s Memorization Updates',
+            context.isUrdu
+                ? (LocalStorageService.isMadrassaNazraOnly(branchId)
+                    ? 'آج کی ناظرہ کی تفصیلات'
+                    : (nazraStudentsCount > 0 ? 'آج کے اسباق و پیش رفت' : 'آج کی حفظ کی تفصیلات'))
+                : (LocalStorageService.isMadrassaNazraOnly(branchId)
+                    ? 'Today\'s Nazra Reading Updates'
+                    : (nazraStudentsCount > 0 ? 'Today\'s Lesson & Progress Updates' : 'Today\'s Memorization Updates')),
             style: context.urduStyle(
               style: TextStyle(
                 fontSize: 14,
@@ -334,9 +368,12 @@ class MadrassaOverviewView extends ConsumerWidget {
                   children: [
                     Icon(Icons.history_toggle_off_rounded, color: Colors.grey.shade400, size: 18),
                     const SizedBox(width: 8),
-                    Text(
-                      context.isUrdu ? 'آج ابھی تک کوئی کارکردگی درج نہیں ہوئی۔' : 'No daily progress updates recorded yet today.',
-                      style: context.urduStyle(style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
+                    Flexible(
+                      child: Text(
+                        context.isUrdu ? 'آج ابھی تک کوئی کارکردگی درج نہیں ہوئی۔' : 'No daily progress updates recorded yet today.',
+                        textAlign: TextAlign.center,
+                        style: context.urduStyle(style: TextStyle(color: Colors.grey.shade500, fontSize: 12.5)),
+                      ),
                     ),
                   ],
                 ),
@@ -380,7 +417,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                                 style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: isDark ? Colors.white : const Color(0xFF0F172A)),
                               ),
                               Text(
-                                'Roll #${p['rollNumber']}',
+                                'Roll #${p['rollNumber']}${p['isNazra'] == true ? (context.isUrdu ? ' • ناظرہ' : ' • Nazra') : (context.isUrdu ? ' • حفظ' : ' • Hifz')}',
                                 style: TextStyle(fontSize: 11, color: isDark ? Colors.white54 : const Color(0xFF64748B)),
                               ),
                             ],
@@ -642,43 +679,52 @@ class MadrassaOverviewView extends ConsumerWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      isGood ? Icons.stars_rounded : Icons.warning_amber_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.2),
+                        shape: BoxShape.circle,
                       ),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.white.withValues(alpha: 0.8),
-                        ),
+                      child: Icon(
+                        isGood ? Icons.stars_rounded : Icons.warning_amber_rounded,
+                        color: Colors.white,
+                        size: 20,
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.white.withValues(alpha: 0.8),
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
+              const SizedBox(width: 8),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
@@ -849,6 +895,8 @@ class MadrassaOverviewView extends ConsumerWidget {
                         final now = DateTime.now();
                         await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
                         await MadrassaLocalStorage.downloadHolidays(branchId);
+                        await MadrassaLocalStorage.downloadTeachers(branchId);
+                        await MadrassaLocalStorage.downloadTeacherAttendance(branchId, dateKey);
                         ref.invalidate(madrassaStudentsProvider(branchId));
                         ref.invalidate(madrassaAllLogsProvider(branchId));
                         ref.invalidate(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
@@ -1056,227 +1104,305 @@ class MadrassaOverviewView extends ConsumerWidget {
   } // End of _buildWelcomeHeader
 
   // Rewritten realtime stat grid with individual StreamBuilders and placeholders
-   Widget _buildRealtimeStatGrid(BuildContext context, WidgetRef ref) {
-     final theme = Theme.of(context);
+  Widget _buildRealtimeStatGrid(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
 
-     // Helper placeholder card
-     Widget placeholderCard(String label) {
-       return Container(
-         padding: const EdgeInsets.all(16),
-         decoration: BoxDecoration(
-           color: theme.cardColor,
-           borderRadius: BorderRadius.circular(20),
-           boxShadow: [
-             BoxShadow(
-               color: Colors.black.withValues(alpha: 0.04),
-               blurRadius: 12,
-               offset: const Offset(0, 4),
-             ),
-           ],
-         ),
-         child: Center(
-           child: SizedBox(
-             width: 24,
-             height: 24,
-             child: CircularProgressIndicator(strokeWidth: 2, color: theme.primaryColor),
-           ),
-         ),
-       );
-     }
+    // Helper placeholder card
+    Widget placeholderCard(String label) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: theme.cardColor,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2, color: theme.primaryColor),
+          ),
+        ),
+      );
+    }
 
-     // Determine grid layout
-     return LayoutBuilder(
-       builder: (context, constraints) {
-         final bool isNazraOnly = LocalStorageService.isMadrassaNazraOnly(branchId);
-         final bool isFeeEnabled = LocalStorageService.isMadrassaFeeEnabled(branchId);
-         final width = constraints.maxWidth;
-         final int crossAxisCount;
-         final double childAspectRatio;
+    // Determine grid layout
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bool isNazraOnly = LocalStorageService.isMadrassaNazraOnly(branchId);
+        final bool isFeeEnabled = LocalStorageService.isMadrassaFeeEnabled(branchId);
+        final width = constraints.maxWidth;
 
-         if (width < kMobileBreakpoint) {
-           crossAxisCount = 2;
-           childAspectRatio = 1.15;
-         } else if (width < kTabletBreakpoint) {
-           crossAxisCount = 3;
-           childAspectRatio = 1.3;
-         } else {
-           crossAxisCount = (isFeeEnabled || isNazraOnly) ? 4 : 3;
-           childAspectRatio = 1.25;
-         }
+        final studentsAsync = ref.watch(madrassaStudentsProvider(branchId));
+        final configAsync = ref.watch(madrassaConfigProvider(branchId));
+        final now = DateTime.now();
+        final dateKey = DateFormat('yyyy-MM-dd').format(now);
+        final dailyLogAsync = ref.watch(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
 
-         final studentsAsync = ref.watch(madrassaStudentsProvider(branchId));
-         final configAsync = ref.watch(madrassaConfigProvider(branchId));
-         final now = DateTime.now();
-         final dateKey = DateFormat('yyyy-MM-dd').format(now);
-         final dailyLogAsync = ref.watch(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
+        final studentsList = studentsAsync.value ?? const [];
+        final activeStudentsList = studentsList.where((d) {
+          final statusVal = d['status'];
+          return (statusVal == null || statusVal == '')
+              ? (d['active'] == true)
+              : (statusVal == 'active');
+        }).toList();
+        final nazraStudentsList = activeStudentsList.where((d) => _isNazraStudent(d, branchId)).toList();
+        final bool hasNazra = isNazraOnly || nazraStudentsList.isNotEmpty;
 
-         return GridView.count(
-           crossAxisCount: crossAxisCount,
-           shrinkWrap: true,
-           physics: const NeverScrollableScrollPhysics(),
-           mainAxisSpacing: 14,
-           crossAxisSpacing: 14,
-           childAspectRatio: childAspectRatio,
-           children: [
-             // 1. Students Card -> Navigates to Students tab
-             studentsAsync.when(
-               loading: () => placeholderCard(context.l.totalStudents),
-               error: (_, __) => _statCard(
-                 context,
-                 context.l.totalStudents,
-                 '0',
-                 Icons.people_alt_rounded,
-                 210,
-                 badge: 'Active',
-                 onTap: () => onAction?.call(isAdmin ? 2 : 1),
-               ),
-               data: (students) {
-                 final activeCount = students.where((d) {
-                   final statusVal = d['status'];
-                   return (statusVal == null || statusVal == '')
-                       ? (d['active'] == true)
-                       : (statusVal == 'active');
-                 }).length;
-                 return _statCard(
-                   context,
-                   context.l.totalStudents,
-                   '$activeCount',
-                   Icons.people_alt_rounded,
-                   210,
-                   badge: '$activeCount Enrolled',
-                   onTap: () => onAction?.call(isAdmin ? 2 : 1),
-                 );
-               },
-             ),
-             // 2. Attendance / Daily Log Card -> Navigates to Daily Log tab
-             dailyLogAsync.when(
-               loading: () => placeholderCard(context.l.dailyLogTitle),
-               error: (_, __) => _statCard(
-                 context,
-                 context.l.dailyLogTitle,
-                 '0 / 0',
-                 Icons.edit_calendar_rounded,
-                 160,
-                 badge: 'Today',
-                 onTap: () => onAction?.call(isAdmin ? 1 : 0),
-               ),
-               data: (logData) {
-                 final totalActive = studentsAsync.value?.where((d) {
-                   final statusVal = d['status'];
-                   return (statusVal == null || statusVal == '')
-                       ? (d['active'] == true)
-                       : (statusVal == 'active');
-                 }).length ?? 0;
-                 
-                 int present = 0;
-                 logData.forEach((k, v) {
-                   if (v is Map && v['attendance'] == 'present') present++;
-                 });
-                 final pct = totalActive > 0 ? ((present / totalActive) * 100).toInt() : 0;
-                 return _statCard(
-                   context,
-                   context.l.dailyLogTitle,
-                   '$present / $totalActive',
-                   Icons.edit_calendar_rounded,
-                   160,
-                   badge: '$pct% Present',
-                   onTap: () => onAction?.call(isAdmin ? 1 : 0),
-                 );
-               },
-             ),
-             // 3. PTM Card -> Accurate Current Month PTM & Navigates to Daily Log
-             configAsync.when(
-               loading: () => placeholderCard(context.l.ptmDay),
-               error: (_, __) => _statCard(
-                 context,
-                 context.l.ptmDay,
-                 '-',
-                 Icons.event_available_rounded,
-                 280,
-                 badge: 'Event',
-                 onTap: () => onAction?.call(isAdmin ? 1 : 0),
-               ),
-               data: (config) {
-                 final ptmDate = config.getPtmDate(targetYear: now.year, targetMonth: now.month);
-                 return _statCard(
-                   context,
-                   context.l.ptmDay,
-                   DateFormat('MMM d').format(ptmDate),
-                   Icons.event_available_rounded,
-                   280,
-                   badge: 'Scheduled',
-                   onTap: () => onAction?.call(isAdmin ? 1 : 0),
-                 );
-               },
-             ),
-             // 4. Fees Card (if fee enabled) OR Nazra-only summary card
-             if (isFeeEnabled)
-               configAsync.when(
-                 loading: () => placeholderCard(context.l.baseFeeLabel),
-                 error: (_, __) => _statCard(
-                   context,
-                   context.l.baseFeeLabel,
-                   '-',
-                   Icons.account_balance_wallet_rounded,
-                   35,
-                   badge: 'Base',
-                   onTap: () => onAction?.call(isAdmin ? 6 : 4),
-                 ),
-                 data: (config) => _statCard(
-                   context,
-                   context.l.baseFeeLabel,
-                   'Rs. ${config.baseFee.toInt()}',
-                   Icons.account_balance_wallet_rounded,
-                   35,
-                   badge: 'Per Student',
-                   onTap: () => onAction?.call(isAdmin ? 6 : 4),
-                 ),
-               )
-             else if (isNazraOnly)
-               studentsAsync.when(
-                 loading: () => placeholderCard(context.isUrdu ? 'صرف ناظرہ' : 'Only Nazra'),
-                 error: (_, __) => _statCard(
-                   context,
-                   context.isUrdu ? 'صرف ناظرہ سسٹم' : 'Only Nazra System',
-                   'ناظرہ',
-                   Icons.menu_book_rounded,
-                   35,
-                   badge: 'No Fees',
-                   onTap: () => onAction?.call(isAdmin ? 2 : 1),
-                 ),
-                 data: (students) {
-                   final activeList = students.where((d) {
-                     final statusVal = d['status'];
-                     return (statusVal == null || statusVal == '')
-                         ? (d['active'] == true)
-                         : (statusVal == 'active');
-                   }).toList();
-                   int girls = 0;
-                   int boys = 0;
-                   for (final s in activeList) {
-                     final g = (s['gender'] ?? 'male').toString().toLowerCase();
-                     if (g == 'female' || g == 'girl') {
-                       girls++;
-                     } else {
-                       boys++;
-                     }
-                   }
-                   return _statCard(
-                     context,
-                     context.isUrdu ? 'صرف ناظرہ سسٹم' : 'Only Nazra System',
-                     context.isUrdu ? '$boys لڑکے • $girls لڑکیاں' : '$boys Boys • $girls Girls',
-                     Icons.menu_book_rounded,
-                     35,
-                     badge: 'Attendance + Sabak',
-                     onTap: () => onAction?.call(isAdmin ? 2 : 1),
-                   );
-                 },
-               ),
-           ],
-         );
-       },
-     );
-   }
+        final int crossAxisCount;
+        final double childAspectRatio;
+
+        if (width < kMobileBreakpoint) {
+          crossAxisCount = 2;
+          childAspectRatio = 1.15;
+        } else if (width < kTabletBreakpoint) {
+          crossAxisCount = 3;
+          childAspectRatio = 1.25;
+        } else {
+          crossAxisCount = (width > 1200) ? 4 : 3;
+          childAspectRatio = 1.28;
+        }
+
+        return GridView(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: crossAxisCount,
+            mainAxisSpacing: 14,
+            crossAxisSpacing: 14,
+            childAspectRatio: childAspectRatio,
+          ),
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          children: [
+            // 1. Students Card -> Navigates to Students tab
+            studentsAsync.when(
+              loading: () => placeholderCard(context.l.totalStudents),
+              error: (_, __) => _statCard(
+                context,
+                context.l.totalStudents,
+                '0',
+                Icons.people_alt_rounded,
+                210,
+                badge: 'Active',
+                onTap: () => onAction?.call(isAdmin ? 2 : 1),
+              ),
+              data: (students) {
+                final activeCount = students.where((d) {
+                  final statusVal = d['status'];
+                  return (statusVal == null || statusVal == '')
+                      ? (d['active'] == true)
+                      : (statusVal == 'active');
+                }).length;
+                return _statCard(
+                  context,
+                  context.l.totalStudents,
+                  '$activeCount',
+                  Icons.people_alt_rounded,
+                  210,
+                  badge: '$activeCount Enrolled',
+                  onTap: () => onAction?.call(isAdmin ? 2 : 1),
+                );
+              },
+            ),
+            // 2. Attendance / Daily Log Card -> Navigates to Daily Log tab
+            dailyLogAsync.when(
+              loading: () => placeholderCard(context.l.dailyLogTitle),
+              error: (_, __) => _statCard(
+                context,
+                context.l.dailyLogTitle,
+                '0 / 0',
+                Icons.edit_calendar_rounded,
+                160,
+                badge: 'Today',
+                onTap: () => onAction?.call(isAdmin ? 1 : 0),
+              ),
+              data: (logData) {
+                final totalActive = studentsAsync.value?.where((d) {
+                  final statusVal = d['status'];
+                  return (statusVal == null || statusVal == '')
+                      ? (d['active'] == true)
+                      : (statusVal == 'active');
+                }).length ?? 0;
+
+                int present = 0;
+                logData.forEach((k, v) {
+                  if (v is Map && v['attendance'] == 'present') present++;
+                });
+                final pct = totalActive > 0 ? ((present / totalActive) * 100).toInt() : 0;
+                return _statCard(
+                  context,
+                  context.l.dailyLogTitle,
+                  '$present / $totalActive',
+                  Icons.edit_calendar_rounded,
+                  160,
+                  badge: '$pct% Present',
+                  onTap: () => onAction?.call(isAdmin ? 1 : 0),
+                );
+              },
+            ),
+            // 3. Faculty & Teachers Attendance Card -> Total Teachers + Daily Attendance
+            StreamBuilder<Map<String, dynamic>?>(
+              stream: MadrassaLocalStorage.streamTeacherAttendanceCached(branchId, dateKey),
+              builder: (context, attSnap) {
+                final teachers = MadrassaLocalStorage.getAllTeachersCached(branchId);
+                final totalTeachers = teachers.length;
+                final attData = attSnap.data ?? MadrassaLocalStorage.getTeacherAttendanceCached(branchId, dateKey);
+                final entries = (attData != null && attData['entries'] is Map)
+                    ? Map<String, dynamic>.from(attData['entries'] as Map)
+                    : <String, dynamic>{};
+
+                int presentCount = 0;
+                for (final t in teachers) {
+                  final tId = (t['id'] ?? t['uid'] ?? '').toString();
+                  final e = entries[tId];
+                  if (e is Map) {
+                    final s = (e['status'] ?? '').toString().toLowerCase();
+                    if (s == 'present') {
+                      presentCount++;
+                    }
+                  }
+                }
+
+                final bool hasMarked = entries.isNotEmpty;
+                final String badge = hasMarked
+                    ? (context.isUrdu ? '$presentCount حاضر • $totalTeachers کل' : '$presentCount / $totalTeachers Present')
+                    : (context.isUrdu ? '$totalTeachers اساتذہ' : '$totalTeachers Staff');
+                final String val = hasMarked ? '$presentCount / $totalTeachers' : '$totalTeachers';
+
+                return _statCard(
+                  context,
+                  context.isUrdu ? 'اساتذہ کی حاضری' : 'Teachers Attendance',
+                  val,
+                  Icons.school_rounded,
+                  160,
+                  badge: badge,
+                  onTap: () => onAction?.call(isAdmin ? 3 : 2),
+                );
+              },
+            ),
+            // 4. Nazra Related Data Card (if available in branch)
+            if (hasNazra)
+              studentsAsync.when(
+                loading: () => placeholderCard(context.isUrdu ? 'ناظرہ و قاعدہ' : 'Nazra & Qaida'),
+                error: (_, __) => _statCard(
+                  context,
+                  context.isUrdu ? 'ناظرہ و قاعدہ' : 'Nazra & Qaida Track',
+                  '0',
+                  Icons.auto_stories_rounded,
+                  195,
+                  badge: 'Active',
+                  onTap: () => onAction?.call(isAdmin ? 2 : 1),
+                ),
+                data: (students) {
+                  final activeList = students.where((d) {
+                    final statusVal = d['status'];
+                    return (statusVal == null || statusVal == '')
+                        ? (d['active'] == true)
+                        : (statusVal == 'active');
+                  }).toList();
+
+                  final nazraList = activeList.where((d) => _isNazraStudent(d, branchId)).toList();
+                  final totalNazra = nazraList.length;
+
+                  int qaidaCount = 0;
+                  int nazraQuranCount = 0;
+                  int nazraPresent = 0;
+                  final logData = dailyLogAsync.value;
+
+                  for (final s in nazraList) {
+                    final sId = (s['id'] ?? s['uid'] ?? '').toString();
+                    if (logData != null && logData.containsKey(sId)) {
+                      final entry = logData[sId];
+                      if (entry is Map && entry['attendance'] == 'present') {
+                        nazraPresent++;
+                      }
+                    }
+                    final track = (s['track'] ?? s['stage'] ?? s['course'] ?? s['className'] ?? '').toString().toLowerCase();
+                    final isQaida = track.contains('qaida') || (s['qaidaComplete'] != true && s['qaidaCompleted'] != true);
+                    if (isQaida) {
+                      qaidaCount++;
+                    } else {
+                      nazraQuranCount++;
+                    }
+                  }
+
+                  final bool hasLog = logData != null && logData.isNotEmpty;
+                  final String val = hasLog ? '$nazraPresent / $totalNazra' : '$totalNazra';
+                  final String badge = qaidaCount > 0 && nazraQuranCount > 0
+                      ? '$qaidaCount Qaida • $nazraQuranCount Quran'
+                      : (isNazraOnly
+                          ? (context.isUrdu ? 'صرف ناظرہ' : 'Nazra Branch')
+                          : (context.isUrdu ? '$totalNazra زیرِ تعلیم' : '$totalNazra Enrolled'));
+
+                  return _statCard(
+                    context,
+                    context.isUrdu ? 'ناظرہ و قاعدہ ٹریک' : 'Nazra & Qaida Track',
+                    val,
+                    Icons.auto_stories_rounded,
+                    195,
+                    badge: badge,
+                    onTap: () => onAction?.call(isAdmin ? 2 : 1),
+                  );
+                },
+              ),
+            // 5. PTM Card -> Accurate Current Month PTM & Navigates to Daily Log
+            configAsync.when(
+              loading: () => placeholderCard(context.l.ptmDay),
+              error: (_, __) => _statCard(
+                context,
+                context.l.ptmDay,
+                '-',
+                Icons.event_available_rounded,
+                280,
+                badge: 'Event',
+                onTap: () => onAction?.call(isAdmin ? 1 : 0),
+              ),
+              data: (config) {
+                final ptmDate = config.getPtmDate(targetYear: now.year, targetMonth: now.month);
+                return _statCard(
+                  context,
+                  context.l.ptmDay,
+                  DateFormat('MMM d').format(ptmDate),
+                  Icons.event_available_rounded,
+                  280,
+                  badge: 'Scheduled',
+                  onTap: () => onAction?.call(isAdmin ? 1 : 0),
+                );
+              },
+            ),
+            // 6. Fees Card (if fee enabled)
+            if (isFeeEnabled)
+              configAsync.when(
+                loading: () => placeholderCard(context.l.baseFeeLabel),
+                error: (_, __) => _statCard(
+                  context,
+                  context.l.baseFeeLabel,
+                  '-',
+                  Icons.account_balance_wallet_rounded,
+                  35,
+                  badge: 'Base',
+                  onTap: () => onAction?.call(isAdmin ? 6 : 4),
+                ),
+                data: (config) => _statCard(
+                  context,
+                  context.l.baseFeeLabel,
+                  'Rs. ${config.baseFee.toInt()}',
+                  Icons.account_balance_wallet_rounded,
+                  35,
+                  badge: 'Per Student',
+                  onTap: () => onAction?.call(isAdmin ? 6 : 4),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 
   Widget _statCard(
     BuildContext context,

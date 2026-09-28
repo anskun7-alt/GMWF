@@ -55,6 +55,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
   final _authService = AuthService();
 
   // Controllers
+  final _fullNameCtrl = TextEditingController();
   final _usernameCtrl = TextEditingController();
   final _emailCtrl    = TextEditingController();
   final _passwordCtrl = TextEditingController();
@@ -97,6 +98,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
   @override
   void dispose() {
     _anim.dispose();
+    _fullNameCtrl.dispose();
     _usernameCtrl.dispose();
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
@@ -186,6 +188,9 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
         return;
       }
 
+      final fullName = _fullNameCtrl.text.trim();
+      final effectiveName = fullName.isNotEmpty ? fullName : username;
+
       await _authService.signUp(
         email:                email,
         password:             _passwordCtrl.text.trim(),
@@ -199,22 +204,24 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
         profileImageBytes:    _profileBytes,
         profilePictureBase64: _profileBase64,
         identificationBase64: _idDocBase64,
-        // Store teaching specialization (hifz / nazra / both) in the name field
-        // so it is persisted alongside the user record in Firestore.
-        name:                 _teachingType,
+        name:                 effectiveName,
+        specialization:       _teachingType,
+        teachingType:         _teachingType,
         session:              _session,
         sessions:             _session == 'all'
                                   ? ['morning', 'evening', 'night']
                                   : [_session],
       );
 
-      // Cache specialization in local_users
+      // Cache specialization and name in local_users
       try {
         if (Hive.isBoxOpen('local_users')) {
           final box = Hive.box('local_users');
           final raw = box.get(username) ?? box.get(username.toLowerCase());
           if (raw is Map) {
             final updated = Map<String, dynamic>.from(raw);
+            updated['name'] = effectiveName;
+            updated['displayName'] = effectiveName;
             updated['specialization'] = _teachingType;
             updated['teachingType'] = _teachingType;
             await box.put(username, updated);
@@ -296,6 +303,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                               icon: Icons.badge_outlined, accent: _emerald,
                               title: 'Account Credentials',
                               child: Column(children: [
+                                _field(dark: dark, bord: bord, text: text, muted: muted,
+                                  ctrl: _fullNameCtrl, label: 'Full Name *', icon: Icons.badge_rounded,
+                                  validator: (v) => (v?.trim().isEmpty ?? true) ? 'Required' : null,
+                                ),
+                                const SizedBox(height: 12),
                                 _field(dark: dark, bord: bord, text: text, muted: muted,
                                   ctrl: _usernameCtrl, label: 'Username *', icon: Icons.alternate_email_rounded,
                                   errorText: _usernameError,

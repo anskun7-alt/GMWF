@@ -4,6 +4,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../madrassa_strings.dart';
@@ -39,13 +40,70 @@ void showAddStudentDialog(
       ? (student is DocumentSnapshot ? student.id : (student as Map)['id']?.toString() ?? '')
       : '';
 
-  final programMode = LocalStorageService.getMadrassaProgramMode(branchId);
+  // Resolve creator's branch. Students created by a teacher must strictly be in that teacher's branch,
+  // and guardians linked or created must inherit the exact same branch.
+  String effectiveBranch = branchId.trim().toLowerCase();
+
+  String? teacherBranch;
+  try {
+    if (Hive.isBoxOpen('app_settings')) {
+      final box = Hive.box('app_settings');
+      final uData = box.get('user_data') ?? box.get('currentUser');
+      if (uData is Map) {
+        final b = (uData['branchId'] ?? uData['branch'] ?? '').toString().trim().toLowerCase();
+        if (b.isNotEmpty && b != 'all' && b != 'global') {
+          teacherBranch = b;
+        }
+      }
+    }
+  } catch (_) {}
+
+  if (teacherBranch == null && Hive.isBoxOpen(LocalStorageService.usersBox)) {
+    try {
+      final uBox = Hive.box(LocalStorageService.usersBox);
+      final curUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+      for (final k in [curUid, username, username.toLowerCase()]) {
+        if (k.isNotEmpty) {
+          final u = uBox.get(k) ?? uBox.get('user:$k');
+          if (u is Map) {
+            final b = (u['branchId'] ?? u['branch'] ?? '').toString().trim().toLowerCase();
+            if (b.isNotEmpty && b != 'all' && b != 'global') {
+              teacherBranch = b;
+              break;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  final isCreatorTeacher = role.toLowerCase().contains('teacher') ||
+      username.toLowerCase().contains('teacher');
+
+  if (isCreatorTeacher && teacherBranch != null && teacherBranch.isNotEmpty) {
+    effectiveBranch = teacherBranch;
+  } else if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+    if (teacherBranch != null && teacherBranch.isNotEmpty) {
+      effectiveBranch = teacherBranch;
+    } else if (studentData != null) {
+      final b = (studentData['branchId'] ?? studentData['branch'] ?? '').toString().trim().toLowerCase();
+      if (b.isNotEmpty && b != 'all' && b != 'global') {
+        effectiveBranch = b;
+      }
+    }
+  }
+
+  if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+    effectiveBranch = 'gujrat';
+  }
+
+  final programMode = LocalStorageService.getMadrassaProgramMode(effectiveBranch);
   final isNazraOnly = programMode == 'nazra_only';
   final isHifzOnly = programMode == 'hifz_only';
   final isBothPrograms = programMode == 'both';
 
   String gender = (studentData?['gender']?.toString().toLowerCase().trim() == 'female') ? 'female' : 'male';
-  final branchSessions = CampSessionService.getMadrassaSessions(branchId);
+  final branchSessions = CampSessionService.getMadrassaSessions(effectiveBranch);
   String selectedSession = studentData?['session']?.toString().toLowerCase().trim() ??
       (branchSessions.isNotEmpty ? branchSessions.first : 'morning');
   if (!branchSessions.contains(selectedSession) && branchSessions.isNotEmpty) {
@@ -1330,8 +1388,6 @@ void showAddStudentDialog(
                 setDs(() => isSaving = true);
                 try {
                   String? gUid;
-                  String bId = branchId.toLowerCase().trim();
-                  DocumentReference? sRef;
                   if (isGuardianLinkedOrCreating) {
                     if (foundGuardian != null) {
                       gUid = foundGuardian!['uid'];
@@ -1342,7 +1398,7 @@ void showAddStudentDialog(
                         'name': guardianNameCtrl.text.trim(),
                         'cnic': guardianCnicCtrl.text.trim(),
                         'role': 'Madrassa Guardian',
-                        'branchId': branchId,
+                        'branchId': effectiveBranch,
                         if (overrideGuardianCredentials) ...{
                           'username': gUsernameCtrl.text.trim(),
                           'usernameLower': gUsernameCtrl.text.trim().toLowerCase(),
@@ -1354,6 +1410,7 @@ void showAddStudentDialog(
                       if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
                         final key = gUpdates['email'] != null ? 'user:${gUpdates['email']}' : 'user:$gUid';
                         await Hive.box(LocalStorageService.usersBox).put(key, gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).put('user:$gUid', gUpdates);
                         await Hive.box(LocalStorageService.usersBox).flush();
                       }
 
@@ -1361,17 +1418,30 @@ void showAddStudentDialog(
                         RealtimeManager().sendMessage(RealtimeEvents.payload(
                           type: RealtimeEvents.saveUser,
                           data: gUpdates,
-                          branchId: branchId,
+                          branchId: effectiveBranch,
                         ));
                       } catch (_) {}
 
                       await LocalStorageService.enqueueSync({
                         'type': 'save_user',
                         'uid': gUid,
-                        'branchId': branchId,
+                        'branchId': effectiveBranch,
                         'data': gUpdates,
                       });
                       unawaited(SyncService().triggerUpload());
+
+                      try {
+                        await FirebaseFirestore.instance
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                        await FirebaseFirestore.instance
+                            .collection('branches')
+                            .doc(effectiveBranch)
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                      } catch (_) {}
                     } else if (usernameMatchedGuardian != null) {
                       gUid = usernameMatchedGuardian!['uid'];
                       final gUpdates = <String, dynamic>{
@@ -1381,13 +1451,14 @@ void showAddStudentDialog(
                         'name': guardianNameCtrl.text.trim(),
                         'cnic': guardianCnicCtrl.text.trim(),
                         'role': 'Madrassa Guardian',
-                        'branchId': branchId,
+                        'branchId': effectiveBranch,
                         if (isEdit) 'studentIds': (usernameMatchedGuardian!['studentIds'] is List ? List.from(usernameMatchedGuardian!['studentIds']) : [])..add(studentId),
                       };
 
                       if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
                         final key = gUpdates['email'] != null ? 'user:${gUpdates['email']}' : 'user:$gUid';
                         await Hive.box(LocalStorageService.usersBox).put(key, gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).put('user:$gUid', gUpdates);
                         await Hive.box(LocalStorageService.usersBox).flush();
                       }
 
@@ -1395,17 +1466,30 @@ void showAddStudentDialog(
                         RealtimeManager().sendMessage(RealtimeEvents.payload(
                           type: RealtimeEvents.saveUser,
                           data: gUpdates,
-                          branchId: branchId,
+                          branchId: effectiveBranch,
                         ));
                       } catch (_) {}
 
                       await LocalStorageService.enqueueSync({
                         'type': 'save_user',
                         'uid': gUid,
-                        'branchId': branchId,
+                        'branchId': effectiveBranch,
                         'data': gUpdates,
                       });
                       unawaited(SyncService().triggerUpload());
+
+                      try {
+                        await FirebaseFirestore.instance
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                        await FirebaseFirestore.instance
+                            .collection('branches')
+                            .doc(effectiveBranch)
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                      } catch (_) {}
                     } else if (linkAccount) {
                       final usernameInput = gUsernameCtrl.text.trim().toLowerCase();
                       final targetEmail = '$usernameInput@gmwf.com';
@@ -1418,8 +1502,8 @@ void showAddStudentDialog(
                         'email': targetEmail,
                         'password': gPassCtrl.text.trim(),
                         'role': 'Madrassa Guardian',
-                        'branchId': branchId,
-                        'branchName': 'Madrassa',
+                        'branchId': effectiveBranch,
+                        'branchName': effectiveBranch.toUpperCase(),
                         'phone': contactCtrl.text.trim(),
                         'name': guardianNameCtrl.text.trim(),
                         'cnic': guardianCnicCtrl.text.trim(),
@@ -1433,24 +1517,38 @@ void showAddStudentDialog(
                           password: gPassCtrl.text.trim(),
                           username: usernameInput,
                           role: 'Madrassa Guardian',
-                          branchId: branchId,
-                          branchName: 'Madrassa',
+                          branchId: effectiveBranch,
+                          branchName: effectiveBranch.toUpperCase(),
                           phone: contactCtrl.text.trim(),
                           name: guardianNameCtrl.text.trim(),
                           cnic: guardianCnicCtrl.text.trim(),
                           studentIds: isEdit ? [studentId] : [],
-                        ).timeout(const Duration(seconds: 3));
+                        ).timeout(const Duration(seconds: 15));
                         if (createdUid.isNotEmpty) {
                           gUid = createdUid;
                           gUpdates['uid'] = createdUid;
                         }
                       } catch (_) {
+                        if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+                          final uMap = Hive.box(LocalStorageService.usersBox).get('user:$targetEmail') ??
+                              Hive.box(LocalStorageService.usersBox).get(usernameInput);
+                          if (uMap is Map && uMap['uid'] != null && uMap['uid'].toString().isNotEmpty) {
+                            gUid = uMap['uid'].toString();
+                            gUpdates['uid'] = gUid;
+                          }
+                        }
                         gUid ??= 'g_${DateTime.now().millisecondsSinceEpoch}';
                         gUpdates['uid'] = gUid;
                       }
 
+                      gUpdates['status'] = 'active';
+                      gUpdates['accountStatus'] = 'active';
+                      gUpdates['isActive'] = true;
+                      gUpdates['isCorruptedOrOrphanAuth'] = false;
+
                       if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
                         await Hive.box(LocalStorageService.usersBox).put('user:$targetEmail', gUpdates);
+                        await Hive.box(LocalStorageService.usersBox).put('user:$gUid', gUpdates);
                         await Hive.box(LocalStorageService.usersBox).flush();
                       }
 
@@ -1458,17 +1556,30 @@ void showAddStudentDialog(
                         RealtimeManager().sendMessage(RealtimeEvents.payload(
                           type: RealtimeEvents.saveUser,
                           data: gUpdates,
-                          branchId: branchId,
+                          branchId: effectiveBranch,
                         ));
                       } catch (_) {}
 
                       await LocalStorageService.enqueueSync({
                         'type': 'save_user',
                         'uid': gUid,
-                        'branchId': branchId,
+                        'branchId': effectiveBranch,
                         'data': gUpdates,
                       });
-                      unawaited(SyncService().triggerUpload());
+                      unawaited(SyncService().triggerUpload(force: true));
+
+                      try {
+                        await FirebaseFirestore.instance
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                        await FirebaseFirestore.instance
+                            .collection('branches')
+                            .doc(effectiveBranch)
+                            .collection('users')
+                            .doc(gUid)
+                            .set(gUpdates, SetOptions(merge: true));
+                      } catch (_) {}
                     }
                   }
 
@@ -1514,23 +1625,26 @@ void showAddStudentDialog(
 
                   final now = DateTime.now();
                   final finalStudentId = await MadrassaLocalStorage.saveStudentLocalAndSync(
-                    branchId: branchId,
+                    branchId: effectiveBranch,
                     studentId: isEdit ? studentId : '',
                     data: {
                       ...finalData,
-                      'branchId': branchId,
+                      'branchId': effectiveBranch,
                       'status': studentData?['status'] ?? 'active',
                       'batch': studentData?['batch'] ?? 'active',
                       if (!isEdit) ...{
                         'currentLines': 0,
                         'enrolledMonth': DateFormat('yyyy-MM').format(now),
                         'createdAt': now.toIso8601String(),
+                        'enrolledBy': username,
+                        'enrolledByRole': role,
                         'auditLog': [
                           {
                             'status': 'active',
                             'type': 'enrollment',
                             'date': joinDate.toIso8601String(),
                             'reason': 'Initial Enrollment',
+                            'by': username,
                           }
                         ],
                       },
@@ -1540,13 +1654,13 @@ void showAddStudentDialog(
 
                   // Central audit log - run in background so UI never blocks
                   unawaited(MadrassaAuditService.logAction(
-                    branchId: branchId,
+                    branchId: effectiveBranch,
                     editor: username,
                     role: role,
                     type: isEdit ? 'student_edit' : 'student_enrollment',
                     message: isEdit
                         ? 'Updated details for student ${finalData['name']} (Roll: ${finalData['rollNumber']})'
-                        : 'Enrolled new student ${finalData['name']} (Roll: ${finalData['rollNumber']})',
+                        : 'Enrolled new student ${finalData['name']} (Roll: ${finalData['rollNumber']}) in branch ${effectiveBranch.toUpperCase()}',
                     studentId: finalStudentId,
                     studentName: finalData['name'] as String?,
                   ));
@@ -1556,7 +1670,7 @@ void showAddStudentDialog(
                       entityId: finalStudentId,
                       entityName: nameCtrl.text.trim(),
                       entityType: 'madrassa_student',
-                      branchId: branchId,
+                      branchId: effectiveBranch,
                       customPin: enteredPin,
                     ));
                   }
@@ -1572,26 +1686,46 @@ void showAddStudentDialog(
                             final studentIds = List<String>.from(map['studentIds'] ?? []);
                             if (!studentIds.contains(finalStudentId)) {
                               studentIds.add(finalStudentId);
-                              map['studentIds'] = studentIds;
-                              await uBox.put(key, map);
-                              await uBox.flush();
-
-                              try {
-                                RealtimeManager().sendMessage(RealtimeEvents.payload(
-                                  type: RealtimeEvents.saveUser,
-                                  data: map,
-                                  branchId: branchId,
-                                ));
-                              } catch (_) {}
-
-                              await LocalStorageService.enqueueSync({
-                                'type': 'save_user',
-                                'uid': gUid,
-                                'branchId': branchId,
-                                'data': map,
-                              });
-                              unawaited(SyncService().triggerUpload());
                             }
+                            map['studentIds'] = studentIds;
+                            // Enforce guardian's branch matches the teacher's branch
+                            map['branchId'] = effectiveBranch;
+                            map['role'] = 'Madrassa Guardian';
+                            await uBox.put(key, map);
+                            await uBox.flush();
+
+                            try {
+                              RealtimeManager().sendMessage(RealtimeEvents.payload(
+                                type: RealtimeEvents.saveUser,
+                                data: map,
+                                branchId: effectiveBranch,
+                              ));
+                            } catch (_) {}
+
+                            await LocalStorageService.enqueueSync({
+                              'type': 'save_user',
+                              'uid': gUid,
+                              'branchId': effectiveBranch,
+                              'data': map,
+                            });
+                            unawaited(SyncService().triggerUpload());
+
+                            try {
+                              await FirebaseFirestore.instance
+                                  .collection('users')
+                                  .doc(gUid)
+                                  .set({
+                                    'studentIds': studentIds,
+                                    'branchId': effectiveBranch,
+                                    'role': 'Madrassa Guardian',
+                                  }, SetOptions(merge: true));
+                              await FirebaseFirestore.instance
+                                  .collection('branches')
+                                  .doc(effectiveBranch)
+                                  .collection('users')
+                                  .doc(gUid)
+                                  .set(map, SetOptions(merge: true));
+                            } catch (_) {}
                             break;
                           }
                         }

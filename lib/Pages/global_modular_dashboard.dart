@@ -1839,7 +1839,7 @@ class _SidebarBrand extends StatelessWidget {
               ),
               const Spacer(),
               Text(
-                'v${AutoUpdateService.currentVersion}',
+                'v${AutoUpdateService.resolvedVersion}',
                 style: TextStyle(
                   color: dark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
                   fontSize: 8.5,
@@ -2518,7 +2518,7 @@ class _MobileLayout extends StatelessWidget {
                         border: Border.all(color: t.accent.withValues(alpha: 0.28), width: 0.6),
                       ),
                       child: Text(
-                        'v${AutoUpdateService.currentVersion}',
+                        'v${AutoUpdateService.resolvedVersion}',
                         style: TextStyle(
                           color: t.accent,
                           fontSize: 9,
@@ -3787,11 +3787,38 @@ Widget _buildUserHeroAvatar(String photoUrl, String userName, RoleThemeData t, {
   if (str.isNotEmpty) {
     final bytes = ImageUploadService.decodeBase64ToBytes(str);
     if (bytes != null) {
-      child = Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size));
+      child = Image.memory(
+        bytes,
+        key: ValueKey('hero_avatar_${str.hashCode}'),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.medium,
+        errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size),
+      );
     } else if (str.startsWith('http://') || str.startsWith('https://')) {
-      child = Image.network(str, width: size, height: size, fit: BoxFit.cover, errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size));
+      child = Image.network(
+        str,
+        key: ValueKey('hero_avatar_net_${str.hashCode}'),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.medium,
+        errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size),
+      );
     } else if (File(str).existsSync()) {
-      child = Image.file(File(str), width: size, height: size, fit: BoxFit.cover, errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size));
+      child = Image.file(
+        File(str),
+        key: ValueKey('hero_avatar_file_${str.hashCode}'),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.medium,
+        errorBuilder: (c, e, s) => _buildUserAvatarFallback(userName, t, size),
+      );
     } else {
       child = _buildUserAvatarFallback(userName, t, size);
     }

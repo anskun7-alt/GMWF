@@ -284,12 +284,26 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
     employeeAttendance: empAttendance,
   );
 
-  // If all local numbers are 0 and remote fallback is explicitly allowed, attempt a quick Firestore fetch
-  if (allowRemoteFallback && z == 0 && nz == 0 && donTotal == 0 && dispRev == 0 && empAttendance == 0) {
+  // If local numbers are incomplete and remote fallback is explicitly allowed, attempt a quick Firestore fetch
+  if (allowRemoteFallback && (z == 0 || donTotal == 0 || das == 0 || dispRev == 0)) {
     try {
       final fsRes = await _fetchFirestoreBranchStats(bId, date);
       if (fsRes != null) {
-        res = fsRes;
+        res = BranchStats(
+          zakat: z > 0 ? z : fsRes.zakat,
+          nonZakat: nz > 0 ? nz : fsRes.nonZakat,
+          gmwf: gm > 0 ? gm : fsRes.gmwf,
+          dispensed: dispensed > 0 ? dispensed : fsRes.dispensed,
+          prescribed: madrassaAttendance > 0 ? madrassaAttendance : fsRes.prescribed,
+          dasterkhwaan: das > 0 ? das : fsRes.dasterkhwaan,
+          dasterkhwaanServed: served > 0 ? served : fsRes.dasterkhwaanServed,
+          donations: donTotal > 0 ? donTotal : fsRes.donations,
+          dispensaryRevenue: dispRev > 0 ? dispRev : fsRes.dispensaryRevenue,
+          zakatRevenue: zRev > 0 ? zRev : fsRes.zakatRevenue,
+          nonZakatRevenue: nzRev > 0 ? nzRev : fsRes.nonZakatRevenue,
+          gmwfRevenue: gmRev > 0 ? gmRev : fsRes.gmwfRevenue,
+          employeeAttendance: empAttendance > 0 ? empAttendance : fsRes.employeeAttendance,
+        );
       }
     } catch (_) {}
   }
@@ -305,7 +319,7 @@ Future<BranchStats?> _fetchFirestoreBranchStats(String branchId, DateTime date) 
     final dateKeyDmyy = DateFormat('ddMMyy').format(date);
     int donTotal = 0;
     int empAtt = 0;
-    int z = 0, nz = 0, gm = 0, das = 0, dispensed = 0, dispRev = 0;
+    int z = 0, nz = 0, gm = 0, das = 0, served = 0, dispensed = 0, dispRev = 0;
     int zRev = 0, nzRev = 0, gmRev = 0;
 
     // 1. Donations for today (targeted branch query with short timeout)
@@ -326,6 +340,23 @@ Future<BranchStats?> _fetchFirestoreBranchStats(String branchId, DateTime date) 
         final amt = val['amount'];
         final amtDouble = (amt is num) ? amt.toDouble() : (double.tryParse(amt?.toString() ?? '0') ?? 0.0);
         donTotal += amtDouble.toInt();
+
+        // Populate local Hive so local queries and other screens find the records
+        try {
+          if (Hive.isBoxOpen(DonationsLocalStorage.donationsBox)) {
+            final dBox = Hive.box(DonationsLocalStorage.donationsBox);
+            final hKey = '${bId}_${dateKeyYmd}_${doc.id}';
+            if (!dBox.containsKey(hKey)) {
+              dBox.put(hKey, {
+                ...val,
+                'firestoreId': doc.id,
+                'localId': val['localId'] ?? doc.id,
+                'branchId': bId,
+                'syncStatus': 'synced',
+              });
+            }
+          }
+        } catch (_) {}
       }
     } catch (_) {}
 
@@ -355,6 +386,21 @@ Future<BranchStats?> _fetchFirestoreBranchStats(String branchId, DateTime date) 
           final rev = 20 * d.toInt();
           dispRev += rev;
           zRev += rev;
+          // Populate local entries cache
+          try {
+            if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+              final eBox = Hive.box(LocalStorageService.entriesBox);
+              final key = '$bId-${doc.id}';
+              if (!eBox.containsKey(key)) {
+                eBox.put(key, {
+                  ...(doc.data() as Map<String, dynamic>),
+                  'branchId': bId,
+                  'serial': doc.id,
+                  'syncStatus': 'synced',
+                });
+              }
+            }
+          } catch (_) {}
         }
       }
 
@@ -366,14 +412,75 @@ Future<BranchStats?> _fetchFirestoreBranchStats(String branchId, DateTime date) 
           final rev = 100 * d.toInt();
           dispRev += rev;
           nzRev += rev;
+          try {
+            if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+              final eBox = Hive.box(LocalStorageService.entriesBox);
+              final key = '$bId-${doc.id}';
+              if (!eBox.containsKey(key)) {
+                eBox.put(key, {
+                  ...(doc.data() as Map<String, dynamic>),
+                  'branchId': bId,
+                  'serial': doc.id,
+                  'syncStatus': 'synced',
+                });
+              }
+            }
+          } catch (_) {}
         }
       }
 
       // GMWF patients
       gm = (results[2] as QuerySnapshot).size + (results[6] as QuerySnapshot).size + (results[9] as QuerySnapshot).size;
 
-      // Dasterkhwaan tokens
-      das = (results[3] as QuerySnapshot).size;
+      // Legacy serials subcollection dasterkhwan check
+      if ((results[3] as QuerySnapshot).size > 0) {
+        das = (results[3] as QuerySnapshot).size;
+      }
+    } catch (_) {}
+
+    // 2b. Dasterkhwaan tokens: check branches/$bId/dasterkhwaan/$dateKey (dedicated collection)
+    try {
+      final dasDocYmd = await FirebaseFirestore.instance
+          .collection('branches').doc(bId).collection('dasterkhwaan').doc(dateKeyYmd)
+          .get().timeout(const Duration(milliseconds: 3500));
+      if (dasDocYmd.exists) {
+        final dData = dasDocYmd.data() ?? {};
+        final tot = (dData['totalTokens'] as num?)?.toInt() ?? 0;
+        final srv = (dData['servedTokens'] as num?)?.toInt() ?? 0;
+        if (tot > 0) das = tot;
+        if (srv > 0) served = srv;
+      }
+      if (das == 0) {
+        final dasDocDmyy = await FirebaseFirestore.instance
+            .collection('branches').doc(bId).collection('dasterkhwaan').doc(dateKeyDmyy)
+            .get().timeout(const Duration(milliseconds: 3500));
+        if (dasDocDmyy.exists) {
+          final dData = dasDocDmyy.data() ?? {};
+          final tot = (dData['totalTokens'] as num?)?.toInt() ?? 0;
+          final srv = (dData['servedTokens'] as num?)?.toInt() ?? 0;
+          if (tot > 0) das = tot;
+          if (srv > 0) served = srv;
+        }
+      }
+      if (das == 0) {
+        final tokensSnap = await FirebaseFirestore.instance
+            .collection('branches').doc(bId).collection('dasterkhwaan').doc(dateKeyYmd).collection('tokens')
+            .get().timeout(const Duration(milliseconds: 3500));
+        if (tokensSnap.docs.isNotEmpty) {
+          das = tokensSnap.docs.length;
+          served = tokensSnap.docs.where((d) => d.data()['served'] == true).length;
+          // Populate local food tokens cache
+          try {
+            if (Hive.isBoxOpen('dasterkhwaan_tokens')) {
+              final tBox = Hive.box('dasterkhwaan_tokens');
+              for (final doc in tokensSnap.docs) {
+                final d = doc.data();
+                tBox.put(doc.id, {...d, 'id': doc.id, 'branchId': bId, 'dateKey': dateKeyYmd});
+              }
+            }
+          } catch (_) {}
+        }
+      }
     } catch (_) {}
 
     // Fallback: check branches/$bId/entries collection if serials subcollection was empty
@@ -424,7 +531,7 @@ Future<BranchStats?> _fetchFirestoreBranchStats(String branchId, DateTime date) 
       dispensed: dispensed,
       prescribed: 0,
       dasterkhwaan: das,
-      dasterkhwaanServed: 0,
+      dasterkhwaanServed: served,
       donations: donTotal,
       dispensaryRevenue: dispRev,
       zakatRevenue: zRev,
@@ -719,6 +826,23 @@ Future<KarachiCampBreakdown> fetchKarachiCampBreakdown([DateTime? date]) async {
         data['dateKey'] = ymd;
         addEntryIfValid(data, doc.id);
       }
+
+      // Persist downloaded cloud entries into local Hive so local queries find them
+      try {
+        if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+          final box = Hive.box(LocalStorageService.entriesBox);
+          for (final entry in entryMap.entries) {
+            final key = 'karachi-${entry.key}';
+            if (!box.containsKey(key)) {
+              box.put(key, {
+                ...entry.value,
+                'branchId': 'karachi',
+                'syncStatus': 'synced',
+              });
+            }
+          }
+        }
+      } catch (_) {}
     } catch (_) {}
   }
 

@@ -234,6 +234,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       SyncService().start(_branchId!);
       _recalculateLocalStats();
       _setupRealtimeListeners();
+      unawaited(_downloadBranchData(_branchId!));
     } else {
       _loadUserAndBranch();
     }
@@ -307,6 +308,20 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
 
   // ── Data ───────────────────────────────────────────────────────────────────
 
+  Future<void> _downloadBranchData(String b) async {
+    try {
+      await LocalStorageService.downloadDasterkhwaanTokens(b, days: 7);
+      await DonationsLocalStorage.downloadAllDonations(b, days: 7);
+      await DonationsLocalStorage.downloadDonors(b);
+      await DonationBoxStorage.downloadBoxes(b);
+      if (mounted) {
+        setState(() => _recalculateLocalStats());
+      }
+    } catch (e) {
+      debugPrint('[OfficeBoy] _downloadBranchData error: $e');
+    }
+  }
+
   Future<void> _loadUserAndBranch() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -331,6 +346,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
             _recalculateLocalStats();
             _setupRealtimeListeners();
             _backfillUnsyncedTokens();
+            unawaited(_downloadBranchData(b));
             return;
           }
         }
@@ -345,6 +361,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
           _recalculateLocalStats();
           _setupRealtimeListeners();
           _backfillUnsyncedTokens();
+          unawaited(_downloadBranchData(cb));
           return;
         }
       }
@@ -368,6 +385,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
           _recalculateLocalStats();
           _setupRealtimeListeners();
           _backfillUnsyncedTokens();
+          unawaited(_downloadBranchData(branch.id));
           return;
         }
       }
@@ -965,9 +983,11 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         await DonationBoxStorage.backfillUnsyncedBoxes(_branchId);
         SyncService().triggerUpload(force: true);
         try {
-          // Quota guard: delta fetch only recent 3 days instead of default 90 days
-          await DonationsLocalStorage.downloadAllDonations(_branchId!, days: 3);
+          await LocalStorageService.downloadDasterkhwaanTokens(_branchId!, days: 7, force: true);
+          await DonationsLocalStorage.downloadAllDonations(_branchId!, days: 7);
           await DonationsLocalStorage.downloadDonors(_branchId!);
+          await DonationBoxStorage.downloadBoxes(_branchId!);
+          if (mounted) _recalculateLocalStats();
         } catch (_) {}
       }
       if (mounted) {
@@ -1276,12 +1296,15 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
             Icons.history_rounded,
           ];
 
+    final accentColor = isDark ? _DS.mint : _DS.sage;
+    final inactiveColor = isDark ? const Color(0xFF8B949E) : _DS.ink3;
+
     return Container(
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF161B22) : Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.05),
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.06),
             blurRadius: 14,
             offset: const Offset(0, -2),
           ),
@@ -1296,49 +1319,50 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: List.generate(labels.length, (idx) {
               final sel = currentIndex == idx;
-              return GestureDetector(
-                onTap: () => _goToTab(idx),
-                behavior: HitTestBehavior.opaque,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  curve: Curves.easeOutCubic,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: sel
-                        ? (isDark ? _DS.mint.withValues(alpha: 0.20) : _DS.sage)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(_DS.r14),
-                    border: sel && isDark
-                        ? Border.all(color: _DS.mint.withValues(alpha: 0.35), width: 0.8)
-                        : null,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        icons[idx],
-                        size: 18,
-                        color: sel
-                            ? (isDark ? _DS.mint : Colors.white)
-                            : (isDark ? const Color(0xFF8B949E) : _DS.ink3),
-                      ),
-                      if (sel) ...[
-                        const SizedBox(width: 4),
+              return Expanded(
+                child: InkWell(
+                  onTap: () => _goToTab(idx),
+                  borderRadius: BorderRadius.circular(12),
+                  splashColor: accentColor.withValues(alpha: 0.1),
+                  highlightColor: Colors.transparent,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3.5),
+                          decoration: BoxDecoration(
+                            color: sel
+                                ? (isDark ? _DS.mint.withValues(alpha: 0.20) : _DS.mintBg)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            icons[idx],
+                            size: 19,
+                            color: sel ? (isDark ? _DS.mint : _DS.sage) : inactiveColor,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
                         Text(
                           labels[idx],
                           style: GoogleFonts.dmSans(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w700,
-                            color: isDark ? _DS.mint : Colors.white,
+                            fontSize: 9.5,
+                            fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
+                            color: sel ? (isDark ? _DS.mint : _DS.sage) : inactiveColor,
+                            letterSpacing: -0.2,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
-                    ],
+                    ),
                   ),
                 ),
               );
@@ -2620,15 +2644,6 @@ class _TokensScreenState extends State<_TokensScreen> {
                     ),
                     child: Row(
                       children: sessionsToRender.map((sKey) {
-                        final sConf = conf[sKey] as Map? ?? {};
-                        final openT = sConf['openTime']?.toString() ?? '';
-                        final closeT = sConf['closeTime']?.toString() ?? '';
-                        final timingStr = (openT.isNotEmpty && closeT.isNotEmpty)
-                            ? '$openT - $closeT'
-                            : (sKey == 'breakfast'
-                                ? '07:00 AM - 11:30 AM'
-                                : (sKey == 'lunch' ? '12:00 PM - 04:30 PM' : '05:00 PM - 11:59 PM'));
-
                         final meta = _sessionMeta[sKey] ?? _sessionMeta['dinner']!;
 
                         return Expanded(
@@ -2636,8 +2651,8 @@ class _TokensScreenState extends State<_TokensScreen> {
                             padding: const EdgeInsets.symmetric(horizontal: 2),
                             child: _buildSessionTab(
                               id: sKey,
-                              title: meta.title,
-                              timingSubtitle: timingStr,
+                              title: meta.shortTitle,
+                              timingSubtitle: meta.urdu.replaceAll(' کا دسترخوان', ''),
                               icon: meta.icon,
                               activeGradient: meta.gradient,
                               activeShadow: meta.color,
@@ -2868,7 +2883,7 @@ class _TokensScreenState extends State<_TokensScreen> {
     );
   }
 
-  // ── Tactile Meal Voucher Preview ───────────────────────────────────────────
+  // ── Tactile Meal Voucher Preview (Compact & Clean Mobile UI) ─────────────
   Widget _buildVoucherPreview({
     required int nextStart,
     required int qty,
@@ -2883,195 +2898,142 @@ class _TokensScreenState extends State<_TokensScreen> {
     return Container(
       decoration: BoxDecoration(
         color: _DS.getSurface(isDark),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: meta.color.withValues(alpha: isDark ? 0.15 : 0.08),
-            blurRadius: 20,
-            offset: const Offset(0, 6),
-          ),
-          BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.03),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
+            color: meta.color.withValues(alpha: isDark ? 0.12 : 0.05),
+            blurRadius: 14,
+            offset: const Offset(0, 3),
           ),
         ],
         border: Border.all(color: _DS.getBorder(isDark), width: 1),
       ),
       child: Column(
         children: [
-          // Top portion of voucher
+          // Header of Voucher
           Padding(
-            padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: isDark ? meta.color.withValues(alpha: 0.15) : meta.bg,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Icon(
-                            meta.icon,
-                            size: 16,
-                            color: meta.color,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'GULAB MEHMOOD WELFARE',
-                              style: GoogleFonts.dmSans(
-                                fontSize: 9,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.8,
-                                color: _DS.getInk3(isDark),
-                              ),
-                            ),
-                            Text(
-                              'Dasterkhwaan Meal Voucher',
-                              style: GoogleFonts.dmSans(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                color: _DS.getInk(isDark),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: isDark ? meta.color.withValues(alpha: 0.15) : meta.bg,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: meta.color.withValues(alpha: 0.3)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: meta.color,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          Text(
-                            '${meta.shortTitle.toUpperCase()} SESSION',
-                            style: GoogleFonts.dmSans(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w800,
-                              color: meta.color,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'NEXT IN QUEUE',
-                          style: GoogleFonts.dmSans(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                            color: _DS.getInk3(isDark),
-                            letterSpacing: 0.6,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          rangeText,
-                          style: GoogleFonts.dmSans(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w900,
-                            color: _DS.getInk(isDark),
-                            letterSpacing: -0.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: _DS.getSurface2(isDark),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        '$qty Meal${qty > 1 ? "s" : ""}',
-                        style: GoogleFonts.dmSans(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: _DS.getInk2(isDark),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          // Perforated divider with circular punch cutouts
-          _buildPerforatedDivider(context),
-
-          // Bottom stub of voucher
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Row(
                   children: [
-                    Icon(Icons.confirmation_num_outlined, size: 16, color: _DS.getInk3(isDark)),
-                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.all(5),
+                      decoration: BoxDecoration(
+                        color: isDark ? meta.color.withValues(alpha: 0.18) : meta.bg,
+                        borderRadius: BorderRadius.circular(7),
+                      ),
+                      child: Icon(meta.icon, size: 14, color: meta.color),
+                    ),
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'DASTERKHWAAN MEAL VOUCHER',
+                          style: GoogleFonts.dmSans(
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                            color: _DS.getInk3(isDark),
+                          ),
+                        ),
+                        Text(
+                          '${meta.shortTitle} Session · ${_sessionUrdu(sessionKey)}',
+                          style: GoogleFonts.dmSans(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: _DS.getInk(isDark),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: isDark ? meta.color.withValues(alpha: 0.15) : meta.bg,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: meta.color.withValues(alpha: 0.25)),
+                  ),
+                  child: Text(
+                    meta.shortTitle.toUpperCase(),
+                    style: GoogleFonts.dmSans(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w800,
+                      color: meta.color,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Subtle divider
+          Divider(color: _DS.getBorder(isDark), height: 1, thickness: 0.8),
+
+          // Main Info: Queue & PKR
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      '$qty × PKR ${widget.pricePerToken.toInt()} = ',
+                      'NEXT IN QUEUE',
                       style: GoogleFonts.dmSans(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w700,
                         color: _DS.getInk3(isDark),
+                        letterSpacing: 0.5,
                       ),
                     ),
+                    const SizedBox(height: 2),
                     Text(
-                      'PKR $totalPKR',
+                      rangeText,
                       style: GoogleFonts.dmSans(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                        color: meta.color,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                        color: _DS.getInk(isDark),
+                        letterSpacing: -0.3,
                       ),
                     ),
                   ],
                 ),
-                // Barcode simulation lines
-                Row(
-                  children: [1, 3, 2, 4, 1, 3, 2, 1, 3].map((w) {
-                    return Container(
-                      margin: const EdgeInsets.only(left: 2),
-                      width: w.toDouble(),
-                      height: 18,
-                      color: _DS.getBorder2(isDark),
-                    );
-                  }).toList(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: isDark ? _DS.mint.withValues(alpha: 0.15) : _DS.mintBg,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: _DS.mint.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$qty Meal${qty > 1 ? "s" : ""} · ',
+                        style: GoogleFonts.dmSans(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? _DS.mint : _DS.sage,
+                        ),
+                      ),
+                      Text(
+                        'PKR $totalPKR',
+                        style: GoogleFonts.dmSans(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: isDark ? _DS.mint : _DS.sage,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -3081,52 +3043,6 @@ class _TokensScreenState extends State<_TokensScreen> {
     );
   }
 
-  Widget _buildPerforatedDivider(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return SizedBox(
-      height: 20,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          // Dashed line
-          Positioned(
-            left: 16,
-            right: 16,
-            child: CustomPaint(
-              size: const Size(double.infinity, 1),
-              painter: _DashedLinePainter(color: _DS.getBorder2(isDark)),
-            ),
-          ),
-          // Left cutout
-          Positioned(
-            left: -10,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: _DS.getBg(isDark),
-                shape: BoxShape.circle,
-                border: Border.all(color: _DS.getBorder(isDark), width: 1),
-              ),
-            ),
-          ),
-          // Right cutout
-          Positioned(
-            right: -10,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: _DS.getBg(isDark),
-                shape: BoxShape.circle,
-                border: Border.all(color: _DS.getBorder(isDark), width: 1),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   // ── Quantity Section ───────────────────────────────────────────────────────
   Widget _buildQuantitySection(BuildContext context, int currentQty) {
@@ -3535,29 +3451,33 @@ class _TokensScreenState extends State<_TokensScreen> {
                                   children: [
                                     Icon(
                                       meta.icon,
-                                      size: 12,
+                                      size: 13,
                                       color: meta.color,
                                     ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '${meta.shortTitle} Session (${_sessionUrdu(session)})',
-                                      style: GoogleFonts.dmSans(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
-                                        color: _DS.getInk(isDark),
+                                    const SizedBox(width: 5),
+                                    Expanded(
+                                      child: Text(
+                                        '${meta.shortTitle} Session',
+                                        style: GoogleFonts.dmSans(
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: _DS.getInk(isDark),
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
                                   ],
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  time != null
-                                      ? DateFormat('hh:mm a').format(time)
-                                      : 'Today',
+                                  '${time != null ? DateFormat('hh:mm a').format(time) : 'Today'} · ${_sessionUrdu(session)}',
                                   style: GoogleFonts.dmSans(
-                                    fontSize: 11,
+                                    fontSize: 10.5,
                                     color: _DS.getInk3(isDark),
                                   ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ],
                             ),
@@ -3638,30 +3558,6 @@ class _TokensScreenState extends State<_TokensScreen> {
   }
 }
 
-// ─── Perforated Dashed Line Painter ──────────────────────────────────────────
-
-class _DashedLinePainter extends CustomPainter {
-  final Color color;
-  _DashedLinePainter({this.color = const Color(0xFFCBD5E1)});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-    double startX = 0;
-    const dashWidth = 5.0;
-    const dashSpace = 4.0;
-    while (startX < size.width) {
-      canvas.drawLine(Offset(startX, 0), Offset(startX + dashWidth, 0), paint);
-      startX += dashWidth + dashSpace;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
 
 // ─── Reverse Button ──────────────────────────────────────────────────────────
 

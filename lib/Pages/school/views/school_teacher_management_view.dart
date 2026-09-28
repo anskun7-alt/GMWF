@@ -2,17 +2,22 @@
 
 import 'package:flutter/material.dart';
 import '../../../services/image_upload_service.dart';
-import '../../../widgets/media_upload_tile.dart';
 import '../dialogs/school_teacher_dialog.dart';
 import '../models/school_teacher.dart';
+import '../theme/school_theme.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 
 class SchoolTeacherManagementView extends StatefulWidget {
   final String branchId;
+  final String userRole;
+  final String userName;
 
   const SchoolTeacherManagementView({
     super.key,
     required this.branchId,
+    this.userRole = 'School Admin',
+    this.userName = 'Admin',
   });
 
   @override
@@ -22,6 +27,8 @@ class SchoolTeacherManagementView extends StatefulWidget {
 class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementView> {
   final TextEditingController _searchCtrl = TextEditingController();
 
+  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+
   @override
   void dispose() {
     _searchCtrl.dispose();
@@ -29,6 +36,7 @@ class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementVie
   }
 
   void _openTeacherDialog([SchoolTeacher? teacher]) async {
+    if (_isTeacher) return; // Teachers cannot register or edit teachers
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => SchoolTeacherDialog(
@@ -43,341 +51,272 @@ class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementVie
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Search & Action Toolbar
-        Container(
-          padding: const EdgeInsets.all(16),
-          color: Colors.white,
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _searchCtrl,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    hintText: 'Search teacher by name, employee ID, or subject...',
-                    prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF10B981)),
-                    filled: true,
-                    fillColor: const Color(0xFFF8FAFC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-
-              ElevatedButton.icon(
-                onPressed: () => _openTeacherDialog(),
-                icon: const Icon(Icons.person_add_alt_1_rounded),
-                label: const Text('Register Teacher'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF10B981),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-            ],
-          ),
-        ),
-
-        const Divider(height: 1),
-
-        // Teacher List
-        Expanded(
-          child: StreamBuilder<List<Map<String, dynamic>>>(
-            stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
-            builder: (context, snapshot) {
-              final rawList = snapshot.data ?? [];
-              final query = _searchCtrl.text.trim().toLowerCase();
-
-              var teachers = rawList.map((m) => SchoolTeacher.fromMap(m['id'] ?? '', m)).toList();
-
-              if (query.isNotEmpty) {
-                teachers = teachers.where((t) {
-                  return t.name.toLowerCase().contains(query) ||
-                      t.employeeId.toLowerCase().contains(query) ||
-                      t.subjects.any((s) => s.toLowerCase().contains(query));
-                }).toList();
-              }
-
-              if (teachers.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.person_off_rounded, size: 64, color: Colors.grey.shade300),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'No teachers registered yet',
-                        style: TextStyle(color: Colors.grey, fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Click "+ Register Teacher" to add your school staff.',
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              return ListView.separated(
-                padding: const EdgeInsets.all(16),
-                itemCount: teachers.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 12),
-                itemBuilder: (context, index) {
-                  final teacher = teachers[index];
-                  return _buildTeacherCard(teacher);
-                },
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  void _showTeacherDocumentsDialog(SchoolTeacher teacher) {
-    int docCount = (teacher.photoUrl.isNotEmpty ? 1 : 0) +
-        (teacher.cnicUrl.isNotEmpty ? 1 : 0) +
-        teacher.additionalDocuments.length;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            const Icon(Icons.folder_shared_rounded, color: Color(0xFF10B981)),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                'Faculty Documents ($docCount) — ${teacher.name}',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-        content: SizedBox(
-          width: 540,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (teacher.photoUrl.isNotEmpty) ...[
-                  const Text('Faculty Profile Photo:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  MediaUploadTile(label: 'Faculty Photo', icon: Icons.account_box_outlined, initialValue: teacher.photoUrl, readOnly: true),
-                  const SizedBox(height: 12),
-                ],
-                if (teacher.cnicUrl.isNotEmpty) ...[
-                  const Text('CNIC / ID Card Document:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  MediaUploadTile(label: 'Faculty CNIC', icon: Icons.badge_outlined, isDocument: true, initialValue: teacher.cnicUrl, readOnly: true),
-                  const SizedBox(height: 12),
-                ],
-                if (teacher.experienceLetterUrl.isNotEmpty) ...[
-                  const Text('Experience Letter (تجربہ سرٹیفکیٹ):', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  MediaUploadTile(label: 'Experience Letter', icon: Icons.history_edu_outlined, isDocument: true, initialValue: teacher.experienceLetterUrl, readOnly: true),
-                  const SizedBox(height: 12),
-                ],
-                if (teacher.joiningLetterUrl.isNotEmpty) ...[
-                  const Text('Job Joining Letter (تقرری نامہ):', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  MediaUploadTile(label: 'Joining Letter', icon: Icons.assignment_turned_in_outlined, isDocument: true, initialValue: teacher.joiningLetterUrl, readOnly: true),
-                  const SizedBox(height: 12),
-                ],
-                if (teacher.degreesUrl.isNotEmpty) ...[
-                  const Text('Degrees & Certificates (تعلیمی اسناد و ڈگریاں):', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  MediaUploadTile(label: 'Degrees & Certificates', icon: Icons.school_outlined, isDocument: true, initialValue: teacher.degreesUrl, readOnly: true),
-                  const SizedBox(height: 12),
-                ],
-                if (teacher.additionalDocuments.isNotEmpty) ...[
-                  const Text('Custom Documents:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
-                  const SizedBox(height: 6),
-                  ...teacher.additionalDocuments.map((doc) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: MediaUploadTile(
-                          label: doc['name'] ?? 'Document',
-                          icon: Icons.file_present_rounded,
-                          isDocument: true,
-                          initialValue: doc['url'],
-                          readOnly: true,
-                        ),
-                      )),
-                ],
-                if (docCount == 0)
-                  const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Center(child: Text('No documents uploaded for this faculty member yet.', style: TextStyle(color: Colors.grey))),
-                  ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTeacherCard(SchoolTeacher teacher) {
-    int docCount = (teacher.photoUrl.isNotEmpty ? 1 : 0) +
-        (teacher.cnicUrl.isNotEmpty ? 1 : 0) +
-        (teacher.experienceLetterUrl.isNotEmpty ? 1 : 0) +
-        (teacher.joiningLetterUrl.isNotEmpty ? 1 : 0) +
-        (teacher.degreesUrl.isNotEmpty ? 1 : 0) +
-        teacher.additionalDocuments.length;
-
-    final photoBytes = ImageUploadService.decodeBase64ToBytes(teacher.photoUrl);
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: Row(
+    return Scaffold(
+      backgroundColor: SchoolTheme.bgLight,
+      body: Column(
         children: [
-          // Teacher Photo Avatar
-          if (photoBytes != null && photoBytes.isNotEmpty)
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: const Color(0xFF10B981).withValues(alpha: 0.1),
-              backgroundImage: MemoryImage(photoBytes),
-            )
-          else if (teacher.photoUrl.startsWith('http'))
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: const Color(0xFF10B981).withValues(alpha: 0.1),
-              backgroundImage: NetworkImage(teacher.photoUrl),
-            )
-          else
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: const Color(0xFF10B981).withValues(alpha: 0.1),
-              child: const Icon(Icons.record_voice_over_rounded, color: Color(0xFF10B981)),
+          // Search & Action Toolbar
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border(bottom: BorderSide(color: SchoolTheme.borderLight)),
             ),
-          const SizedBox(width: 16),
-
-          // Info
-          Expanded(
-            flex: 3,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Text(
-                      teacher.name,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: Color(0xFF0F172A),
+                Expanded(
+                  child: TextField(
+                    controller: _searchCtrl,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      hintText: _isTeacher
+                          ? 'My Faculty Profile Record...'
+                          : 'Search faculty by name, employee ID, or subject...',
+                      prefixIcon: const Icon(Icons.search_rounded, color: SchoolTheme.primary, size: 20),
+                      filled: true,
+                      fillColor: const Color(0xFFF8FAFC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide(color: SchoolTheme.borderLight),
                       ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide(color: SchoolTheme.borderLight),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: SchoolTheme.primary, width: 1.5),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
                     ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  ),
+                ),
+                if (!_isTeacher) ...[
+                  const SizedBox(width: 14),
+                  ElevatedButton.icon(
+                    onPressed: () => _openTeacherDialog(),
+                    icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                    label: const Text('Register Faculty', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: SchoolTheme.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      elevation: 0,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          // Teacher List
+          Expanded(
+            child: StreamBuilder<List<Map<String, dynamic>>>(
+              stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
+              builder: (context, snapshot) {
+                final rawList = snapshot.data ?? [];
+                final query = _searchCtrl.text.trim().toLowerCase();
+
+                var teachers = rawList.map((m) => SchoolTeacher.fromMap(m['id'] ?? '', m)).toList();
+
+                // Strict Teacher Data Isolation:
+                // One teacher CANNOT see another teacher's profile/data!
+                if (_isTeacher) {
+                  teachers = teachers.where((t) {
+                    final n = t.name.toLowerCase().trim();
+                    final e = t.email.toLowerCase().trim();
+                    final u = widget.userName.toLowerCase().trim();
+                    return n == u || e == u || (u.isNotEmpty && (n.contains(u) || u.contains(n)));
+                  }).toList();
+                } else if (query.isNotEmpty) {
+                  teachers = teachers.where((t) {
+                    return t.name.toLowerCase().contains(query) ||
+                        t.employeeId.toLowerCase().contains(query) ||
+                        t.subjects.any((s) => s.toLowerCase().contains(query)) ||
+                        t.department.toLowerCase().contains(query);
+                  }).toList();
+                }
+
+                if (teachers.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.badge_outlined, size: 56, color: Colors.grey.shade300),
+                        const SizedBox(height: 12),
+                        Text(
+                          _isTeacher
+                              ? 'No faculty profile found for user @${widget.userName}.'
+                              : 'No faculty members found in registry.',
+                          style: const TextStyle(color: SchoolTheme.textMid, fontSize: 15, fontWeight: FontWeight.bold),
+                        ),
+                        if (!_isTeacher) ...[
+                          const SizedBox(height: 6),
+                          const Text('Click "+ Register Faculty" to onboard new teachers.', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                        ],
+                      ],
+                    ),
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: teachers.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (context, idx) {
+                    final t = teachers[idx];
+                    return Container(
+                      padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF1F5F9),
-                        borderRadius: BorderRadius.circular(6),
+                        color: Colors.white,
+                        borderRadius: SchoolTheme.radius16,
+                        border: Border.all(color: SchoolTheme.borderLight),
+                        boxShadow: SchoolTheme.cardShadow,
                       ),
-                      child: Text(
-                        teacher.employeeId,
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF64748B), fontWeight: FontWeight.bold),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Profile picture or Avatar
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Container(
+                                  width: 52,
+                                  height: 52,
+                                  color: SchoolTheme.primaryLight,
+                                  child: _buildTeacherAvatar(t),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+
+                              // Name & Basic Info
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          t.name,
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                            color: SchoolTheme.textDark,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        SchoolBadge(
+                                          label: t.designation,
+                                          color: SchoolTheme.primary,
+                                          fontSize: 11,
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'ID: ${t.employeeId.isNotEmpty ? t.employeeId : "N/A"} • ${t.department}',
+                                      style: const TextStyle(
+                                        color: SchoolTheme.textMuted,
+                                        fontSize: 12.5,
+                                      ),
+                                    ),
+                                    if (t.isHomeroom) ...[
+                                      const SizedBox(height: 4),
+                                      Row(
+                                        children: [
+                                          const Icon(Icons.star_rounded, size: 14, color: Colors.amber),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'Homeroom In-charge: Grade ${t.homeroomGrade} (Sec ${t.homeroomSection.isNotEmpty ? t.homeroomSection : "A"})',
+                                            style: const TextStyle(
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.bold,
+                                              color: Color(0xFFD97706),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+
+                              // Edit Button (Admins/Principals only)
+                              if (!_isTeacher)
+                                IconButton(
+                                  icon: const Icon(Icons.edit_rounded, color: SchoolTheme.primary, size: 20),
+                                  tooltip: 'Edit Faculty Record',
+                                  onPressed: () => _openTeacherDialog(t),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          const Divider(height: 1),
+                          const SizedBox(height: 10),
+
+                          // Assigned Classes & Subjects Chips
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 6,
+                            children: [
+                              if (t.assignedGrades.isNotEmpty) ...[
+                                ...t.assignedGrades.map((g) => SchoolBadge(
+                                      label: 'Class: $g',
+                                      color: SchoolTheme.getGradeColor(g),
+                                      fontSize: 11,
+                                    )),
+                              ],
+                              if (t.subjects.isNotEmpty) ...[
+                                ...t.subjects.map((s) => SchoolBadge(
+                                      label: s,
+                                      color: const Color(0xFF0284C7),
+                                      fontSize: 11,
+                                    )),
+                              ],
+                              if (t.degree.isNotEmpty)
+                                SchoolBadge(
+                                  label: t.degree,
+                                  color: SchoolTheme.textMid,
+                                  backgroundColor: const Color(0xFFF1F5F9),
+                                  fontSize: 11,
+                                ),
+                            ],
+                          ),
+                        ],
                       ),
-                    ),
-                    if (teacher.isHomeroom) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEEF2FF),
-                          border: Border.all(color: const Color(0xFF6366F1).withValues(alpha: 0.3)),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'Class Incharge: ${teacher.homeroomClass}',
-                          style: const TextStyle(fontSize: 11, color: Color(0xFF4338CA), fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${teacher.designation} (${teacher.department}) • ${teacher.qualification}',
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                ),
-              ],
+                    );
+                  },
+                );
+              },
             ),
-          ),
-
-          // Assigned Classes & Subjects
-          Expanded(
-            flex: 4,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (teacher.assignedGrades.isNotEmpty)
-                  Text(
-                    'Classes: ${teacher.assignedGrades.join(", ")}',
-                    style: const TextStyle(fontSize: 13, color: Color(0xFF334155), fontWeight: FontWeight.w500),
-                  ),
-                const SizedBox(height: 2),
-                if (teacher.subjects.isNotEmpty)
-                  Text(
-                    'Subjects: ${teacher.subjects.join(", ")}',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                  ),
-              ],
-            ),
-          ),
-
-          // Phone
-          Text(
-            teacher.phone,
-            style: const TextStyle(fontSize: 13, color: Color(0xFF475569)),
-          ),
-          const SizedBox(width: 8),
-
-          // Documents Viewer Icon
-          IconButton(
-            tooltip: 'View Faculty Documents ($docCount)',
-            icon: Badge(
-              label: Text('$docCount'),
-              isLabelVisible: docCount > 0,
-              child: const Icon(Icons.folder_shared_rounded, color: Color(0xFF10B981)),
-            ),
-            onPressed: () => _showTeacherDocumentsDialog(teacher),
-          ),
-
-          // Edit Button
-          IconButton(
-            tooltip: 'Edit Faculty Details',
-            icon: const Icon(Icons.edit_rounded, color: Color(0xFF64748B)),
-            onPressed: () => _openTeacherDialog(teacher),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildTeacherAvatar(SchoolTeacher t) {
+    if (t.photoUrl.isEmpty) {
+      return const Icon(Icons.person_rounded, size: 28, color: SchoolTheme.primary);
+    }
+    final bytes = ImageUploadService.decodeBase64ToBytes(t.photoUrl);
+    if (bytes != null && bytes.isNotEmpty) {
+      return Image.memory(
+        bytes,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const Icon(Icons.person_rounded, size: 28, color: SchoolTheme.primary),
+      );
+    }
+    if (t.photoUrl.startsWith('http')) {
+      return Image.network(
+        t.photoUrl,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const Icon(Icons.person_rounded, size: 28, color: SchoolTheme.primary),
+      );
+    }
+    return const Icon(Icons.person_rounded, size: 28, color: SchoolTheme.primary);
   }
 }

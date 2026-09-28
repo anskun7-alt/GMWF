@@ -773,9 +773,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       isFloating: false,
       title: 'Receptionist – ${_username ?? widget.receptionistName}',
       subtitle: CampSessionService.getBranchAndCampDisplayName(
-        branchName: _branchName ?? 'Free Dispensary',
+        branchName: _branchName ?? LocalStorageService.getBranchName(widget.branchId),
         branchId: widget.branchId,
-        campId: CampSessionService.getActiveCamp(),
+        campId: CampSessionService.getActiveCamp(widget.branchId),
       ),
       onTitleLongPress: () => DispensaryUserSettingsDialog.show(
         context,

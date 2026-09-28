@@ -15,6 +15,7 @@ import '../models/school_student.dart';
 import '../utils/school_local_storage.dart';
 import '../utils/school_admission_pdf_service.dart';
 import '../constants/school_constants.dart';
+import '../theme/school_theme.dart';
 import '../../../widgets/app_feedback.dart';
 
 class SchoolEnrollmentDialog extends StatefulWidget {
@@ -190,7 +191,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               title: Row(
                 children: [
-                  const Icon(Icons.sync_alt_rounded, color: Color(0xFF0F766E)),
+                  const Icon(Icons.sync_alt_rounded, color: SchoolTheme.primary),
                   const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
@@ -231,7 +232,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
 
                                 return ListTile(
                                   leading: CircleAvatar(
-                                    backgroundColor: const Color(0xFF0F766E).withValues(alpha: 0.1),
+                                    backgroundColor: SchoolTheme.primary.withValues(alpha: 0.1),
                                     backgroundImage: photoBytes != null && photoBytes.isNotEmpty ? MemoryImage(photoBytes) : null,
                                     child: photoBytes == null || photoBytes.isEmpty
                                         ? const Icon(Icons.person_rounded, color: Color(0xFF0F766E))
@@ -245,7 +246,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                                         Container(
                                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                                           decoration: BoxDecoration(
-                                            color: const Color(0xFF0F766E).withValues(alpha: 0.1),
+                                            color: SchoolTheme.primary.withValues(alpha: 0.1),
                                             borderRadius: BorderRadius.circular(4),
                                           ),
                                           child: Text('PIN: $pin', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF0F766E))),
@@ -259,7 +260,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                                   ),
                                   trailing: ElevatedButton(
                                     style: ElevatedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF0F766E),
+                                      backgroundColor: SchoolTheme.primary,
                                       foregroundColor: Colors.white,
                                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                     ),
@@ -312,7 +313,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('✅ Successfully transferred details for "${selected['name']}". Biometric PIN ($pin) preserved.'),
-          backgroundColor: const Color(0xFF0F766E),
+          backgroundColor: SchoolTheme.primary,
         ),
       );
     }
@@ -530,7 +531,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white),
+            style: ElevatedButton.styleFrom(backgroundColor: SchoolTheme.primary, foregroundColor: Colors.white),
             onPressed: () {
               final text = titleCtrl.text.trim();
               if (text.isNotEmpty) Navigator.pop(ctx, text);
@@ -644,8 +645,8 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                       icon: const Icon(Icons.print_rounded, size: 18),
                       label: const Text('Save & Print PDF / محفوظ و پرنٹ کریں', style: TextStyle(fontWeight: FontWeight.bold)),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF0F766E),
-                        side: const BorderSide(color: Color(0xFF0F766E), width: 1.2),
+                        foregroundColor: SchoolTheme.primary,
+                        side: const BorderSide(color: SchoolTheme.primary, width: 1.2),
                         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       ),
@@ -667,7 +668,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                       ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF0F766E),
+                        backgroundColor: SchoolTheme.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -1019,7 +1020,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
             Row(
               children: [
                 if (prefixIcon != null) ...[
-                  Icon(prefixIcon, size: 16, color: const Color(0xFF0F766E)),
+                  Icon(prefixIcon, size: 16, color: SchoolTheme.primary),
                   const SizedBox(width: 6),
                 ],
                 Text(
@@ -1235,7 +1236,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
             Text(
               'دستاویزات اور تصویر',
               textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 14, fontWeight: FontWeight.bold, color: const Color(0xFF0F766E)),
+              style: GoogleFonts.notoSansArabic(fontSize: 14, fontWeight: FontWeight.bold, color: SchoolTheme.primary),
             ),
           ],
         ),
@@ -1328,7 +1329,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
           alignment: Alignment.centerLeft,
           child: OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF0F766E),
+              foregroundColor: SchoolTheme.primary,
               side: const BorderSide(color: Color(0xFF0F766E)),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -1354,7 +1355,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
           children: [
             Checkbox(
               value: _parentSignatureConfirmed,
-              activeColor: const Color(0xFF0F766E),
+              activeColor: SchoolTheme.primary,
               onChanged: (v) => setState(() => _parentSignatureConfirmed = v ?? true),
             ),
             const Text(

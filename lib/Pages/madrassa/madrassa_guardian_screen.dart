@@ -119,18 +119,59 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       String branchId, List<String> ids) async {
     if (ids.isEmpty) return [];
 
+    // Auto-resolve branch if branchId is empty, 'all', or 'global'
+    String effectiveBranch = branchId.trim().toLowerCase();
+    if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+      // 1. Check local Hive cached branches
+      for (final b in LocalStorageService.getLocalBranchesList()) {
+        final bId = (b['id'] ?? '').toString().trim().toLowerCase();
+        if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+          for (final id in ids) {
+            if (MadrassaLocalStorage.getStudentCached(bId, id) != null) {
+              effectiveBranch = bId;
+              break;
+            }
+          }
+        }
+        if (effectiveBranch.isNotEmpty && effectiveBranch != 'all' && effectiveBranch != 'global') break;
+      }
+
+      // 2. If still unresolved, query Firestore collectionGroup
+      if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+        try {
+          final groupSnap = await FirebaseFirestore.instance
+              .collectionGroup('madrassa_students')
+              .where(FieldPath.documentId, isEqualTo: ids.first)
+              .limit(1)
+              .get()
+              .timeout(const Duration(seconds: 4));
+          if (groupSnap.docs.isNotEmpty) {
+            final parentBranch = groupSnap.docs.first.reference.parent.parent?.id;
+            if (parentBranch != null && parentBranch.isNotEmpty) {
+              effectiveBranch = parentBranch.toLowerCase();
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 3. Fallback to default branch if known (e.g. gujrat)
+      if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+        effectiveBranch = 'gujrat';
+      }
+    }
+
     final now = DateTime.now();
-    final allStudentsCached = ids.every((id) => MadrassaLocalStorage.getStudentCached(branchId, id) != null);
+    final allStudentsCached = ids.every((id) => MadrassaLocalStorage.getStudentCached(effectiveBranch, id) != null);
 
     // If any linked student is missing from local Hive, download scoped records
     if (!allStudentsCached) {
       try {
-        await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, ids)
+        await MadrassaLocalStorage.downloadStudentsForGuardian(effectiveBranch, ids)
             .timeout(const Duration(seconds: 4), onTimeout: () {});
         await Future.wait([
-          MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month),
-          MadrassaLocalStorage.downloadHolidays(branchId),
-          MadrassaLocalStorage.downloadConfig(branchId),
+          MadrassaLocalStorage.downloadLogsForMonth(effectiveBranch, now.year, now.month),
+          MadrassaLocalStorage.downloadHolidays(effectiveBranch),
+          MadrassaLocalStorage.downloadConfig(effectiveBranch),
         ]).timeout(const Duration(seconds: 4), onTimeout: () => []);
       } catch (_) {}
     } else {
@@ -139,8 +180,8 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       if (_lastGuardianRefreshTime == null || now.difference(_lastGuardianRefreshTime!) > const Duration(minutes: 30)) {
         _lastGuardianRefreshTime = now;
         Future.wait([
-          MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month),
-          MadrassaLocalStorage.downloadConfig(branchId),
+          MadrassaLocalStorage.downloadLogsForMonth(effectiveBranch, now.year, now.month),
+          MadrassaLocalStorage.downloadConfig(effectiveBranch),
         ]).catchError((_) => <void>[]);
       }
     }
@@ -150,7 +191,7 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       // Reading with Source.cache eliminates duplicate network reads.
       final snaps = await Future.wait(ids.map((id) => FirebaseFirestore.instance
           .collection('branches')
-          .doc(branchId)
+          .doc(effectiveBranch)
           .collection('madrassa_students')
           .doc(id)
           .get(const GetOptions(source: Source.cache))));
@@ -160,7 +201,7 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       try {
         return await Future.wait(ids.map((id) => FirebaseFirestore.instance
             .collection('branches')
-            .doc(branchId)
+            .doc(effectiveBranch)
             .collection('madrassa_students')
             .doc(id)
             .get()));
@@ -235,8 +276,16 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
   }
 
   bool _isAdminViewing() {
-    final role = (widget.userData['role'] as String? ?? '').toLowerCase();
-    return role != 'madrassa guardian';
+    final role = (widget.userData['role'] as String? ?? '').toLowerCase().trim();
+    final isGuardian = role == 'madrassa guardian' ||
+        role == 'madrassa parent' ||
+        role == 'guardian' ||
+        role == 'parent' ||
+        role == 'school guardian' ||
+        role == 'school parent' ||
+        role.contains('guardian') ||
+        role.contains('parent');
+    return !isGuardian;
   }
 
   // Helper to fetch branches and show a picker when branchId is missing
@@ -551,8 +600,8 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
              _studentsFuture = null;
              _lastBranchId = branchId;
            }
-          debugPrint("[Diagnostic] MadrassaGuardianScreen build - branchId: $branchId, isAdmin: $isAdmin, userData: ${widget.userData}");
-          if (branchId.isEmpty && !isAdmin) return _EmptyState(onLogout: _logout, message: 'Branch missing');
+          // If not admin, _fetchStudents auto-resolves branch from the student records if branchId is empty or 'all'
+          // if (branchId.isEmpty && !isAdmin) return _EmptyState(onLogout: _logout, message: 'Branch missing');
 
           if (isAdmin) {
             final effectiveBranchId = (branchId.isNotEmpty && branchId != 'all') ? branchId : (_selectedBranchId ?? '');

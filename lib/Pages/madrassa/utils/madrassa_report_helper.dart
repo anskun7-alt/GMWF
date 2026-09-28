@@ -1800,8 +1800,10 @@ class MadrassaReportHelper {
                   ),
                 TextButton(
                   onPressed: () async {
+                    final isPdf = fileName.toLowerCase().endsWith('.pdf');
+                    final mime = isPdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
                     if (isMobile) {
-                      await Share.shareXFiles([XFile(finalFilePath!, mimeType: 'application/pdf')], text: fileName);
+                      await Share.shareXFiles([XFile(finalFilePath!, mimeType: mime)], text: fileName);
                     } else {
                       final fileUri = Uri.file(finalFilePath!);
                       await launchUrl(fileUri, mode: LaunchMode.externalApplication);
@@ -1815,12 +1817,22 @@ class MadrassaReportHelper {
           );
         }
       } else {
-        // Fallback to printing share
-        await Printing.sharePdf(bytes: bytes, filename: fileName);
+        // Fallback to printing or share
+        final isPdf = fileName.toLowerCase().endsWith('.pdf');
+        if (isPdf) {
+          await Printing.sharePdf(bytes: bytes, filename: fileName);
+        } else {
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File(p.join(tempDir.path, fileName));
+          await tempFile.writeAsBytes(bytes);
+          await Share.shareXFiles([XFile(tempFile.path)], text: fileName);
+        }
       }
     } catch (e) {
-      // Fallback to printing share
-      await Printing.sharePdf(bytes: bytes, filename: fileName);
+      final isPdf = fileName.toLowerCase().endsWith('.pdf');
+      if (isPdf) {
+        await Printing.sharePdf(bytes: bytes, filename: fileName);
+      }
     }
   }
 
@@ -1967,5 +1979,1013 @@ class MadrassaReportHelper {
         ],
       ),
     );
+  }
+
+  static String _extractTeacherName(Map<String, dynamic> teacher) {
+    final u = (teacher['username'] ?? '').toString().trim();
+    if (u.isNotEmpty) return u;
+    final d = (teacher['displayName'] ?? '').toString().trim();
+    if (d.isNotEmpty) return d;
+    final n = (teacher['name'] ?? '').toString().trim();
+    if (n.isNotEmpty) return n;
+    return (teacher['id'] ?? teacher['uid'] ?? 'Teacher').toString();
+  }
+
+  // ===========================================================================
+  // TEACHER MONTHLY PRESENCE & LEAVE AUDIT REPORTS
+  // ===========================================================================
+
+  static Future<void> generateTeacherMonthlyAttendancePdf({
+    required String branchId,
+    required String branchName,
+    required int year,
+    required int month,
+    required Map<String, dynamic> teacher,
+    required Map<String, Map<String, dynamic>> monthlyLogs,
+  }) async {
+    if (_amiriFont == null) {
+      try {
+        final amiriData = await rootBundle.load('assets/fonts/Amiri-Regular.ttf');
+        _amiriFont = pw.Font.ttf(amiriData);
+      } catch (_) {}
+    }
+
+    final pdf = pw.Document(
+      theme: pw.ThemeData.withFont(
+        base: pw.Font.helvetica(),
+        bold: pw.Font.helveticaBold(),
+      ),
+    );
+
+    pw.MemoryImage? logoImage;
+    try {
+      final logoData = await rootBundle.load('assets/logo/gmwf-1.webp');
+      logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+    } catch (_) {}
+
+    final teacherId = (teacher['id'] ?? teacher['uid'] ?? teacher['username'] ?? '').toString().trim();
+    final teacherName = _extractTeacherName(teacher);
+    final spec = (teacher['specialization'] ?? teacher['teachingType'] ?? 'Hifz / Nazra').toString();
+    final shift = (teacher['session'] ?? 'Morning').toString();
+    final phone = (teacher['phone'] ?? '').toString();
+    final monthName = DateFormat('MMMM yyyy').format(DateTime(year, month));
+    final daysInMonth = DateTime(year, month + 1, 0).day;
+    final now = DateTime.now();
+
+    int presentDays = 0;
+    int absentDays = 0;
+    int leaveDays = 0;
+    final List<Map<String, String>> dailyRecords = [];
+    final List<Map<String, String>> leavesList = [];
+
+    for (int day = 1; day <= daysInMonth; day++) {
+      final date = DateTime(year, month, day);
+      final dateKey = DateFormat('yyyy-MM-dd').format(date);
+      final dayName = DateFormat('EEEE').format(date);
+      final isFuture = date.isAfter(DateTime(now.year, now.month, now.day));
+      final isFriday = date.weekday == DateTime.friday;
+
+      final dayLog = monthlyLogs[dateKey];
+      final entries = (dayLog?['entries'] as Map?) ?? {};
+      final entry = entries[teacherId] ?? entries[teacher['username']] ?? entries[teacher['displayName']];
+
+      String status = '-';
+      String reason = '';
+      String markedBy = '';
+
+      if (entry != null && entry is Map) {
+        status = (entry['status'] ?? 'present').toString().toLowerCase();
+        reason = (entry['leaveReason'] ?? '').toString().trim();
+        markedBy = (entry['markedBy'] ?? '').toString().trim();
+      } else if (isFuture) {
+        status = 'upcoming';
+      } else if (isFriday) {
+        status = 'weekend';
+      } else {
+        status = 'not recorded';
+      }
+
+      if (status == 'present') {
+        presentDays++;
+      } else if (status == 'absent') {
+        absentDays++;
+      } else if (status == 'leave') {
+        leaveDays++;
+        leavesList.add({
+          'date': DateFormat('dd MMM yyyy').format(date),
+          'day': dayName,
+          'reason': reason.isNotEmpty ? reason : 'No reason specified',
+          'markedBy': markedBy.isNotEmpty ? markedBy : 'Principal',
+        });
+      }
+
+      dailyRecords.add({
+        'date': DateFormat('dd MMM').format(date),
+        'day': dayName,
+        'status': status.toUpperCase(),
+        'reason': status == 'leave' ? (reason.isNotEmpty ? reason : 'No reason recorded') : '',
+        'markedBy': markedBy,
+      });
+    }
+
+    final totalActiveDays = presentDays + absentDays + leaveDays;
+    final presenceRate = totalActiveDays > 0
+        ? (presentDays / totalActiveDays * 100).toStringAsFixed(1)
+        : '100.0';
+
+    final effectiveBranch = branchName.isNotEmpty ? branchName : branchId.toUpperCase();
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(24),
+        header: (pw.Context context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Container(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: const pw.BoxDecoration(
+                color: PdfColor.fromInt(0xFF0F766E),
+                borderRadius: pw.BorderRadius.all(pw.Radius.circular(8)),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        'Gulzar Madina Madrassa',
+                        style: pw.TextStyle(
+                          fontSize: 18,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.white,
+                        ),
+                      ),
+                      pw.SizedBox(height: 3),
+                      pw.Text(
+                        'Teacher Monthly Presence & Leave Audit — $monthName',
+                        style: const pw.TextStyle(fontSize: 10.5, color: PdfColors.teal50),
+                      ),
+                      pw.SizedBox(height: 2),
+                      pw.Text(
+                        'Branch: $effectiveBranch',
+                        style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.teal100),
+                      ),
+                    ],
+                  ),
+                  if (logoImage != null)
+                    pw.ClipOval(
+                      child: pw.Container(
+                        color: PdfColors.white,
+                        width: 44,
+                        height: 44,
+                        child: pw.Padding(
+                          padding: const pw.EdgeInsets.all(4),
+                          child: pw.Image(logoImage),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            pw.SizedBox(height: 12),
+          ],
+        ),
+        build: (pw.Context context) {
+          return [
+            // Teacher Profile Information Card
+            pw.Container(
+              padding: const pw.EdgeInsets.all(12),
+              decoration: pw.BoxDecoration(
+                color: const PdfColor.fromInt(0xFFF8FAFC),
+                borderRadius: pw.BorderRadius.circular(8),
+                border: pw.Border.all(color: const PdfColor.fromInt(0xFFE2E8F0)),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        teacherName,
+                        style: pw.TextStyle(
+                          fontSize: 15,
+                          fontWeight: pw.FontWeight.bold,
+                          color: const PdfColor.fromInt(0xFF0F172A),
+                        ),
+                      ),
+                      pw.SizedBox(height: 3),
+                      pw.Text(
+                        'Specialization: $spec  •  Shift: $shift${phone.isNotEmpty ? '  •  Phone: $phone' : ''}',
+                        style: const pw.TextStyle(fontSize: 10, color: PdfColor.fromInt(0xFF475569)),
+                      ),
+                    ],
+                  ),
+                  pw.Container(
+                    padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: pw.BoxDecoration(
+                      color: const PdfColor.fromInt(0xFF0F766E),
+                      borderRadius: pw.BorderRadius.circular(6),
+                    ),
+                    child: pw.Text(
+                      '$presenceRate% Presence',
+                      style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            pw.SizedBox(height: 12),
+
+            // Monthly Statistics Tiles
+            _sectionHeader('MONTHLY PRESENCE SNAPSHOT'),
+            pw.SizedBox(height: 8),
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: _statTile('Working Days', '$totalActiveDays', const PdfColor.fromInt(0xFF3B82F6)),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: _statTile('Present Days', '$presentDays ($presenceRate%)', const PdfColor.fromInt(0xFF10B981)),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: _statTile('Absent Days', '$absentDays', const PdfColor.fromInt(0xFFEF4444)),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: _statTile('Leaves Taken', '$leaveDays', const PdfColor.fromInt(0xFFF59E0B)),
+                ),
+              ],
+            ),
+            pw.SizedBox(height: 14),
+
+            // Documented Leave Reasons Audit Block
+            _sectionHeader('DOCUMENTED LEAVE AUDIT'),
+            pw.SizedBox(height: 8),
+            if (leavesList.isEmpty)
+              pw.Container(
+                width: double.infinity,
+                padding: const pw.EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                decoration: pw.BoxDecoration(
+                  color: const PdfColor.fromInt(0xFFECFDF5),
+                  borderRadius: pw.BorderRadius.circular(6),
+                  border: pw.Border.all(color: const PdfColor.fromInt(0xFFA7F3D0)),
+                ),
+                child: pw.Row(
+                  children: [
+                    pw.Text('✓ ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF059669), fontSize: 13)),
+                    pw.Text(
+                      'No leaves recorded for this teacher in $monthName. Full presence maintained.',
+                      style: const pw.TextStyle(fontSize: 10, color: PdfColor.fromInt(0xFF065F46)),
+                    ),
+                  ],
+                ),
+              )
+            else
+              pw.Table(
+                border: pw.TableBorder.all(color: const PdfColor.fromInt(0xFFFDE68A), width: 0.75),
+                children: [
+                  pw.TableRow(
+                    decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFFEF3C7)),
+                    children: [
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text('Date', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9.5, color: const PdfColor.fromInt(0xFF92400E))),
+                      ),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text('Day', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9.5, color: const PdfColor.fromInt(0xFF92400E))),
+                      ),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text('Documented Leave Reason (Mandatory)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9.5, color: const PdfColor.fromInt(0xFF92400E))),
+                      ),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text('Recorded By', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9.5, color: const PdfColor.fromInt(0xFF92400E))),
+                      ),
+                    ],
+                  ),
+                  ...leavesList.map((l) => pw.TableRow(
+                    decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFFFFBEB)),
+                    children: [
+                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(l['date'] ?? '', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(l['day'] ?? '', style: const pw.TextStyle(fontSize: 9))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(l['reason'] ?? '', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFFB45309)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(l['markedBy'] ?? '', style: const pw.TextStyle(fontSize: 9))),
+                    ],
+                  )),
+                ],
+              ),
+            pw.SizedBox(height: 14),
+
+            // Daily Presence Register Table
+            _sectionHeader('DAILY PRESENCE ROLL ($monthName)'),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              border: pw.TableBorder.all(color: const PdfColor.fromInt(0xFFE2E8F0), width: 0.5),
+              columnWidths: {
+                0: const pw.FixedColumnWidth(48),
+                1: const pw.FixedColumnWidth(55),
+                2: const pw.FixedColumnWidth(65),
+                3: const pw.FlexColumnWidth(3),
+                4: const pw.FixedColumnWidth(70),
+              },
+              children: [
+                pw.TableRow(
+                  decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFF0F766E)),
+                  children: [
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Date', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8.5), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Day', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8.5))),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Status', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8.5), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Leave Reason / Attendance Notes', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8.5))),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Recorded By', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8.5))),
+                  ],
+                ),
+                ...dailyRecords.map((r) {
+                  final st = r['status'] ?? '';
+                  PdfColor statusColor = const PdfColor.fromInt(0xFF64748B);
+                  PdfColor rowBg = PdfColors.white;
+
+                  if (st == 'PRESENT') {
+                    statusColor = const PdfColor.fromInt(0xFF10B981);
+                  } else if (st == 'ABSENT') {
+                    statusColor = const PdfColor.fromInt(0xFFEF4444);
+                    rowBg = const PdfColor.fromInt(0xFFFEF2F2);
+                  } else if (st == 'LEAVE') {
+                    statusColor = const PdfColor.fromInt(0xFFF59E0B);
+                    rowBg = const PdfColor.fromInt(0xFFFFFBEB);
+                  } else if (st == 'WEEKEND') {
+                    statusColor = const PdfColor.fromInt(0xFF94A3B8);
+                    rowBg = const PdfColor.fromInt(0xFFF8FAFC);
+                  }
+
+                  return pw.TableRow(
+                    decoration: pw.BoxDecoration(color: rowBg),
+                    children: [
+                      pw.Padding(padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 4), child: pw.Text(r['date'] ?? '', style: const pw.TextStyle(fontSize: 8), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 4), child: pw.Text(r['day'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                        child: pw.Text(
+                          st,
+                          style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: statusColor),
+                          textAlign: pw.TextAlign.center,
+                        ),
+                      ),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                        child: pw.Text(
+                          r['reason'] ?? '',
+                          style: pw.TextStyle(
+                            fontSize: 8,
+                            fontWeight: st == 'LEAVE' ? pw.FontWeight.bold : pw.FontWeight.normal,
+                            color: st == 'LEAVE' ? const PdfColor.fromInt(0xFFB45309) : const PdfColor.fromInt(0xFF475569),
+                          ),
+                        ),
+                      ),
+                      pw.Padding(padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 4), child: pw.Text(r['markedBy'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                    ],
+                  );
+                }),
+              ],
+            ),
+            pw.SizedBox(height: 24),
+
+            // Signatures block
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  children: [
+                    pw.Container(width: 140, height: 1, color: const PdfColor.fromInt(0xFFCBD5E1)),
+                    pw.SizedBox(height: 4),
+                    pw.Text('Teacher Signature', style: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF64748B))),
+                  ],
+                ),
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  children: [
+                    pw.Container(width: 140, height: 1, color: const PdfColor.fromInt(0xFFCBD5E1)),
+                    pw.SizedBox(height: 4),
+                    pw.Text('Principal Stamp & Signature', style: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF64748B))),
+                  ],
+                ),
+              ],
+            ),
+          ];
+        },
+        footer: (pw.Context context) => pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text(
+            'Page ${context.pageNumber} of ${context.pagesCount} • Generated on ${DateFormat('dd-MM-yyyy HH:mm').format(DateTime.now())}',
+            style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey),
+          ),
+        ),
+      ),
+    );
+
+    final cleanName = teacherName.replaceAll(RegExp(r'[^\w\s]+'), '').replaceAll(' ', '_');
+    final fileName = 'Teacher_${cleanName}_Presence_${DateFormat('MMM_yyyy').format(DateTime(year, month))}.pdf';
+    final bytes = await pdf.save();
+    await _saveAndNotify(fileName, bytes);
+  }
+
+  static Future<void> exportTeacherMonthlyAttendanceExcel({
+    required String branchId,
+    required String branchName,
+    required int year,
+    required int month,
+    required Map<String, dynamic> teacher,
+    required Map<String, Map<String, dynamic>> monthlyLogs,
+  }) async {
+    final excel = Excel.createExcel();
+    final sheetName = 'Monthly Presence';
+    excel.rename('Sheet1', sheetName);
+    final Sheet sheet = excel[sheetName];
+    excel.setDefaultSheet(sheetName);
+
+    final teacherId = (teacher['id'] ?? teacher['uid'] ?? teacher['username'] ?? '').toString().trim();
+    final teacherName = _extractTeacherName(teacher);
+    final spec = (teacher['specialization'] ?? teacher['teachingType'] ?? 'Hifz / Nazra').toString();
+    final shift = (teacher['session'] ?? 'Morning').toString();
+    final phone = (teacher['phone'] ?? '').toString();
+    final monthName = DateFormat('MMMM yyyy').format(DateTime(year, month));
+    final daysInMonth = DateTime(year, month + 1, 0).day;
+    final now = DateTime.now();
+    final effectiveBranch = branchName.isNotEmpty ? branchName : branchId.toUpperCase();
+
+    // Column widths
+    sheet.setColumnWidth(0, 14);
+    sheet.setColumnWidth(1, 14);
+    sheet.setColumnWidth(2, 14);
+    sheet.setColumnWidth(3, 35);
+    sheet.setColumnWidth(4, 14);
+    sheet.setColumnWidth(5, 18);
+    sheet.setColumnWidth(6, 22);
+
+    // Header Title
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 0)).value = TextCellValue('Gulzar Madina Madrassa - Faculty Monthly Presence & Leave Audit');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 1)).value = TextCellValue('Branch: $effectiveBranch | Month: $monthName');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 2)).value = TextCellValue('Teacher: $teacherName | Spec: $spec | Shift: $shift | Phone: $phone');
+
+    // KPI Summary Header
+    int presentDays = 0;
+    int absentDays = 0;
+    int leaveDays = 0;
+    final List<Map<String, String>> dailyRecords = [];
+    final List<Map<String, String>> leavesList = [];
+
+    for (int day = 1; day <= daysInMonth; day++) {
+      final date = DateTime(year, month, day);
+      final dateKey = DateFormat('yyyy-MM-dd').format(date);
+      final dayName = DateFormat('EEEE').format(date);
+      final isFuture = date.isAfter(DateTime(now.year, now.month, now.day));
+      final isFriday = date.weekday == DateTime.friday;
+
+      final dayLog = monthlyLogs[dateKey];
+      final entries = (dayLog?['entries'] as Map?) ?? {};
+      final entry = entries[teacherId] ?? entries[teacher['username']] ?? entries[teacher['displayName']];
+
+      String status = '-';
+      String reason = '';
+      String markedBy = '';
+      String markedAt = '';
+
+      if (entry != null && entry is Map) {
+        status = (entry['status'] ?? 'present').toString().toLowerCase();
+        reason = (entry['leaveReason'] ?? '').toString().trim();
+        markedBy = (entry['markedBy'] ?? '').toString().trim();
+        markedAt = (entry['markedAt'] ?? '').toString().trim();
+      } else if (isFuture) {
+        status = 'upcoming';
+      } else if (isFriday) {
+        status = 'weekend';
+      } else {
+        status = 'not recorded';
+      }
+
+      if (status == 'present') {
+        presentDays++;
+      } else if (status == 'absent') {
+        absentDays++;
+      } else if (status == 'leave') {
+        leaveDays++;
+        leavesList.add({
+          'date': dateKey,
+          'day': dayName,
+          'reason': reason.isNotEmpty ? reason : 'No reason recorded',
+          'markedBy': markedBy,
+          'markedAt': markedAt,
+        });
+      }
+
+      dailyRecords.add({
+        'date': dateKey,
+        'day': dayName,
+        'status': status.toUpperCase(),
+        'reason': status == 'leave' ? (reason.isNotEmpty ? reason : 'No reason recorded') : '',
+        'shift': shift,
+        'markedBy': markedBy,
+        'markedAt': markedAt,
+      });
+    }
+
+    final totalActiveDays = presentDays + absentDays + leaveDays;
+    final presenceRate = totalActiveDays > 0
+        ? (presentDays / totalActiveDays * 100).toStringAsFixed(1)
+        : '100.0';
+
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 4)).value = TextCellValue('Summary:');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: 4)).value = TextCellValue('Working Days: $totalActiveDays');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: 4)).value = TextCellValue('Present: $presentDays ($presenceRate%)');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: 4)).value = TextCellValue('Absent: $absentDays');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: 4)).value = TextCellValue('Leaves: $leaveDays');
+
+    // Headers
+    final headers = ['Date', 'Day', 'Status', 'Documented Leave Reason (Mandatory)', 'Shift', 'Recorded By', 'Timestamp'];
+    for (int col = 0; col < headers.length; col++) {
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: 6)).value = TextCellValue(headers[col]);
+    }
+
+    int rowIndex = 7;
+    for (final r in dailyRecords) {
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIndex)).value = TextCellValue(r['date'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIndex)).value = TextCellValue(r['day'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIndex)).value = TextCellValue(r['status'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIndex)).value = TextCellValue(r['reason'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIndex)).value = TextCellValue(r['shift'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowIndex)).value = TextCellValue(r['markedBy'] ?? '');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 6, rowIndex: rowIndex)).value = TextCellValue(r['markedAt'] ?? '');
+      rowIndex++;
+    }
+
+    // Sheet 2: Leaves Audit
+    final Sheet leavesSheet = excel['Leaves Audit'];
+    leavesSheet.setColumnWidth(0, 14);
+    leavesSheet.setColumnWidth(1, 14);
+    leavesSheet.setColumnWidth(2, 22);
+    leavesSheet.setColumnWidth(3, 40);
+    leavesSheet.setColumnWidth(4, 18);
+    leavesSheet.setColumnWidth(5, 22);
+
+    leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 0)).value = TextCellValue('Gulzar Madina Madrassa - Documented Leave Reasons Audit');
+    leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 1)).value = TextCellValue('Teacher: $teacherName ($effectiveBranch) - $monthName');
+
+    final leaveHeaders = ['Date', 'Day', 'Teacher Name', 'Documented Leave Reason (Mandatory)', 'Recorded By', 'Timestamp'];
+    for (int col = 0; col < leaveHeaders.length; col++) {
+      leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: 3)).value = TextCellValue(leaveHeaders[col]);
+    }
+
+    int lRow = 4;
+    if (leavesList.isEmpty) {
+      leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: lRow)).value = TextCellValue('No leaves recorded in $monthName.');
+    } else {
+      for (final l in leavesList) {
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: lRow)).value = TextCellValue(l['date'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: lRow)).value = TextCellValue(l['day'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: lRow)).value = TextCellValue(teacherName);
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: lRow)).value = TextCellValue(l['reason'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: lRow)).value = TextCellValue(l['markedBy'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: lRow)).value = TextCellValue(l['markedAt'] ?? '');
+        lRow++;
+      }
+    }
+
+    final fileBytes = excel.save();
+    if (fileBytes != null) {
+      final cleanName = teacherName.replaceAll(RegExp(r'[^\w\s]+'), '').replaceAll(' ', '_');
+      final fileName = 'Teacher_${cleanName}_Presence_${DateFormat('MMM_yyyy').format(DateTime(year, month))}.xlsx';
+      await _saveAndNotify(fileName, Uint8List.fromList(fileBytes));
+    }
+  }
+
+  static Future<void> generateAllTeachersMonthlyAttendancePdf({
+    required String branchId,
+    required String branchName,
+    required int year,
+    required int month,
+    required List<Map<String, dynamic>> teachers,
+    required Map<String, Map<String, dynamic>> monthlyLogs,
+  }) async {
+    if (_amiriFont == null) {
+      try {
+        final amiriData = await rootBundle.load('assets/fonts/Amiri-Regular.ttf');
+        _amiriFont = pw.Font.ttf(amiriData);
+      } catch (_) {}
+    }
+
+    final pdf = pw.Document(
+      theme: pw.ThemeData.withFont(
+        base: pw.Font.helvetica(),
+        bold: pw.Font.helveticaBold(),
+      ),
+    );
+
+    pw.MemoryImage? logoImage;
+    try {
+      final logoData = await rootBundle.load('assets/logo/gmwf-1.webp');
+      logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+    } catch (_) {}
+
+    final monthName = DateFormat('MMMM yyyy').format(DateTime(year, month));
+    final daysInMonth = DateTime(year, month + 1, 0).day;
+    final effectiveBranch = branchName.isNotEmpty ? branchName : branchId.toUpperCase();
+
+    final List<Map<String, dynamic>> teacherStats = [];
+    final List<Map<String, String>> allLeavesList = [];
+
+    for (final teacher in teachers) {
+      final teacherId = (teacher['id'] ?? teacher['uid'] ?? teacher['username'] ?? '').toString().trim();
+      final teacherName = _extractTeacherName(teacher);
+      final spec = (teacher['specialization'] ?? teacher['teachingType'] ?? 'Hifz / Nazra').toString();
+      final shift = (teacher['session'] ?? 'Morning').toString();
+
+      int presentDays = 0;
+      int absentDays = 0;
+      int leaveDays = 0;
+      final List<String> leaveReasons = [];
+
+      for (int day = 1; day <= daysInMonth; day++) {
+        final date = DateTime(year, month, day);
+        final dateKey = DateFormat('yyyy-MM-dd').format(date);
+        final dayName = DateFormat('EEEE').format(date);
+        final dayLog = monthlyLogs[dateKey];
+        final entries = (dayLog?['entries'] as Map?) ?? {};
+        final entry = entries[teacherId] ?? entries[teacher['username']] ?? entries[teacher['displayName']];
+
+        if (entry != null && entry is Map) {
+          final status = (entry['status'] ?? 'present').toString().toLowerCase();
+          final reason = (entry['leaveReason'] ?? '').toString().trim();
+          final markedBy = (entry['markedBy'] ?? '').toString().trim();
+
+          if (status == 'present') {
+            presentDays++;
+          } else if (status == 'absent') {
+            absentDays++;
+          } else if (status == 'leave') {
+            leaveDays++;
+            final effectiveReason = reason.isNotEmpty ? reason : 'No reason recorded';
+            leaveReasons.add('${DateFormat('dd MMM').format(date)}: $effectiveReason');
+            allLeavesList.add({
+              'teacher': teacherName,
+              'date': DateFormat('dd MMM yyyy').format(date),
+              'day': dayName,
+              'reason': effectiveReason,
+              'markedBy': markedBy.isNotEmpty ? markedBy : 'Principal',
+            });
+          }
+        }
+      }
+
+      final active = presentDays + absentDays + leaveDays;
+      final rate = active > 0 ? (presentDays / active * 100).toStringAsFixed(1) : '100.0';
+
+      teacherStats.add({
+        'name': teacherName,
+        'spec': spec,
+        'shift': shift,
+        'workingDays': active,
+        'present': presentDays,
+        'absent': absentDays,
+        'leave': leaveDays,
+        'rate': rate,
+        'reasons': leaveReasons.join(', '),
+      });
+    }
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(24),
+        header: (pw.Context context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Container(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: const pw.BoxDecoration(
+                color: PdfColor.fromInt(0xFF0F766E),
+                borderRadius: pw.BorderRadius.all(pw.Radius.circular(8)),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        'Gulzar Madina Madrassa — All Faculty Monthly Presence & Leave Audit',
+                        style: pw.TextStyle(
+                          fontSize: 16,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.white,
+                        ),
+                      ),
+                      pw.SizedBox(height: 2),
+                      pw.Text(
+                        'Branch: $effectiveBranch  •  Month: $monthName  •  Total Faculty: ${teachers.length}',
+                        style: const pw.TextStyle(fontSize: 10, color: PdfColors.teal50),
+                      ),
+                    ],
+                  ),
+                  if (logoImage != null)
+                    pw.ClipOval(
+                      child: pw.Container(
+                        color: PdfColors.white,
+                        width: 38,
+                        height: 38,
+                        child: pw.Padding(
+                          padding: const pw.EdgeInsets.all(3),
+                          child: pw.Image(logoImage),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            pw.SizedBox(height: 10),
+          ],
+        ),
+        build: (pw.Context context) {
+          return [
+            _sectionHeader('FACULTY MONTHLY PRESENCE MATRIX'),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              border: pw.TableBorder.all(color: const PdfColor.fromInt(0xFFE2E8F0), width: 0.5),
+              columnWidths: {
+                0: const pw.FixedColumnWidth(28),
+                1: const pw.FixedColumnWidth(120),
+                2: const pw.FixedColumnWidth(70),
+                3: const pw.FixedColumnWidth(60),
+                4: const pw.FixedColumnWidth(55),
+                5: const pw.FixedColumnWidth(50),
+                6: const pw.FixedColumnWidth(50),
+                7: const pw.FixedColumnWidth(50),
+                8: const pw.FixedColumnWidth(55),
+                9: const pw.FlexColumnWidth(3),
+              },
+              children: [
+                pw.TableRow(
+                  decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFF0F766E)),
+                  children: [
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('#', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Teacher Name', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8))),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Spec', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8))),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Shift', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8))),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Work Days', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Present', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Absent', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Leave', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Presence %', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8), textAlign: pw.TextAlign.center)),
+                    pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Documented Leave Reasons (Mandatory)', style: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold, fontSize: 8))),
+                  ],
+                ),
+                ...teacherStats.asMap().entries.map((entry) {
+                  final idx = entry.key;
+                  final t = entry.value;
+                  final hasLeaves = (t['leave'] as int) > 0;
+                  final rowBg = hasLeaves ? const PdfColor.fromInt(0xFFFFFBEB) : (idx % 2 == 1 ? const PdfColor.fromInt(0xFFF8FAFC) : PdfColors.white);
+
+                  return pw.TableRow(
+                    decoration: pw.BoxDecoration(color: rowBg),
+                    children: [
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${idx + 1}', style: const pw.TextStyle(fontSize: 8), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(t['name'] ?? '', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(t['spec'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(t['shift'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${t['workingDays']}', style: const pw.TextStyle(fontSize: 8), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${t['present']}', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFF10B981)), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${t['absent']}', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFFEF4444)), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${t['leave']}', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFFF59E0B)), textAlign: pw.TextAlign.center)),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('${t['rate']}%', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold), textAlign: pw.TextAlign.center)),
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(4),
+                        child: pw.Text(
+                          (t['reasons'] as String).isEmpty ? '—' : t['reasons'],
+                          style: pw.TextStyle(
+                            fontSize: 7.5,
+                            color: hasLeaves ? const PdfColor.fromInt(0xFFB45309) : const PdfColor.fromInt(0xFF64748B),
+                            fontWeight: hasLeaves ? pw.FontWeight.bold : pw.FontWeight.normal,
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                }),
+              ],
+            ),
+            pw.SizedBox(height: 14),
+
+            if (allLeavesList.isNotEmpty) ...[
+              _sectionHeader('ALL FACULTY DOCUMENTED LEAVES AUDIT ($monthName)'),
+              pw.SizedBox(height: 8),
+              pw.Table(
+                border: pw.TableBorder.all(color: const PdfColor.fromInt(0xFFFDE68A), width: 0.75),
+                children: [
+                  pw.TableRow(
+                    decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFFEF3C7)),
+                    children: [
+                      pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Date', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: const PdfColor.fromInt(0xFF92400E)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Day', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: const PdfColor.fromInt(0xFF92400E)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Teacher Name', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: const PdfColor.fromInt(0xFF92400E)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Documented Leave Reason (Mandatory)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: const PdfColor.fromInt(0xFF92400E)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text('Recorded By', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8.5, color: const PdfColor.fromInt(0xFF92400E)))),
+                    ],
+                  ),
+                  ...allLeavesList.map((l) => pw.TableRow(
+                    decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFFFFBEB)),
+                    children: [
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(l['date'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(l['day'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(l['teacher'] ?? '', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(l['reason'] ?? '', style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: const PdfColor.fromInt(0xFFB45309)))),
+                      pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(l['markedBy'] ?? '', style: const pw.TextStyle(fontSize: 8))),
+                    ],
+                  )),
+                ],
+              ),
+              pw.SizedBox(height: 16),
+            ],
+
+            // Signatures block
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  children: [
+                    pw.Container(width: 160, height: 1, color: const PdfColor.fromInt(0xFFCBD5E1)),
+                    pw.SizedBox(height: 4),
+                    pw.Text('Madrassa Nazim Signature', style: const pw.TextStyle(fontSize: 8.5, color: PdfColor.fromInt(0xFF64748B))),
+                  ],
+                ),
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.center,
+                  children: [
+                    pw.Container(width: 160, height: 1, color: const PdfColor.fromInt(0xFFCBD5E1)),
+                    pw.SizedBox(height: 4),
+                    pw.Text('Principal Stamp & Signature', style: const pw.TextStyle(fontSize: 8.5, color: PdfColor.fromInt(0xFF64748B))),
+                  ],
+                ),
+              ],
+            ),
+          ];
+        },
+        footer: (pw.Context context) => pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text(
+            'Page ${context.pageNumber} of ${context.pagesCount} • Generated on ${DateFormat('dd-MM-yyyy HH:mm').format(DateTime.now())}',
+            style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey),
+          ),
+        ),
+      ),
+    );
+
+    final fileName = 'All_Faculty_Presence_${branchId.toUpperCase()}_${DateFormat('MMM_yyyy').format(DateTime(year, month))}.pdf';
+    final bytes = await pdf.save();
+    await _saveAndNotify(fileName, bytes);
+  }
+
+  static Future<void> exportAllTeachersMonthlyAttendanceExcel({
+    required String branchId,
+    required String branchName,
+    required int year,
+    required int month,
+    required List<Map<String, dynamic>> teachers,
+    required Map<String, Map<String, dynamic>> monthlyLogs,
+  }) async {
+    final excel = Excel.createExcel();
+    final sheetName = 'Faculty Summary';
+    excel.rename('Sheet1', sheetName);
+    final Sheet sheet = excel[sheetName];
+    excel.setDefaultSheet(sheetName);
+
+    final monthName = DateFormat('MMMM yyyy').format(DateTime(year, month));
+    final daysInMonth = DateTime(year, month + 1, 0).day;
+    final effectiveBranch = branchName.isNotEmpty ? branchName : branchId.toUpperCase();
+
+    // Column Widths
+    sheet.setColumnWidth(0, 6);
+    sheet.setColumnWidth(1, 24);
+    sheet.setColumnWidth(2, 14);
+    sheet.setColumnWidth(3, 14);
+    sheet.setColumnWidth(4, 12);
+    sheet.setColumnWidth(5, 12);
+    sheet.setColumnWidth(6, 12);
+    sheet.setColumnWidth(7, 12);
+    sheet.setColumnWidth(8, 14);
+    sheet.setColumnWidth(9, 45);
+
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 0)).value = TextCellValue('Gulzar Madina Madrassa - All Faculty Monthly Presence & Leave Audit');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 1)).value = TextCellValue('Branch: $effectiveBranch | Month: $monthName | Total Faculty: ${teachers.length}');
+
+    final headers = ['#', 'Teacher Name', 'Specialization', 'Shift', 'Work Days', 'Present', 'Absent', 'Leave', 'Presence %', 'Documented Leave Reasons (Mandatory)'];
+    for (int col = 0; col < headers.length; col++) {
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: 3)).value = TextCellValue(headers[col]);
+    }
+
+    final List<Map<String, String>> allLeavesList = [];
+    int rowIndex = 4;
+
+    for (int i = 0; i < teachers.length; i++) {
+      final teacher = teachers[i];
+      final teacherId = (teacher['id'] ?? teacher['uid'] ?? teacher['username'] ?? '').toString().trim();
+      final teacherName = _extractTeacherName(teacher);
+      final spec = (teacher['specialization'] ?? teacher['teachingType'] ?? 'Hifz / Nazra').toString();
+      final shift = (teacher['session'] ?? 'Morning').toString();
+
+      int presentDays = 0;
+      int absentDays = 0;
+      int leaveDays = 0;
+      final List<String> leaveReasons = [];
+
+      for (int day = 1; day <= daysInMonth; day++) {
+        final date = DateTime(year, month, day);
+        final dateKey = DateFormat('yyyy-MM-dd').format(date);
+        final dayName = DateFormat('EEEE').format(date);
+        final dayLog = monthlyLogs[dateKey];
+        final entries = (dayLog?['entries'] as Map?) ?? {};
+        final entry = entries[teacherId] ?? entries[teacher['username']] ?? entries[teacher['displayName']];
+
+        if (entry != null && entry is Map) {
+          final status = (entry['status'] ?? 'present').toString().toLowerCase();
+          final reason = (entry['leaveReason'] ?? '').toString().trim();
+          final markedBy = (entry['markedBy'] ?? '').toString().trim();
+
+          if (status == 'present') {
+            presentDays++;
+          } else if (status == 'absent') {
+            absentDays++;
+          } else if (status == 'leave') {
+            leaveDays++;
+            final effectiveReason = reason.isNotEmpty ? reason : 'No reason recorded';
+            leaveReasons.add('${DateFormat('dd MMM').format(date)}: $effectiveReason');
+            allLeavesList.add({
+              'teacher': teacherName,
+              'date': dateKey,
+              'day': dayName,
+              'reason': effectiveReason,
+              'markedBy': markedBy,
+            });
+          }
+        }
+      }
+
+      final active = presentDays + absentDays + leaveDays;
+      final rate = active > 0 ? (presentDays / active * 100).toStringAsFixed(1) : '100.0';
+
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIndex)).value = TextCellValue('${i + 1}');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIndex)).value = TextCellValue(teacherName);
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIndex)).value = TextCellValue(spec);
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIndex)).value = TextCellValue(shift);
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIndex)).value = TextCellValue('$active');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowIndex)).value = TextCellValue('$presentDays');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 6, rowIndex: rowIndex)).value = TextCellValue('$absentDays');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 7, rowIndex: rowIndex)).value = TextCellValue('$leaveDays');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 8, rowIndex: rowIndex)).value = TextCellValue('$rate%');
+      sheet.cell(CellIndex.indexByColumnRow(columnIndex: 9, rowIndex: rowIndex)).value = TextCellValue(leaveReasons.join('; '));
+      rowIndex++;
+    }
+
+    // Sheet 2: All Leaves Log
+    final Sheet leavesSheet = excel['Leaves Log'];
+    leavesSheet.setColumnWidth(0, 14);
+    leavesSheet.setColumnWidth(1, 14);
+    leavesSheet.setColumnWidth(2, 24);
+    leavesSheet.setColumnWidth(3, 42);
+    leavesSheet.setColumnWidth(4, 18);
+
+    leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 0)).value = TextCellValue('Gulzar Madina Madrassa - All Leaves Audit Log');
+    leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 1)).value = TextCellValue('Branch: $effectiveBranch | Month: $monthName');
+
+    final lHeaders = ['Date', 'Day', 'Teacher Name', 'Documented Leave Reason (Mandatory)', 'Recorded By'];
+    for (int col = 0; col < lHeaders.length; col++) {
+      leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: 3)).value = TextCellValue(lHeaders[col]);
+    }
+
+    int lRow = 4;
+    if (allLeavesList.isEmpty) {
+      leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: lRow)).value = TextCellValue('No leaves recorded across all faculty in $monthName.');
+    } else {
+      for (final l in allLeavesList) {
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: lRow)).value = TextCellValue(l['date'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: lRow)).value = TextCellValue(l['day'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: lRow)).value = TextCellValue(l['teacher'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: lRow)).value = TextCellValue(l['reason'] ?? '');
+        leavesSheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: lRow)).value = TextCellValue(l['markedBy'] ?? '');
+        lRow++;
+      }
+    }
+
+    final fileBytes = excel.save();
+    if (fileBytes != null) {
+      final fileName = 'All_Faculty_Presence_${branchId.toUpperCase()}_${DateFormat('MMM_yyyy').format(DateTime(year, month))}.xlsx';
+      await _saveAndNotify(fileName, Uint8List.fromList(fileBytes));
+    }
   }
 }

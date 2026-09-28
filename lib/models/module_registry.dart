@@ -164,13 +164,19 @@ class ModuleRegistry {
       icon: Icons.people_alt_rounded,
       requiredPermission: AppPermission.manageUsers,
       isFeatured: false,
+      isBranchDependent: true,
+      supportsGlobalWrapper: true,
       builder: (context, data) {
         final role = (data['role'] as String? ?? '').toLowerCase().trim();
         final userBranch = (data['branchId'] as String? ?? '').toLowerCase().trim();
-        final isGlobalExec = ['chairman', 'ceo', 'admin', 'administrator', 'super admin', 'global admin', 'hq manager', 'president', 'founder'].contains(role) && (userBranch == 'all' || userBranch == 'global' || userBranch.isEmpty);
+        final isGlobalExec = [
+          'chairman', 'ceo', 'admin', 'administrator', 'super admin',
+          'global admin', 'hq manager', 'hqmanager', 'hq_manager',
+          'president', 'founder', 'director'
+        ].contains(role);
         final isScoped = !isGlobalExec;
         return UsersScreen(
-          branchId: isScoped ? userBranch : 'all',
+          branchId: isScoped ? userBranch : (userBranch.isNotEmpty ? userBranch : 'all'),
           currentUserRole: data['role']?.toString(),
         );
       },
@@ -364,7 +370,11 @@ class ModuleRegistry {
       builder: (context, data) {
         final role = (data['role'] as String? ?? '').toLowerCase().trim();
         final userBranch = (data['branchId'] as String? ?? '').toLowerCase().trim();
-        final isGlobalExec = ['chairman', 'ceo', 'admin', 'administrator', 'super admin', 'global admin', 'hq manager', 'president', 'founder'].contains(role) && (userBranch == 'all' || userBranch == 'global' || userBranch.isEmpty);
+        final isGlobalExec = [
+          'chairman', 'ceo', 'admin', 'administrator', 'super admin',
+          'global admin', 'hq manager', 'hqmanager', 'hq_manager',
+          'president', 'founder', 'director'
+        ].contains(role);
         final isScoped = !isGlobalExec;
         return Branches(
           branchId: isScoped ? userBranch : null,
@@ -737,6 +747,55 @@ class ModuleRegistry {
         username: data['name'] ?? data['username'] ?? 'User',
         role: data['role'] ?? 'School Admin',
         initialTabIndex: 6,
+      ),
+      category: ModuleCategory.school,
+    ),
+    AppModule(
+      id: 'school_fees',
+      title: 'School Fee Management',
+      description: 'Monthly student tuition fees, dues, challan slips, and defaulters',
+      icon: Icons.payments_rounded,
+      requiredPermission: AppPermission.manageSchoolAdmin,
+      isBranchDependent: true,
+      supportsGlobalWrapper: true,
+      builder: (context, data) => SchoolDashboard(
+        branchId: data['branchId'] ?? 'all',
+        username: data['name'] ?? data['username'] ?? 'User',
+        role: data['role'] ?? 'School Admin',
+        initialTabIndex: 5,
+      ),
+      category: ModuleCategory.school,
+    ),
+    AppModule(
+      id: 'school_grading',
+      title: 'School Grading & Reports',
+      description: 'Exams, marks entry, report cards, and GPA performance analytics',
+      icon: Icons.grade_rounded,
+      requiredPermission: AppPermission.manageSchool,
+      isBranchDependent: true,
+      supportsGlobalWrapper: true,
+      isFeatured: true,
+      builder: (context, data) => SchoolDashboard(
+        branchId: data['branchId'] ?? 'all',
+        username: data['name'] ?? data['username'] ?? 'User',
+        role: data['role'] ?? 'School Admin',
+        initialTabIndex: 7,
+      ),
+      category: ModuleCategory.school,
+    ),
+    AppModule(
+      id: 'school_audit',
+      title: 'School Audit Trail',
+      description: 'Institutional security audit logs, attendance edits, and faculty modifications',
+      icon: Icons.security_rounded,
+      requiredPermission: AppPermission.manageSchoolAdmin,
+      isBranchDependent: true,
+      supportsGlobalWrapper: true,
+      builder: (context, data) => SchoolDashboard(
+        branchId: data['branchId'] ?? 'all',
+        username: data['name'] ?? data['username'] ?? 'User',
+        role: data['role'] ?? 'School Admin',
+        initialTabIndex: 8,
       ),
       category: ModuleCategory.school,
     ),

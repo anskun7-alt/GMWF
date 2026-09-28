@@ -1,5 +1,6 @@
 // lib/pages/register.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -40,10 +41,13 @@ class _RegisterState extends State<Register>
   String? _selectedDepartment;
   String? _selectedRole;
   String? _selectedBranch;
+  bool _branchManuallySelected = false; // true once user or code has made an intentional selection
   String? _selectedDispensary;
   final Set<String> _selectedDispensaries = {};
   final Map<String, String> _campSessions = {};
   String _selectedMadrassaSession = 'morning';
+  String _selectedMadrassaTeachingType = 'hifz'; // 'nazra', 'hifz', 'both'
+  final Set<String> _selectedMadrassaSessions = {'morning'};
   String? _selectedDegree;
 
   final TextEditingController _usernameController     = TextEditingController();
@@ -257,9 +261,12 @@ class _RegisterState extends State<Register>
     if (mounted) {
       setState(() {
         _branches = immediateBranches;
-        if (_branches.isNotEmpty && (_selectedBranch == null || !_branches.any((b) => b['name'] == _selectedBranch))) {
-          if (!isGlobalExec || _branches.length == 1) {
-            _selectedBranch = _branches.first['name'];
+        // Only auto-select if the user hasn't already made an intentional choice
+        if (_branches.isNotEmpty && !_branchManuallySelected) {
+          if (_selectedBranch == null || !_branches.any((b) => b['name'] == _selectedBranch)) {
+            if (!isGlobalExec || _branches.length == 1) {
+              _selectedBranch = _branches.first['name'];
+            }
           }
         }
       });
@@ -301,9 +308,12 @@ class _RegisterState extends State<Register>
           if (mounted) {
             setState(() {
               _branches = updatedBranches;
-              if (_branches.isNotEmpty && (_selectedBranch == null || !_branches.any((b) => b['name'] == _selectedBranch))) {
-                if (!isGlobalExec || _branches.length == 1) {
-                  _selectedBranch = _branches.first['name'];
+              // Only auto-select if the user hasn't already explicitly chosen
+              if (_branches.isNotEmpty && !_branchManuallySelected) {
+                if (_selectedBranch == null || !_branches.any((b) => b['name'] == _selectedBranch)) {
+                  if (!isGlobalExec || _branches.length == 1) {
+                    _selectedBranch = _branches.first['name'];
+                  }
                 }
               }
             });
@@ -315,18 +325,50 @@ class _RegisterState extends State<Register>
 
   Future<void> _loadStudentsForBranch(String bId) async {
     try {
+      final cleanBId = bId.toLowerCase().trim();
+      List<Map<String, dynamic>> students = [];
+      if (Hive.isBoxOpen(LocalStorageService.madrassaStudentsBox)) {
+        final box = Hive.box(LocalStorageService.madrassaStudentsBox);
+        for (final val in box.values) {
+          if (val is Map) {
+            final sBranch = (val['branchId'] ?? val['branch'] ?? '').toString().toLowerCase().trim();
+            final isDel = val['isDeleted'] == true || val['status'] == 'deleted' || val['status'] == 'inactive';
+            if (!isDel && (sBranch == cleanBId || sBranch.isEmpty || cleanBId.isEmpty)) {
+              students.add(Map<String, dynamic>.from(val));
+            }
+          }
+        }
+      }
+
+      if (mounted && students.isNotEmpty) {
+        setState(() {
+          _branchStudents = students;
+          _branchStudents.sort((a, b) => (a['rollNumber'] ?? '').compareTo(b['rollNumber'] ?? ''));
+        });
+      }
+
       final snap = await FirebaseFirestore.instance
           .collection('branches')
-          .doc(bId)
+          .doc(cleanBId)
           .collection('madrassa_students')
-          .where('isActive', isEqualTo: true)
-          .get();
-      setState(() {
-        _branchStudents = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
-        _branchStudents.sort((a, b) => (a['rollNumber'] ?? '').compareTo(b['rollNumber'] ?? ''));
-      });
+          .get()
+          .timeout(const Duration(seconds: 4));
+
+      final remoteStudents = snap.docs
+          .map((d) => {'id': d.id, ...d.data()})
+          .where((s) => s['isDeleted'] != true && s['status'] != 'inactive')
+          .toList();
+
+      if (mounted && remoteStudents.isNotEmpty) {
+        setState(() {
+          _branchStudents = remoteStudents;
+          _branchStudents.sort((a, b) => (a['rollNumber'] ?? '').compareTo(b['rollNumber'] ?? ''));
+        });
+      }
     } catch (e) {
-      _snack('Failed to load students: $e', error: true);
+      if (_branchStudents.isEmpty) {
+        _snack('Failed to load students: $e', error: true);
+      }
     }
   }
 
@@ -440,6 +482,16 @@ class _RegisterState extends State<Register>
         _snack('Please select the associated student for this parent', error: true);
         return false;
       }
+      if (_selectedRole == 'Madrassa Teacher') {
+        if (_selectedMadrassaTeachingType.isEmpty) {
+          _snack('Please select teaching specialization (Nazra / Hifz / Both)', error: true);
+          return false;
+        }
+        if (_selectedMadrassaSession.isEmpty && _selectedMadrassaSessions.isEmpty) {
+          _snack('Please select a teaching shift for Madrassa Teacher', error: true);
+          return false;
+        }
+      }
       final isDoctor = (_selectedRole ?? '').toLowerCase().contains('doc');
       if (isDoctor && _selectedDegree == null) {
         _snack('Please select medical degree for Doctor role', error: true);
@@ -512,7 +564,28 @@ class _RegisterState extends State<Register>
         }
       }
 
-      final branchId = _getBranchId();
+      String branchId = _getBranchId();
+      final curRole = _getCurrentUserRole();
+      final curBranch = _getCurrentUserBranchId();
+      if ((curRole.contains('teacher') || curRole.contains('principal') || curRole.contains('admin')) &&
+          curBranch.isNotEmpty && curBranch != 'all' && curBranch != 'global' &&
+          (branchId.isEmpty || branchId == 'all')) {
+        branchId = curBranch;
+      } else if (roleToAssign == 'Madrassa Parent' && _selectedStudentId != null) {
+        final match = _branchStudents.where((s) => s['id'] == _selectedStudentId).firstOrNull;
+        final studentBranch = (match?['branchId'] ?? match?['branch'] ?? '').toString().trim().toLowerCase();
+        if (studentBranch.isNotEmpty && studentBranch != 'all' && studentBranch != 'global') {
+          branchId = studentBranch;
+        }
+      }
+
+      String branchName = _getBranchName();
+      if (branchId.isNotEmpty && branchId != 'all') {
+        final bMatch = _branches.where((b) => b['id'].toString().toLowerCase().trim() == branchId).firstOrNull;
+        if (bMatch != null && bMatch['name'] != null) {
+          branchName = bMatch['name'].toString();
+        }
+      }
 
       final registeredUid = await _authService.signUp(
         email:              email,
@@ -521,7 +594,7 @@ class _RegisterState extends State<Register>
         name:               username,
         role:               roleToAssign,
         branchId:           branchId,
-        branchName:         _getBranchName(),
+        branchName:         branchName,
         phone:              _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
         degree:             degree.isNotEmpty ? degree : null,
         biometricPin:       enteredPin.isNotEmpty ? enteredPin : null,
@@ -554,15 +627,55 @@ class _RegisterState extends State<Register>
         degreeFile:         _degreeFile,
         profilePictureBase64: _profilePictureBase64,
         degreeBase64:         _degreeBase64,
+        specialization:     roleToAssign == 'Madrassa Teacher' ? _selectedMadrassaTeachingType : null,
+        teachingType:       roleToAssign == 'Madrassa Teacher' ? _selectedMadrassaTeachingType : null,
         session:            roleToAssign == 'Madrassa Teacher' ? (_selectedMadrassaSession.isNotEmpty ? _selectedMadrassaSession : 'morning') : null,
         sessions:           roleToAssign == 'Madrassa Teacher'
                                 ? (_selectedMadrassaSession == 'all'
                                     ? ['morning', 'evening', 'night']
-                                    : [if (_selectedMadrassaSession.isNotEmpty) _selectedMadrassaSession else 'morning'])
+                                    : (_selectedMadrassaSessions.isNotEmpty
+                                        ? _selectedMadrassaSessions.toList()
+                                        : [if (_selectedMadrassaSession.isNotEmpty) _selectedMadrassaSession else 'morning']))
                                 : const [],
       );
 
+      // Cache specialization, teachingType and sessions in local_users
+      if (roleToAssign == 'Madrassa Teacher') {
+        try {
+          if (Hive.isBoxOpen('local_users')) {
+            final box = Hive.box('local_users');
+            final effectiveSessions = _selectedMadrassaSession == 'all'
+                ? ['morning', 'evening', 'night']
+                : (_selectedMadrassaSessions.isNotEmpty
+                    ? _selectedMadrassaSessions.toList()
+                    : [if (_selectedMadrassaSession.isNotEmpty) _selectedMadrassaSession else 'morning']);
+            final keys = <String>{
+              username,
+              username.toLowerCase(),
+              if (registeredUid.isNotEmpty) registeredUid,
+              'user:$username',
+              'user:${username.toLowerCase()}',
+              if (registeredUid.isNotEmpty) 'user:$registeredUid',
+              email,
+              'user:$email',
+            };
+            for (final k in keys) {
+              final raw = box.get(k);
+              if (raw is Map) {
+                final updated = Map<String, dynamic>.from(raw);
+                updated['specialization'] = _selectedMadrassaTeachingType;
+                updated['teachingType'] = _selectedMadrassaTeachingType;
+                updated['session'] = _selectedMadrassaSession;
+                updated['sessions'] = effectiveSessions;
+                await box.put(k, updated);
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
       try {
+        unawaited(LocalStorageService.pushLocalUsersToFirestore());
         SyncService().triggerUpload(force: true);
       } catch (_) {}
 
@@ -588,8 +701,14 @@ class _RegisterState extends State<Register>
         _profilePictureBase64     = null;
         _degreeBase64             = null;
         _selectedBranch           = null;
+        _branchManuallySelected   = false;
         _selectedDispensary       = null;
         _selectedDispensaries.clear();
+        _campSessions.clear();
+        _selectedMadrassaSession  = 'morning';
+        _selectedMadrassaTeachingType = 'hifz';
+        _selectedMadrassaSessions.clear();
+        _selectedMadrassaSessions.add('morning');
         _selectedDegree           = null;
         _selectedStudentId        = null;
         _currentStep              = 0;
@@ -1409,8 +1528,10 @@ class _RegisterState extends State<Register>
         // Dispensary Multi-Camp & Shifts
         _buildDispensaryDropdown(t),
 
-        // Madrassa Teacher Session
+        // Madrassa Teacher Specialization (Nazra, Hifz, Both) & Shifts
         if (_selectedRole == 'Madrassa Teacher') ...[
+          const SizedBox(height: 16),
+          _buildMadrassaTeachingTypeSelector(t),
           const SizedBox(height: 16),
           _buildMadrassaTeacherSessionSelector(t),
         ],
@@ -1543,6 +1664,30 @@ class _RegisterState extends State<Register>
             _summaryRow('Phone:', _phoneController.text.trim()),
           if (_biometricPinController.text.trim().isNotEmpty)
             _summaryRow('Biometric PIN:', _biometricPinController.text.trim()),
+          if (_selectedRole == 'Madrassa Teacher') ...[
+            _summaryRow(
+              'Teaching Focus:',
+              _selectedMadrassaTeachingType == 'nazra'
+                  ? '📖 Nazra (Reading & Recitation)'
+                  : _selectedMadrassaTeachingType == 'both'
+                      ? '✨ Hifz & Nazra (Combined)'
+                      : '🕋 Hifz (Memorization)',
+            ),
+            _summaryRow(
+              'Teaching Shift:',
+              _selectedMadrassaSession == 'all'
+                  ? '📑 All Shifts (Full-Day Coverage)'
+                  : _selectedMadrassaSessions.length > 1
+                      ? '🕒 ${_selectedMadrassaSessions.map((s) => s[0].toUpperCase() + s.substring(1)).join(', ')}'
+                      : _selectedMadrassaSession == 'morning'
+                          ? '☀️ Morning (8:00 AM – 2:00 PM)'
+                          : _selectedMadrassaSession == 'evening'
+                              ? '🌅 Evening (2:00 PM – 8:00 PM)'
+                              : _selectedMadrassaSession == 'night'
+                                  ? '🌙 Night (8:00 PM – 8:00 AM)'
+                                  : _selectedMadrassaSession,
+            ),
+          ],
         ],
       ),
     );
@@ -1985,6 +2130,7 @@ class _RegisterState extends State<Register>
           : (v) {
               setState(() {
                 _selectedBranch = v;
+                _branchManuallySelected = true; // Mark user as having explicitly chosen
                 _selectedStudentId = null;
                 if (_selectedRole == 'Madrassa Parent') {
                   final bId = _getBranchId();
@@ -2138,6 +2284,178 @@ class _RegisterState extends State<Register>
     );
   }
 
+  Widget _buildMadrassaTeachingTypeSelector(RoleThemeData t) {
+    if (_selectedRole != 'Madrassa Teacher') return const SizedBox.shrink();
+
+    const types = [
+      {
+        'value': 'nazra',
+        'label': 'Nazra',
+        'arabic': 'نَظْرَة',
+        'sub': 'Quran Reading, Qaida & Recitation',
+        'icon': Icons.menu_book_rounded,
+        'badge': 'Reading & Recitation',
+        'color': Color(0xFF10B981),
+      },
+      {
+        'value': 'hifz',
+        'label': 'Hifz',
+        'arabic': 'حِفْظ',
+        'sub': 'Quran Memorization & Revision',
+        'icon': Icons.auto_stories_rounded,
+        'badge': 'Memorization Focus',
+        'color': Color(0xFF7C3AED),
+      },
+      {
+        'value': 'both',
+        'label': 'Both',
+        'arabic': 'حِفْظ + نَظْرَة',
+        'sub': 'Combined Hifz & Nazra classes',
+        'icon': Icons.import_contacts_rounded,
+        'badge': 'Full Quranic Spectrum',
+        'color': Color(0xFF0284C7),
+      },
+    ];
+
+    return _buildCard(
+      t,
+      title: 'Teaching Specialization & Focus (تخصص / تدریسی شعبہ) *',
+      icon: Icons.menu_book_rounded,
+      accent: const Color(0xFF7C3AED),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Select whether this teacher specializes in Nazra (Reading/Qaida), Hifz (Memorization), or both:',
+            style: TextStyle(fontSize: 12.5, color: t.textSecondary),
+          ),
+          const SizedBox(height: 14),
+          Column(
+            children: types.map((item) {
+              final isSelected = _selectedMadrassaTeachingType == item['value'];
+              final Color typeColor = item['color'] as Color;
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: InkWell(
+                  onTap: () {
+                    setState(() {
+                      _selectedMadrassaTeachingType = item['value'] as String;
+                    });
+                  },
+                  borderRadius: BorderRadius.circular(14),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? typeColor.withValues(alpha: 0.08)
+                          : t.bgCardAlt,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: isSelected ? typeColor : t.bgRule,
+                        width: isSelected ? 2 : 1,
+                      ),
+                      boxShadow: isSelected
+                          ? [BoxShadow(color: typeColor.withValues(alpha: 0.14), blurRadius: 8, offset: const Offset(0, 2))]
+                          : null,
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: isSelected ? typeColor.withValues(alpha: 0.18) : t.textTertiary.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            item['icon'] as IconData,
+                            size: 22,
+                            color: isSelected ? typeColor : t.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(
+                                    item['label'] as String,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                      color: isSelected ? typeColor : t.textPrimary,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    item['arabic'] as String,
+                                    style: TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: isSelected ? typeColor : t.textTertiary,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
+                                    decoration: BoxDecoration(
+                                      color: typeColor.withValues(alpha: isSelected ? 0.15 : 0.08),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      item['badge'] as String,
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.bold,
+                                        color: typeColor,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                item['sub'] as String,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: isSelected ? t.textPrimary : t.textTertiary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: 22,
+                          height: 22,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: isSelected ? typeColor : Colors.transparent,
+                            border: Border.all(
+                              color: isSelected ? typeColor : t.bgRule,
+                              width: 2,
+                            ),
+                          ),
+                          child: isSelected
+                              ? const Icon(Icons.check_rounded, size: 14, color: Colors.white)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildMadrassaTeacherSessionSelector(RoleThemeData t) {
     if (_selectedRole != 'Madrassa Teacher') return const SizedBox.shrink();
 
@@ -2145,21 +2463,182 @@ class _RegisterState extends State<Register>
     try { bId = _getBranchId().toLowerCase().trim(); } catch (_) {}
     final List<String> availableSessions = CampSessionService.getMadrassaSessions(bId);
 
+    const shiftOptions = [
+      {
+        'value': 'morning',
+        'label': 'Morning Shift',
+        'arabic': 'صبح کا سیشن',
+        'time': '8:00 AM – 2:00 PM',
+        'icon': Icons.wb_sunny_rounded,
+        'color': Color(0xFFF59E0B),
+      },
+      {
+        'value': 'evening',
+        'label': 'Evening Shift',
+        'arabic': 'شام کا سیشن',
+        'time': '2:00 PM – 8:00 PM',
+        'icon': Icons.wb_twilight_rounded,
+        'color': Color(0xFF0284C7),
+      },
+      {
+        'value': 'night',
+        'label': 'Night Shift',
+        'arabic': 'رات کا سیشن',
+        'time': '8:00 PM – 8:00 AM',
+        'icon': Icons.nights_stay_rounded,
+        'color': Color(0xFF6366F1),
+      },
+      {
+        'value': 'all',
+        'label': 'All Shifts',
+        'arabic': 'تمام سیشنز / مکمل دن',
+        'time': 'Full-Day Coverage',
+        'icon': Icons.all_inclusive_rounded,
+        'color': Color(0xFF8B5CF6),
+      },
+    ];
+
+    final filteredShifts = shiftOptions.where((s) {
+      final val = s['value'] as String;
+      if (val == 'all') return true;
+      if (availableSessions.isEmpty) return true;
+      return availableSessions.contains(val);
+    }).toList();
+
     return _buildCard(
       t,
-      title: 'Madrassa Teaching Shift / Session *',
+      title: 'Madrassa Teaching Shift / Session (تدریسی اوقات و سیشن) *',
       icon: Icons.schedule_rounded,
       accent: const Color(0xFF8B5CF6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Select which teaching shift this instructor teaches:',
+            'Select the operational teaching shift(s) this instructor is assigned to:',
             style: TextStyle(fontSize: 12, color: t.textSecondary),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
+          // Interactive Shift Tiles
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide = constraints.maxWidth >= 540;
+              return Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: filteredShifts.map((s) {
+                  final val = s['value'] as String;
+                  final isAll = val == 'all';
+                  final isSelected = isAll
+                      ? _selectedMadrassaSession == 'all'
+                      : (_selectedMadrassaSession == val || _selectedMadrassaSessions.contains(val));
+                  final Color shiftColor = s['color'] as Color;
+
+                  return InkWell(
+                    onTap: () {
+                      setState(() {
+                        if (isAll) {
+                          _selectedMadrassaSession = 'all';
+                          _selectedMadrassaSessions.clear();
+                          _selectedMadrassaSessions.addAll(['morning', 'evening', 'night']);
+                        } else {
+                          if (_selectedMadrassaSession == 'all') {
+                            _selectedMadrassaSessions.clear();
+                          }
+                          if (_selectedMadrassaSessions.contains(val)) {
+                            if (_selectedMadrassaSessions.length > 1) {
+                              _selectedMadrassaSessions.remove(val);
+                              _selectedMadrassaSession = _selectedMadrassaSessions.first;
+                            }
+                          } else {
+                            _selectedMadrassaSessions.add(val);
+                            _selectedMadrassaSession = val;
+                          }
+                          if (_selectedMadrassaSessions.length == 3) {
+                            _selectedMadrassaSession = 'all';
+                          }
+                        }
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      width: isWide ? (constraints.maxWidth - 10) / 2 : double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? shiftColor.withValues(alpha: 0.08)
+                            : t.bgCardAlt,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected ? shiftColor : t.bgRule,
+                          width: isSelected ? 1.8 : 1,
+                        ),
+                        boxShadow: isSelected
+                            ? [BoxShadow(color: shiftColor.withValues(alpha: 0.12), blurRadius: 6)]
+                            : null,
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(7),
+                            decoration: BoxDecoration(
+                              color: isSelected ? shiftColor.withValues(alpha: 0.18) : t.textTertiary.withValues(alpha: 0.08),
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: Icon(s['icon'] as IconData, size: 18, color: isSelected ? shiftColor : t.textSecondary),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      s['label'] as String,
+                                      style: TextStyle(
+                                        color: isSelected ? shiftColor : t.textPrimary,
+                                        fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      s['arabic'] as String,
+                                      style: TextStyle(
+                                        color: isSelected ? shiftColor.withValues(alpha: 0.9) : t.textTertiary,
+                                        fontSize: 11.5,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  s['time'] as String,
+                                  style: TextStyle(color: isSelected ? t.textPrimary : t.textTertiary, fontSize: 11),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                            color: isSelected ? shiftColor : t.bgRule,
+                            size: 19,
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          // Dropdown selector backup
           DropdownButtonFormField<String>(
-            initialValue: _selectedMadrassaSession,
+            initialValue: filteredShifts.any((s) => s['value'] == _selectedMadrassaSession)
+                ? _selectedMadrassaSession
+                : (filteredShifts.isNotEmpty ? filteredShifts.first['value'] as String : 'morning'),
             isExpanded: true,
             dropdownColor: t.bgCard,
             decoration: InputDecoration(
@@ -2170,17 +2649,22 @@ class _RegisterState extends State<Register>
               enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
               focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFF8B5CF6), width: 2)),
             ),
-            items: [
-              const DropdownMenuItem(value: 'morning', child: Text('☀️ Morning Shift (صبح کا سیشن)')),
-              if (availableSessions.contains('evening') || availableSessions.isEmpty)
-                const DropdownMenuItem(value: 'evening', child: Text('🌅 Evening Shift (شام کا سیشن)')),
-              if (availableSessions.contains('night') || availableSessions.isEmpty)
-                const DropdownMenuItem(value: 'night', child: Text('🌙 Night Shift (رات کا سیشن)')),
-              const DropdownMenuItem(value: 'all', child: Text('📑 All Sessions / Full Day (تمام سیشنز)')),
-            ],
+            items: filteredShifts.map((s) => DropdownMenuItem(
+              value: s['value'] as String,
+              child: Text('${s['label']} (${s['arabic']}) • ${s['time']}'),
+            )).toList(),
             onChanged: (val) {
               if (val != null) {
-                setState(() => _selectedMadrassaSession = val);
+                setState(() {
+                  _selectedMadrassaSession = val;
+                  if (val == 'all') {
+                    _selectedMadrassaSessions.clear();
+                    _selectedMadrassaSessions.addAll(['morning', 'evening', 'night']);
+                  } else {
+                    _selectedMadrassaSessions.clear();
+                    _selectedMadrassaSessions.add(val);
+                  }
+                });
               }
             },
           ),

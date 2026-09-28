@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/Firebase-Firestore-FFA611.svg?style=flat-square&logo=Firebase&logoColor=white" alt="Firebase" />
   <img src="https://img.shields.io/badge/Database-Hive%20Local-yellowgreen.svg?style=flat-square" alt="Hive DB" />
   <img src="https://img.shields.io/badge/Platforms-Windows%20%7C%20Android%20%7C%20Web-blue.svg?style=flat-square" alt="Platforms" />
-  <img src="https://img.shields.io/badge/Version-v1.5.4-emerald.svg?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.5.7-emerald.svg?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Status-Production-success.svg?style=flat-square" alt="Status" />
 </p>
 

@@ -203,7 +203,7 @@ class ServerSyncManager {
     purgeDuplicateServerQueue().ignore();
     _uploadQueue().ignore();
 
-    _syncTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (_running) _uploadQueue().ignore();
     });
 
@@ -575,6 +575,17 @@ class ServerSyncManager {
 
       case RealtimeEvents.deleteEmployee:
         _deleteEmployee(data, msg, user: user);
+        break;
+
+      // ── USERS ─────────────────────────────────────────────────────────────
+      case RealtimeEvents.saveUser:
+      case 'save_user':
+        _saveUser(data, msg, user: user);
+        break;
+
+      case RealtimeEvents.deleteUser:
+      case 'delete_user':
+        _deleteUser(data, msg, user: user);
         break;
     }
   }
@@ -1089,6 +1100,50 @@ class ServerSyncManager {
     });
   }
 
+  void _saveUser(Map<String, dynamic> data, Map<String, dynamic> full, {_UserContext? user}) {
+    final branchId = LocalStorageService.sanitizeBranchId(
+      _field(data, full, 'branchId') ?? _branchId,
+      fallback: _branchId ?? 'karachi',
+    );
+    final uid = (data['uid'] ?? data['id'] ?? '').toString().trim();
+    if (uid.isEmpty) return;
+
+    final rec = {...data, 'branchId': branchId, 'uid': uid, ...?user?.toAuditMap()};
+
+    // Update local Hive box on host
+    try {
+      LocalStorageService.saveUserOffline(
+        uid: uid,
+        branchId: branchId,
+        userData: rec,
+      ).ignore();
+    } catch (_) {}
+
+    _enqueue({
+      'type': 'save_user',
+      'branchId': branchId,
+      'uid': uid,
+      'data': rec,
+    });
+  }
+
+  void _deleteUser(Map<String, dynamic> data, Map<String, dynamic> full, {_UserContext? user}) {
+    final branchId = LocalStorageService.sanitizeBranchId(
+      _field(data, full, 'branchId') ?? _branchId,
+      fallback: _branchId ?? 'karachi',
+    );
+    final uid = (data['uid'] ?? data['id'] ?? '').toString().trim();
+    if (uid.isEmpty) return;
+
+    _enqueue({
+      'type': 'delete_user',
+      'branchId': branchId,
+      'uid': uid,
+      'email': data['email']?.toString(),
+      'username': data['username']?.toString(),
+    });
+  }
+
   // ── Catch-up Push ─────────────────────────────────────────────────────────
   Future<void> _pushCatchUpToSocket(
       String socketId, Map<String, dynamic> info, {bool forceAll = false}) async {
@@ -1304,6 +1359,9 @@ class ServerSyncManager {
 
       opCopy['createdAt'] = DateTime.now().toIso8601String();
       box.put(key, LocalStorageService.sanitize(opCopy));
+      if (_running) {
+        _uploadQueue().ignore();
+      }
     } catch (e) {
       debugPrint('[SSM] _enqueue failed: $e');
     }
@@ -1353,6 +1411,12 @@ class ServerSyncManager {
 
         await Future.delayed(const Duration(milliseconds: 10));
       }
+
+      if (_running && box.isNotEmpty) {
+        Future.delayed(const Duration(seconds: 2), () {
+          if (_running) _uploadQueue().ignore();
+        });
+      }
     } finally {
       _uploading = false;
     }
@@ -1383,7 +1447,7 @@ class ServerSyncManager {
     final type      = op['type']?.toString() ?? '';
     final branchId  = (op['branchId'] ?? _branchId!).toString();
     final data      = Map<String, dynamic>.from(op['data'] ?? {});
-    final cleanData = LocalStorageService.sanitize(data);
+    final cleanData = LocalStorageService.sanitizeForCloudUpload(data);
 
     switch (type) {
       case 'save_entry':
@@ -1926,6 +1990,55 @@ class ServerSyncManager {
         final bId = op['branchId']?.toString() ?? branchId;
         if (localId == null || localId.isEmpty) return;
         await _db.collection('branches').doc(bId).collection('employees').doc(localId).delete();
+        break;
+
+      case 'save_user':
+        final uid = (op['uid'] ?? cleanData['uid'] ?? cleanData['id'] ?? '').toString().trim();
+        final bId = LocalStorageService.sanitizeBranchId(
+          (op['branchId'] ?? cleanData['branchId'] ?? branchId).toString(),
+          fallback: branchId,
+        );
+        if (uid.isEmpty) return;
+
+        final fsData = LocalStorageService.sanitizeForCloudUpload(cleanData);
+        if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+          fsData['branchId'] = bId;
+        }
+        fsData['isDeleted'] = false;
+        fsData['status'] = 'active';
+        fsData['accountStatus'] = 'active';
+        fsData['isActive'] = true;
+        fsData['isRevoked'] = false;
+        fsData['accessRevoked'] = false;
+        fsData['isCorruptedOrOrphanAuth'] = false;
+        fsData.remove('deletedAt');
+        fsData['updatedAt'] = FieldValue.serverTimestamp();
+
+        // Write to BOTH root and branch
+        await _db.collection('users').doc(uid).set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 10));
+        if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+          await _db.collection('branches').doc(bId).collection('users').doc(uid).set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 10)).catchError((_) {});
+        }
+        break;
+
+      case 'delete_user':
+        final uid = (op['uid'] ?? cleanData['uid'] ?? cleanData['id'] ?? '').toString().trim();
+        final bId = LocalStorageService.sanitizeBranchId(
+          (op['branchId'] ?? cleanData['branchId'] ?? branchId).toString(),
+          fallback: branchId,
+        );
+        final deletePayload = {
+          'isDeleted': true,
+          'status': 'deleted',
+          'accountStatus': 'deleted',
+          'deletedAt': FieldValue.serverTimestamp(),
+        };
+        if (uid.isNotEmpty) {
+          await _db.collection('users').doc(uid).set(deletePayload, SetOptions(merge: true)).timeout(const Duration(seconds: 10)).catchError((_) {});
+          if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
+            await _db.collection('branches').doc(bId).collection('users').doc(uid).set(deletePayload, SetOptions(merge: true)).timeout(const Duration(seconds: 10)).catchError((_) {});
+          }
+        }
         break;
 
       default:

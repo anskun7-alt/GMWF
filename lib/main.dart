@@ -61,18 +61,36 @@ class TimestampAdapter extends TypeAdapter<Timestamp> {
   }
 }
 
+int _errorLogCountInWindow = 0;
+DateTime? _errorLogWindowStart;
+
 Future<void> _logError(String message, [String? stack]) async {
   if (kIsWeb) return;
   try {
+    // Rate-limit error writes: max 5 writes per 10 seconds to protect CPU/Disk
+    final now = DateTime.now();
+    if (_errorLogWindowStart == null || now.difference(_errorLogWindowStart!).inSeconds > 10) {
+      _errorLogWindowStart = now;
+      _errorLogCountInWindow = 0;
+    }
+    _errorLogCountInWindow++;
+    if (_errorLogCountInWindow > 5) return;
+
     final dir = await getApplicationSupportDirectory();
     final logFile = File(path.join(dir.path, 'gmwf_crash.log'));
-    final timestamp = DateTime.now().toIso8601String();
+
+    // Rotate/truncate if log file exceeds 2 MB to prevent massive disk bloat
+    if (await logFile.exists()) {
+      final len = await logFile.length();
+      if (len > 2 * 1024 * 1024) {
+        await logFile.writeAsString('[${now.toIso8601String()}] --- Log Rotated (Previous log exceeded 2MB) ---\n');
+      }
+    }
+
+    final timestamp = now.toIso8601String();
     final entry = '[$timestamp] ERROR: $message\nSTACK: ${stack ?? ''}\n\n';
     await logFile.writeAsString(entry, mode: FileMode.append);
-    debugPrint("Error logged to file: $message");
-  } catch (e) {
-    debugPrint("Unable to write crash log: $e");
-  }
+  } catch (_) {}
 }
 
 Future<void> _markLastCrash() async {
@@ -100,53 +118,46 @@ Future<void> _clearCrashMarkerOnSuccess() async {
   }
 }
 
+bool _isIgnoredTransientError(String errStr) {
+  final lower = errStr.toLowerCase();
+  return lower.contains('overflowed') ||
+      lower.contains('renderbox was not laid out') ||
+      lower.contains('hassize') ||
+      lower.contains('_needslayout') ||
+      lower.contains('needs-paint') ||
+      lower.contains('_debugdoingthislayout') ||
+      lower.contains('parentdatadirty') ||
+      lower.contains('childsemantics') ||
+      lower.contains('deactivated widget') ||
+      lower.contains('ancestor is unsafe') ||
+      lower.contains('rawkeydownevent') ||
+      lower.contains('keyspressed') ||
+      lower.contains('networkmanager::startlisten') ||
+      lower.contains('widgetinspector');
+}
+
 void _installGlobalErrorHandlers() {
   FlutterError.onError = (FlutterErrorDetails details) {
-    if (!kIsWeb && Platform.isWindows) {
-      try {
-        appWindow.show();
-      } catch (_) {}
-    }
+    final exStr = details.exceptionAsString();
+    if (_isIgnoredTransientError(exStr)) return;
+
     FlutterError.presentError(details);
-
-    final exStr = details.exceptionAsString().toLowerCase();
-    final isTransientLayout = exStr.contains('overflowed') ||
-        exStr.contains('renderbox was not laid out') ||
-        exStr.contains('hassize') ||
-        exStr.contains('_needslayout') ||
-        exStr.contains('needs-paint') ||
-        exStr.contains('_debugdoingthislayout') ||
-        exStr.contains('parentdatadirty') ||
-        exStr.contains('childsemantics');
-
-    if (!isTransientLayout) {
-      _logError(details.exceptionAsString(), details.stack?.toString());
-      _markLastCrash();
+    _logError(exStr, details.stack?.toString());
+    _markLastCrash();
+    try {
       Sentry.captureException(details.exception, stackTrace: details.stack);
-    }
+    } catch (_) {}
   };
 
   PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
-    if (!kIsWeb && Platform.isWindows) {
-      try {
-        appWindow.show();
-      } catch (_) {}
-    }
-    final errStr = error.toString().toLowerCase();
-    final isTransientLayout = errStr.contains('overflowed') ||
-        errStr.contains('renderbox was not laid out') ||
-        errStr.contains('hassize') ||
-        errStr.contains('_needslayout') ||
-        errStr.contains('needs-paint') ||
-        errStr.contains('_debugdoingthislayout') ||
-        errStr.contains('parentdatadirty') ||
-        errStr.contains('childsemantics');
+    final errStr = error.toString();
+    if (_isIgnoredTransientError(errStr)) return true;
 
-    if (!isTransientLayout) {
-      _logError(error.toString(), stack.toString());
-      _markLastCrash();
+    _logError(errStr, stack.toString());
+    _markLastCrash();
+    try {
       Sentry.captureException(error, stackTrace: stack);
-    }
+    } catch (_) {}
     return true;
   };
 }
@@ -224,8 +235,8 @@ Future<void> main() async {
         await _clearCrashMarkerOnSuccess();
         AuthService.onSignOutCallback = AuthHomeWrapper.clearSession;
 
-        // Start background daemons & services
-        unawaited(AutoUpdateService.getAppVersion());
+        // Load dynamic version from pubspec via package_info
+        await AutoUpdateService.getAppVersion();
         unawaited(CloudMessagingService().initialize().catchError((e) {
           debugPrint('[Init] CloudMessagingService init warning: $e');
         }));
@@ -264,6 +275,9 @@ Future<void> _runBackgroundCleanups() async {
     await FinanceV2Migration.runMigration();
     await LocalStorageService.forceDeduplicatePatients();
     await LocalStorageService.repairMisassignedShiftSessions();
+    await LocalStorageService.repairAndSanitizeLocalAccounts();
+    await LocalStorageService.purgeBloatedSyncQueue();
+    await LocalStorageService.compactAllBoxes();
 
     if (Hive.isBoxOpen(DonationsLocalStorage.donationsBox)) {
       final box = Hive.box(DonationsLocalStorage.donationsBox);
@@ -707,6 +721,15 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
             }
           }
         }
+      }
+
+      final email = (user.email ?? '').trim().toLowerCase();
+      final prefix = email.contains('@') ? email.split('@').first : email;
+      final local = (email.isNotEmpty ? LocalStorageService.findLocalUser(email) : null) ??
+          (prefix.isNotEmpty ? LocalStorageService.findLocalUser(prefix) : null) ??
+          LocalStorageService.findLocalUser(user.uid);
+      if (local != null) {
+        return local;
       }
     } catch (_) {}
     return null;

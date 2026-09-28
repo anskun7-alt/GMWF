@@ -3,10 +3,11 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
-import '../../../services/image_upload_service.dart';
 import '../theme/school_theme.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 import '../constants/school_constants.dart';
+import '../../../design/design_system.dart';
 
 class SchoolDailyAttendanceView extends StatefulWidget {
   final String branchId;
@@ -31,19 +32,51 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
   final Map<String, Map<String, dynamic>> _localChanges = {};
   bool? _localAllowStudentLeave;
 
-  final List<String> _gradeOptions = SchoolConstants.filterGrades;
+  List<String> _gradeOptions = [];
 
-  bool _isGlobalLevelUser(String role) {
-    final r = role.toLowerCase().trim();
-    return r == 'chairman' ||
-        r == 'ceo' ||
-        r == 'hq_manager' ||
-        r == 'hq manager' ||
-        r == 'superadmin' ||
-        r == 'super_admin' ||
-        r == 'global_admin' ||
-        r == 'global admin' ||
-        r == 'admin';
+  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+  bool get _isHighestAuthority => SchoolAuthHelper.isHighestAuthority(widget.userRole);
+
+  @override
+  void initState() {
+    super.initState();
+    _initGradeFilters();
+  }
+
+  @override
+  void didUpdateWidget(covariant SchoolDailyAttendanceView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.userRole != widget.userRole ||
+        oldWidget.editorName != widget.editorName ||
+        oldWidget.branchId != widget.branchId) {
+      _initGradeFilters();
+    }
+  }
+
+  void _initGradeFilters() {
+    if (_isTeacher) {
+      // Teacher can ONLY access their assigned grades / homeroom
+      final assigned = SchoolAuthHelper.getTeacherAssignedGrades(
+        widget.branchId,
+        widget.userRole,
+        widget.editorName,
+      );
+      if (assigned.isNotEmpty) {
+        _gradeOptions = assigned;
+        if (!_gradeOptions.contains(_selectedGradeFilter)) {
+          _selectedGradeFilter = _gradeOptions.first;
+        }
+      } else {
+        _gradeOptions = [];
+        _selectedGradeFilter = 'Unassigned';
+      }
+    } else {
+      // Admins, Principals, HQ Manager, Chairman can select any grade
+      _gradeOptions = SchoolConstants.filterGrades;
+      if (_selectedGradeFilter == 'Unassigned') {
+        _selectedGradeFilter = 'All';
+      }
+    }
   }
 
   Future<bool> _confirmDiscardChanges() async {
@@ -69,7 +102,7 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFEF4444),
+              backgroundColor: const Color(0xFFE11D48),
               foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
@@ -81,36 +114,120 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
     return confirm ?? false;
   }
 
+  void _markAll(String status, List<Map<String, dynamic>> students) {
+    for (final s in students) {
+      final sId = s['id']?.toString() ?? '';
+      if (sId.isNotEmpty) {
+        _localChanges[sId] = {
+          'status': status,
+          'uniform': _localChanges[sId]?['uniform'] ?? true,
+          'remarks': _localChanges[sId]?['remarks'] ?? '',
+          'timestamp': DateTime.now().toIso8601String(),
+        };
+      }
+    }
+    setState(() {});
+  }
+
+  Future<void> _saveAttendance(Map<String, dynamic> currentEntries) async {
+    if (_localChanges.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No new attendance changes to save.'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSaving = true);
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+
+    final mergedEntries = Map<String, dynamic>.from(currentEntries);
+    _localChanges.forEach((k, v) {
+      mergedEntries[k] = v;
+    });
+
+    try {
+      await SchoolLocalStorage.saveDailyLog(
+        branchId: widget.branchId,
+        dateKey: dateKey,
+        logEntries: mergedEntries,
+        editorName: widget.editorName,
+      );
+
+      _localChanges.clear();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: SchoolTheme.statusPresent,
+            content: Text('Attendance successfully saved for $dateKey!'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: SchoolTheme.statusAbsent,
+            content: Text('Error saving attendance: $e'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final isMobile = GBreakpoint.isMobile(context);
 
-    // Check teacher homeroom permissions
-    final r = widget.userRole.toLowerCase().trim();
-    final isTeacherOnly = r.contains('teacher') && !r.contains('admin') && !r.contains('principal');
-
-    final teachers = SchoolLocalStorage.getAllTeachersCached(widget.branchId);
-    final loggedTeacher = teachers.firstWhere(
-      (t) => (t['name'] ?? '').toString().toLowerCase().trim() == widget.editorName.toLowerCase().trim(),
-      orElse: () => <String, dynamic>{},
-    );
-
-    final teacherHomeroomGrade = (loggedTeacher['homeroomGrade'] ?? '').toString().trim();
-    final homeroomAssignment = _selectedGradeFilter != 'All'
-        ? SchoolLocalStorage.getHomeroomAssignmentCached(widget.branchId, _selectedGradeFilter, 'A')
-        : null;
-    final assignedHomeroomTeacherName = homeroomAssignment?['teacherName']?.toString() ?? 'Unassigned';
-
-    // Lock attendance marking if user is a teacher and selected grade != their assigned homeroom class
-    bool isAttendanceLocked = false;
-    if (isTeacherOnly) {
-      if (_selectedGradeFilter == 'All') {
-        isAttendanceLocked = true;
-      } else if (teacherHomeroomGrade.isNotEmpty && teacherHomeroomGrade != _selectedGradeFilter) {
-        isAttendanceLocked = true;
-      } else if (teacherHomeroomGrade.isEmpty && assignedHomeroomTeacherName.toLowerCase() != widget.editorName.toLowerCase()) {
-        isAttendanceLocked = true;
-      }
+    // If teacher has no assigned class
+    if (_isTeacher && _gradeOptions.isEmpty) {
+      return Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 480),
+          margin: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: SchoolTheme.radius20,
+            border: Border.all(color: SchoolTheme.borderLight),
+            boxShadow: SchoolTheme.cardShadow,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: const BoxDecoration(
+                  color: Color(0xFFFEF3C7),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.assignment_ind_rounded, size: 40, color: Color(0xFFD97706)),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Homeroom Class Required',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: SchoolTheme.textDark,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Logged in as @${widget.editorName}. You are not currently assigned to a homeroom class. Teachers can only view and mark attendance for their assigned class. Please contact your School Principal or Admin to assign your homeroom class.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 13, color: SchoolTheme.textMid, height: 1.5),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     final bool effectiveAllowLeave = _localAllowStudentLeave ?? true;
@@ -124,583 +241,489 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
           Navigator.pop(context);
         }
       },
-      child: Column(
-            children: [
-              // Global Level User Allow Leave Banner
-              if (_isGlobalLevelUser(widget.userRole)) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  color: effectiveAllowLeave ? const Color(0xFFFFF8E1) : const Color(0xFFEEF2FF),
-                  child: Row(
-                    children: [
-                      Icon(
-                        effectiveAllowLeave ? Icons.event_available_rounded : Icons.event_busy_rounded,
-                        color: effectiveAllowLeave ? Colors.amber.shade900 : const Color(0xFF4338CA),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1E293B),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Text(
-                                    '👑 Global Users Only (Chairman, CEO, HQ Manager, Admin)',
-                                    style: TextStyle(color: Colors.amber, fontSize: 10, fontWeight: FontWeight.bold),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              effectiveAllowLeave ? 'Student Leave Option Allowed (Visible to ALL Users)' : 'Student Leave Option Stopped (Hidden from ALL Users)',
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: effectiveAllowLeave ? Colors.amber.shade900 : const Color(0xFF3730A3)),
-                            ),
-                            Text(
-                              effectiveAllowLeave
-                                  ? 'Leave button is displayed for ALL users. Click Stop Leave to hide it.'
-                                  : 'Leave option is hidden from ALL users. Click Allow Leave to display it.',
-                              style: TextStyle(fontSize: 11, color: effectiveAllowLeave ? Colors.amber.shade900 : Colors.indigo.shade700),
-                            ),
-                          ],
-                        ),
-                      ),
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: effectiveAllowLeave ? Colors.red.shade700 : const Color(0xFF4338CA),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        ),
-                        icon: Icon(effectiveAllowLeave ? Icons.block : Icons.check_circle_outline, size: 16),
-                        label: Text(effectiveAllowLeave ? 'Stop Leave' : 'Allow Leave', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                        onPressed: () async {
-                          final newAllowState = !effectiveAllowLeave;
-                          setState(() {
-                            _localAllowStudentLeave = newAllowState;
-                          });
-                          await FirebaseFirestore.instance
-                              .collection('branches')
-                              .doc(widget.branchId)
-                              .collection('madrassa_config')
-                              .doc('current')
-                              .set({'allowStudentLeave': newAllowState}, SetOptions(merge: true));
-
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                duration: const Duration(seconds: 2),
-                                backgroundColor: newAllowState ? Colors.green.shade700 : Colors.red.shade700,
-                                content: Text(newAllowState ? 'Student Leave option enabled & visible to ALL users.' : 'Student Leave option disabled & hidden from ALL users.'),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-
-              // Homeroom Teacher Lock Banner
-              if (isAttendanceLocked)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  color: const Color(0xFFFEF2F2),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.lock_rounded, color: Color(0xFFEF4444), size: 20),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          _selectedGradeFilter == 'All'
-                              ? '🔒 Attendance marking locked in "All Classes" view. Please select your assigned Homeroom Class to mark student attendance.'
-                              : '🔒 Attendance Marking Locked: Only the assigned Homeroom Teacher ($assignedHomeroomTeacherName) can mark attendance for Grade $_selectedGradeFilter.',
-                          style: const TextStyle(color: Color(0xFF991B1B), fontWeight: FontWeight.bold, fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-              // Date & Grade Filter Toolbar
+      child: Scaffold(
+        backgroundColor: SchoolTheme.bgLight,
+        body: Column(
+          children: [
+            // Executive Leave Toggle Banner (Highest Authority only)
+            if (_isHighestAuthority) ...[
               Container(
-                padding: const EdgeInsets.all(16),
-                color: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                color: effectiveAllowLeave ? const Color(0xFFFEF3C7) : const Color(0xFFEEF2FF),
                 child: Row(
                   children: [
-                    // Date picker button
-                    InkWell(
-                      onTap: isAttendanceLocked ? null : _pickDate,
-                      borderRadius: BorderRadius.circular(10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF6366F1).withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFF6366F1).withValues(alpha: 0.3)),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.calendar_today_rounded, color: Color(0xFF6366F1), size: 18),
-                            const SizedBox(width: 8),
-                            Text(
-                              DateFormat('EEEE, dd MMM yyyy').format(_selectedDate),
-                              style: const TextStyle(
-                                color: Color(0xFF6366F1),
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                              ),
-                            ),
-                          ],
+                    Icon(
+                      effectiveAllowLeave ? Icons.event_available_rounded : Icons.event_busy_rounded,
+                      color: effectiveAllowLeave ? const Color(0xFFD97706) : SchoolTheme.primary,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        effectiveAllowLeave
+                            ? '👑 Executive Control: Student Leave Option is Active for all staff.'
+                            : '👑 Executive Control: Student Leave Option is Disabled for all staff.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: effectiveAllowLeave ? const Color(0xFF92400E) : SchoolTheme.primaryDark,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 16),
-
-                    // Grade Dropdown
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF1F5F9),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: DropdownButtonHideUnderline(
-                        child: DropdownButton<String>(
-                          value: _selectedGradeFilter,
-                          icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                          items: _gradeOptions.map((g) {
-                            return DropdownMenuItem(value: g, child: Text('Class: $g'));
-                          }).toList(),
-                          onChanged: (v) {
-                            if (v != null) setState(() => _selectedGradeFilter = v);
-                          },
-                        ),
-                      ),
-                    ),
-                    const Spacer(),
-
-                    // Mark All Present Button
-                    OutlinedButton.icon(
-                      onPressed: isAttendanceLocked ? null : _markAllPresent,
-                      icon: const Icon(Icons.done_all_rounded, size: 18),
-                      label: const Text('Mark All Present'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF10B981),
-                        side: const BorderSide(color: Color(0xFF10B981)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-
-                    // Save Changes Button
-                    ElevatedButton.icon(
-                      onPressed: (isAttendanceLocked || _isSaving) ? null : _saveAttendance,
-                      icon: _isSaving
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-                            )
-                          : const Icon(Icons.save_rounded, size: 18),
-                      label: const Text('Save Log'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF6366F1),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    TextButton.icon(
+                      onPressed: () async {
+                        final newAllow = !effectiveAllowLeave;
+                        setState(() => _localAllowStudentLeave = newAllow);
+                        await FirebaseFirestore.instance
+                            .collection('branches')
+                            .doc(widget.branchId)
+                            .collection('school_config')
+                            .doc('current')
+                            .set({'allowStudentLeave': newAllow}, SetOptions(merge: true));
+                      },
+                      icon: Icon(effectiveAllowLeave ? Icons.block_rounded : Icons.check_circle_rounded, size: 14),
+                      label: Text(effectiveAllowLeave ? 'Disable Leave' : 'Enable Leave', style: const TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: effectiveAllowLeave ? const Color(0xFFE11D48) : SchoolTheme.primary,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                       ),
                     ),
                   ],
-                ),
-              ),
-
-              const Divider(height: 1),
-
-              // Attendance List
-              Expanded(
-                child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: SchoolLocalStorage.streamStudentsCached(widget.branchId),
-                  builder: (context, studentSnapshot) {
-                    final allStudents = studentSnapshot.data ?? [];
-                    var students = allStudents.where((s) => (s['status'] ?? 'active') == 'active').toList();
-
-                    if (_selectedGradeFilter != 'All') {
-                      students = students.where((s) => (s['grade'] ?? '') == _selectedGradeFilter).toList();
-                    }
-
-                    if (students.isEmpty) {
-                      return Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.rule_folder_rounded, size: 64, color: Colors.grey.shade400),
-                            const SizedBox(height: 12),
-                            Text(
-                              'No active students found for Grade: $_selectedGradeFilter',
-                              style: TextStyle(color: Colors.grey.shade600, fontSize: 15),
-                            ),
-                          ],
-                        ),
-                      );
-                    }
-
-                    return StreamBuilder<Map<String, dynamic>?>(
-                      stream: SchoolLocalStorage.streamLogCached(widget.branchId, dateKey),
-                      builder: (context, logSnapshot) {
-                        final logMap = (logSnapshot.data?['entries'] as Map?) ?? {};
-
-                        return ListView.separated(
-                          padding: const EdgeInsets.all(16),
-                          itemCount: students.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 12),
-                          itemBuilder: (context, index) {
-                            final st = students[index];
-                            final studentId = (st['id'] ?? st['rollNo']).toString();
-
-                            final existingEntry = _localChanges[studentId] ??
-                                Map<String, dynamic>.from((logMap[studentId] as Map?) ?? {});
-
-                            final status = (existingEntry['status'] ?? 'present').toString();
-                            final isUniform = (existingEntry['uniform'] ?? true) as bool;
-                            final remarks = (existingEntry['remarks'] ?? '').toString();
-
-                            return _buildStudentAttendanceCard(
-                              student: st,
-                              studentId: studentId,
-                              status: status,
-                              isUniform: isUniform,
-                              remarks: remarks,
-                              readOnly: isAttendanceLocked,
-                              allowStudentLeave: effectiveAllowLeave,
-                            );
-                          },
-                        );
-                      },
-                    );
-                  },
                 ),
               ),
             ],
-          ),
-        );
-  }
 
-  Widget _buildStudentAttendanceCard({
-    required Map<String, dynamic> student,
-    required String studentId,
-    required String status,
-    required bool isUniform,
-    required String remarks,
-    bool readOnly = false,
-    bool allowStudentLeave = false,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          // Student Info Avatar & Name (Clickable Profile)
-          Expanded(
-            child: InkWell(
-              onTap: () => _showStudentProfileDialog(student),
-              borderRadius: BorderRadius.circular(10),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  children: [
-                    Builder(
-                      builder: (context) {
-                        final photoUrl = (student['photoUrl'] ?? '').toString();
-                        final bytes = ImageUploadService.decodeBase64ToBytes(photoUrl);
-                        if (bytes != null && bytes.isNotEmpty) {
-                          return CircleAvatar(
-                            radius: 20,
-                            backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
-                            backgroundImage: MemoryImage(bytes),
+            // Action & Filter Bar
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 20, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                border: Border(bottom: BorderSide(color: SchoolTheme.borderLight)),
+              ),
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  // Date Picker & Class Filter
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      // Date Selector
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: _selectedDate,
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime.now().add(const Duration(days: 30)),
                           );
-                        } else if (photoUrl.startsWith('http')) {
-                          return CircleAvatar(
-                            radius: 20,
-                            backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
-                            backgroundImage: NetworkImage(photoUrl),
-                          );
-                        }
-                        return CircleAvatar(
-                          radius: 20,
-                          backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
-                          child: Text(
-                            (student['rollNo'] ?? '0').toString(),
-                            style: const TextStyle(
-                              color: Color(0xFF6366F1),
-                              fontWeight: FontWeight.bold,
-                            ),
+                          if (picked != null && picked != _selectedDate) {
+                            if (await _confirmDiscardChanges()) {
+                              setState(() {
+                                _selectedDate = picked;
+                                _localChanges.clear();
+                              });
+                            }
+                          }
+                        },
+                        borderRadius: BorderRadius.circular(10),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: SchoolTheme.primaryLight,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: SchoolTheme.primary.withValues(alpha: 0.3)),
                           ),
-                        );
-                      },
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Flexible(
-                                child: Text(
-                                  student['name'] ?? 'Unknown Student',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15,
-                                    color: Color(0xFF1E293B),
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
+                              const Icon(Icons.calendar_month_rounded, color: SchoolTheme.primary, size: 16),
+                              const SizedBox(width: 6),
+                              Text(
+                                DateFormat('dd MMM yyyy').format(_selectedDate),
+                                style: const TextStyle(
+                                  color: SchoolTheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12.5,
                                 ),
                               ),
-                              const SizedBox(width: 6),
-                              const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFF94A3B8)),
                             ],
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${student['grade']} - Sec ${student['section']} • Roll: ${student['rollNo'] ?? '—'}',
-                            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-                          ),
-                        ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
 
-          // Status Selector Chips
-          AbsorbPointer(
-            absorbing: readOnly,
-            child: Opacity(
-              opacity: readOnly ? 0.6 : 1.0,
-              child: Wrap(
-                spacing: 6,
-                children: [
-                  _buildStatusChip(studentId, 'present', 'Present', SchoolTheme.statusPresent, status),
-                  _buildStatusChip(studentId, 'absent', 'Absent', SchoolTheme.statusAbsent, status),
-                  if (allowStudentLeave || status == 'leave')
-                    _buildStatusChip(studentId, 'leave', 'Leave', SchoolTheme.statusLeave, status),
-                  _buildStatusChip(studentId, 'late', 'Late', SchoolTheme.statusLate, status),
+                      // Grade / Class Filter
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF1F5F9),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: SchoolTheme.borderLight),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _selectedGradeFilter,
+                            icon: const Icon(Icons.arrow_drop_down_rounded, color: SchoolTheme.textMid),
+                            items: _gradeOptions.map((g) {
+                              return DropdownMenuItem(
+                                value: g,
+                                child: Text(
+                                  g == 'All' ? 'All Classes' : 'Grade: $g',
+                                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                                ),
+                              );
+                            }).toList(),
+                            onChanged: (v) {
+                              if (v != null && v != _selectedGradeFilter) {
+                                setState(() {
+                                  _selectedGradeFilter = v;
+                                  _localChanges.clear();
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+
+                      if (_isTeacher)
+                        SchoolBadge(
+                          label: 'Assigned Class: $_selectedGradeFilter',
+                          color: SchoolTheme.primary,
+                          fontSize: 11,
+                        ),
+                    ],
+                  ),
+
+                  // Actions: Mark All Present & Save Log
+                  StreamBuilder<List<Map<String, dynamic>>>(
+                    stream: SchoolLocalStorage.streamStudentsCached(widget.branchId),
+                    builder: (context, snapshot) {
+                      final allStudents = (snapshot.data ?? [])
+                          .where((s) => (s['status'] ?? 'active') == 'active')
+                          .toList();
+
+                      final filteredStudents = _selectedGradeFilter == 'All'
+                          ? allStudents
+                          : allStudents.where((s) => s['grade'] == _selectedGradeFilter).toList();
+
+                      return StreamBuilder<Map<String, dynamic>?>(
+                        stream: SchoolLocalStorage.streamLogCached(widget.branchId, dateKey),
+                        builder: (context, logSnap) {
+                          final currentEntries = (logSnap.data?['entries'] as Map?) ?? {};
+                          final hasChanges = _localChanges.isNotEmpty;
+
+                          return Wrap(
+                            spacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: filteredStudents.isEmpty
+                                    ? null
+                                    : () => _markAll('present', filteredStudents),
+                                icon: const Icon(Icons.done_all_rounded, size: 15),
+                                label: const Text('Mark All Present', style: TextStyle(fontSize: 12)),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: SchoolTheme.statusPresent,
+                                  side: const BorderSide(color: SchoolTheme.statusPresent),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                              ),
+                              ElevatedButton.icon(
+                                onPressed: (_isSaving || !hasChanges)
+                                    ? null
+                                    : () => _saveAttendance(Map<String, dynamic>.from(currentEntries)),
+                                icon: _isSaving
+                                    ? const SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.save_rounded, size: 15),
+                                label: Text(
+                                  hasChanges ? 'Save Changes (${_localChanges.length})' : 'Saved',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: SchoolTheme.primary,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                  elevation: 0,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      );
+                    },
+                  ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(width: 16),
 
-          // Uniform Checkbox
-          AbsorbPointer(
-            absorbing: readOnly,
-            child: Opacity(
-              opacity: readOnly ? 0.6 : 1.0,
-              child: FilterChip(
-                label: const Text('Uniform'),
-                selected: isUniform,
-                selectedColor: const Color(0xFF3B82F6).withValues(alpha: 0.15),
-                checkmarkColor: const Color(0xFF3B82F6),
-                onSelected: readOnly ? null : (val) {
-                  setState(() {
-                    _localChanges.putIfAbsent(studentId, () => {});
-                    _localChanges[studentId]!['uniform'] = val;
+            // Attendance List
+            Expanded(
+              child: StreamBuilder<List<Map<String, dynamic>>>(
+                stream: SchoolLocalStorage.streamStudentsCached(widget.branchId),
+                builder: (context, snapshot) {
+                  final allStudents = (snapshot.data ?? [])
+                      .where((s) => (s['status'] ?? 'active') == 'active')
+                      .toList();
+
+                  // Teacher Data Isolation:
+                  // A teacher can ONLY see students belonging to their assigned class(es)!
+                  List<Map<String, dynamic>> visibleStudents;
+                  if (_isTeacher) {
+                    visibleStudents = allStudents.where((s) {
+                      final g = (s['grade'] ?? '').toString().trim();
+                      return _gradeOptions.contains(g) &&
+                          (_selectedGradeFilter == 'All' || g == _selectedGradeFilter);
+                    }).toList();
+                  } else {
+                    visibleStudents = _selectedGradeFilter == 'All'
+                        ? allStudents
+                        : allStudents.where((s) => s['grade'] == _selectedGradeFilter).toList();
+                  }
+
+                  // Sort by roll number or name
+                  visibleStudents.sort((a, b) {
+                    final rA = int.tryParse((a['rollNo'] ?? '').toString()) ?? 999999;
+                    final rB = int.tryParse((b['rollNo'] ?? '').toString()) ?? 999999;
+                    return rA.compareTo(rB);
                   });
+
+                  if (visibleStudents.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.person_off_rounded, size: 56, color: Colors.grey.shade300),
+                          const SizedBox(height: 12),
+                          Text(
+                            _isTeacher
+                                ? 'No students enrolled in your assigned class ($_selectedGradeFilter).'
+                                : 'No students found for class filter: $_selectedGradeFilter',
+                            style: const TextStyle(color: SchoolTheme.textMid, fontSize: 14, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
+                  return StreamBuilder<Map<String, dynamic>?>(
+                    stream: SchoolLocalStorage.streamLogCached(widget.branchId, dateKey),
+                    builder: (context, logSnap) {
+                      final currentEntries = (logSnap.data?['entries'] as Map?) ?? {};
+
+                      return ListView.separated(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: visibleStudents.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final student = visibleStudents[index];
+                          final sId = student['id']?.toString() ?? '';
+                          final name = student['name']?.toString() ?? 'Student';
+                          final rollNo = student['rollNo']?.toString() ?? '-';
+                          final grade = student['grade']?.toString() ?? '-';
+                          final section = student['section']?.toString() ?? 'A';
+
+                          final savedEntry = currentEntries[sId] as Map?;
+                          final localEntry = _localChanges[sId];
+
+                          final status = (localEntry?['status'] ?? savedEntry?['status'] ?? 'unmarked')
+                              .toString()
+                              .toLowerCase();
+                          final bool uniform = localEntry?['uniform'] ?? savedEntry?['uniform'] ?? true;
+
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: SchoolTheme.radius14,
+                              border: Border.all(
+                                color: _localChanges.containsKey(sId)
+                                    ? SchoolTheme.primary.withValues(alpha: 0.5)
+                                    : SchoolTheme.borderLight,
+                                width: _localChanges.containsKey(sId) ? 1.5 : 1.0,
+                              ),
+                              boxShadow: SchoolTheme.cardShadow,
+                            ),
+                            child: Row(
+                              children: [
+                                // Roll Number Badge
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: SchoolTheme.getGradeColor(grade).withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    rollNo,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      color: SchoolTheme.getGradeColor(grade),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+
+                                // Student Name & Grade
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        name,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                          color: SchoolTheme.textDark,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Row(
+                                        children: [
+                                          Text(
+                                            'Grade $grade - Sec $section',
+                                            style: const TextStyle(color: SchoolTheme.textMuted, fontSize: 11.5),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          InkWell(
+                                            onTap: () {
+                                              setState(() {
+                                                _localChanges[sId] = {
+                                                  'status': status == 'unmarked' ? 'present' : status,
+                                                  'uniform': !uniform,
+                                                  'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
+                                                  'timestamp': DateTime.now().toIso8601String(),
+                                                };
+                                              });
+                                            },
+                                            child: Text(
+                                              uniform ? '• Uniform OK' : '• Uniform Viol.',
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w600,
+                                                color: uniform ? SchoolTheme.statusPresent : SchoolTheme.statusAbsent,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Attendance Selection Chips (Present, Absent, Leave)
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _buildStatusButton(
+                                      label: 'P',
+                                      tooltip: 'Present',
+                                      isSelected: status == 'present',
+                                      activeColor: SchoolTheme.statusPresent,
+                                      onTap: () => setState(() {
+                                        _localChanges[sId] = {
+                                          'status': 'present',
+                                          'uniform': uniform,
+                                          'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
+                                          'timestamp': DateTime.now().toIso8601String(),
+                                        };
+                                      }),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _buildStatusButton(
+                                      label: 'A',
+                                      tooltip: 'Absent',
+                                      isSelected: status == 'absent',
+                                      activeColor: SchoolTheme.statusAbsent,
+                                      onTap: () => setState(() {
+                                        _localChanges[sId] = {
+                                          'status': 'absent',
+                                          'uniform': uniform,
+                                          'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
+                                          'timestamp': DateTime.now().toIso8601String(),
+                                        };
+                                      }),
+                                    ),
+                                    if (effectiveAllowLeave) ...[
+                                      const SizedBox(width: 6),
+                                      _buildStatusButton(
+                                        label: 'L',
+                                        tooltip: 'Leave',
+                                        isSelected: status == 'leave',
+                                        activeColor: SchoolTheme.statusLeave,
+                                        onTap: () => setState(() {
+                                          _localChanges[sId] = {
+                                            'status': 'leave',
+                                            'uniform': uniform,
+                                            'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
+                                            'timestamp': DateTime.now().toIso8601String(),
+                                          };
+                                        }),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
                 },
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatusChip(
-    String studentId,
-    String statusKey,
-    String label,
-    Color color,
-    String currentStatus,
-  ) {
-    final isSelected = currentStatus.toLowerCase() == statusKey;
-    return ChoiceChip(
-      label: Text(label),
-      selected: isSelected,
-      selectedColor: color,
-      labelStyle: TextStyle(
-        color: isSelected ? Colors.white : Colors.grey.shade700,
-        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-        fontSize: 12,
-      ),
-      onSelected: (selected) {
-        if (selected) {
-          setState(() {
-            _localChanges.putIfAbsent(studentId, () => {});
-            _localChanges[studentId]!['status'] = statusKey;
-          });
-        }
-      },
-    );
-  }
-
-  Future<void> _pickDate() async {
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate,
-      firstDate: DateTime(2024),
-      lastDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (picked != null && picked != _selectedDate) {
-      setState(() {
-        _selectedDate = picked;
-        _localChanges.clear();
-      });
-    }
-  }
-
-  void _markAllPresent() {
-    // Fetches cached students and updates local changes to present
-    final students = SchoolLocalStorage.getAllStudentsCached(widget.branchId);
-    setState(() {
-      for (var s in students) {
-        final id = (s['id'] ?? s['rollNo']).toString();
-        _localChanges.putIfAbsent(id, () => {});
-        _localChanges[id]!['status'] = 'present';
-        _localChanges[id]!['uniform'] = true;
-      }
-    });
-  }
-
-  Future<void> _saveAttendance() async {
-    setState(() => _isSaving = true);
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-
-    // Merge existing log entries with local changes
-    final existingLog = SchoolLocalStorage.getLogCached(widget.branchId, dateKey);
-    final existingEntries = Map<String, dynamic>.from((existingLog?['entries'] as Map?) ?? {});
-
-    _localChanges.forEach((studentId, changeMap) {
-      existingEntries[studentId] = {
-        ...?existingEntries[studentId],
-        ...changeMap,
-      };
-    });
-
-    await SchoolLocalStorage.saveDailyLog(
-      branchId: widget.branchId,
-      dateKey: dateKey,
-      logEntries: existingEntries,
-      editorName: widget.editorName,
-    );
-
-    if (mounted) {
-      setState(() {
-        _isSaving = false;
-        _localChanges.clear();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Attendance log saved successfully!'),
-          backgroundColor: Color(0xFF10B981),
+          ],
         ),
-      );
-    }
+      ),
+    );
   }
 
-  void _showStudentProfileDialog(Map<String, dynamic> student) {
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        final photoUrl = (student['photoUrl'] ?? '').toString();
-        final bytes = ImageUploadService.decodeBase64ToBytes(photoUrl);
-        return Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          child: Container(
-            width: 420,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Center(
-                  child: bytes != null && bytes.isNotEmpty
-                      ? CircleAvatar(radius: 40, backgroundImage: MemoryImage(bytes))
-                      : (photoUrl.startsWith('http')
-                          ? CircleAvatar(radius: 40, backgroundImage: NetworkImage(photoUrl))
-                          : CircleAvatar(
-                              radius: 40,
-                              backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.15),
-                              child: const Icon(Icons.person_rounded, size: 44, color: Color(0xFF6366F1)),
-                            )),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  student['name'] ?? 'Student',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
-                ),
-                Text(
-                  'Class: ${student['grade']} - Sec ${student['section']} • Roll: ${student['rollNo'] ?? '—'}',
-                  style: const TextStyle(fontSize: 13, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
-                ),
-                const Divider(height: 24),
-                _buildProfileRow('Father / Guardian:', student['guardianName']?.toString() ?? '—'),
-                _buildProfileRow('Contact Phone:', student['guardianPhone']?.toString() ?? '—'),
-                if ((student['bformNo'] ?? '').toString().isNotEmpty)
-                  _buildProfileRow('B-Form Number:', student['bformNo'].toString()),
-                if ((student['guardianCnic'] ?? '').toString().isNotEmpty)
-                  _buildProfileRow('Father CNIC:', student['guardianCnic'].toString()),
-                if ((student['biometricPin'] ?? '').toString().isNotEmpty)
-                  _buildProfileRow('Biometric PIN:', student['biometricPin'].toString()),
-                if ((student['address'] ?? '').toString().isNotEmpty)
-                  _buildProfileRow('Residential Address:', student['address'].toString()),
-                const SizedBox(height: 20),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Close', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ),
-              ],
+  Widget _buildStatusButton({
+    required String label,
+    required String tooltip,
+    required bool isSelected,
+    required Color activeColor,
+    required VoidCallback onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 36,
+          height: 36,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: isSelected ? activeColor : const Color(0xFFF1F5F9),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: isSelected ? activeColor : SchoolTheme.borderLight,
+              width: 1.2,
             ),
           ),
-        );
-      },
-    );
-  }
-
-  Widget _buildProfileRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 140,
-            child: Text(label, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: isSelected ? Colors.white : SchoolTheme.textMid,
+            ),
           ),
-          Expanded(
-            child: Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: Color(0xFF1E293B))),
-          ),
-        ],
+        ),
       ),
     );
   }

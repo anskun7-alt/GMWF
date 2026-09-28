@@ -131,6 +131,8 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
     await MadrassaLocalStorage.ensureBoxesOpen();
     if (widget.branchId.isNotEmpty && widget.branchId != 'unknown') {
       SyncService().start(widget.branchId);
+      // Immediately download all fresh Madrassa data for this branch in the background
+      MadrassaLocalStorage.downloadAllMadrassaData(widget.branchId);
     }
   }
 
@@ -306,6 +308,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                           borderColor: borderColor,
                           textPrimary: textPrimary,
                           textMuted: textMuted,
+                          currentTitle: navTitles[_selectedIndex],
                         ),
                         body: Stack(
                           fit: StackFit.expand,
@@ -478,6 +481,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
     required Color borderColor,
     required Color textPrimary,
     required Color textMuted,
+    required String currentTitle,
   }) {
     return PreferredSize(
       preferredSize: const Size.fromHeight(64),
@@ -496,17 +500,35 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
         child: SafeArea(
           bottom: false,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Row(
               children: [
+                // Back button if screen can be popped
+                if (Navigator.of(context).canPop()) ...[
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: borderColor),
+                      ),
+                      child: Icon(Icons.arrow_back_rounded, size: 18, color: textPrimary),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 // Logo squircle with glow
                 Container(
-                  width: 40,
-                  height: 40,
-                  padding: const EdgeInsets.all(6),
+                  width: 36,
+                  height: 36,
+                  padding: const EdgeInsets.all(5),
                   decoration: BoxDecoration(
                     color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(
                       color: const Color(0xFF0F766E).withValues(alpha: 0.3),
                       width: 1.2,
@@ -521,8 +543,8 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                   ),
                   child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
                 ),
-                const SizedBox(width: 10),
-                // Title and role
+                const SizedBox(width: 8),
+                // Title, Branch pill & active section
                 Expanded(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -535,7 +557,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                           style: TextStyle(
                             color: textPrimary,
                             fontWeight: FontWeight.w800,
-                            fontSize: 14.5,
+                            fontSize: 13.5,
                             letterSpacing: -0.2,
                           ),
                         ),
@@ -544,7 +566,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                       Row(
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
                             decoration: BoxDecoration(
                               color: const Color(0xFF0F766E).withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(6),
@@ -558,21 +580,19 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                               style: const TextStyle(
                                 color: Color(0xFF0F766E),
                                 fontWeight: FontWeight.bold,
-                                fontSize: 9.5,
+                                fontSize: 9,
                               ),
                             ),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 5),
                           Flexible(
                             child: Text(
-                              _displayUsername.isNotEmpty && _displayUsername.toLowerCase() != 'unknown'
-                                  ? _displayUsername
-                                  : widget.role,
+                              currentTitle,
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: textMuted,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 11,
+                              style: const TextStyle(
+                                color: Color(0xFF0F766E),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10.5,
                               ),
                             ),
                           ),
@@ -581,26 +601,78 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                     ],
                   ),
                 ),
-                // Profile & Security Button
-                IconButton(
-                  icon: const Icon(Icons.manage_accounts_rounded, size: 20, color: Color(0xFF0F766E)),
-                  tooltip: 'Profile & Password',
-                  onPressed: _openProfileDialog,
-                  padding: const EdgeInsets.all(4),
-                  constraints: const BoxConstraints(),
-                ),
-                const SizedBox(width: 6),
-                // Register Teacher (principal / chairman / hq / admin)
-                if (_effectiveIsAdmin) ...[
-                  _buildRegisterTeacherBtn(compact: true),
-                  const SizedBox(width: 4),
-                ],
-                // Modern Action Buttons
+                // Modern Action Buttons on Mobile: Sync, Language, and consolidated More Menu
                 _buildSyncBtn(context, isDark),
-                const SizedBox(width: 4),
-                _buildThemeToggleBtn(isDark),
-                const SizedBox(width: 4),
+                const SizedBox(width: 6),
                 _buildLanguageToggleBtn(context, isDark),
+                const SizedBox(width: 4),
+                PopupMenuButton<String>(
+                  icon: Icon(Icons.more_vert_rounded, size: 20, color: textMuted),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  color: cardBg,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    side: BorderSide(color: borderColor),
+                  ),
+                  onSelected: (val) async {
+                    if (val == 'register_teacher') {
+                      _openRegisterTeacherDialog();
+                    } else if (val == 'profile') {
+                      _openProfileDialog();
+                    } else if (val == 'theme') {
+                      await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
+                    }
+                  },
+                  itemBuilder: (ctx) => [
+                    if (_effectiveIsAdmin)
+                      PopupMenuItem(
+                        value: 'register_teacher',
+                        child: Row(
+                          children: [
+                            const Icon(Icons.person_add_rounded, size: 18, color: Color(0xFF0F766E)),
+                            const SizedBox(width: 10),
+                            Text(
+                              context.isUrdu ? 'نیا استاد درج کریں' : 'Register Teacher',
+                              style: context.urduStyle(style: const TextStyle(fontSize: 13)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    PopupMenuItem(
+                      value: 'profile',
+                      child: Row(
+                        children: [
+                          const Icon(Icons.manage_accounts_rounded, size: 18, color: Color(0xFF0F766E)),
+                          const SizedBox(width: 10),
+                          Text(
+                            context.isUrdu ? 'پروفائل اور پاس ورڈ' : 'Profile & Password',
+                            style: context.urduStyle(style: const TextStyle(fontSize: 13)),
+                          ),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'theme',
+                      child: Row(
+                        children: [
+                          Icon(
+                            isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                            size: 18,
+                            color: Colors.amber[700],
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            isDark
+                                ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode')
+                                : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
+                            style: context.urduStyle(style: const TextStyle(fontSize: 13)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -1342,9 +1414,9 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
 }
 
 // ==========================================
-// MOBILE MOTION BOTTOM BAR (Glass / Floating Style)
+// MOBILE MOTION BOTTOM BAR (Auto-Centering Smooth Nav Bar)
 // ==========================================
-class MadrassaMotionBottomBar extends StatelessWidget {
+class MadrassaMotionBottomBar extends StatefulWidget {
   final int selectedIndex;
   final ValueChanged<int> onTabSelected;
   final List<String> titles;
@@ -1363,83 +1435,57 @@ class MadrassaMotionBottomBar extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final bg = isDark ? const Color(0xFF101726) : Colors.white;
-    final borderColor = isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0);
-    final activeGradient = isDark
-        ? const LinearGradient(colors: [Color(0xFF0F766E), Color(0xFF14B8A6)])
-        : const LinearGradient(colors: [Color(0xFF0F766E), Color(0xFF0D9488)]);
-    final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+  State<MadrassaMotionBottomBar> createState() => _MadrassaMotionBottomBarState();
+}
 
-    final isScrollable = titles.length > 5;
+class _MadrassaMotionBottomBarState extends State<MadrassaMotionBottomBar> {
+  late final ScrollController _scrollController;
 
-    Widget buildItem(int i) {
-      final isSelected = selectedIndex == i;
-      final item = GestureDetector(
-        onTap: () {
-          HapticFeedback.selectionClick();
-          onTabSelected(i);
-        },
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          margin: const EdgeInsets.symmetric(horizontal: 2),
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-          decoration: BoxDecoration(
-            gradient: isSelected ? activeGradient : null,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: isSelected
-                ? [
-                    BoxShadow(
-                      color: const Color(0xFF0F766E).withValues(alpha: 0.35),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ]
-                : null,
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AnimatedScale(
-                scale: isSelected ? 1.08 : 1.0,
-                duration: const Duration(milliseconds: 200),
-                child: Icon(
-                  isSelected ? activeIcons[i] : icons[i],
-                  size: 19,
-                  color: isSelected ? Colors.white : inactiveColor,
-                ),
-              ),
-              if (isSelected) ...[
-                const SizedBox(width: 5),
-                Text(
-                  titles[i],
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.urduStyle(
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 11.5,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      );
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSelected(animate: false));
+  }
 
-      if (isScrollable) {
-        return item;
-      }
-      return Expanded(
-        flex: isSelected ? 2 : 1,
-        child: item,
-      );
+  @override
+  void didUpdateWidget(covariant MadrassaMotionBottomBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedIndex != widget.selectedIndex) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSelected(animate: true));
     }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToSelected({bool animate = true}) {
+    if (!_scrollController.hasClients) return;
+    const itemWidth = 72.0;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final targetOffset = (widget.selectedIndex * itemWidth) - (screenWidth / 2) + (itemWidth / 2);
+    final clampedOffset = targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent);
+    if (animate) {
+      _scrollController.animateTo(
+        clampedOffset,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _scrollController.jumpTo(clampedOffset);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = widget.isDark ? const Color(0xFF101726) : Colors.white;
+    final borderColor = widget.isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0);
+    const emeraldPrimary = Color(0xFF0F766E);
+    const emeraldLight = Color(0xFF14B8A6);
+    final inactiveColor = widget.isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
 
     return Container(
       decoration: BoxDecoration(
@@ -1449,27 +1495,92 @@ class MadrassaMotionBottomBar extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.06),
-            blurRadius: 12,
-            offset: const Offset(0, -3),
+            color: Colors.black.withValues(alpha: widget.isDark ? 0.35 : 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, -2),
           ),
         ],
       ),
       child: SafeArea(
         top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-          child: isScrollable
-              ? SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  physics: const BouncingScrollPhysics(),
-                  child: Row(
-                    children: List.generate(titles.length, buildItem),
-                  ),
-                )
-              : Row(
-                  children: List.generate(titles.length, buildItem),
-                ),
+        child: SizedBox(
+          height: 60,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final totalItems = widget.titles.length;
+              final canFitAll = constraints.maxWidth >= (totalItems * 68.0);
+              final itemWidth = canFitAll ? (constraints.maxWidth / totalItems) : 72.0;
+
+              return ListView.builder(
+                controller: _scrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                itemCount: totalItems,
+                itemBuilder: (context, i) {
+                  final isSelected = widget.selectedIndex == i;
+                  return InkWell(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      widget.onTabSelected(i);
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      width: itemWidth,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            curve: Curves.easeOutCubic,
+                            height: 28,
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            decoration: BoxDecoration(
+                              gradient: isSelected
+                                  ? const LinearGradient(
+                                      colors: [emeraldPrimary, emeraldLight],
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                    )
+                                  : null,
+                              borderRadius: BorderRadius.circular(14),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: emeraldPrimary.withValues(alpha: 0.35),
+                                        blurRadius: 6,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: Icon(
+                              isSelected ? widget.activeIcons[i] : widget.icons[i],
+                              size: 18,
+                              color: isSelected ? Colors.white : inactiveColor,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            widget.titles[i],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.urduStyle(
+                              style: TextStyle(
+                                color: isSelected ? (widget.isDark ? emeraldLight : emeraldPrimary) : inactiveColor,
+                                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
         ),
       ),
     );

@@ -1947,7 +1947,7 @@ class _BoxCardState extends State<_BoxCard> {
           borderRadius: BorderRadius.circular(16),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
               color: _isHovered ? t.accent.withValues(alpha: 0.03) : t.bgCard,
               borderRadius: BorderRadius.circular(16),
@@ -1962,195 +1962,398 @@ class _BoxCardState extends State<_BoxCard> {
                 ),
               ],
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                // Box number badge
-                Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: statusColor.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: statusColor.withValues(alpha: 0.15)),
-                  ),
-                  child: Center(
-                    child: Text(
-                      box.boxNumber.replaceAll('BOX-', ''),
-                      style: GoogleFonts.dmMono(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                        color: statusColor,
+                // ── Top Row: Badge + Name / Area / Address + 3-Dot Menu ──
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // Box number badge
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: statusColor.withValues(alpha: 0.18)),
+                      ),
+                      child: Center(
+                        child: Text(
+                          box.boxNumber.replaceAll('BOX-', ''),
+                          style: GoogleFonts.dmMono(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: statusColor,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                // Info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
+                    const SizedBox(width: 12),
+
+                    // Holder Name & Address (spans entire width!)
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Flexible(
-                            child: Text(
-                              box.holderName,
-                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: t.textPrimary),
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  box.holderName,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    color: t.textPrimary,
+                                    letterSpacing: -0.2,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                ),
+                              ),
+                              if (box.area.isNotEmpty) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: t.accent.withValues(alpha: 0.08),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+                                  ),
+                                  child: Text(
+                                    box.area,
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: t.accent,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
-                          if (box.area.isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: t.accent.withValues(alpha: 0.08),
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+                          const SizedBox(height: 3),
+                          Row(
+                            children: [
+                              Icon(
+                                box.holderAddress.isNotEmpty ? Icons.location_on_outlined : Icons.phone_outlined,
+                                size: 12,
+                                color: t.textTertiary,
                               ),
-                              child: Text(
-                                box.area,
-                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: t.accent),
-                                overflow: TextOverflow.ellipsis,
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  box.holderAddress.isNotEmpty
+                                      ? (box.holderPhone.isNotEmpty ? '${box.holderAddress} · ${box.holderPhone}' : box.holderAddress)
+                                      : (box.holderPhone.isNotEmpty ? box.holderPhone : 'No address specified'),
+                                  style: TextStyle(fontSize: 12, color: t.textTertiary),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        box.holderAddress.isNotEmpty
-                            ? box.holderAddress
-                            : (box.holderPhone.isNotEmpty ? box.holderPhone : 'No address specified'),
-                        style: TextStyle(fontSize: 12, color: t.textTertiary),
-                        overflow: TextOverflow.ellipsis,
+                    ),
+
+                    const SizedBox(width: 6),
+
+                    // 3-Dot Quick Action Overflow Menu
+                    Theme(
+                      data: Theme.of(context).copyWith(
+                        popupMenuTheme: PopupMenuThemeData(
+                          color: t.bgCard,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            side: BorderSide(color: t.bgRule),
+                          ),
+                          elevation: 8,
+                        ),
                       ),
-                      const SizedBox(height: 6),
-                      Wrap(
+                      child: PopupMenuButton<String>(
+                        icon: Container(
+                          width: 30,
+                          height: 30,
+                          decoration: BoxDecoration(
+                            color: t.bgCardAlt.withValues(alpha: 0.6),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(Icons.more_vert_rounded, size: 17, color: t.textSecondary),
+                        ),
+                        tooltip: 'Box Options',
+                        padding: EdgeInsets.zero,
+                        onSelected: (val) {
+                          if (val == 'open') widget.onOpenBox();
+                          if (val == 'edit') widget.onEdit();
+                          if (val == 'report') widget.onReportIncident();
+                          if (val == 'replace') widget.onAssignReplacement();
+                          if (val == 'detail') widget.onTap();
+                          if (val == 'copy_phone' && box.holderPhone.isNotEmpty) {
+                            Clipboard.setData(ClipboardData(text: box.holderPhone));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Copied ${box.holderPhone} to clipboard'),
+                                duration: const Duration(seconds: 2),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          }
+                        },
+                        itemBuilder: (ctx) => [
+                          const PopupMenuItem(
+                            value: 'open',
+                            height: 38,
+                            child: Row(
+                              children: [
+                                Icon(Icons.lock_open_rounded, size: 16, color: Color(0xFF047857)),
+                                SizedBox(width: 10),
+                                Text('Open Box & Collect', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'detail',
+                            height: 38,
+                            child: Row(
+                              children: [
+                                Icon(Icons.history_rounded, size: 16, color: t.textSecondary),
+                                const SizedBox(width: 10),
+                                const Text('View Opening History', style: TextStyle(fontSize: 13)),
+                              ],
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'edit',
+                            height: 38,
+                            child: Row(
+                              children: [
+                                Icon(Icons.edit_rounded, size: 16, color: t.textSecondary),
+                                const SizedBox(width: 10),
+                                const Text('Edit Details', style: TextStyle(fontSize: 13)),
+                              ],
+                            ),
+                          ),
+                          if (box.holderPhone.isNotEmpty)
+                            PopupMenuItem(
+                              value: 'copy_phone',
+                              height: 38,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.copy_rounded, size: 16, color: t.textSecondary),
+                                  const SizedBox(width: 10),
+                                  Text('Copy Phone (${box.holderPhone})', style: const TextStyle(fontSize: 13)),
+                                ],
+                              ),
+                            ),
+                          const PopupMenuDivider(height: 10),
+                          if (!box.isCompromised)
+                            const PopupMenuItem(
+                              value: 'report',
+                              height: 38,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.report_problem_outlined, size: 16, color: Color(0xFFDC2626)),
+                                  SizedBox(width: 10),
+                                  Text('Report Problem / Snatched', style: TextStyle(fontSize: 13, color: Color(0xFFDC2626), fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            )
+                          else if (box.replacedByBoxId == null)
+                            const PopupMenuItem(
+                              value: 'replace',
+                              height: 38,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.sync_alt_rounded, size: 16, color: Color(0xFF7C3AED)),
+                                  SizedBox(width: 10),
+                                  Text('Assign Replacement Box', style: TextStyle(fontSize: 13, color: Color(0xFF7C3AED), fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 10),
+                Divider(height: 1, thickness: 0.8, color: t.bgRule.withValues(alpha: 0.6)),
+                const SizedBox(height: 9),
+
+                // ── Bottom Row: Status / Collection Stats + Action Buttons ──
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // Left Badges
+                    Flexible(
+                      child: Wrap(
                         spacing: 6,
                         runSpacing: 4,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                             decoration: BoxDecoration(
                               color: statusColor.withValues(alpha: 0.08),
                               borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: statusColor.withValues(alpha: 0.2)),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(statusIcon, size: 11, color: statusColor),
                                 const SizedBox(width: 4),
-                                Text(statusLabel, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: statusColor)),
+                                Text(
+                                  statusLabel,
+                                  style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: statusColor),
+                                ),
                               ],
                             ),
                           ),
+                          if (box.lastOpenedAmount != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                              decoration: BoxDecoration(
+                                color: t.bgCardAlt,
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: t.bgRule),
+                              ),
+                              child: Text(
+                                'PKR ${fmt.format(box.lastOpenedAmount)}',
+                                style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: t.textPrimary),
+                              ),
+                            ),
                           if (box.replacementForBoxId != null)
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF7C3AED).withValues(alpha: 0.08),
                                 borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: const Color(0xFF7C3AED).withValues(alpha: 0.2)),
                               ),
                               child: Text(
                                 'Replaces ${box.replacementForBoxId}',
                                 style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: Color(0xFF7C3AED)),
                               ),
                             ),
-                          if (box.lastOpenedAmount != null)
-                            Text(
-                              'PKR ${fmt.format(box.lastOpenedAmount)}',
-                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: t.textSecondary),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(width: 8),
+
+                    // Right Actions (Smaller, accessible, and elegant)
+                    if (box.isCompromised) ...[
+                      if (box.replacedByBoxId != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF7C3AED).withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(7),
+                          ),
+                          child: Text(
+                            'Replaced 🔄',
+                            style: GoogleFonts.plusJakartaSans(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF7C3AED),
                             ),
+                          ),
+                        )
+                      else
+                        ElevatedButton.icon(
+                          onPressed: widget.onAssignReplacement,
+                          icon: const Icon(Icons.sync_alt_rounded, size: 12),
+                          label: const Text('Replace', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF7C3AED),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            visualDensity: VisualDensity.compact,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                          ),
+                        ),
+                    ] else ...[
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Compact Report Incident button
+                          IconButton(
+                            onPressed: widget.onReportIncident,
+                            icon: const Icon(Icons.report_problem_outlined, size: 15, color: Color(0xFFDC2626)),
+                            tooltip: 'Report Incident (Snatched/Broken)',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                            visualDensity: VisualDensity.compact,
+                            style: IconButton.styleFrom(
+                              backgroundColor: const Color(0xFFDC2626).withValues(alpha: 0.08),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(7),
+                                side: BorderSide(color: const Color(0xFFDC2626).withValues(alpha: 0.2)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+
+                          // Compact Edit button
+                          IconButton(
+                            onPressed: widget.onEdit,
+                            icon: Icon(Icons.edit_rounded, size: 15, color: t.textSecondary),
+                            tooltip: 'Edit Box',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                            visualDensity: VisualDensity.compact,
+                            style: IconButton.styleFrom(
+                              backgroundColor: t.bgCardAlt,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(7),
+                                side: BorderSide(color: t.bgRule),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+
+                          // Primary Open Button (crisp, compact, thumb-friendly)
+                          Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: widget.onOpenBox,
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5.5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF047857).withValues(alpha: 0.08),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: const Color(0xFF047857).withValues(alpha: 0.25)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.lock_open_rounded, size: 13, color: Color(0xFF047857)),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Open',
+                                      style: GoogleFonts.plusJakartaSans(
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w800,
+                                        color: const Color(0xFF047857),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-
-                // Actions based on state
-                if (box.isCompromised) ...[
-                  if (box.replacedByBoxId != null) ...[
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF7C3AED).withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text('Replaced 🔄', style: GoogleFonts.plusJakartaSans(fontSize: 11, fontWeight: FontWeight.w800, color: const Color(0xFF7C3AED))),
-                    ),
-                  ] else ...[
-                    ElevatedButton.icon(
-                      onPressed: widget.onAssignReplacement,
-                      icon: const Icon(Icons.sync_alt_rounded, size: 13),
-                      label: const Text('Replace', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF7C3AED),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        visualDensity: VisualDensity.compact,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                    ),
                   ],
-                ] else ...[
-                  // Report Incident icon button
-                  IconButton(
-                    onPressed: widget.onReportIncident,
-                    icon: const Icon(Icons.report_problem_outlined, size: 17, color: Color(0xFFDC2626)),
-                    tooltip: 'Report Incident (Snatched/Stolen/Broken)',
-                    style: IconButton.styleFrom(
-                      padding: const EdgeInsets.all(8),
-                      backgroundColor: const Color(0xFFDC2626).withValues(alpha: 0.08),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  IconButton(
-                    onPressed: widget.onEdit,
-                    icon: Icon(Icons.edit_rounded, size: 18, color: t.textTertiary),
-                    tooltip: 'Edit Box',
-                    style: IconButton.styleFrom(
-                      padding: const EdgeInsets.all(8),
-                      backgroundColor: t.bgCardAlt,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  // Open button
-                  Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      onTap: widget.onOpenBox,
-                      borderRadius: BorderRadius.circular(10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF047857).withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFF047857).withValues(alpha: 0.2)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.lock_open_rounded, size: 14, color: Color(0xFF047857)),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Open',
-                              style: GoogleFonts.plusJakartaSans(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                color: const Color(0xFF047857),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ],
             ),
           ),

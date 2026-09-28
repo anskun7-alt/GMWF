@@ -2,21 +2,32 @@
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../theme/school_theme.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 import '../../../theme/role_theme_provider.dart';
 import '../../../theme/app_theme.dart';
 import '../../../design/design_system.dart';
 
 class SchoolOverviewView extends StatelessWidget {
   final String branchId;
+  final String userRole;
 
   const SchoolOverviewView({
     super.key,
     required this.branchId,
+    this.userRole = 'School Admin',
   });
 
   @override
   Widget build(BuildContext context) {
+    if (SchoolAuthHelper.isTeacher(userRole)) {
+      return const SchoolAccessDenied(
+        title: 'Executive Overview Restricted',
+        message: 'School institutional overview, administrative metrics, and enrollment analytics are restricted to School Principal, Administration, and Executives.',
+      );
+    }
+
     final t = RoleThemeScope.dataOf(context);
     final todayKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
@@ -95,7 +106,9 @@ class SchoolOverviewView extends StatelessWidget {
                           stream: SchoolLocalStorage.streamBookLoansCached(branchId),
                           builder: (context, loansSnap) {
                             final loans = loansSnap.data ?? [];
-                            final activeLoans = loans.where((l) => (l['status'] ?? 'issued') == 'issued' || (l['status'] ?? '') == 'borrowed').length;
+                            final activeLoans = loans.where((l) =>
+                                (l['status'] ?? 'issued') == 'issued' ||
+                                (l['status'] ?? '') == 'borrowed').length;
                             final availableBooks = (totalBooks - activeLoans).clamp(0, 999999);
 
                             return StreamBuilder<List<Map<String, dynamic>>>(
@@ -288,7 +301,7 @@ class SchoolOverviewView extends StatelessWidget {
                                               ),
                                               _buildMetricCard(
                                                 t: t,
-                                                title: 'Campus Campus ID',
+                                                title: 'Campus ID',
                                                 value: branchId.toUpperCase(),
                                                 subtitle: 'Secure Local Database',
                                                 icon: Icons.domain_rounded,

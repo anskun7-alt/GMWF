@@ -1226,6 +1226,10 @@ class MadrassaLocalStorage {
     final box = Hive.box(LocalStorageService.usersBox);
 
     final List<Map<String, dynamic>> teachers = [];
+    final Map<String, int> uidToIndex = {};
+    final Map<String, int> emailToIndex = {};
+    final Map<String, int> usernameToIndex = {};
+
     for (final k in box.keys) {
       final raw = box.get(k);
       if (raw == null || raw is! Map) continue;
@@ -1244,8 +1248,46 @@ class MadrassaLocalStorage {
           m['isDeleted'] == true;
 
       if (isMatchBranch && !isOffboarded) {
-        m['id'] = m['uid'] ?? m['id'] ?? k.toString().replaceAll('user:', '');
-        teachers.add(m);
+        final uid = (m['uid'] ?? m['id'] ?? '').toString().trim();
+        final email = (m['email'] ?? '').toString().trim().toLowerCase();
+        final username = (m['username'] ?? m['usernameLower'] ?? '').toString().trim().toLowerCase();
+
+        int? existingIndex;
+        if (uid.isNotEmpty && uid != 'null' && uidToIndex.containsKey(uid)) {
+          existingIndex = uidToIndex[uid];
+        } else if (email.isNotEmpty && email != 'null' && emailToIndex.containsKey(email)) {
+          existingIndex = emailToIndex[email];
+        } else if (username.isNotEmpty && username != 'null' && usernameToIndex.containsKey(username)) {
+          existingIndex = usernameToIndex[username];
+        }
+
+        m['id'] = uid.isNotEmpty && uid != 'null' ? uid : (m['id'] ?? k.toString().replaceAll('user:', ''));
+        m['uid'] = uid.isNotEmpty && uid != 'null' ? uid : m['id'];
+
+        if (existingIndex != null) {
+          final existing = teachers[existingIndex];
+          final merged = <String, dynamic>{...existing};
+          m.forEach((key, val) {
+            if (val != null && val.toString().trim().isNotEmpty && val != 'null') {
+              merged[key] = val;
+            }
+          });
+          teachers[existingIndex] = merged;
+
+          final finalUid = (merged['uid'] ?? merged['id'] ?? '').toString().trim();
+          final finalEmail = (merged['email'] ?? '').toString().trim().toLowerCase();
+          final finalUsername = (merged['username'] ?? merged['usernameLower'] ?? '').toString().trim().toLowerCase();
+
+          if (finalUid.isNotEmpty && finalUid != 'null') uidToIndex[finalUid] = existingIndex;
+          if (finalEmail.isNotEmpty && finalEmail != 'null') emailToIndex[finalEmail] = existingIndex;
+          if (finalUsername.isNotEmpty && finalUsername != 'null') usernameToIndex[finalUsername] = existingIndex;
+        } else {
+          final idx = teachers.length;
+          teachers.add(m);
+          if (uid.isNotEmpty && uid != 'null') uidToIndex[uid] = idx;
+          if (email.isNotEmpty && email != 'null') emailToIndex[email] = idx;
+          if (username.isNotEmpty && username != 'null') usernameToIndex[username] = idx;
+        }
       }
     }
 
@@ -1533,6 +1575,94 @@ class MadrassaLocalStorage {
       }
     } catch (e) {
       debugPrint('[MadrassaLocalStorage] Error downloading teacher attendance: $e');
+    }
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> getMonthlyTeacherAttendance({
+    required String branchId,
+    required int year,
+    required int month,
+  }) async {
+    final cleanBranch = branchId.toLowerCase().trim();
+    final box = await LocalStorageService.ensureBoxOpen(logsBox);
+    final monthPrefix = '${year.toString().padLeft(4, '0')}-${month.toString().padLeft(2, '0')}';
+    final result = <String, Map<String, dynamic>>{};
+
+    // 1. Collect all matching cached keys in Hive
+    final prefix = '${cleanBranch}__madrassa_tchlog__$monthPrefix';
+    for (final key in box.keys) {
+      if (key is String && key.startsWith(prefix)) {
+        final dateKey = key.substring('${cleanBranch}__madrassa_tchlog__'.length);
+        final raw = box.get(key);
+        if (raw is Map) {
+          result[dateKey] = Map<String, dynamic>.from(raw);
+        }
+      }
+    }
+
+    // 2. Fetch from Firestore for the whole month if online
+    try {
+      final startKey = '$monthPrefix-01';
+      final lastDay = DateTime(year, month + 1, 0).day;
+      final endKey = '$monthPrefix-${lastDay.toString().padLeft(2, '0')}';
+
+      final snap = await FirebaseFirestore.instance
+          .collection('branches')
+          .doc(cleanBranch)
+          .collection('madrassa_teacher_attendance')
+          .where(FieldPath.documentId, isGreaterThanOrEqualTo: startKey)
+          .where(FieldPath.documentId, isLessThanOrEqualTo: endKey)
+          .get();
+
+      for (final doc in snap.docs) {
+        final dKey = doc.id;
+        final data = doc.data();
+        result[dKey] = data;
+        final key = _teacherAttendanceKey(cleanBranch, dKey);
+        await box.put(key, _sanitize(data));
+      }
+      if (snap.docs.isNotEmpty) {
+        await box.flush();
+      }
+    } catch (e) {
+      debugPrint('[MadrassaLocalStorage] getMonthlyTeacherAttendance error: $e');
+    }
+
+    return result;
+  }
+
+  /// Downloads all related Madrassa data for the specified branch (students, teachers,
+  /// attendance, logs, fees, holidays, config) into local storage.
+  static Future<void> downloadAllMadrassaData(String branchId, {bool force = false}) async {
+    final cleanBranch = branchId.toLowerCase().trim();
+    if (cleanBranch.isEmpty || cleanBranch == 'all' || cleanBranch == 'unknown') return;
+
+    try {
+      final now = DateTime.now();
+      final todayKey = '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+      await Future.wait([
+        downloadStudents(cleanBranch, force: force),
+        downloadTeachers(cleanBranch, force: force),
+        downloadHolidays(cleanBranch),
+        downloadConfig(cleanBranch),
+        downloadLogsForMonth(cleanBranch, now.year, now.month),
+        downloadFeePaymentsForMonth(cleanBranch, now.year, now.month),
+        downloadTeacherAttendance(cleanBranch, todayKey),
+      ]);
+
+      // If early in the month (first 10 days), also ensure previous month's logs are available
+      if (now.day <= 10) {
+        final prevMonth = now.month == 1 ? 12 : now.month - 1;
+        final prevYear = now.month == 1 ? now.year - 1 : now.year;
+        await Future.wait([
+          downloadLogsForMonth(cleanBranch, prevYear, prevMonth),
+          downloadFeePaymentsForMonth(cleanBranch, prevYear, prevMonth),
+        ]);
+      }
+      debugPrint('[MadrassaLocalStorage] All Madrassa data downloaded successfully for $cleanBranch');
+    } catch (e) {
+      debugPrint('[MadrassaLocalStorage] Error in downloadAllMadrassaData for $cleanBranch: $e');
     }
   }
 }

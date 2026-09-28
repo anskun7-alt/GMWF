@@ -818,6 +818,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
                     // Update local storage in Hive and FlutterSecureStorage
                     widget.userData['password'] = newPw;
+                    widget.userData['passwordHash'] = LocalStorageService.hashPassword(newPw);
                     await LocalStorageService.saveLocalUser(widget.userData);
                     await offline_auth.OfflineAuthService.updateCachedPassword(newPw, usernameOrEmail: email);
                     await offline_auth.OfflineAuthService.saveCredentials(
@@ -825,6 +826,15 @@ class _SettingsPageState extends State<SettingsPage> {
                       password: newPw, 
                       userData: widget.userData
                     );
+                    final uname = (widget.userData['username'] ?? widget.userData['usernameLower'] ?? widget.userData['name'])?.toString().trim().toLowerCase();
+                    if (uname != null && uname.isNotEmpty && uname != email.toLowerCase()) {
+                      await offline_auth.OfflineAuthService.updateCachedPassword(newPw, usernameOrEmail: uname);
+                      await offline_auth.OfflineAuthService.saveCredentials(
+                        usernameOrEmail: uname, 
+                        password: newPw, 
+                        userData: widget.userData
+                      );
+                    }
 
                     // Sync over LAN Server if connected
                     try {

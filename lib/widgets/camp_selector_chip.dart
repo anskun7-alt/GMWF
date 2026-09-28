@@ -29,6 +29,22 @@ class CampSelectorChip extends StatefulWidget {
 
 class _CampSelectorChipState extends State<CampSelectorChip> {
   @override
+  void initState() {
+    super.initState();
+    CampSessionService.activeCampNotifier.addListener(_onActiveCampChanged);
+  }
+
+  @override
+  void dispose() {
+    CampSessionService.activeCampNotifier.removeListener(_onActiveCampChanged);
+    super.dispose();
+  }
+
+  void _onActiveCampChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
     final effBranch = widget.branchId ?? (() {
       try {
@@ -64,7 +80,7 @@ class _CampSelectorChipState extends State<CampSelectorChip> {
     final borderColor = widget.borderColor ?? Colors.white.withValues(alpha: 0.30);
 
     final isBound = CampSessionService.getBoundDispensaryId() != null;
-    final shiftName = switch (CampSessionService.getCurrentSession(null, effBranch)) {
+    final shiftName = switch (CampSessionService.getCurrentSession(null, effBranch, activeCampId)) {
       'morning' => 'Morning',
       'evening' => 'Evening',
       'night'   => 'Night',
@@ -136,7 +152,7 @@ class _CampSelectorChipState extends State<CampSelectorChip> {
       color: Colors.white,
       elevation: 4,
       onSelected: (selectedId) async {
-        await CampSessionService.setActiveCamp(selectedId);
+        await CampSessionService.setActiveCamp(selectedId, isManual: true);
         if (mounted) setState(() {});
         if (widget.onCampChanged != null) {
           widget.onCampChanged!(selectedId);

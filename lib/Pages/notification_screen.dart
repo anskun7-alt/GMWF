@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../services/local_storage_service.dart';
 import '../services/cloud_messaging_service.dart';
+import '../services/auto_update_service.dart';
 
 class NotificationScreen extends StatefulWidget {
   final String branchId;
@@ -466,7 +467,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
                 onTap: () async {
                   Navigator.pop(ctx);
                   await CloudMessagingService().dispatchAppUpdateAlert(
-                    newVersion: '1.5.4',
+                    newVersion: AutoUpdateService.currentVersion,
                     releaseNotes: 'Performance improvements, real-time sync upgrades, and enhanced notifications.',
                   );
                 },

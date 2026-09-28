@@ -1293,7 +1293,7 @@ class _DoctorScreenState extends State<DoctorScreen>
     return GmwfAppBar(
       title: 'Doctor Panel – ${_username ?? widget.doctorName}',
       subtitle: CampSessionService.getBranchAndCampDisplayName(
-        branchName: _branchName ?? 'Free Dispensary',
+        branchName: _branchName ?? LocalStorageService.getBranchName(widget.branchId),
         branchId: widget.branchId,
         campId: CampSessionService.getActiveCamp(widget.branchId),
       ),

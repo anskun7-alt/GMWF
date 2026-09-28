@@ -12,6 +12,7 @@ import '../models/school_grade.dart';
 import '../models/school_student.dart';
 import '../theme/school_theme.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 import '../constants/school_constants.dart';
 import '../../../design/design_system.dart';
 
@@ -47,9 +48,9 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
   final Map<String, TextEditingController> _remarksCtrls = {};
   bool _isSaving = false;
 
-  final List<String> _grades = SchoolConstants.grades;
+  List<String> _grades = SchoolConstants.grades;
   final List<String> _sections = ['A', 'B', 'C'];
-  final List<String> _subjects = [
+  List<String> _subjects = [
     'Mathematics',
     'English',
     'Urdu',
@@ -70,6 +71,54 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
   final List<String> _examTypes = ['Quiz', 'Assignment', 'Midterm', 'Final'];
   final List<String> _terms = ['Term 1', 'Term 2', 'Final Term'];
 
+  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+
+  @override
+  void initState() {
+    super.initState();
+    _initTeacherFilters();
+  }
+
+  @override
+  void didUpdateWidget(covariant SchoolGradingView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.userRole != widget.userRole ||
+        oldWidget.userName != widget.userName ||
+        oldWidget.branchId != widget.branchId) {
+      _initTeacherFilters();
+    }
+  }
+
+  void _initTeacherFilters() {
+    if (_isTeacher) {
+      final assignedGrades = SchoolAuthHelper.getTeacherAssignedGrades(
+        widget.branchId,
+        widget.userRole,
+        widget.userName,
+      );
+      final assignedSubjects = SchoolAuthHelper.getTeacherAssignedSubjects(
+        widget.branchId,
+        widget.userRole,
+        widget.userName,
+      );
+
+      if (assignedGrades.isNotEmpty) {
+        _grades = assignedGrades;
+        if (!_grades.contains(_selectedGrade)) {
+          _selectedGrade = _grades.first;
+        }
+      }
+      if (assignedSubjects.isNotEmpty) {
+        _subjects = assignedSubjects;
+        if (!_subjects.contains(_selectedSubject)) {
+          _selectedSubject = _subjects.first;
+        }
+      }
+    } else {
+      _grades = SchoolConstants.grades;
+    }
+  }
+
   @override
   void dispose() {
     for (final c in _marksCtrls.values) {
@@ -83,6 +132,12 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isTeacher && _grades.isEmpty) {
+      return const SchoolAccessDenied(
+        title: 'Grading Access Restricted',
+        message: 'You have not been assigned any classes for grade entry. Teachers can only enter and view grades for their assigned classes and subjects. Please contact your Principal or Admin.',
+      );
+    }
     final isAdmin = !widget.userRole.toLowerCase().contains('teacher') ||
         widget.userRole.toLowerCase().contains('admin') ||
         widget.userRole.toLowerCase().contains('principal');
@@ -385,8 +440,8 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
           if (_attachmentName == null)
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF0F766E),
-                side: const BorderSide(color: Color(0xFF0F766E)),
+                foregroundColor: SchoolTheme.primary,
+                side: const BorderSide(color: SchoolTheme.primary),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               ),
@@ -398,9 +453,9 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: const Color(0xFF0F766E).withValues(alpha: 0.1),
+                color: SchoolTheme.primaryLight,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFF0F766E).withValues(alpha: 0.3)),
+                border: Border.all(color: SchoolTheme.primary.withValues(alpha: 0.3)),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -410,7 +465,7 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
                         ? Icons.table_chart_rounded
                         : (_attachmentType == 'pdf' ? Icons.picture_as_pdf_rounded : Icons.insert_drive_file_rounded),
                     size: 16,
-                    color: const Color(0xFF0F766E),
+                    color: SchoolTheme.primary,
                   ),
                   const SizedBox(width: 6),
                   ConstrainedBox(
@@ -419,7 +474,7 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
                       _attachmentName!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F766E)),
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: SchoolTheme.primary),
                     ),
                   ),
                   const SizedBox(width: 4),
@@ -904,18 +959,18 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF0F766E).withValues(alpha: 0.08),
+                    color: SchoolTheme.primaryLight,
                     borderRadius: SchoolTheme.radius8,
-                    border: Border.all(color: const Color(0xFF0F766E).withValues(alpha: 0.2)),
+                    border: Border.all(color: SchoolTheme.primary.withValues(alpha: 0.2)),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.attach_file_rounded, color: Color(0xFF0F766E), size: 18),
+                      const Icon(Icons.attach_file_rounded, color: SchoolTheme.primary, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           'Attached Marksheet / Exam File: ${studentGrades.firstWhere((g) => g.attachmentName.isNotEmpty).attachmentName}',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F766E)),
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: SchoolTheme.primary),
                         ),
                       ),
                     ],

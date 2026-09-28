@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -173,7 +172,11 @@ class ImageUploadService {
     }
   }
 
+  static final Map<int, Uint8List> _b64Cache = {};
+
   /// Decodes Base64 data URI or raw Base64 string to Uint8List bytes.
+  /// Caches decoded bytes by content hash so Flutter's MemoryImage sees identical
+  /// object references and avoids disposing/re-decoding textures on every build pass.
   static Uint8List? decodeBase64ToBytes(String? input) {
     if (input == null || input.isEmpty) return null;
     try {
@@ -182,7 +185,18 @@ class ImageUploadService {
         clean = clean.split(',').last;
       }
       clean = clean.replaceAll(RegExp(r'\s+'), '');
-      return base64Decode(base64.normalize(clean));
+      if (clean.isEmpty) return null;
+
+      final hash = clean.hashCode;
+      final cached = _b64Cache[hash];
+      if (cached != null) return cached;
+
+      final decoded = base64Decode(base64.normalize(clean));
+      if (_b64Cache.length > 120) {
+        _b64Cache.remove(_b64Cache.keys.first);
+      }
+      _b64Cache[hash] = decoded;
+      return decoded;
     } catch (e) {
       debugPrint('[ImageUploadService] Base64 decode error: $e');
       return null;

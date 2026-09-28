@@ -7,6 +7,7 @@ import '../models/school_fee.dart';
 import '../models/school_student.dart';
 import '../theme/school_theme.dart';
 import '../utils/school_local_storage.dart';
+import '../utils/school_auth_helper.dart';
 import '../constants/school_constants.dart';
 import '../../../design/design_system.dart';
 
@@ -48,6 +49,12 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
 
   @override
   Widget build(BuildContext context) {
+    if (SchoolAuthHelper.isTeacher(widget.userRole)) {
+      return const SchoolAccessDenied(
+        title: 'Confidential Accounts & Fee Records',
+        message: 'Student fee management, defaulter records, and institutional collections are confidential administrative data reserved strictly for School Administration and Principal.',
+      );
+    }
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: SchoolLocalStorage.streamStudentsCached(widget.branchId),
       builder: (context, studentSnapshot) {

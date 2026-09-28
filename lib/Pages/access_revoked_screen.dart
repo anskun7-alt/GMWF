@@ -117,6 +117,143 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
         }
       }
     } catch (_) {}
+
+    // 3. For corrupted/orphan status, immediately attempt background auto-repair
+    final rawStatus = (widget.userData?['status'] ?? widget.reason ?? '').toString().toLowerCase();
+    if (rawStatus == 'corrupted' || widget.userData?['isCorruptedOrOrphanAuth'] == true) {
+      await _attemptAutoRepair(silent: true);
+    }
+  }
+
+  Future<void> _attemptAutoRepair({bool silent = false}) async {
+    if (!silent) setState(() => _checkingStatus = true);
+    try {
+      final uid = (widget.userData?['uid'] ?? widget.userData?['id'] ?? '').toString();
+      final email = (widget.userData?['email'] ?? '').toString().toLowerCase().trim();
+      final username = (widget.userData?['username'] ?? '').toString().toLowerCase().trim();
+
+      Map<String, dynamic>? foundProfile;
+
+      // 1. Check local Hive users
+      if (Hive.isBoxOpen('local_users')) {
+        final box = Hive.box('local_users');
+        for (final val in box.values) {
+          if (val is Map) {
+            final m = Map<String, dynamic>.from(val);
+            final uUid = (m['uid'] ?? m['id'] ?? '').toString();
+            final uEmail = (m['email'] ?? '').toString().toLowerCase().trim();
+            final uName = (m['username'] ?? m['name'] ?? '').toString().toLowerCase().trim();
+            if ((uid.isNotEmpty && uUid == uid) ||
+                (email.isNotEmpty && (uEmail == email || uEmail.startsWith('$username@'))) ||
+                (username.isNotEmpty && (uName == username || uEmail.startsWith('$username@')))) {
+              final r = (m['role'] ?? '').toString().toLowerCase().trim();
+              if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+                foundProfile = m;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Check local employees database
+      if (foundProfile == null && Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final empBox = Hive.box(LocalStorageService.employeesBox);
+        for (final val in empBox.values) {
+          if (val is Map) {
+            final e = Map<String, dynamic>.from(val);
+            final eEmail = (e['email'] ?? '').toString().toLowerCase().trim();
+            final eName = (e['name'] ?? e['fullName'] ?? '').toString().toLowerCase().trim();
+            final eId = (e['id'] ?? e['employeeId'] ?? '').toString().toLowerCase().trim();
+            if ((email.isNotEmpty && eEmail == email) ||
+                (username.isNotEmpty && (eName == username || eId == username))) {
+              foundProfile = {
+                ...e,
+                'uid': uid.isNotEmpty ? uid : (e['uid'] ?? eId),
+                'role': e['designation'] ?? e['role'] ?? 'staff',
+                'branchId': e['branchId'] ?? 'all',
+              };
+              break;
+            }
+          }
+        }
+      }
+
+      // 3. Check Firestore /users collection directly
+      if (foundProfile == null && (email.isNotEmpty || username.isNotEmpty)) {
+        try {
+          if (email.isNotEmpty) {
+            final snap = await FirebaseFirestore.instance
+                .collection('users')
+                .where('email', isEqualTo: email)
+                .limit(1)
+                .get()
+                .timeout(const Duration(seconds: 4));
+            if (snap.docs.isNotEmpty) {
+              foundProfile = snap.docs.first.data();
+            }
+          }
+          if (foundProfile == null && username.isNotEmpty) {
+            final snap = await FirebaseFirestore.instance
+                .collection('users')
+                .where('usernameLower', isEqualTo: username)
+                .limit(1)
+                .get()
+                .timeout(const Duration(seconds: 4));
+            if (snap.docs.isNotEmpty) {
+              foundProfile = snap.docs.first.data();
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (foundProfile != null) {
+        final healed = Map<String, dynamic>.from(widget.userData ?? {})..addAll(foundProfile);
+        final effectiveUid = uid.isNotEmpty ? uid : (healed['uid'] ?? healed['id'] ?? '').toString();
+        healed['uid'] = effectiveUid;
+        healed['status'] = 'active';
+        healed['accountStatus'] = 'active';
+        healed['isActive'] = true;
+        healed['isRevoked'] = false;
+        healed['accessRevoked'] = false;
+        healed['isCorruptedOrOrphanAuth'] = false;
+        healed['isDeleted'] = false;
+
+        await LocalStorageService.saveLocalUser(healed);
+        if (effectiveUid.isNotEmpty) {
+          try {
+            await FirebaseFirestore.instance.collection('users').doc(effectiveUid).set(
+              healed,
+              SetOptions(merge: true),
+            ).timeout(const Duration(seconds: 5));
+          } catch (_) {}
+        }
+
+        if (mounted) {
+          setState(() {
+            _accessRestored = true;
+            _restoreRequestPending = false;
+            _checkingStatus = false;
+          });
+          _showSnack('🎉 Profile verified & restored! Returning to login...', success: true);
+          await Future.delayed(const Duration(seconds: 2));
+          if (mounted) {
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const LoginPage()),
+              (route) => false,
+            );
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('[AccessRevokedScreen] Auto-repair attempt error: $e');
+    }
+
+    if (mounted && !silent) {
+      setState(() => _checkingStatus = false);
+      _showSnack('Could not automatically resolve your profile. Please submit a request to admin.');
+    }
   }
 
   @override
@@ -540,8 +677,10 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
         widget.userData?['username']?.toString() ??
         '';
     final branch = widget.userData?['branchId'] ?? 'HQ';
-    final rawStatus = widget.userData?['status']?.toString() ?? 'revoked';
-    final status = rawStatus.toUpperCase();
+    final rawStatus = (widget.reason ?? widget.userData?['status'] ?? 'revoked').toString().toLowerCase().trim();
+    final isDeleted = rawStatus == 'deleted' || widget.userData?['isDeleted'] == true;
+    final isCorrupted = rawStatus == 'corrupted' || widget.userData?['isCorruptedOrOrphanAuth'] == true;
+    final status = isDeleted ? 'DELETED' : (isCorrupted ? 'PROFILE MISSING' : rawStatus.toUpperCase());
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
@@ -583,9 +722,11 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                           color: const Color(0xFFEF4444).withValues(alpha: 0.3),
                           width: 2),
                     ),
-                    child: const Icon(
-                      Icons.no_accounts_rounded,
-                      color: Color(0xFFEF4444),
+                    child: Icon(
+                      isCorrupted
+                          ? Icons.warning_amber_rounded
+                          : (isDeleted ? Icons.delete_forever_rounded : Icons.no_accounts_rounded),
+                      color: const Color(0xFFEF4444),
                       size: 46,
                     ),
                   ),
@@ -593,10 +734,12 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                 const SizedBox(height: 24),
 
                 // Main Title
-                const Text(
-                  'Access Revoked',
+                Text(
+                  isCorrupted
+                      ? 'Account Profile Missing'
+                      : (isDeleted ? 'Account Deleted' : 'Access Revoked'),
                   textAlign: TextAlign.center,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 26,
                     fontWeight: FontWeight.bold,
                     color: Colors.white,
@@ -604,21 +747,31 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                 ),
                 const SizedBox(height: 8),
 
-                // Thank you subtitle
+                // Subtitle
                 Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF334155),
+                    color: isCorrupted || isDeleted
+                        ? const Color(0xFFEF4444).withValues(alpha: 0.15)
+                        : const Color(0xFF334155),
                     borderRadius: BorderRadius.circular(10),
+                    border: isCorrupted || isDeleted
+                        ? Border.all(color: const Color(0xFFEF4444).withValues(alpha: 0.3))
+                        : null,
                   ),
                   child: Text(
-                    'Thank you for your services',
+                    isCorrupted
+                        ? 'Authentication exists, but account data is not found or corrupted'
+                        : (isDeleted
+                            ? 'This account has been permanently deleted'
+                            : 'Thank you for your services'),
+                    textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: Colors.grey.shade300,
+                      color: isCorrupted || isDeleted ? const Color(0xFFFCA5A5) : Colors.grey.shade300,
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      fontStyle: FontStyle.italic,
+                      fontStyle: (isCorrupted || isDeleted) ? FontStyle.normal : FontStyle.italic,
                     ),
                   ),
                 ),
@@ -694,15 +847,19 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(color: const Color(0xFF334155)),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
-                        Icon(Icons.info_outline_rounded,
+                        const Icon(Icons.info_outline_rounded,
                             color: Color(0xFFEF4444), size: 22),
-                        SizedBox(width: 12),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Your app access has been revoked. If you believe this is a mistake, request the HQ Manager to restore your account.',
-                            style: TextStyle(
+                            isCorrupted
+                                ? 'Your login credentials exist, but your account profile is missing or corrupted. Please contact your system administrator to restore or re-register your profile.'
+                                : (isDeleted
+                                    ? 'This account was deleted by an administrator. You can no longer access this application with these credentials. Please contact your system administrator.'
+                                    : 'Your app access has been revoked. If you believe this is a mistake, request the HQ Manager to restore your account.'),
+                            style: const TextStyle(
                               color: Color(0xFF94A3B8),
                               fontSize: 13,
                               height: 1.4,
@@ -780,6 +937,33 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                       ),
                     ),
                   ] else ...[
+                    if (isCorrupted) ...[
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _checkingStatus ? null : () => _attemptAutoRepair(silent: false),
+                          icon: _checkingStatus
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.auto_fix_high_rounded, size: 20),
+                          label: Text(
+                            _checkingStatus ? 'Checking & Repairing...' : 'Auto-Repair & Sync Account',
+                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF10B981),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            elevation: 0,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                     // Submit Request to HQ Manager
                     SizedBox(
                       width: double.infinity,
@@ -798,11 +982,13 @@ class _AccessRevokedScreenState extends State<AccessRevokedScreen>
                         label: Text(
                           _submittingRequest
                               ? 'Submitting Request...'
-                              : 'Think this is a mistake? Request Access Back',
+                              : (isDeleted || isCorrupted
+                                  ? 'Contact Admin / Submit Inquiry'
+                                  : 'Think this is a mistake? Request Access Back'),
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                         ),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF22C55E),
+                          backgroundColor: isCorrupted ? const Color(0xFF334155) : const Color(0xFF22C55E),
                           foregroundColor: Colors.white,
                           disabledBackgroundColor: const Color(0xFF22C55E).withValues(alpha: 0.5),
                           padding: const EdgeInsets.symmetric(vertical: 16),

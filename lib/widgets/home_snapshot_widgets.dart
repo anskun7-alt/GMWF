@@ -3451,21 +3451,22 @@ Future<SnapshotDashboardData> fetchSnapshotDashboardData(Map<String, dynamic> us
 
     statsMap.forEach((bId, value) {
       if (bId == 'karachi') {
+        final hasCampBreakdown = karachiCamps.totalPatients > 0;
         final hajiToday = BranchStats(
-          zakat: karachiCamps.hajiCampZakat,
-          nonZakat: karachiCamps.hajiCampNonZakat,
-          gmwf: karachiCamps.hajiCampGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.hajiCampZakat : 0,
+          nonZakat: hasCampBreakdown ? karachiCamps.hajiCampNonZakat : 0,
+          gmwf: hasCampBreakdown ? karachiCamps.hajiCampGmwf : 0,
           prescribed: value.today.prescribed,
-          dispensaryRevenue: karachiCamps.hajiCampRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.hajiCampRevenue : 0,
           donations: 0,
         );
 
         final saddarToday = BranchStats(
-          zakat: karachiCamps.kapayaZakat,
-          nonZakat: karachiCamps.kapayaNonZakat,
-          gmwf: karachiCamps.kapayaGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.kapayaZakat : value.today.zakat,
+          nonZakat: hasCampBreakdown ? karachiCamps.kapayaNonZakat : value.today.nonZakat,
+          gmwf: hasCampBreakdown ? karachiCamps.kapayaGmwf : value.today.gmwf,
           prescribed: value.today.prescribed,
-          dispensaryRevenue: karachiCamps.kapayaRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.kapayaRevenue : value.today.dispensaryRevenue,
           donations: value.today.donations,
           dasterkhwaan: value.today.dasterkhwaan,
           dasterkhwaanServed: value.today.dasterkhwaanServed,
@@ -3687,7 +3688,7 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
     }
     final branchIds = cleanBranchIds.toList();
 
-    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds, allowRemoteFallback: false);
+    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds, allowRemoteFallback: isGlobalExec);
     final weeklyPatients = await fetchWeeklyPatientCounts(branchIds);
     final List<HomeBranchRow> branchRows = [];
     final List<BranchStats> todayStatsList = [];
@@ -3697,21 +3698,22 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
 
     statsMap.forEach((bId, value) {
       if (bId == 'karachi') {
+        final hasCampBreakdown = karachiCamps.totalPatients > 0;
         final hajiToday = BranchStats(
-          zakat: karachiCamps.hajiCampZakat,
-          nonZakat: karachiCamps.hajiCampNonZakat,
-          gmwf: karachiCamps.hajiCampGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.hajiCampZakat : 0,
+          nonZakat: hasCampBreakdown ? karachiCamps.hajiCampNonZakat : 0,
+          gmwf: hasCampBreakdown ? karachiCamps.hajiCampGmwf : 0,
           prescribed: value.today.prescribed,
-          dispensaryRevenue: karachiCamps.hajiCampRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.hajiCampRevenue : 0,
           donations: 0,
         );
 
         final saddarToday = BranchStats(
-          zakat: karachiCamps.kapayaZakat,
-          nonZakat: karachiCamps.kapayaNonZakat,
-          gmwf: karachiCamps.kapayaGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.kapayaZakat : value.today.zakat,
+          nonZakat: hasCampBreakdown ? karachiCamps.kapayaNonZakat : value.today.nonZakat,
+          gmwf: hasCampBreakdown ? karachiCamps.kapayaGmwf : value.today.gmwf,
           prescribed: value.today.prescribed,
-          dispensaryRevenue: karachiCamps.kapayaRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.kapayaRevenue : value.today.dispensaryRevenue,
           donations: value.today.donations,
           dasterkhwaan: value.today.dasterkhwaan,
           dasterkhwaanServed: value.today.dasterkhwaanServed,
@@ -3783,15 +3785,16 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
     final List<HomeBranchRow> branchRows = [];
     if (branchId == 'karachi') {
       final karachiCamps = await fetchKarachiCampBreakdown();
+      final hasCampBreakdown = karachiCamps.totalPatients > 0;
       branchRows.add(HomeBranchRow(
         id: 'karachi_saddar',
         name: 'Karachi — Saddar Dispensary',
         today: BranchStats(
-          zakat: karachiCamps.kapayaZakat,
-          nonZakat: karachiCamps.kapayaNonZakat,
-          gmwf: karachiCamps.kapayaGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.kapayaZakat : todayStats.zakat,
+          nonZakat: hasCampBreakdown ? karachiCamps.kapayaNonZakat : todayStats.nonZakat,
+          gmwf: hasCampBreakdown ? karachiCamps.kapayaGmwf : todayStats.gmwf,
           prescribed: todayStats.prescribed,
-          dispensaryRevenue: karachiCamps.kapayaRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.kapayaRevenue : todayStats.dispensaryRevenue,
           donations: todayStats.donations,
           dasterkhwaan: todayStats.dasterkhwaan,
           dasterkhwaanServed: todayStats.dasterkhwaanServed,
@@ -3803,11 +3806,11 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
         id: 'karachi_haji',
         name: 'Karachi — Haji Camp Dispensary',
         today: BranchStats(
-          zakat: karachiCamps.hajiCampZakat,
-          nonZakat: karachiCamps.hajiCampNonZakat,
-          gmwf: karachiCamps.hajiCampGmwf,
+          zakat: hasCampBreakdown ? karachiCamps.hajiCampZakat : 0,
+          nonZakat: hasCampBreakdown ? karachiCamps.hajiCampNonZakat : 0,
+          gmwf: hasCampBreakdown ? karachiCamps.hajiCampGmwf : 0,
           prescribed: todayStats.prescribed,
-          dispensaryRevenue: karachiCamps.hajiCampRevenue,
+          dispensaryRevenue: hasCampBreakdown ? karachiCamps.hajiCampRevenue : 0,
           donations: 0,
         ),
         yesterday: yesterdayStats,
