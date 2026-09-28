@@ -886,9 +886,10 @@ Future<KarachiCampBreakdown> fetchKarachiCampBreakdown([DateTime? date]) async {
       }
     }
 
+    final serialUpper = (e['serial'] ?? e['tokenNumber'] ?? e['token'] ?? '').toString().toUpperCase();
     final cat = (e['category'] ?? e['queueType'] ?? e['type'] ?? '').toString().toLowerCase().trim();
-    final isZakat = cat.contains('zakat') && !cat.contains('non');
-    final isNonZakat = cat.contains('non-zakat') || cat.contains('nonzakat') || cat.contains('non_zakat');
+    final isGmwf = cat.contains('gmwf') || cat.contains('free') || e['isFreeToken'] == true || serialUpper.contains('-G-');
+    final isNonZakat = !isGmwf && (cat.contains('non-zakat') || cat.contains('nonzakat') || cat.contains('non_zakat') || serialUpper.contains('-NZ-') || serialUpper.contains('NZ'));
 
     final feeVal = e['fee'] ?? e['tokenFee'] ?? e['amount'] ?? e['price'] ?? e['dispensaryRevenue'];
     int eRev = 0;
@@ -897,25 +898,53 @@ Future<KarachiCampBreakdown> fetchKarachiCampBreakdown([DateTime? date]) async {
     } else {
       final daysRaw = e['daysOfMedicine'] ?? 1;
       final days = (daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw.toString()) ?? 1);
-      if (isZakat) eRev = 20 * days;
-      else if (isNonZakat) eRev = 100 * days;
-      else eRev = 20 * days; // Default Karachi token fee
+      if (isGmwf) {
+        eRev = 0;
+      } else if (isNonZakat) {
+        eRev = 100 * days;
+      } else {
+        eRev = 20 * days; // Default Karachi token fee (Zakat Rs 20)
+      }
     }
 
     if (isExplicitHaji) {
       hajiRev += eRev;
       if (isEvening) {
-        if (isZakat) hajiEZ++; else if (isNonZakat) hajiENZ++; else hajiEGM++;
+        if (isGmwf) {
+          hajiEGM++;
+        } else if (isNonZakat) {
+          hajiENZ++;
+        } else {
+          hajiEZ++;
+        }
       } else {
-        if (isZakat) hajiMZ++; else if (isNonZakat) hajiMNZ++; else hajiMGM++;
+        if (isGmwf) {
+          hajiMGM++;
+        } else if (isNonZakat) {
+          hajiMNZ++;
+        } else {
+          hajiMZ++;
+        }
       }
     } else {
       // All other Karachi patient data attributes to Saddar (Kapaya) Camp
       kapayaRev += eRev;
       if (isEvening) {
-        if (isZakat) kapayaEZ++; else if (isNonZakat) kapayaENZ++; else kapayaEGM++;
+        if (isGmwf) {
+          kapayaEGM++;
+        } else if (isNonZakat) {
+          kapayaENZ++;
+        } else {
+          kapayaEZ++;
+        }
       } else {
-        if (isZakat) kapayaMZ++; else if (isNonZakat) kapayaMNZ++; else kapayaMGM++;
+        if (isGmwf) {
+          kapayaMGM++;
+        } else if (isNonZakat) {
+          kapayaMNZ++;
+        } else {
+          kapayaMZ++;
+        }
       }
     }
   }

@@ -16,6 +16,7 @@ import '../services/local_storage_service.dart';
 import '../services/finance_local_storage.dart';
 import '../services/serials_service.dart';
 import '../services/camp_session_service.dart';
+import '../services/quota_service.dart';
 
 import 'package:rxdart/rxdart.dart';
 import 'package:flutter/foundation.dart';
@@ -142,6 +143,9 @@ final branchMultiVisitFilterProvider = StateProvider<bool>((ref) => false);
 /// Selected stage filter: 'all', 'waiting_doctor', 'waiting_dispensary', 'dispensed'
 final branchStageFilterProvider = StateProvider<String>((ref) => 'all');
 
+/// Selected token category filter: 'all', 'vitals', 'normal'
+final branchTokenCategoryFilterProvider = StateProvider<String>((ref) => 'all');
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Reverted-patient IDs  (patients whose frequent-flag has been dismissed)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +189,7 @@ class DispensaryNotifier
     extends AutoDisposeFamilyNotifier<DispensaryState, String> {
   StreamSubscription? _todaySubscription;
   String? _subscribedTodayKey;
+  static final Map<String, DateTime> _lastFirestoreFetch = {};
 
   // The branchId is available as `arg` from the family provider, normalized to lowercase.
   String get branchId => arg.toLowerCase().trim();
@@ -376,7 +381,7 @@ class DispensaryNotifier
       currentList.removeWhere((item) => item['dispenseDate'] == todayDisplayStr);
       currentList.addAll(enrichedToday);
       await _computeVisitsAndEmit(currentList);
-    } catch (e, stack) {
+    } catch (e) {
       print('[DispensaryNotifier] _fetchAndMergeToday error: $e');
     }
   }
@@ -450,6 +455,15 @@ class DispensaryNotifier
     }
 
     final branchIds = <String>{};
+    // Seed with all known registered local branches
+    for (final b in _getLocalBranchesList(null)) {
+      final id = (b['id'] ?? '').toString().toLowerCase().trim();
+      if (id.isNotEmpty && id != 'all' && id != 'global') {
+        branchIds.add(id);
+      }
+    }
+    branchIds.addAll(['karachi', 'gujrat', 'sialkot', 'rawalpindi', 'jalalpur_jattan']);
+
     try {
       final connectivity = await Connectivity().checkConnectivity();
       if (connectivity.any((r) => r != ConnectivityResult.none)) {
@@ -466,7 +480,7 @@ class DispensaryNotifier
       for (final value in box.values) {
         if (value is Map) {
           final id = value['branchId']?.toString().toLowerCase().trim() ?? '';
-          if (id.isNotEmpty) branchIds.add(id);
+          if (id.isNotEmpty && id != 'all' && id != 'global') branchIds.add(id);
         }
       }
     }
@@ -500,19 +514,161 @@ class DispensaryNotifier
       'waiting_for_dispense'
     };
 
-    // 1. Local-first search: prefer Hive / cached data before any network fetch.
+    bool isMatchingBranch(String docBranchId, String targetId, String serial) {
+      final b1 = docBranchId.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
+      final b2 = targetId.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
+      if (b2 == 'all' || b2 == 'global' || b2.isEmpty) return true;
+
+      final sUpper = serial.toUpperCase();
+      if (b2 == 'karachi' || b2.contains('karachi') || b2.contains('saddar') || b2.contains('haji')) {
+        if (b1.contains('karachi') || b1.contains('haji') || b1.contains('saddar') || b1.contains('kap')) return true;
+        if (sUpper.contains('SADD') || sUpper.contains('HAJI') || sUpper.contains('KAP') || sUpper.contains('HC')) return true;
+      }
+      if (b2.contains('gujrat') || b2 == 'grt' || b2 == 'gjt') {
+        if (b1.contains('gujrat') || b1.contains('grt') || b1.contains('gjt')) return true;
+        if (sUpper.contains('GRT') || sUpper.contains('GJT')) return true;
+      }
+      if (b2.contains('sialkot') || b2 == 'skt') {
+        if (b1.contains('sialkot') || b1.contains('skt')) return true;
+        if (sUpper.contains('SKT')) return true;
+      }
+      if (b2.contains('jalalpur') || b2 == 'jlj') {
+        if (b1.contains('jalalpur') || b1.contains('jlj') || b1.contains('jpj')) return true;
+        if (sUpper.contains('JLJ') || sUpper.contains('JPJ')) return true;
+      }
+      if (b2.contains('rawalpindi') || b2 == 'rwp') {
+        if (b1.contains('rawalpindi') || b1.contains('rwp')) return true;
+        if (sUpper.contains('RWP')) return true;
+      }
+      if (b1.isEmpty) {
+        return b2 == 'karachi';
+      }
+      return b1 == b2 || b1.contains(b2) || b2.contains(b1);
+    }
+
+    String cleanSerialKey(String raw) {
+      var s = raw.trim().toLowerCase();
+      for (final prefix in [
+        'karachi-',
+        'gujrat-',
+        'sialkot-',
+        'rawalpindi-',
+        'grt-',
+        'skt-',
+        'rwp-',
+      ]) {
+        if (s.startsWith(prefix)) {
+          s = s.substring(prefix.length);
+          break;
+        }
+      }
+      if (s.contains('_')) {
+        final p = s.split('_');
+        if (p.length > 2 &&
+            (p[0] == 'karachi' || p[0] == 'gujrat' || p[0] == 'sialkot')) {
+          s = p.sublist(2).join('_');
+        }
+      }
+      return s;
+    }
+
+    String getNumericSuffix(String raw) {
+      final parts = raw.trim().split(RegExp(r'[-_]'));
+      return parts.isNotEmpty ? parts.last.toLowerCase() : raw.toLowerCase();
+    }
+
+    void mergeIntoCombined(Map<String, dynamic> incoming, {String? keyHint}) {
+      final rawS = (incoming['serial'] ?? incoming['id'] ?? keyHint ?? '').toString().trim().toLowerCase();
+      if (rawS.isEmpty) return;
+      final cleanS = cleanSerialKey(rawS);
+      final numSuffix = getNumericSuffix(cleanS);
+
+      // Find if an existing entry matches exact serial or numeric suffix with same camp
+      String targetKey = cleanS;
+      if (!combined.containsKey(targetKey)) {
+        for (final k in combined.keys) {
+          if (k == cleanS || k.endsWith('-$cleanS') || cleanS.endsWith('-$k')) {
+            targetKey = k;
+            break;
+          }
+          if (numSuffix.isNotEmpty && numSuffix.length >= 2) {
+            final kSuffix = getNumericSuffix(k);
+            if (kSuffix == numSuffix) {
+              final kIsSadd = k.contains('sadd');
+              final sIsSadd = cleanS.contains('sadd');
+              final kIsHaji = k.contains('haji');
+              final sIsHaji = cleanS.contains('haji');
+              if ((kIsSadd && sIsSadd) || (kIsHaji && sIsHaji) || (!kIsSadd && !kIsHaji && !sIsSadd && !sIsHaji)) {
+                targetKey = k;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      final existing = combined[targetKey];
+      if (existing == null) {
+        combined[targetKey] = Map<String, dynamic>.from(incoming);
+      } else {
+        final merged = Map<String, dynamic>.from(existing);
+        incoming.forEach((k, v) {
+          if (v == null || v == '') return;
+          final strV = v.toString().trim();
+          final isIncomingUnknown = strV.toLowerCase() == 'unknown' || strV.toLowerCase() == 'unknown patient';
+          final existingVal = merged[k];
+          final existingStr = existingVal?.toString().trim() ?? '';
+          final isExistingUnknown = existingVal == null || existingStr.isEmpty || existingStr.toLowerCase() == 'unknown' || existingStr.toLowerCase() == 'unknown patient';
+
+          if (isExistingUnknown && !isIncomingUnknown) {
+            merged[k] = v;
+          } else if (existingVal == null || existingStr.isEmpty) {
+            merged[k] = v;
+          }
+        });
+        final exSerial = (merged['serial'] ?? '').toString();
+        final inSerial = (incoming['serial'] ?? '').toString();
+        if (inSerial.length > exSerial.length) {
+          merged['serial'] = inSerial;
+        }
+        combined[targetKey] = merged;
+      }
+    }
+
+    // 1. Cached day records
     try {
       final cached = LocalStorageService.getBranchDayCache(targetBranchId, dayKey, 'dispensary');
       if (cached != null) {
         for (final d in cached) {
           final map = Map<String, dynamic>.from(d);
           map['branchId'] ??= targetBranchId;
-          final s = (map['serial'] ?? map['id'] ?? '').toString().trim().toLowerCase();
-          if (s.isNotEmpty) combined[s] = map;
+          mergeIntoCombined(map);
         }
       }
     } catch (_) {}
 
+    // 2. Local entriesBox (receptionist registered patient entries with full patient data)
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+        final eBox = Hive.box(LocalStorageService.entriesBox);
+        for (final k in eBox.keys) {
+          final val = eBox.get(k);
+          if (val is Map) {
+            final d = Map<String, dynamic>.from(val);
+            final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
+            final s = (d['serial'] ?? k).toString();
+            final dk = (d['dateKey'] ?? '').toString().trim();
+            final status = (d['dispenseStatus'] ?? d['status'] ?? '').toString().toLowerCase().trim();
+            final matchBranch = isMatchingBranch(b, targetBranchId, s);
+            if (matchBranch && dk == dayKey && (status.isEmpty || activeStatuses.contains(status) || status.contains('waiting') || status.contains('prescribed') || status.contains('dispensed'))) {
+              mergeIntoCombined(d, keyHint: k.toString());
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3. Local dispensaryBox (dispense records)
     try {
       if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
         final dBox = Hive.box(LocalStorageService.dispensaryBox);
@@ -522,104 +678,195 @@ class DispensaryNotifier
             final d = Map<String, dynamic>.from(val);
             d['branchId'] ??= targetBranchId;
             final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
+            final s = (d['serial'] ?? k).toString();
             final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
-            final matchBranch = targetBranchId == 'all' || targetBranchId.isEmpty || b == targetBranchId || b.isEmpty;
+            final matchBranch = isMatchingBranch(b, targetBranchId, s);
             if (matchBranch && (dk == dayKey || dk.isEmpty)) {
-              final s = (d['serial'] ?? d['id'] ?? k).toString().trim().toLowerCase();
-              if (s.isNotEmpty && !combined.containsKey(s)) combined[s] = d;
+              mergeIntoCombined(d, keyHint: k.toString());
             }
           }
         }
       }
     } catch (_) {}
 
+    // 4. Local prescriptionsBox (clinical consultation records & vitals)
     try {
-      if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
-        final eBox = Hive.box(LocalStorageService.entriesBox);
-        for (final k in eBox.keys) {
-          final val = eBox.get(k);
+      if (Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
+        final pBox = Hive.box(LocalStorageService.prescriptionsBox);
+        for (final k in pBox.keys) {
+          final val = pBox.get(k);
           if (val is Map) {
             final d = Map<String, dynamic>.from(val);
             final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
-            final dk = (d['dateKey'] ?? '').toString().trim();
-            final status = (d['dispenseStatus'] ?? d['status'] ?? '').toString().toLowerCase().trim();
-            final matchBranch = targetBranchId == 'all' || targetBranchId.isEmpty || b == targetBranchId || b.isEmpty;
-            if (matchBranch && dk == dayKey && (status.isEmpty || activeStatuses.contains(status) || status.contains('waiting') || status.contains('prescribed') || status.contains('dispensed'))) {
-              final s = (d['serial'] ?? d['id'] ?? k).toString().trim().toLowerCase();
-              final parts = s.split('-');
-              final canonical = parts.length > 2 ? '${parts[1]}-${parts[2]}' : (parts.length > 1 ? '${parts[0]}-${parts[1]}' : s);
-                final existingKey = combined.containsKey(s)
-                  ? s
-                  : (combined.containsKey(canonical) ? canonical : s);
-                final existing = combined[existingKey];
-                combined[existingKey] = {...?existing, ...d};
+            final s = (d['serial'] ?? k).toString();
+            final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
+            final matchBranch = isMatchingBranch(b, targetBranchId, s);
+            if (matchBranch && (dk == dayKey || dk.isEmpty)) {
+              mergeIntoCombined(d, keyHint: k.toString());
             }
           }
         }
       }
     } catch (_) {}
 
-    // If local data is already populated, return it without hitting Firestore
-    if (combined.isNotEmpty) {
-      return combined.values.toList();
-    }
-
-    final connectivity = await Connectivity().checkConnectivity();
-    final hasNetwork = connectivity.any((r) => r != ConnectivityResult.none);
-    if (!hasNetwork) {
-      return combined.values.toList();
-    }
-
-    // 2. FALLBACK: Only fetch remote data when local data is completely empty.
-    final firestoreBranch = (targetBranchId.isEmpty || targetBranchId == 'all') ? 'karachi' : targetBranchId;
+    // 5. Enrich missing patient demographics from local_patients (patientsBox)
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection('branches/$firestoreBranch/dispensary/$dayKey/$dayKey')
-          .get()
-          .timeout(const Duration(seconds: 4));
-      for (final doc in snap.docs) {
-        final d = Map<String, dynamic>.from(doc.data());
-        d['id'] = doc.id;
-        d['branchId'] ??= firestoreBranch;
-        final s = (d['serial'] ?? doc.id).toString().trim().toLowerCase();
-        if (s.isNotEmpty && !combined.containsKey(s)) combined[s] = d;
+      if (Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+        final patBox = Hive.box(LocalStorageService.patientsBox);
+        for (final entry in combined.values) {
+          final pName = (entry['patientName'] ?? entry['name'] ?? '').toString().trim();
+          final isUnknown = pName.isEmpty || pName.toLowerCase() == 'unknown' || pName.toLowerCase() == 'unknown patient';
+          if (isUnknown) {
+            final pCnic = (entry['patientCnic'] ?? entry['cnic'] ?? entry['guardianCnic'] ?? '').toString().replaceAll('-', '').replaceAll(' ', '').trim();
+            final pId = (entry['patientId'] ?? entry['id'] ?? '').toString().trim();
+            Map<String, dynamic>? foundPatient;
+            if (pCnic.isNotEmpty && pCnic != '0000000000000' && patBox.containsKey(pCnic)) {
+              final raw = patBox.get(pCnic);
+              if (raw is Map) foundPatient = Map<String, dynamic>.from(raw);
+            }
+            if (foundPatient == null && pId.isNotEmpty && patBox.containsKey(pId)) {
+              final raw = patBox.get(pId);
+              if (raw is Map) foundPatient = Map<String, dynamic>.from(raw);
+            }
+            if (foundPatient != null) {
+              entry['patientName'] ??= foundPatient['name'] ?? foundPatient['patientName'];
+              entry['name'] ??= foundPatient['name'] ?? foundPatient['patientName'];
+              entry['patientCnic'] ??= foundPatient['cnic'] ?? foundPatient['patientCnic'];
+              entry['cnic'] ??= foundPatient['cnic'] ?? foundPatient['patientCnic'];
+              entry['patientPhone'] ??= foundPatient['phone'] ?? foundPatient['contactPhone'];
+              entry['phone'] ??= foundPatient['phone'] ?? foundPatient['contactPhone'];
+              entry['age'] ??= foundPatient['age'] ?? foundPatient['patientAge'];
+              entry['gender'] ??= foundPatient['gender'] ?? foundPatient['patientGender'];
+            }
+          }
+        }
       }
     } catch (_) {}
 
+    // 6. Network sync with Firestore to fill in any online registered tokens / remote updates
     try {
-      final queues = ['zakat', 'non-zakat', 'gmwf'];
-      final dateDocIds = CampSessionService.getAllCampDateDocIds(
-        branchId: firestoreBranch,
-        dateKey: dayKey,
-      );
-      final serialDocs = await Future.wait<List<QueryDocumentSnapshot<Map<String, dynamic>>>>([
-        for (final dateDocId in dateDocIds)
-          for (final q in queues)
-            FirebaseFirestore.instance
-                .collection('branches/$firestoreBranch/serials/$dateDocId/$q')
-                .get()
-                .timeout(const Duration(seconds: 3))
-                .then((snap) => snap.docs)
-                .catchError((_) => <QueryDocumentSnapshot<Map<String, dynamic>>>[]),
-      ]);
-      for (final docs in serialDocs) {
-        for (final doc in docs) {
+      if (QuotaService.isQuotaExhausted) {
+        return combined.values.toList();
+      }
+
+      final fetchKey = '$targetBranchId-$dayKey';
+      final lastFetch = _lastFirestoreFetch[fetchKey];
+      final isRecentlyFetched = lastFetch != null &&
+          DateTime.now().difference(lastFetch).inSeconds < 120;
+      final hasUnknownPatients = combined.values.any((e) {
+        final name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
+        return name.isEmpty || name == 'unknown' || name == 'unknown patient';
+      });
+
+      // Quota Protection: If all patient data is already locally known and complete,
+      // and we checked Firestore within the last 2 minutes, avoid unnecessary reads.
+      if (isRecentlyFetched && !hasUnknownPatients && combined.isNotEmpty) {
+        return combined.values.toList();
+      }
+
+      final connectivity = await Connectivity().checkConnectivity();
+      final hasNetwork = connectivity.any((r) => r != ConnectivityResult.none);
+      if (hasNetwork) {
+        _lastFirestoreFetch[fetchKey] = DateTime.now();
+        // Standalone branches check: Gujrat might be stored in Firestore as 'gujrat' or 'grt', Sialkot as 'sialkot' or 'skt'
+        final candidateBranches = <String>{};
+        if (targetBranchId.isEmpty || targetBranchId == 'all') {
+          candidateBranches.addAll(['karachi', 'gujrat', 'sialkot', 'rawalpindi', 'jalalpur_jattan']);
+        } else {
+          final t = targetBranchId.toLowerCase().trim();
+          candidateBranches.add(t);
+          if (t == 'gujrat' || t == 'grt' || t == 'gjt') {
+            candidateBranches.addAll(['gujrat', 'grt']);
+          } else if (t == 'sialkot' || t == 'skt') {
+            candidateBranches.addAll(['sialkot', 'skt']);
+          } else if (t == 'rawalpindi' || t == 'rwp') {
+            candidateBranches.addAll(['rawalpindi', 'rwp']);
+          } else if (t == 'jalalpur_jattan' || t == 'jalalpur' || t == 'jlj') {
+            candidateBranches.addAll(['jalalpur_jattan', 'jalalpur', 'jlj']);
+          }
+        }
+
+        final queues = ['zakat', 'non-zakat', 'gmwf'];
+        final List<QueryDocumentSnapshot<Map<String, dynamic>>> allFetchedDocs = [];
+
+        for (final firestoreBranch in candidateBranches) {
+          final dateDocIds = CampSessionService.getAllCampDateDocIds(
+            branchId: firestoreBranch,
+            dateKey: dayKey,
+          );
+          final serialDocs = await Future.wait<List<QueryDocumentSnapshot<Map<String, dynamic>>>>([
+            for (final dateDocId in dateDocIds)
+              for (final q in queues)
+                FirebaseFirestore.instance
+                    .collection('branches/$firestoreBranch/serials/$dateDocId/$q')
+                    .get()
+                    .timeout(const Duration(seconds: 4))
+                    .then((snap) => snap.docs)
+                    .catchError((e) {
+                      if (QuotaService.isQuotaError(e)) {
+                        QuotaService.recordQuotaExceeded(error: e);
+                      }
+                      return <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+                    }),
+          ]);
+          for (final docs in serialDocs) {
+            allFetchedDocs.addAll(docs);
+          }
+        }
+
+        bool newlyDownloaded = false;
+        for (final doc in allFetchedDocs) {
           final d = Map<String, dynamic>.from(doc.data());
           d['id'] = doc.id;
           d['branchId'] ??= targetBranchId;
           final status = (d['status'] ?? d['dispenseStatus'] ?? '').toString().toLowerCase().trim();
-          final s = (d['serial'] ?? doc.id).toString().trim().toLowerCase();
           final isDeleted = d['isDeleted'] == true ||
               status == 'deleted' ||
               status == 'void' ||
               status == 'cancelled';
-          if (s.isNotEmpty &&
-              !isDeleted) {
-            combined[s] = {...?combined[s], ...d};
+          if (!isDeleted) {
+            mergeIntoCombined(d, keyHint: doc.id);
+            newlyDownloaded = true;
+
+            // DOWNLOAD ONCE & PERSIST: Cache into local entriesBox so future reads use local Hive
+            try {
+              if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+                final eBox = Hive.box(LocalStorageService.entriesBox);
+                final s = (d['serial'] ?? doc.id).toString().trim();
+                final b = (d['branchId'] ?? targetBranchId).toString().toLowerCase().trim();
+                if (s.isNotEmpty) {
+                  final eKey = '$b-$s';
+                  final existing = eBox.get(eKey);
+                  if (existing is Map) {
+                    final mergedE = Map<String, dynamic>.from(existing);
+                    d.forEach((k, v) {
+                      if (v != null && v.toString().isNotEmpty) mergedE[k] = v;
+                    });
+                    eBox.put(eKey, mergedE);
+                  } else {
+                    eBox.put(eKey, d);
+                  }
+                }
+              }
+            } catch (_) {}
           }
         }
+
+        // Cache the full day's results locally in Hive so repeat queries hit 0 quota
+        if (newlyDownloaded) {
+          await LocalStorageService.putBranchDayCache(
+            targetBranchId,
+            dayKey,
+            'dispensary',
+            combined.values.toList(),
+          );
+        }
       }
-    } catch (_) {}
+    } catch (e) {
+      if (QuotaService.isQuotaError(e)) {
+        QuotaService.recordQuotaExceeded(error: e);
+      }
+    }
 
     return combined.values.toList();
   }

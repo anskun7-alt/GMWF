@@ -382,6 +382,23 @@ class _StableRequestTabState extends State<_StableRequestTab>
     return requesterId;
   }
 
+  static Map<String, dynamic> _deepConvertMap(dynamic source) {
+    if (source == null || source is! Map) return {};
+    final result = <String, dynamic>{};
+    for (final e in source.entries) {
+      final key = e.key.toString();
+      final val = e.value;
+      if (val is Map) {
+        result[key] = _deepConvertMap(val);
+      } else if (val is List) {
+        result[key] = val.map((item) => item is Map ? _deepConvertMap(item) : item).toList();
+      } else {
+        result[key] = val;
+      }
+    }
+    return result;
+  }
+
   int _safeInt(dynamic val) {
     if (val == null) return 0;
     if (val is int) return val;
@@ -392,7 +409,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
   List<Map<String, dynamic>> _safeItemList(dynamic list) {
     if (list == null || list is! List) return [];
-    return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    return list.whereType<Map>().map((e) => _deepConvertMap(e)).toList();
   }
 
   @override
@@ -410,7 +427,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
         final allDocs = <LocalRequestDoc>[];
         for (final entry in box.toMap().entries) {
           if (entry.value is Map) {
-            final data = Map<String, dynamic>.from(entry.value as Map);
+            final data = _deepConvertMap(entry.value);
             final status = (data['status']?.toString() ?? 'pending').toLowerCase();
             if (status == widget.status.toLowerCase()) {
               final id = data['requestId']?.toString() ?? data['id']?.toString() ?? entry.key.toString();
@@ -445,7 +462,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
         final canApproveAny = isSupervisorRole || isDoctor;
 
         final eligibleDocs = allDocs.where((doc) {
-          final data = doc.data() as Map<String, dynamic>;
+          final data = doc.data();
           final requestType = data['requestType']?.toString() ??
               data['type']?.toString() ??
               'unknown';
@@ -600,353 +617,390 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
   Widget _buildRequestCard(
       BuildContext context, dynamic doc) {
-    final isDark      = Theme.of(context).brightness == Brightness.dark;
-    final data        = doc.data() as Map<String, dynamic>;
-    final requestType = data['requestType']?.toString() ??
-        data['type']?.toString() ??
-        'unknown';
-    final collection  = doc.reference.parent.id;
-    final patientName = data['patientName']?.toString() ?? '—';
-    final rawTs       = data['requestedAt'] ?? data['createdAt'];
-    final ts          = rawTs is Timestamp ? rawTs : (rawTs is String ? (DateTime.tryParse(rawTs) != null ? Timestamp.fromDate(DateTime.parse(rawTs)) : null) : null);
-    final reason      = data['reason']?.toString() ?? '';
-    final name        = _resolveRequesterName(doc.id, data);
-    final approverName = data['reviewedByName'] ?? data['approvedByName'];
-    final docReason   = data['doctorReason']?.toString() ?? '';
+    try {
+      final isDark      = Theme.of(context).brightness == Brightness.dark;
+      final rawData     = doc is LocalRequestDoc ? doc.data() : (doc.data() is Map ? doc.data() : <String, dynamic>{});
+      final data        = _deepConvertMap(rawData);
+      final requestType = data['requestType']?.toString() ??
+          data['type']?.toString() ??
+          'unknown';
+      final collection  = doc.reference.parent.id;
+      final patientName = data['patientName']?.toString() ?? '—';
+      final rawTs       = data['requestedAt'] ?? data['createdAt'];
+      final ts          = rawTs is Timestamp 
+          ? rawTs 
+          : (rawTs is DateTime 
+              ? Timestamp.fromDate(rawTs) 
+              : (rawTs is String && DateTime.tryParse(rawTs) != null 
+                  ? Timestamp.fromDate(DateTime.parse(rawTs)) 
+                  : null));
+      final reason      = data['reason']?.toString() ?? '';
+      final name        = _resolveRequesterName(doc.id, data);
+      final approverName = data['reviewedByName'] ?? data['approvedByName'];
+      final docReason   = data['doctorReason']?.toString() ?? '';
 
-    String amountText = '';
-    if (requestType == 'token_reversal') {
-      final queueType =
-          (data['queueType'] as String?)?.toLowerCase() ?? 'zakat';
-      if (queueType.contains('non')) {
-        amountText = 'Rs. 100';
-      } else if (queueType.contains('gmwf')) {
-        amountText = 'PKR 0';
-      } else {
-        amountText = 'Rs. 20';
+      String amountText = '';
+      if (requestType == 'token_reversal') {
+        final queueType =
+            (data['queueType'] as String?)?.toLowerCase() ?? 'zakat';
+        if (queueType.contains('non')) {
+          amountText = 'Rs. 100';
+        } else if (queueType.contains('gmwf')) {
+          amountText = 'PKR 0';
+        } else {
+          amountText = 'Rs. 20';
+        }
       }
-    }
 
-    final role = (widget.currentUserRole ?? '').toLowerCase().trim();
-    final isBranchManager = role.contains('branch manager') || role.contains('branch_manager') || role == 'bm' || role.contains('manager');
-    final isSupervisorRole = widget.isSupervisor || role.contains('supervisor') || isBranchManager || role.contains('admin') || role.contains('chairman') || role.contains('ceo');
-    final isDoctor = role.contains('doctor');
+      final role = (widget.currentUserRole ?? '').toLowerCase().trim();
+      final isBranchManager = role.contains('branch manager') || role.contains('branch_manager') || role == 'bm' || role.contains('manager');
+      final isSupervisorRole = widget.isSupervisor || role.contains('supervisor') || isBranchManager || role.contains('admin') || role.contains('chairman') || role.contains('ceo');
+      final isDoctor = role.contains('doctor');
 
-    final canApproveAsSupervisor = isSupervisorRole && requestType != 'token_exception';
-    final canApproveAsDoctor = isDoctor && requestType == 'token_exception';
+      final canApproveAsSupervisor = isSupervisorRole && requestType != 'token_exception';
+      final canApproveAsDoctor = isDoctor && requestType == 'token_exception';
 
-    final campLabel = RequestUtils.resolveRequestCampName(data, widget.branchId);
+      final campLabel = RequestUtils.resolveRequestCampName(data, widget.branchId);
 
-    return Card(
-      color: isDark ? const Color(0xFF1E293B) : Colors.white,
-      elevation: widget.status == 'pending' ? (isDark ? 3 : 5) : 1,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: isDark ? const Color(0xFF334155) : const Color(0xFFCCFBF1),
-          width: 1,
+      return Card(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        elevation: widget.status == 'pending' ? (isDark ? 3 : 5) : 1,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: isDark ? const Color(0xFF334155) : const Color(0xFFCCFBF1),
+            width: 1,
+          ),
         ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Expanded(
-                child: Text(
-                  RequestUtils.getTitle(requestType, patientName),
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? const Color(0xFF5EEAD4) : Colors.teal.shade800,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF0284C7).withValues(alpha: 0.25) : const Color(0xFFE0F2FE),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: isDark ? const Color(0xFF38BDF8).withValues(alpha: 0.4) : const Color(0xFFBAE6FD),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.holiday_village_rounded, size: 14, color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0369A1)),
-                    const SizedBox(width: 5),
-                    Text(
-                      campLabel.toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0369A1),
-                        letterSpacing: 0.4,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: RequestUtils.getBadgeColor(requestType, isDark: isDark),
-                  borderRadius: BorderRadius.circular(20),
-                  border: isDark
-                      ? Border.all(
-                          color: RequestUtils.getTextColor(requestType, isDark: isDark).withValues(alpha: 0.4),
-                          width: 1,
-                        )
-                      : null,
-                ),
-                child: Text(
-                  requestType.replaceAll('_', ' ').toUpperCase(),
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: RequestUtils.getTextColor(requestType, isDark: isDark),
-                  ),
-                ),
-              ),
-            ]),
-            const SizedBox(height: 10),
-            Row(children: [
-              Icon(Icons.person_rounded, size: 16, color: isDark ? const Color(0xFF2DD4BF) : Colors.teal.shade800),
-              const SizedBox(width: 8),
-              Text(
-                'By: $name',
-                style: TextStyle(fontSize: 13.5, color: isDark ? Colors.white70 : Colors.black87),
-              ),
-            ]),
-            const SizedBox(height: 4),
-            Row(children: [
-              Icon(Icons.location_on_rounded, size: 16, color: isDark ? const Color(0xFF38BDF8) : Colors.teal.shade800),
-              const SizedBox(width: 8),
-              Expanded(
-                child: RichText(
-                  text: TextSpan(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Expanded(
+                  child: Text(
+                    RequestUtils.getTitle(requestType, patientName),
                     style: TextStyle(
-                      fontSize: 13,
-                      color: isDark ? Colors.white70 : Colors.black87,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      color: isDark ? const Color(0xFF5EEAD4) : Colors.teal.shade800,
                     ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF0284C7).withValues(alpha: 0.25) : const Color(0xFFE0F2FE),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: isDark ? const Color(0xFF38BDF8).withValues(alpha: 0.4) : const Color(0xFFBAE6FD),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const TextSpan(text: 'Facility Camp: '),
-                      TextSpan(
-                        text: campLabel,
+                      Icon(Icons.holiday_village_rounded, size: 14, color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0369A1)),
+                      const SizedBox(width: 5),
+                      Text(
+                        campLabel.toUpperCase(),
                         style: TextStyle(
+                          fontSize: 11,
                           fontWeight: FontWeight.bold,
-                          color: isDark ? const Color(0xFF38BDF8) : Colors.teal.shade900,
+                          color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0369A1),
+                          letterSpacing: 0.4,
                         ),
-                      ),
-                      TextSpan(
-                        text: ' (${(data['branchId'] ?? widget.branchId).toString().toUpperCase()})',
-                        style: TextStyle(fontSize: 11.5, color: isDark ? Colors.white38 : Colors.grey.shade600),
                       ),
                     ],
                   ),
                 ),
-              ),
-            ]),
-            if (ts != null) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: RequestUtils.getBadgeColor(requestType, isDark: isDark),
+                    borderRadius: BorderRadius.circular(20),
+                    border: isDark
+                        ? Border.all(
+                            color: RequestUtils.getTextColor(requestType, isDark: isDark).withValues(alpha: 0.4),
+                            width: 1,
+                          )
+                        : null,
+                  ),
+                  child: Text(
+                    requestType.replaceAll('_', ' ').toUpperCase(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: RequestUtils.getTextColor(requestType, isDark: isDark),
+                    ),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Icon(Icons.person_rounded, size: 16, color: isDark ? const Color(0xFF2DD4BF) : Colors.teal.shade800),
+                const SizedBox(width: 8),
+                Text(
+                  'By: $name',
+                  style: TextStyle(fontSize: 13.5, color: isDark ? Colors.white70 : Colors.black87),
+                ),
+              ]),
               const SizedBox(height: 4),
               Row(children: [
-                Icon(Icons.schedule_rounded, size: 14, color: isDark ? Colors.white38 : Colors.black38),
-                const SizedBox(width: 6),
-                Text(
-                  'Requested: ${DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate())}',
-                  style: TextStyle(fontSize: 12, color: isDark ? Colors.white54 : Colors.black54),
-                ),
-              ]),
-            ],
-            if (widget.status == 'approved') ...[
-              const SizedBox(height: 6),
-              Row(children: [
-                Icon(Icons.verified_user_rounded, size: 14, color: isDark ? const Color(0xFF34D399) : Colors.teal.shade700),
-                const SizedBox(width: 6),
-                Text(
-                  'Approved by: ${approverName ?? 'Doctor'}',
-                  style: TextStyle(
-                    fontSize: 12, 
-                    color: isDark ? const Color(0xFF34D399) : Colors.teal.shade700, 
-                    fontWeight: FontWeight.bold
+                Icon(Icons.location_on_rounded, size: 16, color: isDark ? const Color(0xFF38BDF8) : Colors.teal.shade800),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: RichText(
+                    text: TextSpan(
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isDark ? Colors.white70 : Colors.black87,
+                      ),
+                      children: [
+                        const TextSpan(text: 'Facility Camp: '),
+                        TextSpan(
+                          text: campLabel,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: isDark ? const Color(0xFF38BDF8) : Colors.teal.shade900,
+                          ),
+                        ),
+                        TextSpan(
+                          text: ' (${(data['branchId'] ?? widget.branchId).toString().toUpperCase()})',
+                          style: TextStyle(fontSize: 11.5, color: isDark ? Colors.white38 : Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ]),
-            ],
-            if (widget.status == 'rejected') ...[
-              const SizedBox(height: 6),
-              Row(children: [
-                Icon(Icons.remove_circle_rounded, size: 14, color: isDark ? const Color(0xFFF87171) : Colors.red.shade700),
-                const SizedBox(width: 6),
+              if (ts != null) ...[
+                const SizedBox(height: 4),
+                Row(children: [
+                  Icon(Icons.schedule_rounded, size: 14, color: isDark ? Colors.white38 : Colors.black38),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Requested: ${DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate())}',
+                    style: TextStyle(fontSize: 12, color: isDark ? Colors.white54 : Colors.black54),
+                  ),
+                ]),
+              ],
+              if (widget.status == 'approved') ...[
+                const SizedBox(height: 6),
+                Row(children: [
+                  Icon(Icons.verified_user_rounded, size: 14, color: isDark ? const Color(0xFF34D399) : Colors.teal.shade700),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Approved by: ${approverName ?? 'Doctor'}',
+                    style: TextStyle(
+                      fontSize: 12, 
+                      color: isDark ? const Color(0xFF34D399) : Colors.teal.shade700, 
+                      fontWeight: FontWeight.bold
+                    ),
+                  ),
+                ]),
+              ],
+              if (widget.status == 'rejected') ...[
+                const SizedBox(height: 6),
+                Row(children: [
+                  Icon(Icons.remove_circle_rounded, size: 14, color: isDark ? const Color(0xFFF87171) : Colors.red.shade700),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Rejected by: ${approverName ?? 'Doctor'}',
+                    style: TextStyle(
+                      fontSize: 12, 
+                      color: isDark ? const Color(0xFFF87171) : Colors.red.shade700, 
+                      fontWeight: FontWeight.bold
+                    ),
+                  ),
+                ]),
+              ],
+              if (amountText.isNotEmpty) ...[
+                const SizedBox(height: 6),
                 Text(
-                  'Rejected by: ${approverName ?? 'Doctor'}',
+                  'Amount: $amountText',
                   style: TextStyle(
-                    fontSize: 12, 
-                    color: isDark ? const Color(0xFFF87171) : Colors.red.shade700, 
-                    fontWeight: FontWeight.bold
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? const Color(0xFF2DD4BF) : Colors.teal.shade800,
                   ),
                 ),
-              ]),
-            ],
-            if (amountText.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Amount: $amountText',
-                style: TextStyle(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.bold,
-                  color: isDark ? const Color(0xFF2DD4BF) : Colors.teal.shade800,
-                ),
-              ),
-            ],
-            const SizedBox(height: 12),
-            if (requestType == 'patient_edit')
-              _buildPatientChanges(data, doc.id, collection)
-            else if (requestType == 'edit_medicine')
-              _buildMedicineEditChanges(data)
-            else if (requestType == 'token_reversal')
-              _buildTokenReversalView(data)
-            else if (requestType == 'token_exception')
-              _buildTokenExceptionView(data)
-            else if (data['items'] != null || data['draftItems'] != null)
-              _buildItemsView(data, doc.id, requestType),
+              ],
+              const SizedBox(height: 12),
+              if (requestType == 'patient_edit')
+                _buildPatientChanges(data, doc.id, collection)
+              else if (requestType == 'edit_medicine')
+                _buildMedicineEditChanges(data)
+              else if (requestType == 'token_reversal')
+                _buildTokenReversalView(data)
+              else if (requestType == 'token_exception')
+                _buildTokenExceptionView(data)
+              else if (data['items'] != null || data['draftItems'] != null)
+                _buildItemsView(data, doc.id, requestType),
 
-            if (reason.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+              if (reason.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Requester Reason:',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.bold,
+                          color: isDark ? Colors.white60 : Colors.black54,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        reason,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: isDark ? Colors.white : Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Requester Reason:',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white60 : Colors.black54,
+              ],
+              if (docReason.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF134E4A).withValues(alpha: 0.3) : Colors.teal.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: isDark ? const Color(0xFF0D9488) : Colors.teal.shade200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Approval Reason:',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.bold,
+                          color: isDark ? const Color(0xFF5EEAD4) : Colors.teal.shade900,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      reason,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: isDark ? Colors.white : Colors.black87,
+                      const SizedBox(height: 2),
+                      Text(
+                        docReason,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? Colors.white : Colors.teal.shade800,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
-            if (docReason.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF134E4A).withValues(alpha: 0.3) : Colors.teal.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: isDark ? const Color(0xFF0D9488) : Colors.teal.shade200),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Approval Reason:',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? const Color(0xFF5EEAD4) : Colors.teal.shade900,
+              ],
+              const SizedBox(height: 14),
+              if (widget.status == 'pending')
+                if (canApproveAsSupervisor || canApproveAsDoctor)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red.shade400,
+                          side: BorderSide(color: Colors.red.shade400),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        ),
+                        onPressed: () => _updateStatus(context, doc.id,
+                            'rejected', requestType, collection),
+                        child: const Text('Reject', style: TextStyle(fontWeight: FontWeight.bold)),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      docReason,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: isDark ? Colors.white : Colors.teal.shade800,
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isDark ? const Color(0xFF0F766E) : Colors.teal.shade700,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                          elevation: 1,
+                        ),
+                        onPressed: () => _updateStatus(context, doc.id,
+                            'approved', requestType, collection),
+                        child: const Text('Approve', style: TextStyle(fontWeight: FontWeight.bold)),
                       ),
+                    ],
+                  )
+                else if (isSupervisorRole && requestType == 'token_exception')
+                  _buildDoctorOnlyNotice()
+                else
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Chip(
+                      label: const Text('PENDING APPROVAL'),
+                      backgroundColor: isDark ? const Color(0xFF78350F).withValues(alpha: 0.4) : Colors.orange.withValues(alpha: 0.1),
+                      labelStyle: TextStyle(
+                          color: isDark ? const Color(0xFFFDBA74) : Colors.orange.shade800,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 10),
                     ),
-                  ],
-                ),
-              ),
-            ],
-            const SizedBox(height: 14),
-            if (widget.status == 'pending')
-              if (canApproveAsSupervisor || canApproveAsDoctor)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.red.shade400,
-                        side: BorderSide(color: Colors.red.shade400),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      ),
-                      onPressed: () => _updateStatus(context, doc.id,
-                          'rejected', requestType, collection),
-                      child: const Text('Reject', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ),
-                    const SizedBox(width: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: isDark ? const Color(0xFF0F766E) : Colors.teal.shade700,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                        elevation: 1,
-                      ),
-                      onPressed: () => _updateStatus(context, doc.id,
-                          'approved', requestType, collection),
-                      child: const Text('Approve', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ),
-                  ],
-                )
-              else if (isSupervisorRole && requestType == 'token_exception')
-                _buildDoctorOnlyNotice()
+                  )
               else
                 Align(
                   alignment: Alignment.centerRight,
                   child: Chip(
-                    label: const Text('PENDING APPROVAL'),
-                    backgroundColor: isDark ? const Color(0xFF78350F).withValues(alpha: 0.4) : Colors.orange.withValues(alpha: 0.1),
+                    label: Text(widget.status.toUpperCase()),
+                    backgroundColor: widget.status == 'approved' 
+                        ? (isDark ? const Color(0xFF064E3B) : Colors.teal.withValues(alpha: 0.15))
+                        : (isDark ? const Color(0xFF7F1D1D) : Colors.red.withValues(alpha: 0.1)),
                     labelStyle: TextStyle(
-                        color: isDark ? const Color(0xFFFDBA74) : Colors.orange.shade800,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 10),
+                        color: widget.status == 'approved' 
+                            ? (isDark ? const Color(0xFF6EE7B7) : Colors.teal.shade800)
+                            : (isDark ? const Color(0xFFFCA5A5) : Colors.red.shade800),
+                        fontWeight: FontWeight.bold),
                   ),
-                )
-            else
-              Align(
-                alignment: Alignment.centerRight,
-                child: Chip(
-                  label: Text(widget.status.toUpperCase()),
-                  backgroundColor: widget.status == 'approved' 
-                      ? (isDark ? const Color(0xFF064E3B) : Colors.teal.withValues(alpha: 0.15))
-                      : (isDark ? const Color(0xFF7F1D1D) : Colors.red.withValues(alpha: 0.1)),
-                  labelStyle: TextStyle(
-                      color: widget.status == 'approved' 
-                          ? (isDark ? const Color(0xFF6EE7B7) : Colors.teal.shade800)
-                          : (isDark ? const Color(0xFFFCA5A5) : Colors.red.shade800),
-                      fontWeight: FontWeight.bold),
+                ),
+            ],
+          ),
+        ),
+      );
+    } catch (e, stack) {
+      debugPrint('[RequestCard Error] ${doc.id}: $e\n$stack');
+      return Card(
+        color: Colors.red.shade50,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Colors.red.shade200),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              const Icon(Icons.error_outline_rounded, color: Colors.red, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Could not display request (${doc.id})', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 13)),
+                    const SizedBox(height: 2),
+                    Text('$e', style: TextStyle(fontSize: 11, color: Colors.red.shade900)),
+                  ],
                 ),
               ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    }
   }
 
   Widget _buildItemsView(
@@ -993,7 +1047,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
               DataCell(Row(children: [
                 _typeIcon(m['type']),
                 const SizedBox(width: 6),
-                Text(m['type'] ?? '', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87))
+                Text(m['type']?.toString() ?? '', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87))
               ])),
               DataCell(Text(m['dose']?.toString() ?? '', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87))),
               DataCell(Text('${m['quantity'] ?? 0}', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87))),
@@ -1077,9 +1131,9 @@ class _StableRequestTabState extends State<_StableRequestTab>
     );
   }
 
-  Widget _typeIcon(String? type) {
+  Widget _typeIcon(dynamic rawType) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final t    = type ?? 'Others';
+    final t    = rawType?.toString() ?? 'Others';
     final icon = switch (t) {
       'Tablet'      => FontAwesomeIcons.tablets,
       'Capsule'     => FontAwesomeIcons.capsules,
@@ -1095,11 +1149,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
   Widget _buildPatientChanges(
       Map<String, dynamic> data, String requestId, String collection) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final originalData = data['originalData'] as Map<String, dynamic>? ?? {};
+    final originalData = data['originalData'] is Map ? _deepConvertMap(data['originalData']) : <String, dynamic>{};
     final proposedRaw  = widget.status == 'pending'
         ? (data['draftData'] ?? data['proposedData'])
         : data['proposedData'];
-    final proposedData = proposedRaw as Map<String, dynamic>? ?? {};
+    final proposedData = proposedRaw is Map ? _deepConvertMap(proposedRaw) : <String, dynamic>{};
 
     // Standard human labels for patient fields
     final fieldLabels = <String, String>{
@@ -1403,7 +1457,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
   Widget _buildMedicineEditChanges(Map<String, dynamic> data) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final originalData = data['originalData'] as Map<String, dynamic>? ?? {};
+    final originalData = data['originalData'] is Map ? _deepConvertMap(data['originalData']) : <String, dynamic>{};
     final items = widget.status == 'pending'
         ? (_safeItemList(data['draftItems']).isNotEmpty
             ? _safeItemList(data['draftItems'])
@@ -1548,7 +1602,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
   Widget _buildTokenExceptionView(Map<String, dynamic> data) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final restriction = data['restriction'] as Map<String, dynamic>?;
+    final restriction = data['restriction'] is Map ? _deepConvertMap(data['restriction']) : null;
     final patientId  = data['patientId']?.toString() ?? '—';
     final remDays    = restriction?['remainingDays'] ?? '—';
     final isLastDay  = restriction?['isLastDay'] == true;
@@ -2176,8 +2230,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
     if (requestType == 'patient_edit') {
       final patientId = data['patientId'] as String?;
-      final toApply   = (data['draftData']    as Map<String, dynamic>?) ??
-                        (data['proposedData'] as Map<String, dynamic>?);
+      final toApplyRaw = data['draftData'] ?? data['proposedData'];
+      final toApply   = toApplyRaw is Map ? _deepConvertMap(toApplyRaw) : null;
 
       if (toApply == null ||
           toApply.isEmpty ||
@@ -2710,7 +2764,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
       final name           = item['name']?.toString() ?? '';
       final type           = item['type']?.toString() ?? '';
-      final formula        = (item['formula'] ?? '').toString().trim();
+      final formula        = (item['formula'] ?? item['name'] ?? '').toString().trim();
       final dose           = item['dose']?.toString() ?? '';
       final qty            = _safeInt(item['quantity']);
       final price          = _safeInt(item['price']);
@@ -2718,6 +2772,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
       final classification = item['classification']?.toString() ?? '';
       final distilledWater = (item['distilledWater'] as num?)?.toInt();
       final drops          = (item['drops']          as num?)?.toInt();
+
+      final effCamp = (campId != null && campId.isNotEmpty) ? campId : (item['campId'] ?? item['dispensaryId'])?.toString();
 
       final barcode = (item['barcode'] ?? item['code'] ?? '').toString().trim();
       final newData = <String, dynamic>{
@@ -2736,8 +2792,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'approvedBy':     reviewerUid,
         'approvedByName': reviewerName ?? 'Supervisor',
         'updatedAt':      FieldValue.serverTimestamp(),
-        if (campId != null && campId.isNotEmpty) 'dispensaryId': campId,
-        if (campId != null && campId.isNotEmpty) 'dispensaryTag': CampSessionService.getDispensaryKeyword(campId),
+        if (effCamp != null && effCamp.isNotEmpty) 'dispensaryId': effCamp,
+        if (effCamp != null && effCamp.isNotEmpty) 'dispensaryTag': CampSessionService.getDispensaryKeyword(effCamp),
       };
       if (type == 'Nebulization') {
         newData['distilledWater'] = distilledWater ?? 0;
@@ -2746,7 +2802,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
       final newId = RequestUtils.generateDocId(
         name, type, type == 'Nebulization' ? '' : dose, expiry,
-        distilledWater: distilledWater, drops: drops, campId: campId,
+        distilledWater: distilledWater, drops: drops, campId: effCamp,
       );
 
       if (oldId == newId) {

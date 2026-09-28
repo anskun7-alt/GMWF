@@ -167,6 +167,11 @@ class BranchRecordService {
             storedPeak = const SingleRecord(count: 163, dateKey: '090926', dateFormatted: '09-Sep-2026');
             _persistPeakToBranchCache(peakStorageKey, storedPeak);
           }
+          // Auto-heal: Purge false peak record for Haji Camp if mistakenly recorded today with Saddar's tokens
+          if (normBranch.contains('karachi') && normCamp != null && normCamp.contains('haji') && storedPeak.dateKey == todayDk) {
+            bBox.delete(peakStorageKey);
+            storedPeak = null;
+          }
         }
       }
     } catch (_) {}

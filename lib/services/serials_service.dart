@@ -269,26 +269,35 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
     if (rawSerial.isEmpty) return;
     final upperSerial = rawSerial.toUpperCase();
 
+    // Canonical key without branch prefix so 'KARACHI-280926-SADD-013' and '280926-SADD-013' deduplicate
+    String canonicalSerial = upperSerial;
+    if (canonicalSerial.contains('-')) {
+      final parts = canonicalSerial.split('-');
+      if (parts.length >= 3 && parts[1].length == 6 && int.tryParse(parts[1]) != null) {
+        canonicalSerial = parts.sublist(1).join('-');
+      }
+    }
+
     // Determine queue type
-    final qt = (data['queueType'] ?? data['type'] ?? '').toString().toLowerCase().trim();
+    final qt = (data['queueType'] ?? data['category'] ?? data['type'] ?? '').toString().toLowerCase().trim();
     String resolvedQueue;
-    if (qt.contains('non') || qt.contains('nz') || upperSerial.contains('NZ-')) {
+    if (qt.contains('non') || qt.contains('nz') || canonicalSerial.contains('-NZ-') || canonicalSerial.contains('NZ')) {
       resolvedQueue = 'non-zakat';
-    } else if (qt.contains('gmwf') || qt.contains('free') || upperSerial.contains('G-')) {
+    } else if (qt.contains('gmwf') || qt.contains('free') || data['isFreeToken'] == true || canonicalSerial.contains('-G-')) {
       resolvedQueue = 'gmwf';
     } else {
       resolvedQueue = 'zakat';
     }
 
-    if (localTokenMap.containsKey(upperSerial)) return;
-    localTokenMap[upperSerial] = data;
+    if (localTokenMap.containsKey(canonicalSerial)) return;
+    localTokenMap[canonicalSerial] = data;
 
     if (resolvedQueue == 'zakat') {
-      zakatSerials.add(upperSerial);
+      zakatSerials.add(canonicalSerial);
     } else if (resolvedQueue == 'non-zakat') {
-      nonZakatSerials.add(upperSerial);
+      nonZakatSerials.add(canonicalSerial);
     } else {
-      gmwfSerials.add(upperSerial);
+      gmwfSerials.add(canonicalSerial);
     }
   }
 
@@ -296,15 +305,49 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
   try {
     if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
       final eBox = Hive.box(LocalStorageService.entriesBox);
-      for (final k in eBox.keys) {
+      for (final k in eBox.keys.toList()) {
         final val = eBox.get(k);
         if (val is! Map) continue;
         final d = Map<String, dynamic>.from(val);
         final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
-        final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
-        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty;
+        String dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
+
+        // Robust fallback: extract dateKey if missing or malformed
+        if (dk.isEmpty || dk.length != 6) {
+          final s = (d['serial'] ?? d['tokenSerial'] ?? d['id'] ?? k).toString().trim();
+          final sClean = s.toLowerCase().startsWith('karachi-') ? s.substring(8) : s;
+          if (sClean.contains('-')) {
+            final p1 = sClean.split('-')[0].trim();
+            if (p1.length == 6 && int.tryParse(p1) != null) {
+              dk = p1;
+            }
+          }
+          if (dk.isEmpty) {
+            final ts = d['createdAt'] ?? d['timestamp'] ?? d['dispensedAt'] ?? d['completedAt'] ?? d['time'];
+            if (ts != null) {
+              DateTime? dt;
+              if (ts is Timestamp) {
+                dt = ts.toDate().toLocal();
+              } else if (ts is DateTime) {
+                dt = ts.toLocal();
+              } else if (ts is String) {
+                dt = DateTime.tryParse(ts)?.toLocal();
+              }
+              if (dt != null) {
+                dk = DateFormat('ddMMyy').format(dt);
+              }
+            }
+          }
+        }
+
+        final serialUpper = (d['serial'] ?? d['tokenSerial'] ?? d['id'] ?? k).toString().toUpperCase();
+        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty || b.contains(normBranchId) || (normBranchId == 'karachi' && (serialUpper.contains('SADD') || serialUpper.contains('HAJI')));
         if (matchBranch && dk == ds) {
           processLocalEntry(d, k.toString());
+          if (d['dateKey'] == null || d['dateKey'] == '') {
+            d['dateKey'] = dk;
+            eBox.put(k, d);
+          }
         }
       }
     }
@@ -314,15 +357,48 @@ Future<Map<String, int>> _getDailySerialsSummary(String branchId, String ds, Str
   try {
     if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
       final dBox = Hive.box(LocalStorageService.dispensaryBox);
-      for (final k in dBox.keys) {
+      for (final k in dBox.keys.toList()) {
         final val = dBox.get(k);
         if (val is! Map) continue;
         final d = Map<String, dynamic>.from(val);
         final b = (d['branchId'] ?? '').toString().toLowerCase().trim();
-        final dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
-        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty;
+        String dk = (d['dateKey'] ?? d['date'] ?? '').toString().trim();
+
+        if (dk.isEmpty || dk.length != 6) {
+          final s = (d['serial'] ?? d['tokenSerial'] ?? d['id'] ?? k).toString().trim();
+          final sClean = s.toLowerCase().startsWith('karachi-') ? s.substring(8) : s;
+          if (sClean.contains('-')) {
+            final p1 = sClean.split('-')[0].trim();
+            if (p1.length == 6 && int.tryParse(p1) != null) {
+              dk = p1;
+            }
+          }
+          if (dk.isEmpty) {
+            final ts = d['createdAt'] ?? d['timestamp'] ?? d['dispensedAt'] ?? d['completedAt'] ?? d['time'];
+            if (ts != null) {
+              DateTime? dt;
+              if (ts is Timestamp) {
+                dt = ts.toDate().toLocal();
+              } else if (ts is DateTime) {
+                dt = ts.toLocal();
+              } else if (ts is String) {
+                dt = DateTime.tryParse(ts)?.toLocal();
+              }
+              if (dt != null) {
+                dk = DateFormat('ddMMyy').format(dt);
+              }
+            }
+          }
+        }
+
+        final serialUpper = (d['serial'] ?? d['tokenSerial'] ?? d['id'] ?? k).toString().toUpperCase();
+        final matchBranch = normBranchId == 'all' || normBranchId.isEmpty || b == normBranchId || b.isEmpty || b.contains(normBranchId) || (normBranchId == 'karachi' && (serialUpper.contains('SADD') || serialUpper.contains('HAJI')));
         if (matchBranch && dk == ds) {
           processLocalEntry(d, k.toString());
+          if (d['dateKey'] == null || d['dateKey'] == '') {
+            d['dateKey'] = dk;
+            dBox.put(k, d);
+          }
         }
       }
     }
@@ -593,6 +669,16 @@ Stream<Map<String, int>> _serialsCountStreamForBranch(String branchId, DateTime 
     }
   } catch (_) {}
   try {
+    if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+      streams.add(Hive.box(LocalStorageService.entriesBox).watch());
+    }
+  } catch (_) {}
+  try {
+    if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+      streams.add(Hive.box(LocalStorageService.dispensaryBox).watch());
+    }
+  } catch (_) {}
+  try {
     streams.add(RealtimeManager().messageStream);
   } catch (_) {}
 
@@ -618,8 +704,6 @@ Stream<Map<String, Map<String, int>>> facilityShiftBreakdownStream(String branch
   return _serialsCountStreamForBranch(branchId, start, end, subDispensary: 'all', shift: 'all').map((summary) {
     // If the branch stream already contains the breakdown or local cached counts
     final total = summary['total'] ?? 0;
-    final pending = summary['pending'] ?? 0;
-    final dispensed = summary['dispensed'] ?? 0;
 
     // Compute real detailed breakdown across the requested date range
     final normBranchId = branchId.toLowerCase().trim();

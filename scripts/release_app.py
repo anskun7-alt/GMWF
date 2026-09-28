@@ -54,9 +54,9 @@ def main():
                 f.write(content)
             log(f"Updated {iss_name} to version {clean_ver}")
 
-    # 4. Build Android Release APK with persistent release keystore
-    log("Building Android Release APKs (split per ABI)...")
-    res_apk = subprocess.run(["flutter", "build", "apk", "--release", "--split-per-abi"], shell=True)
+    # 4. Build Universal Android Release APK
+    log("Building Android Release APK...")
+    res_apk = subprocess.run(["flutter", "build", "apk", "--release"], shell=True)
     if res_apk.returncode != 0:
         log("Android build failed!")
         sys.exit(1)
@@ -81,22 +81,30 @@ def main():
         log("Compiling Inno Setup Installer...")
         subprocess.run([iscc_path, iss_path])
 
+    # 8. Upload code to GitHub
+    log("Committing and pushing source code to GitHub...")
+    subprocess.run(["git", "add", "."], shell=True)
+    subprocess.run(["git", "commit", "-m", f"Release v{clean_ver}: update builds and code sync"], shell=True)
+    push_res = subprocess.run(["git", "push", "origin", "main"], shell=True)
+    if push_res.returncode == 0:
+        log("Code successfully uploaded to GitHub (origin/main)!")
+    else:
+        log("Warning: git push returned non-zero code. Verify credentials if required.")
+
     log(f"RELEASE v{clean_ver} BUILD SUCCESSFUL!")
     print(f"""
 ============================================================
 GMWF RELEASE v{clean_ver} ASSETS READY FOR GITHUB RELEASE:
 ============================================================
-1. Android ARM64 APK:
-   build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+1. Android Universal Release APK:
+   build/app/outputs/flutter-apk/app-release.apk
 
-2. Android ARMv7 APK:
-   build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-
-3. Web Release:
+2. Web Release:
    build/web/
 
-4. Windows Installer:
-   installer/GMWF-v{clean_ver}-x64.exe
+3. Windows Release Executable / Assets:
+   build/windows/x64/runner/Release/
+   (Or Installer if compiled: installer/GMWF-v{clean_ver}-x64.exe)
 
 Upload these assets to GitHub Release tag: v{clean_ver}
 ============================================================

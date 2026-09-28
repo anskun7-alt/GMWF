@@ -658,6 +658,32 @@ Serial: ${data['serial'] ?? 'N/A'}
         }
       }
 
+      if (updated['dateKey'] == null || updated['dateKey'] == '') {
+        for (final seg in normSerialUpper.split(RegExp(r'[-_]'))) {
+          if (seg.length == 6 && int.tryParse(seg) != null) {
+            updated['dateKey'] = seg;
+            break;
+          }
+        }
+        updated['dateKey'] ??= LocalStorageService.getTodayDateKey();
+      }
+      if (updated['queueType'] == null || updated['queueType'] == '') {
+        if (normSerialUpper.contains('NZ') || normSerialUpper.contains('-NZ-')) {
+          updated['queueType'] = 'non-zakat';
+        } else if (normSerialUpper.contains('-G-') || updated['isFreeToken'] == true) {
+          updated['queueType'] = 'gmwf';
+        } else {
+          updated['queueType'] = 'zakat';
+        }
+      }
+      if (updated['campId'] == null || updated['campId'] == '') {
+        if (normSerialUpper.contains('SADD')) {
+          updated['campId'] = 'saddar';
+        } else if (normSerialUpper.contains('HAJI')) {
+          updated['campId'] = 'haji_camp';
+        }
+      }
+
       await box.put(targetKey, updated);
       if (targetKey != canonicalKey) {
         await box.put(canonicalKey, updated);
@@ -675,11 +701,47 @@ Serial: ${data['serial'] ?? 'N/A'}
     } else {
       // Lookup prescription and dispensary records to ensure entry is not created bare
       final presc = LocalStorageService.getLocalPrescription(normSerialUpper, branchId: normBranch);
+      String dateKey = data['dateKey']?.toString() ?? presc?['dateKey']?.toString() ?? '';
+      if (dateKey.isEmpty) {
+        for (final seg in normSerialUpper.split(RegExp(r'[-_]'))) {
+          if (seg.length == 6 && int.tryParse(seg) != null) {
+            dateKey = seg;
+            break;
+          }
+        }
+        if (dateKey.isEmpty) {
+          dateKey = LocalStorageService.getTodayDateKey();
+        }
+      }
+
+      String campId = data['campId']?.toString() ?? presc?['campId']?.toString() ?? '';
+      if (campId.isEmpty) {
+        if (normSerialUpper.contains('SADD')) {
+          campId = 'saddar';
+        } else if (normSerialUpper.contains('HAJI')) {
+          campId = 'haji_camp';
+        }
+      }
+
+      String queueType = data['queueType']?.toString() ?? presc?['queueType']?.toString() ?? '';
+      if (queueType.isEmpty) {
+        if (normSerialUpper.contains('NZ') || normSerialUpper.contains('-NZ-')) {
+          queueType = 'non-zakat';
+        } else if (normSerialUpper.contains('-G-') || data['isFreeToken'] == true) {
+          queueType = 'gmwf';
+        } else {
+          queueType = 'zakat';
+        }
+      }
+
       final newEntry = <String, dynamic>{
         if (presc != null) ...presc,
         ...data,
         'branchId': normBranch,
         'serial': normSerialUpper,
+        'dateKey': dateKey,
+        'campId': campId.isNotEmpty ? campId : null,
+        'queueType': queueType,
         'dispenseStatus': 'dispensed',
         'status': 'completed',
         'dispensedAt': data['dispensedAt'] ?? DateTime.now().toIso8601String(),

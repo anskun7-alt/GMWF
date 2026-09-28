@@ -178,6 +178,7 @@ class _InventoryPageState extends State<InventoryPage>
   final _searchCtrl = TextEditingController();
   String _filterType = 'All';
   String _filterBatch = 'All Batches';
+  bool _mergeByFormula = false;
   String _sortField = 'name';
   bool _isAscending = true;
   int _page = 0;
@@ -500,14 +501,23 @@ class _InventoryPageState extends State<InventoryPage>
     final box = Hive.box(LocalStorageService.stockBox);
     final normBranch = widget.branchId.toLowerCase().trim();
     final allMapDocs = <Map<String, dynamic>>[];
+    final seenIds = <String>{};
+
     for (final key in box.keys) {
       final val = box.get(key);
       if (val is Map) {
         final m = Map<String, dynamic>.from(val);
-        if (m['id'] == null || m['id'].toString().isEmpty || m['id'] == 'unknown') {
-          final kStr = key.toString();
-          m['id'] = kStr.startsWith('stock:') ? kStr.substring(6) : kStr;
-        }
+        final kStr = key.toString();
+        final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'])?.toString().trim();
+        final cleanId = (rawId != null && rawId.isNotEmpty && rawId != 'unknown' && rawId != 'null')
+            ? rawId
+            : (kStr.startsWith('stock:') ? kStr.substring(6) : kStr);
+        m['id'] = cleanId;
+
+        // Skip duplicate records in stockBox (which stores both 'stock:$id' and '$id')
+        final dedupKey = cleanId.toLowerCase().trim();
+        if (seenIds.contains(dedupKey)) continue;
+        seenIds.add(dedupKey);
 
         // Auto-normalize medicine name & formula to latest master catalog for unedited items
         final isCustom = m['isCustomized'] == true || m['userEdited'] == true;
@@ -522,8 +532,8 @@ class _InventoryPageState extends State<InventoryPage>
 
         // Auto-normalize Kapayya/Kapaya camp to Saddar
         final rawCamp = (m['campId'] ?? m['dispensaryId'] ?? '').toString().toLowerCase();
-        final rawId = m['id'].toString().toLowerCase();
-        if (rawCamp.contains('kapay') || rawCamp == 'kapayya' || rawCamp == 'kapaya' || rawId.startsWith('kapay')) {
+        final rawIdLower = cleanId.toLowerCase();
+        if (rawCamp.contains('kapay') || rawCamp == 'kapayya' || rawCamp == 'kapaya' || rawIdLower.startsWith('kapay')) {
           m['campId'] = 'saddar';
           m['dispensaryId'] = 'saddar';
         }
@@ -645,6 +655,7 @@ class _InventoryPageState extends State<InventoryPage>
       _searchCtrl.clear();
       _filterType = 'All';
       _filterBatch = 'All Batches';
+      _mergeByFormula = false;
       _sortField = 'name';
       _isAscending = true;
       _displayLimit = 50;
@@ -801,7 +812,7 @@ class _InventoryPageState extends State<InventoryPage>
     final Map<String, Map<String, dynamic>> map = {};
     for (final data in docs) {
       final name = (data['name'] ?? '').toString().trim();
-      final type = data['type'] ?? '';
+      final type = (data['type'] ?? '').toString().trim();
       final dose = (data['dose'] ?? '').toString().trim();
       final expiry = data['expiryDate']?.toString().trim() ?? '';
       final qty = _asInt(data['quantity']);
@@ -819,26 +830,79 @@ class _InventoryPageState extends State<InventoryPage>
       String doseDisplay = dose;
       if (type == 'Nebulization' && dose.isEmpty) doseDisplay = 'per session';
 
-      final key = '$name|$type|$dose|$monthYear';
+      final docId = (data['id'] ?? data['medicineId'] ?? 'unknown').toString();
+
+      String key;
+      String displayName = name;
+      String displayFormula = formula;
+
+      if (_mergeByFormula) {
+        // Canonical formula resolution
+        final rawForm = formula.isNotEmpty ? formula : name;
+        final cleanForm = MasterProformaService.cleanBrandToFormula(rawForm).trim();
+        final effFormula = cleanForm.isNotEmpty ? cleanForm : rawForm.trim();
+
+        // Key groups strictly by normalized generic formula so same formula quantities merge together
+        key = effFormula.toLowerCase().trim();
+        displayFormula = effFormula;
+        displayName = effFormula;
+      } else {
+        // Normal mode: separated by batch (monthYear) and item name
+        key = '$name|$type|$dose|$monthYear';
+      }
+
       if (map.containsKey(key)) {
-        map[key]!['quantity'] = (map[key]!['quantity'] as int) + qty;
-        (map[key]!['_docIds'] as List<String>).add(data['id'] ?? data['medicineId'] ?? 'unknown');
+        final existing = map[key]!;
+        final existingDocIds = existing['_docIds'] as List<String>;
+        if (!existingDocIds.contains(docId)) {
+          existingDocIds.add(docId);
+          existing['quantity'] = (existing['quantity'] as int) + qty;
+          existing['_mergedCount'] = ((existing['_mergedCount'] as int?) ?? 1) + 1;
+        }
         // Keep the first non-empty barcode found for this batch
-        if ((map[key]!['barcode'] as String? ?? '').isEmpty && barcode.isNotEmpty) {
-          map[key]!['barcode'] = barcode;
+        if ((existing['barcode'] as String? ?? '').isEmpty && barcode.isNotEmpty) {
+          existing['barcode'] = barcode;
+        }
+
+        if (_mergeByFormula) {
+          // Combine dose if different (e.g. 500 mg, 250 mg)
+          final currentDose = (existing['dose'] ?? '').toString().trim();
+          if (doseDisplay.isNotEmpty && doseDisplay != '—' && currentDose.isNotEmpty && currentDose != '—' && !currentDose.contains(doseDisplay)) {
+            existing['dose'] = '$currentDose, $doseDisplay';
+          } else if (currentDose.isEmpty || currentDose == '—') {
+            existing['dose'] = doseDisplay;
+          }
+
+          // Combine type if different
+          final currentType = (existing['type'] ?? '').toString().trim();
+          if (type.isNotEmpty && currentType.isNotEmpty && !currentType.contains(type)) {
+            existing['type'] = '$currentType / $type';
+          }
+
+          // Track earliest expiry among merged batches
+          final currentExp = existing['expiryDate']?.toString() ?? '';
+          if (currentExp.isNotEmpty && monthYear.isNotEmpty && currentExp != monthYear) {
+            final d1 = _parseExpiry(currentExp);
+            final d2 = _parseExpiry(monthYear);
+            final earliest = d1.isBefore(d2) ? currentExp : monthYear;
+            existing['expiryDate'] = earliest;
+            existing['hasMultipleExpiries'] = true;
+          }
         }
       } else {
         map[key] = {
-          'name': name,
+          'name': displayName,
           'type': type,
           'dose': doseDisplay,
-          'formula': formula,
+          'formula': displayFormula,
           'barcode': barcode,
           'expiryDate': monthYear,
           'quantity': qty,
           'price': price,
           'batchKey': key,
-          '_docIds': <String>[data['id'] ?? data['medicineId'] ?? 'unknown'],
+          '_docIds': <String>[docId],
+          '_mergedCount': 1,
+          '_isMerged': _mergeByFormula,
         };
       }
     }
@@ -2391,6 +2455,8 @@ class _InventoryPageState extends State<InventoryPage>
                       ),
                     ),
                   ),
+                  const SizedBox(width: 6),
+                  _buildMergeFormulaCheckButton(isCompact: true),
 
                   if (_canDeleteInventoryItem && _showRemoveAllMeds) ...[
                     const SizedBox(width: 6),
@@ -2545,6 +2611,8 @@ class _InventoryPageState extends State<InventoryPage>
           ),
         ),
       ),
+      const SizedBox(width: 8),
+      _buildMergeFormulaCheckButton(isCompact: false),
       if (hasCamps && !widget.isDoctor && branchCamps.isNotEmpty) ...[
         const SizedBox(width: 8),
         Container(
@@ -2766,6 +2834,71 @@ class _InventoryPageState extends State<InventoryPage>
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(children: widgets),
+      ),
+    );
+  }
+
+  Widget _buildMergeFormulaCheckButton({bool isCompact = false}) {
+    return Tooltip(
+      message: _mergeByFormula
+          ? 'Formulas merged: Showing combined quantities of same formula. Click to view normal separated batches.'
+          : 'Normal view: Batches separated. Click to check and merge quantities of the same formula.',
+      child: InkWell(
+        onTap: () {
+          setState(() {
+            _mergeByFormula = !_mergeByFormula;
+            if (_mergeByFormula) {
+              _filterBatch = 'All Batches';
+            }
+            _displayLimit = 50;
+            _processData();
+          });
+        },
+        borderRadius: BorderRadius.circular(isCompact ? 7 : 8),
+        child: Container(
+          height: isCompact ? 32 : 38,
+          padding: EdgeInsets.symmetric(horizontal: isCompact ? 8 : 10),
+          decoration: BoxDecoration(
+            color: _mergeByFormula
+                ? (_isDark ? const Color(0xFF0F766E) : _teal)
+                : (_isDark ? const Color(0xFF334155) : Colors.white),
+            borderRadius: BorderRadius.circular(isCompact ? 7 : 8),
+            border: Border.all(
+              color: _mergeByFormula
+                  ? (_isDark ? const Color(0xFF14B8A6) : _tealDark)
+                  : (_isDark ? const Color(0xFF475569) : Colors.grey.shade300),
+              width: _mergeByFormula ? 1.5 : 1.0,
+            ),
+            boxShadow: _mergeByFormula
+                ? [
+                    BoxShadow(
+                      color: _teal.withValues(alpha: 0.25),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _mergeByFormula ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                size: isCompact ? 16 : 18,
+                color: _mergeByFormula ? Colors.white : (_isDark ? const Color(0xFF94A3B8) : _teal),
+              ),
+              const SizedBox(width: 5),
+              Text(
+                'Merge Formula',
+                style: TextStyle(
+                  fontSize: isCompact ? 11.5 : 12,
+                  fontWeight: FontWeight.bold,
+                  color: _mergeByFormula ? Colors.white : (_isDark ? Colors.white : _textDark),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -3513,22 +3646,47 @@ class _InventoryPageState extends State<InventoryPage>
                       style: TextStyle(color: _isDark ? const Color(0xFFF8FAFC) : _textDark, fontSize: 12.5))),
               _dCell(
                   cols[5].w,
-                  Text(NumberFormat('#,###').format(qty),
-                      style: TextStyle(
-                          color: _isDark
-                              ? (lowStock ? const Color(0xFFFF6B6B) : Colors.white)
-                              : (lowStock ? _red : _textDark),
-                          fontWeight: lowStock ? FontWeight.bold : FontWeight.w500,
-                          fontSize: 12.5))),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(NumberFormat('#,###').format(qty),
+                          style: TextStyle(
+                              color: _isDark
+                                  ? (lowStock ? const Color(0xFFFF6B6B) : Colors.white)
+                                  : (lowStock ? _red : _textDark),
+                              fontWeight: lowStock ? FontWeight.bold : FontWeight.w500,
+                              fontSize: 12.5)),
+                      if (_mergeByFormula && (b['_mergedCount'] as int? ?? 1) > 1) ...[
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: _teal.withValues(alpha: _isDark ? 0.35 : 0.15),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: _teal.withValues(alpha: 0.4), width: 0.8),
+                          ),
+                          child: Text(
+                            'Merged',
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.bold,
+                              color: _isDark ? const Color(0xFF5EEAD4) : _tealDark,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  )),
               _dCell(
                   cols[6].w,
-                  Text(expText,
-                      style: TextStyle(
-                          color: _isDark
-                              ? (expSoon ? const Color(0xFFFF6B6B) : Colors.white)
-                              : (expSoon ? _red : _textDark),
-                          fontWeight: expSoon ? FontWeight.bold : FontWeight.normal,
-                          fontSize: 12.5))),
+                  Text(
+                    b['hasMultipleExpiries'] == true ? '$expText (Earliest)' : expText,
+                    style: TextStyle(
+                        color: _isDark
+                            ? (expSoon ? const Color(0xFFFF6B6B) : Colors.white)
+                            : (expSoon ? _red : _textDark),
+                        fontWeight: expSoon ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 12.5))),
             ]),
           ],
         ),
@@ -3820,7 +3978,24 @@ class _InventoryPageState extends State<InventoryPage>
                     if (barcode.isNotEmpty)
                       _infoBadge(barcode, _isDark ? const Color(0xFF38BDF8) : _indigo, icon: Icons.qr_code_rounded),
                     _priceBadge(price),
-                    _expBadge(expText, expSoon),
+                    _expBadge(b['hasMultipleExpiries'] == true ? '$expText (Earliest)' : expText, expSoon),
+                    if (_mergeByFormula && (b['_mergedCount'] as int? ?? 1) > 1)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: _teal.withValues(alpha: _isDark ? 0.35 : 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: _teal.withValues(alpha: 0.4), width: 0.8),
+                        ),
+                        child: Text(
+                          'Merged (${b['_mergedCount']} batches)',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: _isDark ? const Color(0xFF5EEAD4) : _tealDark,
+                          ),
+                        ),
+                      ),
                     if (lowStock || expSoon)
                       _statusLabel(lowStock: lowStock, expSoon: expSoon),
                   ]),

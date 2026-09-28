@@ -948,6 +948,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     final String activeCamp = (CampSessionService.getActiveCamp() ?? '').toLowerCase().trim();
 
     final List<Map<String, dynamic>> existingStock = [];
+    final Set<String> seenStockIds = {};
     try {
       if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
         final box = Hive.box(LocalStorageService.stockBox);
@@ -956,6 +957,15 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           if (val is Map) {
             final m = Map<String, dynamic>.from(val);
             if (m['status'] == 'deleted') continue;
+
+            final kStr = k.toString();
+            final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'])?.toString().trim();
+            final cleanId = (rawId != null && rawId.isNotEmpty && rawId != 'unknown' && rawId != 'null')
+                ? rawId.toLowerCase()
+                : (kStr.startsWith('stock:') ? kStr.substring(6).toLowerCase() : kStr.toLowerCase());
+            if (seenStockIds.contains(cleanId)) continue;
+            seenStockIds.add(cleanId);
+            m['id'] = cleanId;
 
             final itemBranch = (m['branchId'] ?? '').toString().trim().toLowerCase();
             if (activeBranch.isNotEmpty && activeBranch != 'default' && itemBranch.isNotEmpty && itemBranch != activeBranch.toLowerCase()) {

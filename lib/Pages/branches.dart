@@ -94,6 +94,27 @@ String _formatCnic(String raw) {
   return raw;
 }
 
+bool _isVitalsAllowedForBranchOrCamp(String branchId, {String? campId}) {
+  final b = branchId.toLowerCase().trim();
+  if (b.isEmpty || b == 'all' || b == 'global') return true;
+
+  if (campId != null && campId.isNotEmpty && campId != 'all') {
+    final camps = CampSessionService.getCampsForBranch(b, includeClosed: true);
+    for (final c in camps) {
+      final id = (c['id'] ?? '').toString().toLowerCase().trim();
+      final tag = (c['dispensaryTag'] ?? c['tag'] ?? '').toString().toLowerCase().trim();
+      if (id == campId.toLowerCase().trim() || tag == campId.toLowerCase().trim()) {
+        if (c['allowVitalsToken'] != null) {
+          final v = c['allowVitalsToken'];
+          return v == true || v == 'true' || v == 1;
+        }
+      }
+    }
+  }
+
+  return LocalStorageService.isVitalsTokenAllowed(b);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Branches Main Widget
 // ─────────────────────────────────────────────────────────────────────────────
@@ -778,10 +799,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final summaryAsync = ref.watch(serialsSummaryProvider(branchId));
     final data = summaryAsync.value ?? {};
 
-    final totalTokens = (data['total'] ?? 0) as int;
-    final zakatTokens = (data['v1'] ?? 0) as int;
-    final nonZakatTokens = (data['v2'] ?? 0) as int;
-    final gmwfTokens = (data['v3'] ?? 0) as int;
+    final totalTokens = data['total'] ?? 0;
+    final zakatTokens = data['v1'] ?? 0;
+    final nonZakatTokens = data['v2'] ?? 0;
+    final gmwfTokens = data['v3'] ?? 0;
 
     final zakatAmount = zakatTokens * 20;
     final nonZakatAmount = nonZakatTokens * 100;
@@ -809,23 +830,24 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
       ))
     );
 
-    return ValueListenableBuilder<String?>(
-      valueListenable: CampSessionService.activeCampNotifier,
-      builder: (context, activeCamp, _) {
-        final effCamp = activeCamp ?? CampSessionService.getActiveCamp(branchId);
-        final records = BranchRecordService.getBranchRecords(
-          branchId,
-          campId: effCamp,
-          todayCount: isSingleDayToday ? totalTokens : null,
-        );
-        final peakCount = records.peakRecord.count;
-        final peakDate = records.peakRecord.dateFormatted.isNotEmpty
-            ? records.peakRecord.dateFormatted
-            : "No history";
+    final subFilter = ref.watch(branchSubDispensaryFilterProvider);
+    final effCamp = (_selectedCampFilter != 'all' && _selectedCampFilter.isNotEmpty)
+        ? _selectedCampFilter
+        : (subFilter != null && subFilter.isNotEmpty && subFilter != 'all' ? subFilter : null);
 
-        final peakTitle = (effCamp != null && effCamp.isNotEmpty && effCamp != 'all')
-            ? "${CampSessionService.getCampLabel(effCamp)} Peak"
-            : "All-Time Peak";
+    final records = BranchRecordService.getBranchRecords(
+      branchId,
+      campId: effCamp,
+      todayCount: isSingleDayToday ? totalTokens : null,
+    );
+    final peakCount = records.peakRecord.count;
+    final peakDate = records.peakRecord.dateFormatted.isNotEmpty
+        ? records.peakRecord.dateFormatted
+        : "No history";
+
+    final peakTitle = (effCamp != null && effCamp.isNotEmpty && effCamp != 'all')
+        ? "${CampSessionService.getCampLabel(effCamp)} Peak"
+        : "${_selectedBranchName.isNotEmpty ? _selectedBranchName : 'Branch'} Peak";
 
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -925,8 +947,6 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             );
           },
         );
-      },
-    );
   }
 
   Widget _buildKpiCard({
@@ -1331,6 +1351,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         }
       }
 
+      // Token Category Filter (Normal vs Vitals)
+      final tokenCat = ref.watch(branchTokenCategoryFilterProvider);
+      final isV = p['isVitalsOnly'] == true ||
+          p['vitalsOnly'] == true ||
+          (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
+      if (tokenCat == 'vitals' && !isV) return false;
+      if (tokenCat == 'normal' && isV) return false;
+
       // Stage Filter
       if (stageFilter == 'waiting_doctor') {
         return _recordStage(p) == 'waiting_doctor';
@@ -1359,6 +1387,11 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final waitingDoctorCount = campFilteredAllList.where((p) => _recordStage(p) == 'waiting_doctor').length;
     final waitingDispCount = campFilteredAllList.where((p) => _recordStage(p) == 'waiting_dispensary').length;
     final dispensedCount = campFilteredAllList.where((p) => _recordStage(p) == 'dispensed').length;
+    final vitalsCount = campFilteredAllList.where((p) =>
+        p['isVitalsOnly'] == true ||
+        p['vitalsOnly'] == true ||
+        (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false)).length;
+    final normalCount = campFilteredAllList.length - vitalsCount;
 
     // Pagination slice
     final totalRecords = filtered.length;
@@ -1385,10 +1418,50 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Section Title
-          Text(
-            "All Branch Patient Records",
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: t.textPrimary),
+          // Section Title & Configuration Badge
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                "All Branch Patient Records",
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: t.textPrimary),
+              ),
+              Builder(builder: (context) {
+                final allowsVitals = _isVitalsAllowedForBranchOrCamp(branchId, campId: _selectedCampFilter);
+                final badgeColor = allowsVitals ? const Color(0xFF10B981) : const Color(0xFF6366F1);
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: badgeColor.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        allowsVitals ? Icons.monitor_heart_outlined : Icons.confirmation_number_outlined,
+                        size: 13,
+                        color: badgeColor,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        allowsVitals
+                            ? "Dual Tokens: Vitals & Normal Allowed"
+                            : "Normal Tokens Only (Vitals Tokens Disabled)",
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: badgeColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
           ),
           if (dispState.isSyncing) ...[
             const SizedBox(height: 10),
@@ -1445,16 +1518,19 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       children: [
                         _buildCampFilterChip('All $bDisplayName (Collective)', _selectedCampFilter == 'all', () {
                           setState(() { _selectedCampFilter = 'all'; _currentPage = 1; });
+                          ref.read(branchSubDispensaryFilterProvider.notifier).state = null;
                         }, const Color(0xFF0D9488), t),
                         for (int i = 0; i < campOptions.length; i++)
                           _buildCampFilterChip(
                             campOptions[i]['name']!,
                             _selectedCampFilter == campOptions[i]['id']!,
                             () {
+                              final cid = campOptions[i]['id']!;
                               setState(() {
-                                _selectedCampFilter = campOptions[i]['id']!;
+                                _selectedCampFilter = cid;
                                 _currentPage = 1;
                               });
+                              ref.read(branchSubDispensaryFilterProvider.notifier).state = cid;
                             },
                             colors[i % colors.length],
                             t,
@@ -1473,15 +1549,31 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             builder: (context, constraints) {
               final isNarrow = constraints.maxWidth < 850;
 
+              final tokenCat = ref.watch(branchTokenCategoryFilterProvider);
+              final allowsVitals = _isVitalsAllowedForBranchOrCamp(branchId, campId: _selectedCampFilter);
+
               final filterPills = isNarrow
                   ? SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          _buildStageTabPill("All Records", allList.length, stageFilter == 'all', () {
+                          _buildStageTabPill("All Records", allList.length, stageFilter == 'all' && tokenCat == 'all', () {
                             ref.read(branchStageFilterProvider.notifier).state = 'all';
+                            ref.read(branchTokenCategoryFilterProvider.notifier).state = 'all';
                             setState(() => _currentPage = 1);
                           }, const Color(0xFF6366F1), t),
+                          if (allowsVitals || vitalsCount > 0) ...[
+                            const SizedBox(width: 8),
+                            _buildStageTabPill("🩺 Vitals ($vitalsCount)", vitalsCount, tokenCat == 'vitals', () {
+                              ref.read(branchTokenCategoryFilterProvider.notifier).state = 'vitals';
+                              setState(() => _currentPage = 1);
+                            }, const Color(0xFF8B5CF6), t),
+                          ],
+                          const SizedBox(width: 8),
+                          _buildStageTabPill("🎟️ Normal ($normalCount)", normalCount, tokenCat == 'normal', () {
+                            ref.read(branchTokenCategoryFilterProvider.notifier).state = 'normal';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFF0EA5E9), t),
                           const SizedBox(width: 8),
                           _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
                             ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
@@ -1504,10 +1596,20 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       spacing: 8,
                       runSpacing: 8,
                       children: [
-                        _buildStageTabPill("All Records", allList.length, stageFilter == 'all', () {
+                        _buildStageTabPill("All Records", allList.length, stageFilter == 'all' && tokenCat == 'all', () {
                           ref.read(branchStageFilterProvider.notifier).state = 'all';
+                          ref.read(branchTokenCategoryFilterProvider.notifier).state = 'all';
                           setState(() => _currentPage = 1);
                         }, const Color(0xFF6366F1), t),
+                        if (allowsVitals || vitalsCount > 0)
+                          _buildStageTabPill("🩺 Vitals ($vitalsCount)", vitalsCount, tokenCat == 'vitals', () {
+                            ref.read(branchTokenCategoryFilterProvider.notifier).state = 'vitals';
+                            setState(() => _currentPage = 1);
+                          }, const Color(0xFF8B5CF6), t),
+                        _buildStageTabPill("🎟️ Normal ($normalCount)", normalCount, tokenCat == 'normal', () {
+                          ref.read(branchTokenCategoryFilterProvider.notifier).state = 'normal';
+                          setState(() => _currentPage = 1);
+                        }, const Color(0xFF0EA5E9), t),
                         _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
                           ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
                           setState(() => _currentPage = 1);
@@ -1633,9 +1735,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             LayoutBuilder(
               builder: (context, tableConstraints) {
                 if (tableConstraints.maxWidth < 750) {
-                  return _buildMobilePatientRecordsList(context, t, paginatedList, branchId);
+                  return _buildMobilePatientRecordsList(context, t, paginatedList, branchId, startIndex: startIndex);
                 }
-                return _buildRecordsTable(context, t, paginatedList, branchId);
+                return _buildRecordsTable(context, t, paginatedList, branchId, startIndex: startIndex);
               },
             ),
 
@@ -1697,7 +1799,491 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     );
   }
 
-  Widget _buildRecordsTable(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId) {
+  void _showVisitDetailsDialog(BuildContext context, Map<String, dynamic> p, RoleThemeData t, String branchId) {
+    final tokenSerial = (p['serial'] ?? p['id'] ?? 'TK-000').toString();
+    final rawName = (p['patientName'] ?? p['name'] ?? p['fullName'] ?? '').toString().trim();
+    final name = (rawName.isEmpty || rawName.toLowerCase() == 'unknown' || rawName.toLowerCase() == 'unknown patient')
+        ? 'Unknown Patient'
+        : rawName;
+    final age = (p['age'] ?? p['patientAge'] ?? '').toString();
+    final gender = (p['gender'] ?? p['patientGender'] ?? '').toString();
+    final rawPhone = (p['phone'] ?? p['patientPhone'] ?? p['contactPhone'] ?? '').toString().trim();
+    final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
+
+    final rawCnic = (p['displayCnic'] ?? p['cnic'] ?? p['patientCnic'] ?? p['guardianCnic'] ?? '').toString().trim();
+    final hasCnic = rawCnic.isNotEmpty && rawCnic != 'N/A' && rawCnic != '0000000000000' && rawCnic != '-';
+    final formattedCnic = hasCnic ? _formatCnic(rawCnic) : '—';
+    final isChild = p['isChild'] == true ||
+        ((p['guardianCnic'] ?? '').toString().isNotEmpty && (p['patientCnic'] ?? p['cnic'] ?? '').toString().isEmpty);
+
+    final isVitalsOnly = p['isVitalsOnly'] == true ||
+        p['vitalsOnly'] == true ||
+        (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
+
+    final rawType = (p['queueType'] ?? p['type'] ?? p['category'] ?? '').toString().toLowerCase().trim();
+    final type = (rawType.isEmpty || rawType == 'unknown')
+        ? (tokenSerial.contains('-NZ-') || tokenSerial.contains('NZ') ? 'non-zakat' : (tokenSerial.contains('-G-') ? 'gmwf' : 'zakat'))
+        : rawType;
+
+    final stage = _recordStage(p);
+    final statusColor = stage == 'dispensed'
+        ? const Color(0xFF10B981)
+        : stage == 'waiting_dispensary'
+            ? const Color(0xFF3B82F6)
+            : const Color(0xFFF59E0B);
+    final statusLabel = stage == 'dispensed'
+        ? 'Dispensed'
+        : stage == 'waiting_dispensary'
+            ? 'Waiting for Dispensary'
+            : 'Waiting for Doctor';
+
+    final campLabel = _resolvePatientCampLabel(p, branchId);
+    final days = (p['daysOfMedicine'] as num?)?.toInt() ?? 1;
+
+    // Extract vitals data
+    final vitalsRaw = p['vitals'];
+    final vitals = (vitalsRaw is Map) ? Map<String, dynamic>.from(vitalsRaw) : <String, dynamic>{};
+    final docVitals = (vitals['doctorVitals'] is Map)
+        ? Map<String, dynamic>.from(vitals['doctorVitals'])
+        : (p['doctorVitals'] is Map ? Map<String, dynamic>.from(p['doctorVitals']) : <String, dynamic>{});
+    final recVitals = (vitals['receptionistVitals'] is Map)
+        ? Map<String, dynamic>.from(vitals['receptionistVitals'])
+        : (p['receptionistVitals'] is Map ? Map<String, dynamic>.from(p['receptionistVitals']) : <String, dynamic>{});
+
+    String? pickVital(String key, [List<String>? altKeys]) {
+      final candidates = [key, ...?altKeys];
+      for (final k in candidates) {
+        final v = docVitals[k] ?? vitals[k] ?? recVitals[k] ?? p[k];
+        if (v != null && v.toString().trim().isNotEmpty && v.toString().trim() != 'N/A' && v.toString().trim() != '-') {
+          return v.toString().trim();
+        }
+      }
+      return null;
+    }
+
+    final bpSys = pickVital('systolic', ['bp_sys', 'sys']);
+    final bpDia = pickVital('diastolic', ['bp_dia', 'dia']);
+    final rawBp = pickVital('bp');
+    final bp = (bpSys != null && bpDia != null) ? '$bpSys/$bpDia' : rawBp;
+    final sugar = pickVital('sugar', ['bloodSugar', 'bs', 'glucose']);
+    final temp = pickVital('temp', ['temperature']);
+    final weight = pickVital('weight', ['wt']);
+    final pulse = pickVital('pulse', ['heartRate', 'hr']);
+
+    // Clinical assessment
+    final condition = pickVital('condition', ['complaint', 'patientCondition']) ?? (isVitalsOnly ? 'Vitals Inspection Checkup' : 'N/A');
+    final diagnosis = pickVital('diagnosis') ?? (isVitalsOnly ? 'Vitals Check Completed' : 'N/A');
+    final doctorName = pickVital('doctorName', ['doctor', 'drName']) ?? 'N/A';
+
+    // Medicines
+    final presRaw = p['prescription'];
+    final presMap = (presRaw is Map) ? Map<String, dynamic>.from(presRaw) : <String, dynamic>{};
+    final medsList = (presMap['medicines'] ?? p['medicines'] ?? p['prescriptions']);
+    final List<Map<String, dynamic>> medicines = [];
+    if (medsList is List) {
+      for (final m in medsList) {
+        if (m is Map) medicines.add(Map<String, dynamic>.from(m));
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: t.bgCard,
+        child: Container(
+          width: 540,
+          constraints: const BoxConstraints(maxHeight: 680),
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Header
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: isVitalsOnly ? const Color(0xFF8B5CF6).withValues(alpha: 0.15) : t.accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      isVitalsOnly ? Icons.monitor_heart_rounded : Icons.medical_services_rounded,
+                      color: isVitalsOnly ? const Color(0xFF8B5CF6) : t.accent,
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              tokenSerial,
+                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: t.textPrimary),
+                            ),
+                            const SizedBox(width: 8),
+                            InkWell(
+                              onTap: () {
+                                Clipboard.setData(ClipboardData(text: tokenSerial));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Copied $tokenSerial'), duration: const Duration(seconds: 1)),
+                                );
+                              },
+                              child: Icon(Icons.copy_rounded, size: 14, color: t.textSecondary),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          campLabel.isNotEmpty ? campLabel : 'Branch Token',
+                          style: TextStyle(fontSize: 11, color: t.textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(dialogCtx),
+                    icon: Icon(Icons.close_rounded, size: 20, color: t.textSecondary),
+                    splashRadius: 18,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Scrollable body
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Token Category Banner
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: isVitalsOnly
+                              ? const Color(0xFF8B5CF6).withValues(alpha: 0.12)
+                              : const Color(0xFF10B981).withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: isVitalsOnly
+                                ? const Color(0xFF8B5CF6).withValues(alpha: 0.35)
+                                : const Color(0xFF10B981).withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              isVitalsOnly ? Icons.monitor_heart_outlined : Icons.medication_rounded,
+                              size: 18,
+                              color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF10B981),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isVitalsOnly ? "Vitals Inspection Token" : "Regular Consultation Token ($days-Day Course)",
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                      color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF10B981),
+                                    ),
+                                  ),
+                                  Text(
+                                    isVitalsOnly
+                                        ? "Registered specifically for vital screening. No medicine course prescribed."
+                                        : "Standard clinical evaluation with prescribed medicine regimen.",
+                                    style: TextStyle(fontSize: 11, color: t.textSecondary),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: statusColor.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                statusLabel,
+                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: statusColor),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Patient Demographics
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: t.bg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: t.bgRule),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("PATIENT INFORMATION", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: t.textTertiary, letterSpacing: 0.5)),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Full Name", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Text(name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: t.textPrimary)),
+                              ],
+                            ),
+                            const Divider(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("CNIC", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Text(formattedCnic + (isChild ? ' (Guardian)' : ''), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary)),
+                              ],
+                            ),
+                            const Divider(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Age & Gender", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Text(
+                                  [if (age.isNotEmpty && age != 'N/A') '$age yrs', if (gender.isNotEmpty && gender != 'N/A') gender].join(' • '),
+                                  style: TextStyle(fontSize: 12, color: t.textPrimary),
+                                ),
+                              ],
+                            ),
+                            if (hasPhone) ...[
+                              const Divider(height: 14),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text("Phone", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                  Text(rawPhone, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary)),
+                                ],
+                              ),
+                            ],
+                            const Divider(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Queue Category", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Text(type.toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: t.accent)),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Vitals Section
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: t.bg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: t.bgRule),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("RECORDED VITALS", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: t.textTertiary, letterSpacing: 0.5)),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 12,
+                              runSpacing: 10,
+                              children: [
+                                _buildVitalPill("Blood Pressure", bp != null ? "$bp mmHg" : "—", Icons.favorite_rounded, const Color(0xFFEF4444), t),
+                                _buildVitalPill("Blood Sugar", sugar != null ? "$sugar mg/dL" : "—", Icons.bloodtype_rounded, const Color(0xFFF59E0B), t),
+                                _buildVitalPill("Temperature", temp != null ? "$temp °F" : "—", Icons.thermostat_rounded, const Color(0xFF0D9488), t),
+                                _buildVitalPill("Weight", weight != null ? "$weight kg" : "—", Icons.scale_rounded, const Color(0xFF3B82F6), t),
+                                _buildVitalPill("Pulse", pulse != null ? "$pulse bpm" : "—", Icons.monitor_heart_rounded, const Color(0xFF8B5CF6), t),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Clinical Consultation & Diagnosis
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: t.bg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: t.bgRule),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text("DOCTOR CONSULTATION", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: t.textTertiary, letterSpacing: 0.5)),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Condition", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Flexible(child: Text(condition, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary), textAlign: TextAlign.right)),
+                              ],
+                            ),
+                            const Divider(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Diagnosis", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                Flexible(child: Text(diagnosis, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.accent), textAlign: TextAlign.right)),
+                              ],
+                            ),
+                            if (doctorName != 'N/A') ...[
+                              const Divider(height: 14),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text("Consulting Doctor", style: TextStyle(fontSize: 12, color: t.textSecondary)),
+                                  Text(doctorName, style: TextStyle(fontSize: 12, color: t.textPrimary)),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+
+                      // Medicines Section (if regular)
+                      if (!isVitalsOnly) ...[
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: t.bg,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: t.bgRule),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("PRESCRIBED MEDICINES (${medicines.length})", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: t.textTertiary, letterSpacing: 0.5)),
+                              const SizedBox(height: 8),
+                              if (medicines.isEmpty)
+                                Text("No medicines recorded in this token prescription", style: TextStyle(fontSize: 12, color: t.textSecondary, fontStyle: FontStyle.italic))
+                              else
+                                ...medicines.map((m) {
+                                  final mName = (m['name'] ?? 'Medicine').toString();
+                                  final mDose = (m['dosage'] ?? m['dose'] ?? '').toString();
+                                  final mTiming = (m['timing'] ?? '').toString();
+                                  final mQty = (m['quantity'] ?? '').toString();
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 4),
+                                    child: Row(
+                                      children: [
+                                        Icon(Icons.medication_outlined, size: 14, color: t.accent),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            "$mName ${mDose.isNotEmpty ? "($mDose)" : ""}",
+                                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary),
+                                          ),
+                                        ),
+                                        if (mTiming.isNotEmpty)
+                                          Text(mTiming, style: TextStyle(fontSize: 11, color: t.textSecondary)),
+                                        if (mQty.isNotEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(left: 8),
+                                            child: Text("Qty: $mQty", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: t.accent)),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Action buttons
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  OutlinedButton(
+                    onPressed: () => Navigator.pop(dialogCtx),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: t.textSecondary,
+                      side: BorderSide(color: t.bgRule),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: const Text("Close"),
+                  ),
+                  const SizedBox(width: 10),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(dialogCtx);
+                      final pid = p['patientId']?.toString() ?? p['id']?.toString() ?? '';
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => PatientDetailScreen(
+                            patientId: pid,
+                            isOnline: true,
+                            localBox: Hive.box('local_patients'),
+                            branchId: branchId,
+                            doctorId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
+                            isAdmin: true,
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.person_outline, size: 16),
+                    label: const Text("Full Profile"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: t.accent,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVitalPill(String label, String value, IconData icon, Color color, RoleThemeData t) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(label, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: t.textSecondary)),
+              Text(value, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: t.textPrimary)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecordsTable(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId, {int startIndex = 0}) {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
@@ -1714,7 +2300,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
           columnSpacing: 20,
           horizontalMargin: 16,
           columns: const [
+            DataColumn(label: Text("#")),
             DataColumn(label: Text("TOKEN #")),
+            DataColumn(label: Text("TOKEN TYPE")),
             DataColumn(label: Text("PATIENT NAME")),
             DataColumn(label: Text("CNIC")),
             DataColumn(label: Text("PHONE NUMBER")),
@@ -1724,13 +2312,18 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             DataColumn(label: Text("RELATIONS / COURSE")),
             DataColumn(label: Text("ACTIONS")),
           ],
-          rows: records.map((p) {
+          rows: records.asMap().entries.map((entry) {
+            final rowIndex = startIndex + entry.key + 1;
+            final p = entry.value;
             final pid = p['patientId']?.toString() ?? p['id']?.toString() ?? '';
             final tokenSerial = p['serial']?.toString() ?? p['id']?.toString() ?? 'TK-000';
-            final name = p['name']?.toString() ?? 'Unknown Patient';
-            final age = p['age']?.toString() ?? '';
-            final gender = p['gender']?.toString() ?? '';
-            final rawPhone = (p['phone'] ?? p['patientPhone'] ?? '').toString().trim();
+            final rawName = (p['patientName'] ?? p['name'] ?? p['fullName'] ?? '').toString().trim();
+            final name = (rawName.isEmpty || rawName.toLowerCase() == 'unknown' || rawName.toLowerCase() == 'unknown patient')
+                ? 'Unknown Patient'
+                : rawName;
+            final age = (p['age'] ?? p['patientAge'] ?? '').toString();
+            final gender = (p['gender'] ?? p['patientGender'] ?? '').toString();
+            final rawPhone = (p['phone'] ?? p['patientPhone'] ?? p['contactPhone'] ?? '').toString().trim();
             final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
             final stage = _recordStage(p);
             final statusColor = stage == 'dispensed'
@@ -1750,7 +2343,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             final isChild = p['isChild'] == true ||
                 ((p['guardianCnic'] ?? '').toString().isNotEmpty && (p['patientCnic'] ?? p['cnic'] ?? '').toString().isEmpty);
 
-            final type = (p['type'] ?? 'zakat').toString().toLowerCase();
+            final rawType = (p['queueType'] ?? p['type'] ?? p['category'] ?? '').toString().toLowerCase().trim();
+            final type = (rawType.isEmpty || rawType == 'unknown')
+                ? (tokenSerial.contains('-NZ-') || tokenSerial.contains('NZ') ? 'non-zakat' : (tokenSerial.contains('-G-') ? 'gmwf' : 'zakat'))
+                : rawType;
+
+            final isVitalsOnly = p['isVitalsOnly'] == true ||
+                p['vitalsOnly'] == true ||
+                (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
 
             Color typeColor;
             if (type == 'zakat') {
@@ -1770,53 +2370,106 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
 
             return DataRow(
               cells: [
-                // 1. Token #
+                // 1. Index #
+                DataCell(
+                  Text(
+                    '#$rowIndex',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: t.textSecondary,
+                    ),
+                  ),
+                ),
+
+                // 2. Token #
                 DataCell(
                   InkWell(
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: tokenSerial));
-                      ScaffoldMessenger.of(context).clearSnackBars();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Copied token: $tokenSerial'),
-                          duration: const Duration(seconds: 1),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    },
+                    onTap: () => _showVisitDetailsDialog(context, p, t, branchId),
                     borderRadius: BorderRadius.circular(6),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                      child: Text(
-                        tokenSerial,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.textPrimary),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            tokenSerial,
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: t.textPrimary),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(Icons.info_outline_rounded, size: 12, color: t.textTertiary),
+                        ],
                       ),
+                    ),
+                  ),
+                ),
+
+                // 3. Token Type (Vitals Only vs Normal)
+                DataCell(
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: isVitalsOnly
+                          ? const Color(0xFF8B5CF6).withValues(alpha: 0.12)
+                          : const Color(0xFF0EA5E9).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: isVitalsOnly
+                            ? const Color(0xFF8B5CF6).withValues(alpha: 0.3)
+                            : const Color(0xFF0EA5E9).withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isVitalsOnly ? Icons.monitor_heart_outlined : Icons.confirmation_number_outlined,
+                          size: 11,
+                          color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          isVitalsOnly ? 'Vitals Only' : 'Normal',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
 
                 // 2. Patient Name & Age/Gender
                 DataCell(
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
+                  InkWell(
+                    onTap: () => _showVisitDetailsDialog(context, p, t, branchId),
+                    borderRadius: BorderRadius.circular(6),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Text(name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: t.textPrimary)),
-                          if (isFrequent) const Padding(padding: EdgeInsets.only(left: 4), child: Text('🔥', style: TextStyle(fontSize: 11))),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: t.textPrimary)),
+                              if (isFrequent) const Padding(padding: EdgeInsets.only(left: 4), child: Text('🔥', style: TextStyle(fontSize: 11))),
+                            ],
+                          ),
+                          if (age.isNotEmpty && age != 'N/A' || gender.isNotEmpty && gender != 'N/A')
+                            Text(
+                              [
+                                if (age.isNotEmpty && age != 'N/A') '$age yrs',
+                                if (gender.isNotEmpty && gender != 'N/A') gender,
+                              ].join(' • '),
+                              style: TextStyle(fontSize: 10, color: t.textTertiary),
+                            ),
                         ],
                       ),
-                      if (age.isNotEmpty && age != 'N/A' || gender.isNotEmpty && gender != 'N/A')
-                        Text(
-                          [
-                            if (age.isNotEmpty && age != 'N/A') '$age yrs',
-                            if (gender.isNotEmpty && gender != 'N/A') gender,
-                          ].join(' • '),
-                          style: TextStyle(fontSize: 10, color: t.textTertiary),
-                        ),
-                    ],
+                    ),
                   ),
                 ),
 
@@ -1953,35 +2606,56 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   Text(campLabel, style: TextStyle(fontSize: 11, color: t.textSecondary)),
                 ),
 
-                // 8. Relations / Course
+                // 8. Relations / Course (with Vitals Inspection Token badge)
                 DataCell(
                   Wrap(
                     spacing: 6,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      if (visits > 1)
-                        Text('$visits+ Visits', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: t.textPrimary))
-                      else
-                        Text('1st Visit', style: TextStyle(fontSize: 11, color: t.textTertiary)),
-                      if (days > 1)
+                      if (isVitalsOnly)
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                           decoration: BoxDecoration(
-                            color: Colors.deepOrange.withValues(alpha: 0.12),
+                            color: const Color(0xFF8B5CF6).withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: const Color(0xFF8B5CF6).withValues(alpha: 0.4)),
                           ),
-                          child: Text('$days d course', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
-                        ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.monitor_heart_outlined, size: 11, color: Color(0xFF8B5CF6)),
+                              SizedBox(width: 4),
+                              Text('Vitals Only', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF8B5CF6))),
+                            ],
+                          ),
+                        )
+                      else ...[
+                        if (visits > 1)
+                          Text('$visits+ Visits', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: t.textPrimary))
+                        else
+                          Text('1st Visit', style: TextStyle(fontSize: 11, color: t.textTertiary)),
+                        if (days > 1)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.deepOrange.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text('$days d course', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                          ),
+                      ],
                     ],
                   ),
                 ),
 
-                // 8. Actions
+                // 9. Actions
                 DataCell(
                   PopupMenuButton<String>(
                     icon: Icon(Icons.more_vert_rounded, size: 18, color: t.textSecondary),
                     onSelected: (val) {
-                      if (val == 'view') {
+                      if (val == 'details') {
+                        _showVisitDetailsDialog(context, p, t, branchId);
+                      } else if (val == 'view') {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
@@ -2028,6 +2702,16 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       }
                     },
                     itemBuilder: (ctx) => [
+                      const PopupMenuItem(
+                        value: 'details',
+                        child: Row(
+                          children: [
+                            Icon(Icons.assignment_outlined, size: 16),
+                            SizedBox(width: 8),
+                            Text("Visit & Vitals Details"),
+                          ],
+                        ),
+                      ),
                       const PopupMenuItem(value: 'view', child: Row(children: [Icon(Icons.person_rounded, size: 16), SizedBox(width: 8), Text("View Profile")])),
                       const PopupMenuItem(value: 'copy', child: Row(children: [Icon(Icons.copy_rounded, size: 16), SizedBox(width: 8), Text("Copy Token")])),
                       if (hasCnic)
@@ -2045,25 +2729,28 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     );
   }
 
-  Widget _buildMobilePatientRecordsList(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId) {
+  Widget _buildMobilePatientRecordsList(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId, {int startIndex = 0}) {
     return ListView.separated(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       itemCount: records.length,
       separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (context, index) {
-        return _buildMobilePatientCard(context, t, records[index], branchId);
+        return _buildMobilePatientCard(context, t, records[index], branchId, index: startIndex + index + 1);
       },
     );
   }
 
-  Widget _buildMobilePatientCard(BuildContext context, RoleThemeData t, Map<String, dynamic> p, String branchId) {
+  Widget _buildMobilePatientCard(BuildContext context, RoleThemeData t, Map<String, dynamic> p, String branchId, {int? index}) {
     final pid = p['patientId']?.toString() ?? p['id']?.toString() ?? '';
     final tokenSerial = p['serial']?.toString() ?? p['id']?.toString() ?? 'TK-000';
-    final name = p['name']?.toString() ?? 'Unknown Patient';
-    final age = p['age']?.toString() ?? '';
-    final gender = p['gender']?.toString() ?? '';
-    final rawPhone = (p['phone'] ?? p['patientPhone'] ?? '').toString().trim();
+    final rawName = (p['patientName'] ?? p['name'] ?? p['fullName'] ?? '').toString().trim();
+    final name = (rawName.isEmpty || rawName.toLowerCase() == 'unknown' || rawName.toLowerCase() == 'unknown patient')
+        ? 'Unknown Patient'
+        : rawName;
+    final age = (p['age'] ?? p['patientAge'] ?? '').toString();
+    final gender = (p['gender'] ?? p['patientGender'] ?? '').toString();
+    final rawPhone = (p['phone'] ?? p['patientPhone'] ?? p['contactPhone'] ?? '').toString().trim();
     final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
     final stage = _recordStage(p);
     final statusColor = stage == 'dispensed'
@@ -2083,7 +2770,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final isChild = p['isChild'] == true ||
         ((p['guardianCnic'] ?? '').toString().isNotEmpty && (p['patientCnic'] ?? p['cnic'] ?? '').toString().isEmpty);
 
-    final type = (p['type'] ?? 'zakat').toString().toLowerCase();
+    final rawType = (p['queueType'] ?? p['type'] ?? p['category'] ?? '').toString().toLowerCase().trim();
+    final type = (rawType.isEmpty || rawType == 'unknown')
+        ? (tokenSerial.contains('-NZ-') || tokenSerial.contains('NZ') ? 'non-zakat' : (tokenSerial.contains('-G-') ? 'gmwf' : 'zakat'))
+        : rawType;
+
+    final isVitalsOnly = p['isVitalsOnly'] == true ||
+        p['vitalsOnly'] == true ||
+        (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
 
     Color typeColor;
     if (type == 'zakat') {
@@ -2119,7 +2813,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Row 1: Token # + Type Badge + Status (Overflow-safe with flexible alignment)
+            // Row 1: Token # + Type Badge + Status + Details Button
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -2130,18 +2824,21 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     runSpacing: 4,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
+                      if (index != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+                          decoration: BoxDecoration(
+                            color: t.bgRule.withValues(alpha: 0.25),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: t.bgRule),
+                          ),
+                          child: Text(
+                            '#$index',
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: t.textSecondary),
+                          ),
+                        ),
                       InkWell(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: tokenSerial));
-                          ScaffoldMessenger.of(context).clearSnackBars();
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Copied token: $tokenSerial'),
-                              duration: const Duration(seconds: 1),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        },
+                        onTap: () => _showVisitDetailsDialog(context, p, t, branchId),
                         borderRadius: BorderRadius.circular(6),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -2158,9 +2855,39 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: t.accent),
                               ),
                               const SizedBox(width: 4),
-                              Icon(Icons.copy_rounded, size: 11, color: t.accent),
+                              Icon(Icons.info_outline_rounded, size: 12, color: t.accent),
                             ],
                           ),
+                        ),
+                      ),
+                      // Token Type (Vitals Only vs Normal)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+                        decoration: BoxDecoration(
+                          color: (isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9)).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: (isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9)).withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              isVitalsOnly ? Icons.monitor_heart_outlined : Icons.confirmation_number_outlined,
+                              size: 10,
+                              color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9),
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              isVitalsOnly ? 'Vitals Only' : 'Normal',
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                color: isVitalsOnly ? const Color(0xFF8B5CF6) : const Color(0xFF0EA5E9),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       Container(
@@ -2217,32 +2944,35 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             Row(
               children: [
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              name,
-                              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: t.textPrimary),
-                              overflow: TextOverflow.ellipsis,
+                  child: InkWell(
+                    onTap: () => _showVisitDetailsDialog(context, p, t, branchId),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                name,
+                                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: t.textPrimary),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
-                          if (isFrequent) const Padding(padding: EdgeInsets.only(left: 4), child: Text('🔥', style: TextStyle(fontSize: 12))),
-                        ],
-                      ),
-                      if ((age.isNotEmpty && age != 'N/A') || (gender.isNotEmpty && gender != 'N/A')) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          [
-                            if (age.isNotEmpty && age != 'N/A') '$age yrs',
-                            if (gender.isNotEmpty && gender != 'N/A') gender,
-                          ].join(' • '),
-                          style: TextStyle(fontSize: 11, color: t.textSecondary),
+                            if (isFrequent) const Padding(padding: EdgeInsets.only(left: 4), child: Text('🔥', style: TextStyle(fontSize: 12))),
+                          ],
                         ),
+                        if ((age.isNotEmpty && age != 'N/A') || (gender.isNotEmpty && gender != 'N/A')) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            [
+                              if (age.isNotEmpty && age != 'N/A') '$age yrs',
+                              if (gender.isNotEmpty && gender != 'N/A') gender,
+                            ].join(' • '),
+                            style: TextStyle(fontSize: 11, color: t.textSecondary),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
                 InkWell(
@@ -2362,8 +3092,8 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             ),
             const SizedBox(height: 8),
 
-            // Row 4: Facility & Shift info + Course / Visit Tags
-            if (campLabel.isNotEmpty || visits > 1 || days > 1) ...[
+            // Row 4: Facility & Shift info + Course / Visit Tags (with Vitals Inspection Token badge)
+            if (campLabel.isNotEmpty || visits > 1 || days > 1 || isVitalsOnly) ...[
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                 decoration: BoxDecoration(
@@ -2380,20 +3110,31 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    if (visits > 1) ...[
-                      if (campLabel.isNotEmpty) const SizedBox(width: 6),
-                      Text('$visits+ Visits', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: t.textPrimary)),
-                    ],
-                    if (days > 1) ...[
-                      const SizedBox(width: 6),
+                    if (isVitalsOnly)
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: Colors.deepOrange.withValues(alpha: 0.12),
+                          color: const Color(0xFF8B5CF6).withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(4),
                         ),
-                        child: Text('$days d course', style: const TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
-                      ),
+                        child: const Text('🩺 Vitals Only', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: Color(0xFF8B5CF6))),
+                      )
+                    else ...[
+                      if (visits > 1) ...[
+                        if (campLabel.isNotEmpty) const SizedBox(width: 6),
+                        Text('$visits+ Visits', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: t.textPrimary)),
+                      ],
+                      if (days > 1) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: Colors.deepOrange.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text('$days d course', style: const TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: Colors.deepOrange)),
+                        ),
+                      ],
                     ],
                   ],
                 ),

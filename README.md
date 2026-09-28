@@ -83,8 +83,8 @@ flutter run -d windows
 # Windows Desktop App
 flutter build windows --release
 
-# Android App (Split APKs for smaller download)
-flutter build apk --release --split-per-abi
+# Android App
+flutter build apk --release
 
 # Web Version
 flutter build web --release

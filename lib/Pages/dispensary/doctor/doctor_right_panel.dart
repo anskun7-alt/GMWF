@@ -2,7 +2,6 @@
 
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -776,6 +775,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     final queryCtrl = TextEditingController();
     String selectedCategory = 'All';
+    bool hideOutOfStock = true;
 
     final quickSearchKeywords = [
       'Panadol',
@@ -835,6 +835,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
             final filteredMeds = _allInventory.where((m) {
               if (_isSyringeItem(m)) return false;
+              final availableStock = _getAvailableStock(m);
+              if (hideOutOfStock && availableStock <= 0) return false;
+
               final name = (m['name'] ?? '').toString().toLowerCase();
               final type = (m['type'] ?? m['dosageForm'] ?? m['form'] ?? '').toString().toLowerCase();
               final dose = (m['dose'] ?? '').toString().toLowerCase();
@@ -1168,7 +1171,39 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                           SingleChildScrollView(
                             scrollDirection: Axis.horizontal,
                             child: Row(
-                              children: categoryTabs.map((cat) {
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: FilterChip(
+                                    showCheckmark: false,
+                                    avatar: Icon(
+                                      hideOutOfStock ? Icons.check_circle_rounded : Icons.filter_alt_outlined,
+                                      size: 14,
+                                      color: hideOutOfStock ? Colors.white : (isDark ? const Color(0xFF2DD4BF) : _teal),
+                                    ),
+                                    label: Text(hideOutOfStock ? 'In-Stock Only ($inStockCount)' : 'Show All ($countAll)'),
+                                    selected: hideOutOfStock,
+                                    selectedColor: const Color(0xFF0D9488),
+                                    backgroundColor: isDark ? const Color(0xFF0F172A) : Colors.white,
+                                    labelStyle: TextStyle(
+                                      color: hideOutOfStock ? Colors.white : (isDark ? const Color(0xFFCBD5E1) : Colors.grey.shade800),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      side: BorderSide(
+                                        color: hideOutOfStock ? const Color(0xFF0D9488) : (isDark ? const Color(0xFF334155) : Colors.grey.shade300),
+                                        width: hideOutOfStock ? 1.5 : 0.8,
+                                      ),
+                                    ),
+                                    onSelected: (_) {
+                                      setDialogState(() => hideOutOfStock = !hideOutOfStock);
+                                    },
+                                  ),
+                                ),
+                                ...categoryTabs.map((cat) {
                                 final id = cat['id'] as String;
                                 final label = cat['label'] as String;
                                 final icon = cat['icon'] as IconData;
@@ -1231,9 +1266,10 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                                     },
                                   ),
                                 );
-                              }).toList(),
-                            ),
+                              }),
+                            ],
                           ),
+                        ),
                         ],
                       ),
                     ),
@@ -1310,238 +1346,253 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                                     ? (isDark ? const Color(0xFFEF4444) : const Color(0xFFFECACA))
                                     : (isLowStock ? (isDark ? const Color(0xFFF97316) : const Color(0xFFFDE68A)) : (isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)));
 
-                                return InkWell(
-                                  borderRadius: BorderRadius.circular(12),
-                                  onTap: () {
-                                    Navigator.pop(dialogCtx);
-                                    _addMedicineDialog(inventoryMed: m);
-                                  },
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                    decoration: BoxDecoration(
-                                      color: itemBg,
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(color: itemBorder, width: isOutOfStock || isLowStock ? 1.2 : 0.8),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        // Medicine Info with unified single-bubble Icon+Type before name
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Row(
-                                                children: [
-                                                  // Unified Icon + Type Single Bubble (Enlarged & Positioned First)
-                                                  Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
-                                                    decoration: BoxDecoration(
-                                                      color: isOutOfStock ? Colors.grey.shade100 : typeColors.bg,
-                                                      border: Border.all(
-                                                        color: isOutOfStock ? Colors.grey.shade300 : typeColors.border,
-                                                        width: 0.9,
-                                                      ),
-                                                      borderRadius: BorderRadius.circular(20),
-                                                    ),
-                                                    child: Row(
-                                                      mainAxisSize: MainAxisSize.min,
-                                                      children: [
-                                                        FaIcon(
-                                                          _getMedicineIcon(m),
-                                                          color: isOutOfStock ? Colors.grey.shade600 : typeColors.text,
-                                                          size: 13,
-                                                        ),
-                                                        const SizedBox(width: 6),
-                                                        Text(
-                                                          medType,
-                                                          style: TextStyle(
-                                                            fontSize: 12,
-                                                            fontWeight: FontWeight.bold,
-                                                            color: isOutOfStock ? Colors.grey.shade600 : typeColors.text,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 10),
-
-                                                  // Medicine Name
-                                                  Flexible(
-                                                    child: Text(
-                                                      medicineName,
-                                                      style: TextStyle(
-                                                        fontSize: 15,
-                                                        fontWeight: FontWeight.bold,
-                                                        color: isOutOfStock
-                                                            ? (isDark ? const Color(0xFFFCA5A5) : Colors.red.shade900)
-                                                            : (isDark ? Colors.white : const Color(0xFF0F172A)),
-                                                      ),
-                                                      overflow: TextOverflow.ellipsis,
-                                                    ),
-                                                  ),
-
-                                                  if (dose.isNotEmpty) ...[
-                                                    const SizedBox(width: 8),
+                                final isSelectable = !isOutOfStock;
+                                return Opacity(
+                                  opacity: isSelectable ? 1.0 : 0.55,
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(12),
+                                    onTap: isSelectable
+                                        ? () {
+                                            Navigator.pop(dialogCtx);
+                                            _addMedicineDialog(inventoryMed: m);
+                                          }
+                                        : () {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                content: Text('⛔ "${m['name']}" is Out of Stock (0 available in this dispensary). Cannot select.'),
+                                                backgroundColor: Colors.red.shade800,
+                                                duration: const Duration(seconds: 3),
+                                                behavior: SnackBarBehavior.floating,
+                                              ),
+                                            );
+                                          },
+                                    child: Container(
+                                      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                      decoration: BoxDecoration(
+                                        color: itemBg,
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(color: itemBorder, width: isOutOfStock || isLowStock ? 1.2 : 0.8),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          // Medicine Info with unified single-bubble Icon+Type before name
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Row(
+                                                  children: [
+                                                    // Unified Icon + Type Single Bubble (Enlarged & Positioned First)
                                                     Container(
-                                                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
                                                       decoration: BoxDecoration(
-                                                        color: _dosePillBg,
+                                                        color: isOutOfStock ? Colors.grey.shade100 : typeColors.bg,
                                                         border: Border.all(
-                                                          color: _dosePillBorder,
-                                                          width: 0.8,
+                                                          color: isOutOfStock ? Colors.grey.shade300 : typeColors.border,
+                                                          width: 0.9,
                                                         ),
                                                         borderRadius: BorderRadius.circular(20),
                                                       ),
-                                                      child: Text(
-                                                        dose,
-                                                        style: const TextStyle(
-                                                          fontSize: 11.5,
-                                                          fontWeight: FontWeight.w600,
-                                                          color: _dosePillText,
-                                                        ),
+                                                      child: Row(
+                                                        mainAxisSize: MainAxisSize.min,
+                                                        children: [
+                                                          FaIcon(
+                                                            _getMedicineIcon(m),
+                                                            color: isOutOfStock ? Colors.grey.shade600 : typeColors.text,
+                                                            size: 13,
+                                                          ),
+                                                          const SizedBox(width: 6),
+                                                          Text(
+                                                            medType,
+                                                            style: TextStyle(
+                                                              fontSize: 12,
+                                                              fontWeight: FontWeight.bold,
+                                                              color: isOutOfStock ? Colors.grey.shade600 : typeColors.text,
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ),
                                                     ),
-                                                  ],
-                                                ],
-                                              ),
-                                              if (formula.isNotEmpty && formula.toLowerCase() != medicineName.toLowerCase()) ...[
-                                                const SizedBox(height: 4),
-                                                Row(
-                                                  children: [
-                                                    Icon(Icons.biotech_rounded, size: 13, color: Colors.teal.shade700),
-                                                    const SizedBox(width: 4),
-                                                    Expanded(
+                                                    const SizedBox(width: 10),
+
+                                                    // Medicine Name
+                                                    Flexible(
                                                       child: Text(
-                                                        formula,
+                                                        medicineName,
                                                         style: TextStyle(
-                                                          fontSize: 11.5,
-                                                          color: Colors.grey.shade600,
-                                                          fontStyle: FontStyle.italic,
+                                                          fontSize: 15,
+                                                          fontWeight: FontWeight.bold,
+                                                          color: isOutOfStock
+                                                              ? (isDark ? const Color(0xFFFCA5A5) : Colors.red.shade900)
+                                                              : (isDark ? Colors.white : const Color(0xFF0F172A)),
                                                         ),
                                                         overflow: TextOverflow.ellipsis,
                                                       ),
                                                     ),
+
+                                                    if (dose.isNotEmpty) ...[
+                                                      const SizedBox(width: 8),
+                                                      Container(
+                                                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                                                        decoration: BoxDecoration(
+                                                          color: _dosePillBg,
+                                                          border: Border.all(
+                                                            color: _dosePillBorder,
+                                                            width: 0.8,
+                                                          ),
+                                                          borderRadius: BorderRadius.circular(20),
+                                                        ),
+                                                        child: Text(
+                                                          dose,
+                                                          style: const TextStyle(
+                                                            fontSize: 11.5,
+                                                            fontWeight: FontWeight.w600,
+                                                            color: _dosePillText,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ],
+                                                ),
+                                                if (formula.isNotEmpty && formula.toLowerCase() != medicineName.toLowerCase()) ...[
+                                                  const SizedBox(height: 4),
+                                                  Row(
+                                                    children: [
+                                                      Icon(Icons.biotech_rounded, size: 13, color: Colors.teal.shade700),
+                                                      const SizedBox(width: 4),
+                                                      Expanded(
+                                                        child: Text(
+                                                          formula,
+                                                          style: TextStyle(
+                                                            fontSize: 11.5,
+                                                            color: Colors.grey.shade600,
+                                                            fontStyle: FontStyle.italic,
+                                                          ),
+                                                          overflow: TextOverflow.ellipsis,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+
+                                          // Stock Badges & Prescribe Button
+                                          Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment: CrossAxisAlignment.end,
+                                            children: [
+                                              if (isOutOfStock) ...[
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(0xFFFEE2E2),
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border.all(color: Colors.red.shade300, width: 0.8),
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisSize: MainAxisSize.min,
+                                                    children: [
+                                                      Icon(Icons.cancel_outlined, size: 12, color: Colors.red.shade700),
+                                                      const SizedBox(width: 4),
+                                                      Text(
+                                                        'Avail: 0',
+                                                        style: TextStyle(
+                                                          color: Colors.red.shade800,
+                                                          fontWeight: FontWeight.bold,
+                                                          fontSize: 11,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ] else if (isLowStock) ...[
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.orange.shade50,
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border.all(color: Colors.orange.shade300, width: 0.8),
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisSize: MainAxisSize.min,
+                                                    children: [
+                                                      Icon(Icons.warning_amber_rounded, size: 13, color: Colors.orange.shade800),
+                                                      const SizedBox(width: 3),
+                                                      Text(
+                                                        'Avail: $availableStock',
+                                                        style: TextStyle(
+                                                          color: Colors.orange.shade900,
+                                                          fontWeight: FontWeight.bold,
+                                                          fontSize: 11,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ] else ...[
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.green.shade50,
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border.all(color: Colors.green.shade300, width: 0.8),
+                                                  ),
+                                                  child: Text(
+                                                    'Avail: $availableStock',
+                                                    style: TextStyle(
+                                                      color: Colors.green.shade800,
+                                                      fontWeight: FontWeight.bold,
+                                                      fontSize: 11,
+                                                    ),
+                                                  ),
                                                 ),
                                               ],
+                                              if (reservedCount > 0)
+                                                Padding(
+                                                  padding: const EdgeInsets.only(top: 2),
+                                                  child: Text(
+                                                    '$reservedCount reserved',
+                                                    style: TextStyle(
+                                                      fontSize: 9.5,
+                                                      color: Colors.orange.shade700,
+                                                      fontStyle: FontStyle.italic,
+                                                    ),
+                                                  ),
+                                                ),
                                             ],
                                           ),
-                                        ),
-                                        const SizedBox(width: 10),
+                                          const SizedBox(width: 10),
 
-                                        // Stock Badges & Prescribe Button
-                                        Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          crossAxisAlignment: CrossAxisAlignment.end,
-                                          children: [
-                                            if (isOutOfStock) ...[
-                                              Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                                decoration: BoxDecoration(
-                                                  color: const Color(0xFFFEE2E2),
-                                                  borderRadius: BorderRadius.circular(8),
-                                                  border: Border.all(color: Colors.red.shade300, width: 0.8),
-                                                ),
-                                                child: Row(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  children: [
-                                                    Icon(Icons.cancel_outlined, size: 12, color: Colors.red.shade700),
-                                                    const SizedBox(width: 4),
-                                                    Text(
-                                                      'Avail: 0',
-                                                      style: TextStyle(
-                                                        color: Colors.red.shade800,
-                                                        fontWeight: FontWeight.bold,
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ] else if (isLowStock) ...[
-                                              Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                                decoration: BoxDecoration(
-                                                  color: Colors.orange.shade50,
-                                                  borderRadius: BorderRadius.circular(8),
-                                                  border: Border.all(color: Colors.orange.shade300, width: 0.8),
-                                                ),
-                                                child: Row(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  children: [
-                                                    Icon(Icons.warning_amber_rounded, size: 13, color: Colors.orange.shade800),
-                                                    const SizedBox(width: 3),
-                                                    Text(
-                                                      'Avail: $availableStock',
-                                                      style: TextStyle(
-                                                        color: Colors.orange.shade900,
-                                                        fontWeight: FontWeight.bold,
-                                                        fontSize: 11,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ] else ...[
-                                              Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                                decoration: BoxDecoration(
-                                                  color: Colors.green.shade50,
-                                                  borderRadius: BorderRadius.circular(8),
-                                                  border: Border.all(color: Colors.green.shade300, width: 0.8),
-                                                ),
-                                                child: Text(
-                                                  'Avail: $availableStock',
-                                                  style: TextStyle(
-                                                    color: Colors.green.shade800,
+                                          // Action Button
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                            decoration: BoxDecoration(
+                                              color: isOutOfStock ? (isDark ? const Color(0xFF334155) : Colors.grey.shade400) : _teal,
+                                              borderRadius: BorderRadius.circular(8),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(isOutOfStock ? Icons.block_rounded : Icons.add, color: Colors.white, size: 14),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  isOutOfStock ? 'Unavailable' : 'Select',
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
                                                     fontWeight: FontWeight.bold,
-                                                    fontSize: 11,
+                                                    fontSize: 11.5,
                                                   ),
                                                 ),
-                                              ),
-                                            ],
-                                            if (reservedCount > 0)
-                                              Padding(
-                                                padding: const EdgeInsets.only(top: 2),
-                                                child: Text(
-                                                  '$reservedCount reserved',
-                                                  style: TextStyle(
-                                                    fontSize: 9.5,
-                                                    color: Colors.orange.shade700,
-                                                    fontStyle: FontStyle.italic,
-                                                  ),
-                                                ),
-                                              ),
-                                          ],
-                                        ),
-                                        const SizedBox(width: 10),
-
-                                        // Action Button
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                          decoration: BoxDecoration(
-                                            color: isOutOfStock ? Colors.red.shade600 : _teal,
-                                            borderRadius: BorderRadius.circular(8),
+                                              ],
+                                            ),
                                           ),
-                                          child: const Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Icon(Icons.add, color: Colors.white, size: 14),
-                                              SizedBox(width: 4),
-                                              Text(
-                                                'Select',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 11.5,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 );
@@ -1614,16 +1665,16 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     if (isInventory) {
       final availableStock = _getAvailableStock(inventoryMed);
       final rawStock = (inventoryMed['quantity'] as num?)?.toDouble() ?? 0;
-      if (rawStock > 0 && availableStock <= 0) {
+      if (rawStock <= 0 || availableStock <= 0) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(availableStock == 0
-                ? '⚠️ Out of Stock on shelf! (Reserved by pending patients)'
-                : '⚠️ Stock Limit: $availableStock available'),
-            backgroundColor: Colors.orange.shade800,
-            duration: const Duration(seconds: 2),
+            content: Text('⛔ Cannot select "${inventoryMed['name']}": Out of Stock (0 available on shelf).'),
+            backgroundColor: Colors.red.shade800,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
           ));
         }
+        return;
       }
     }
 
@@ -1869,22 +1920,13 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                 if (isInventory) {
                   final rawStock = (inventoryMed['quantity'] as num?)?.toDouble() ?? 0;
                   final availableStock = _getAvailableStock(inventoryMed);
-                  if (rawStock <= 0) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('⚠️ Note: "${inventoryMed['name']}" shows 0 on shelf. Added; dispensary will verify physical stock.'),
-                        backgroundColor: Colors.orange.shade900,
-                        duration: const Duration(seconds: 3),
-                      ));
-                    }
-                  } else if (qty > availableStock && availableStock > 0) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('ℹ️ Note: $availableStock unreserved (Physical stock: ${rawStock.toInt()}). Added.'),
-                        backgroundColor: Colors.teal.shade800,
-                        duration: const Duration(seconds: 3),
-                      ));
-                    }
+                  if (rawStock <= 0 || availableStock <= 0) {
+                    setStateDialog(() => stockError = 'Cannot add: "${inventoryMed['name']}" is Out of Stock (0 available).');
+                    return;
+                  }
+                  if (qty > availableStock) {
+                    setStateDialog(() => stockError = 'Insufficient Stock: Requested $qty, but only $availableStock available in dispensary.');
+                    return;
                   }
                 }
                 final medType = isInventory
@@ -1912,22 +1954,13 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                   final rawStock = (inventoryMed['quantity'] as num?)?.toDouble() ?? 0;
                   final availableStock = _getAvailableStock(inventoryMed);
                   final totalRequired = qty * _daysOfMedicine;
-                  if (rawStock <= 0) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('⚠️ Note: "${inventoryMed['name']}" shows 0 on shelf. Added; dispensary will verify physical stock.'),
-                        backgroundColor: Colors.orange.shade900,
-                        duration: const Duration(seconds: 3),
-                      ));
-                    }
-                  } else if (totalRequired > availableStock) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('ℹ️ Note: Need $totalRequired, $availableStock unreserved (Physical shelf stock: ${rawStock.toInt()}). Added.'),
-                        backgroundColor: Colors.teal.shade800,
-                        duration: const Duration(seconds: 3),
-                      ));
-                    }
+                  if (rawStock <= 0 || availableStock <= 0) {
+                    setStateDialog(() => stockError = 'Cannot add: "${inventoryMed['name']}" is Out of Stock (0 available).');
+                    return;
+                  }
+                  if (totalRequired > availableStock) {
+                    setStateDialog(() => stockError = 'Insufficient Stock: Need $totalRequired for $_daysOfMedicine day(s) ($qty/day), but only $availableStock available.');
+                    return;
                   }
                 }
                 newMed = {
@@ -3095,7 +3128,34 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                                     duration: Duration(seconds: 2),
                                   ));
                                 }
-                              : () => setState(() => _daysOfMedicine = day),
+                              : () {
+                                  setState(() => _daysOfMedicine = day);
+                                  for (final med in widget.prescriptions) {
+                                    final invId = med['inventoryId']?.toString();
+                                    if (invId != null && invId.isNotEmpty) {
+                                      final inv = _allInventory.firstWhere(
+                                        (m) => m['id']?.toString() == invId ||
+                                               ((m['_batchIds'] as List?)?.contains(invId) ?? false),
+                                        orElse: () => {},
+                                      );
+                                      if (inv.isNotEmpty) {
+                                        final avail = _getAvailableStock(inv);
+                                        final medQty = med['quantity'];
+                                        final perDayQty = (medQty is num ? medQty.toInt() : int.tryParse(medQty?.toString() ?? '') ?? 0);
+                                        final totalReq = _isInjectionOrDrip(med) ? perDayQty : perDayQty * day;
+                                        if (totalReq > avail) {
+                                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                            content: Text('⚠️ Low Stock: "${med['name']}" needs $totalReq for $day day(s), but only $avail available.'),
+                                            backgroundColor: Colors.orange.shade900,
+                                            duration: const Duration(seconds: 3),
+                                            behavior: SnackBarBehavior.floating,
+                                          ));
+                                          break;
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
                           borderRadius: BorderRadius.circular(20),
                           child: isSelected
                               ? Column(
@@ -3486,13 +3546,14 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
-              '⚠️ "${med['name']}": Need $required (${rawStock > 0 ? "$rawStock on dispensary shelf" : "0 in stock"}). Dispensary will verify.',
+              '⛔ Insufficient stock for "${med['name']}": Prescribed $required for $_daysOfMedicine day(s), but only ${othersOnly <= 0 ? 0 : othersOnly} available (Shelf stock: $rawStock). Please reduce days/quantity or substitute before saving.',
             ),
-            backgroundColor: Colors.orange.shade800,
-            duration: const Duration(seconds: 3),
+            backgroundColor: Colors.red.shade800,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
           ));
         }
-        // Do NOT block saving! The dispensary is the physical source of truth for stock.
+        return; // Block saving when stock is insufficient
       }
     }
 
@@ -3740,28 +3801,6 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         }
       }
 
-      // 3. Update Firestore Cloud Document (un-awaited background sync so network latency never blocks UI/LAN)
-      final campDocKey = CampSessionService.getCampDateDocId(
-        branchId: widget.branchId,
-        dateKey: dateKey,
-        campId: patientData['campId']?.toString() ?? patientData['dispensaryId']?.toString(),
-        dispensaryTag: patientData['dispensaryTag']?.toString(),
-        serial: widget.serialId.trim(),
-      );
-
-      final cloudUpdatePayload = <String, dynamic>{
-        'status':         'completed',
-        'completedAt':    nowIso,
-        'prescription':   medicalData,
-        'patientName':     resolvedPatientName,
-        'patientCnic':     patientCnic,
-        'doctorName':     doctorName,
-        'doctorId':       doctorId,
-        'daysOfMedicine': days,
-        'vitals':         vitalsMap,
-        'dispenseStatus': 'pending',
-        'updatedAt':      FieldValue.serverTimestamp(),
-      };
 
       // 3. LAN broadcast — send clinical prescription update ONLY (do not re-broadcast receptionist entry fields)
       try {

@@ -51,6 +51,10 @@ class StaffPatientLinkService {
     }
 
     final effectiveCnic = pCnic.isNotEmpty ? pCnic : (patient['isAdult'] == true ? gCnic : null);
+    if (effectiveCnic == null || effectiveCnic.isEmpty) {
+      // Strict requirement: A patient must have a valid CNIC to be verified as a staff member
+      return null;
+    }
     final effectiveName = (patient['name'] ?? patient['patientName'])?.toString();
 
     return getStaffInfoForPatient(
@@ -61,8 +65,10 @@ class StaffPatientLinkService {
     );
   }
 
-  /// Looks up whether a patient with [cnic] or [name] is a registered staff member/employee.
+  /// Looks up whether a patient with [cnic] is a registered staff member/employee.
   /// Returns a map with staff role, designation, branch, and name, or null if not staff.
+  /// STRICT: Only matches via CNIC. Name-only matches are forbidden to prevent
+  /// unrelated patients who share the same name as staff (e.g. IT Head) from being assigned staff roles.
   static Map<String, dynamic>? getStaffInfoForPatient({
     String? cnic,
     String? name,
@@ -80,9 +86,9 @@ class StaffPatientLinkService {
     }
 
     final cleanCnic = normalizeCnic(cnic);
-    final cleanName = normalizeName(name);
 
-    if (cleanCnic.isEmpty && cleanName.isEmpty) return null;
+    // CNIC is strictly required to verify an employee/staff member
+    if (cleanCnic.isEmpty) return null;
 
     // 1. Search in local_employees
     if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
@@ -95,12 +101,9 @@ class StaffPatientLinkService {
         if (emp['isActive'] == false) continue;
 
         final empCnic = normalizeCnic(emp['cnic']?.toString());
-        final empName = normalizeName(emp['name']?.toString() ?? emp['employeeName']?.toString());
 
-        final cnicMatch = cleanCnic.isNotEmpty && empCnic.isNotEmpty && cleanCnic == empCnic;
-        final nameMatch = cleanName.isNotEmpty && empName.isNotEmpty && cleanName == empName;
-
-        if (cnicMatch || nameMatch) {
+        // Strictly match by CNIC only
+        if (empCnic.isNotEmpty && cleanCnic == empCnic) {
           final role = (emp['role'] ?? emp['designation'] ?? 'Staff').toString();
           final dept = (emp['department'] ?? 'Office').toString();
           final branch = (emp['branchId'] ?? 'Main').toString();
@@ -131,12 +134,9 @@ class StaffPatientLinkService {
         if (roleLower.contains('server') || user['isServerAccount'] == true) continue;
 
         final uCnic = normalizeCnic(user['cnic']?.toString());
-        final uName = normalizeName(user['name']?.toString() ?? user['username']?.toString());
 
-        final cnicMatch = cleanCnic.isNotEmpty && uCnic.isNotEmpty && cleanCnic == uCnic;
-        final nameMatch = cleanName.isNotEmpty && uName.isNotEmpty && cleanName == uName;
-
-        if (cnicMatch || nameMatch) {
+        // Strictly match by CNIC only
+        if (uCnic.isNotEmpty && cleanCnic == uCnic) {
           final role = (user['role'] ?? 'Staff').toString();
           final branch = (user['branchId'] ?? 'Main').toString();
           final displayName = (user['name'] ?? user['username'] ?? name ?? 'Staff').toString();

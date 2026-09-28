@@ -5496,6 +5496,22 @@ class LocalStorageService {
     base['dispenseStatus'] = status;
     base['dateKey']        ??= todayKey;
     base['createdAt']      ??= nowIso;
+    if (base['campId'] == null || base['campId'] == '') {
+      if (normSerialUpper.contains('SADD')) {
+        base['campId'] = 'saddar';
+      } else if (normSerialUpper.contains('HAJI')) {
+        base['campId'] = 'haji_camp';
+      }
+    }
+    if (base['queueType'] == null || base['queueType'] == '') {
+      if (normSerialUpper.contains('NZ') || normSerialUpper.contains('-NZ-')) {
+        base['queueType'] = 'non-zakat';
+      } else if (normSerialUpper.contains('-G-') || base['isFreeToken'] == true) {
+        base['queueType'] = 'gmwf';
+      } else {
+        base['queueType'] = 'zakat';
+      }
+    }
     if (statusLower == 'dispensed') {
       base['status']       = 'completed';
       base['dispensedAt']  ??= nowIso;

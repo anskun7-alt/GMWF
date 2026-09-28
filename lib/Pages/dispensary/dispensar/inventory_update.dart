@@ -2809,8 +2809,11 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
             ? _doseCtrl.text.trim()
             : '';
 
+    final updatedFormula = MasterProformaService.cleanBrandToFormula(_nameCtrl.text.trim());
+    final finalName = updatedFormula.isNotEmpty ? updatedFormula : _nameCtrl.text.trim();
     final updatedFields = {
-      'name': _nameCtrl.text.trim(),
+      'name': finalName,
+      'formula': finalName,
       'type': _selectedType,
       'dose': dose,
       'code': newCode,

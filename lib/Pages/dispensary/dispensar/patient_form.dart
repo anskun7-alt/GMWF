@@ -696,8 +696,19 @@ class _PatientFormState extends State<PatientForm> {
           }
         }
 
+        // Deduplicate batches by ID before sorting (handles stock:$id vs $id dual keys)
+        final Map<String, Map<String, dynamic>> uniqueBatches = {};
+        for (final b in matchingBatches) {
+          final id = (b['id'] ?? b['medicineId'] ?? b['_hiveKey'] ?? '').toString().trim().toLowerCase();
+          final canonId = id.startsWith('stock:') ? id.substring(6) : id;
+          if (!uniqueBatches.containsKey(canonId)) {
+            uniqueBatches[canonId] = b;
+          }
+        }
+        final dedupedBatches = uniqueBatches.values.toList();
+
         // Sort matching batches by expiry date ascending (FEFO: earliest first)
-        matchingBatches.sort((a, b) {
+        dedupedBatches.sort((a, b) {
           final expA = MasterProformaService.parseExpiryDate(a['expiryDate'] ?? a['expiry'], (a['id'] ?? a['medicineId'])?.toString());
           final expB = MasterProformaService.parseExpiryDate(b['expiryDate'] ?? b['expiry'], (b['id'] ?? b['medicineId'])?.toString());
           return expA.compareTo(expB);
@@ -707,7 +718,7 @@ class _PatientFormState extends State<PatientForm> {
         final List<Map<String, dynamic>> medDeductions = [];
 
         // Deduct from earlier expiry batches first
-        for (final batch in matchingBatches) {
+        for (final batch in dedupedBatches) {
           if (remainingToDeduct <= 0) break;
           final q = batch['quantity'];
           final currentQty = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
@@ -719,9 +730,18 @@ class _PatientFormState extends State<PatientForm> {
 
           final updated = Map<String, dynamic>.from(batch);
           updated['quantity'] = newQty;
-          final hiveKey = batch['_hiveKey'];
+          final hiveKey = batch['_hiveKey']?.toString() ?? '';
           updated.remove('_hiveKey');
-          stockBox.put(hiveKey, updated);
+          if (hiveKey.isNotEmpty) {
+            stockBox.put(hiveKey, updated);
+            final rawId = (batch['id'] ?? batch['medicineId'] ?? batch['docId'] ?? '').toString().trim();
+            if (rawId.isNotEmpty) {
+              final peerKey = hiveKey.startsWith('stock:') ? rawId : 'stock:$rawId';
+              if (stockBox.containsKey(peerKey)) {
+                stockBox.put(peerKey, updated);
+              }
+            }
+          }
 
           final bId = (batch['id'] ?? batch['medicineId'] ?? batch['docId'] ?? hiveKey).toString();
           final dedInfo = {
@@ -746,8 +766,18 @@ class _PatientFormState extends State<PatientForm> {
             final updated = Map<String, dynamic>.from(existingPrimary);
             final cur = (updated['quantity'] as num?)?.toDouble() ?? 0.0;
             updated['quantity'] = (cur - remainingToDeduct).clamp(0.0, double.infinity);
+            final hKey = hiveKey?.toString() ?? '';
             updated.remove('_hiveKey');
-            stockBox.put(hiveKey, updated);
+            if (hKey.isNotEmpty) {
+              stockBox.put(hKey, updated);
+              final rawId = (primary['id'] ?? primary['medicineId'] ?? primary['docId'] ?? '').toString().trim();
+              if (rawId.isNotEmpty) {
+                final peerKey = hKey.startsWith('stock:') ? rawId : 'stock:$rawId';
+                if (stockBox.containsKey(peerKey)) {
+                  stockBox.put(peerKey, updated);
+                }
+              }
+            }
 
             final bId = (primary['id'] ?? primary['medicineId'] ?? primary['docId'] ?? hiveKey).toString();
             final dedInfo = {
@@ -1124,12 +1154,19 @@ class _PatientFormState extends State<PatientForm> {
       }
 
       double totalAvailableStock = 0.0;
+      final seenStockCheckIds = <String>{};
 
       for (final key in stockBox.keys) {
         final val = stockBox.get(key);
         if (val is! Map) continue;
         final vMap = Map<String, dynamic>.from(val);
         final vKey = key.toString();
+
+        final rawId = (vMap['id'] ?? vMap['docId'] ?? (vKey.startsWith('stock:') ? vKey.substring(6) : vKey)).toString().trim();
+        if (rawId.isNotEmpty) {
+          if (seenStockCheckIds.contains(rawId)) continue;
+          seenStockCheckIds.add(rawId);
+        }
 
         // Branch filter
         final b = (vMap['branchId'] ?? '').toString().toLowerCase().trim();
