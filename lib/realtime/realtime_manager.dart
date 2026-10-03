@@ -146,8 +146,12 @@ class RealtimeManager {
   String? get branchId             => _branchId;
   String? get username             => _username;
   String? get clientId             => _clientId;
+  DateTime get effectiveNow => DateTime.now().add(Duration(milliseconds: _serverClockSkewMs));
+  int _serverClockSkewMs = 0;
 
   VoidCallback? onNeedRediscovery;
+  VoidCallback? onDisconnected;
+  void Function(String ip, int port)? onConnected;
 
   void _recordHealthSuccess() {
     _consecutivePingSuccesses++;
@@ -436,6 +440,17 @@ class RealtimeManager {
     }
   }
 
+  void handleIncomingForTest(Map<String, dynamic> data) {
+    if (data['event_type'] == 'message_ack') {
+      final ackedId = data['messageId']?.toString();
+      if (ackedId != null && ackedId.isNotEmpty) {
+        _removeFromOutboxByMessageId(ackedId);
+      }
+    } else {
+      _routeIncoming(data);
+    }
+  }
+
   // ── Fallback flush ─────────────────────────────────────────────────────────
   void _schedulePendingFallback() {
     Future.delayed(const Duration(seconds: 3), () {
@@ -578,6 +593,14 @@ class RealtimeManager {
         Timer(Duration(seconds: delaySeconds), _connectClient);
   }
 
+  void reconnectNow() {
+    _reconnectTimer?.cancel();
+    _reconnectAttempts = 0;
+    if (!_isConnected) {
+      _connectClient();
+    }
+  }
+
   // ── [FIX 6] Durable Outbox helpers for Users, Sessions, and Credentials ─────
   void sendUserRecord(Map<String, dynamic> userData, {bool isDelete = false}) {
     final payload = RealtimeEvents.payload(
@@ -632,9 +655,9 @@ class RealtimeManager {
     // [FIX-P1] Write to Hive outbox FIRST (skip ping/ack/handshake).
     String? outboxKey;
     if (!isPing && !isAck && !isHandshake && !isCatchUpRequest) {
-
       try {
-        outboxKey = 'outbox_${DateTime.now().microsecondsSinceEpoch}';
+        final mId = normalized['_messageId']?.toString();
+        outboxKey = (mId != null && mId.isNotEmpty) ? mId : 'outbox_${DateTime.now().microsecondsSinceEpoch}';
         final outboxEntry = Map<String, dynamic>.from(normalized);
         outboxEntry['_outboxKey']        = outboxKey;
         outboxEntry['_outboxTimestamp']  = DateTime.now().toIso8601String();
@@ -658,14 +681,21 @@ class RealtimeManager {
       return;
     }
 
+    // Safely encode JSON first — serialization issues MUST NEVER drop the network socket!
+    final String encoded;
     try {
-      _channel!.sink.add(jsonEncode(normalized));
+      encoded = jsonEncode(normalized);
+    } catch (e) {
+      if (kDebugMode) print('[RealtimeManager] ⚠️ JSON encode error for ${normalized['event_type']}: $e');
+      return;
+    }
+
+    try {
+      _channel!.sink.add(encoded);
       if (kDebugMode) print('[RealtimeManager] → ${normalized['event_type']} (msgId=${normalized['_messageId']})');
     } catch (e) {
-      if (kDebugMode) print('[RealtimeManager] Send failed: $e → queuing');
-      // Message stays in outbox; _flushOutbox will resend on next reconnect.
+      if (kDebugMode) print('[RealtimeManager] Socket transmission exception: $e → queuing to pending');
       _pendingMessages.add(normalized);
-      _handleDisconnect();
     }
   }
 
@@ -872,8 +902,9 @@ class RealtimeManager {
     return Map<String, dynamic>.from(_sanitizeForRealtime(copy) as Map);
   }
 
-  static dynamic _sanitizeForRealtime(dynamic value) {
+  static dynamic _sanitizeForRealtime(dynamic value, [int depth = 0]) {
     if (value == null) return null;
+    if (depth > 10) return value.toString();
     if (value is String || value is num || value is bool) return value;
     if (value is DateTime) return value.toIso8601String();
     final typeName = value.runtimeType.toString();
@@ -890,12 +921,12 @@ class RealtimeManager {
     if (value is Map) {
       final res = <String, dynamic>{};
       value.forEach((k, v) {
-        res[k.toString()] = _sanitizeForRealtime(v);
+        res[k.toString()] = _sanitizeForRealtime(v, depth + 1);
       });
       return res;
     }
     if (value is Iterable) {
-      return value.map((e) => _sanitizeForRealtime(e)).toList();
+      return value.map((e) => _sanitizeForRealtime(e, depth + 1)).toList();
     }
     return value.toString();
   }
@@ -931,7 +962,9 @@ class RealtimeManager {
       return;
     }
 
-    RealtimeRouter.routeMessage(decoded);
+    RealtimeRouter.routeMessage(decoded).catchError((e, st) {
+      if (kDebugMode) print('[RealtimeManager] RealtimeRouter error: $e\n$st');
+    });
 
     // [IMM-ACK] Send immediate ACK for data-bearing events (tokens, prescriptions).
     if (type == 'save_stock_item') {

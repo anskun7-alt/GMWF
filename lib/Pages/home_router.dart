@@ -15,6 +15,7 @@ import '../services/firestore_service.dart';
 import '../services/device_info_service.dart';
 import '../services/role_simulator_service.dart';
 import '../widgets/update_dialog_widget.dart';
+import '../widgets/blurred_dialog_observer.dart';
 
 import '../utils/formatters.dart';
 import '../services/auth_service.dart';
@@ -85,7 +86,14 @@ class _HomeRouterState extends State<HomeRouter> {
         final isServerMode = role == 'server';
         UpdateDialogWidget.showUpdateDialogIfNeeded(context, isServerMode: isServerMode);
 
-        if (!isServerMode) {
+        final clinicRoles = {
+          'doctor', 'receptionist', 'dispenser', 'dispensar', 'pharmacist',
+          'rec+dis', 'doc+rec', 'doc+dis', 'doc+rec+dis', 'hybrid'
+        };
+        final isClinicRole = clinicRoles.contains(role) ||
+            clinicRoles.any((cr) => role.contains(cr));
+
+        if (!isServerMode && isClinicRole) {
           final rawBranchId = (userData['branchId'] ?? '').toString().trim();
           // Executive roles (chairman, CEO) have branchId='all' — resolve to the
           // first known real branch so ConnectionManager can find the server IP.
@@ -108,18 +116,21 @@ class _HomeRouterState extends State<HomeRouter> {
             } catch (_) {}
           }
           final username = (userData['username'] ?? userData['name'] ?? userData['email'] ?? '').toString();
-          final uid = (userData['uid'] ?? userData['id'] ?? username).toString();
           ConnectionManager().start(
             role: role,
             branchId: branchId,
             username: username,
           );
-          unawaited(CloudMessagingService().registerTokenForUser(
-            userId: uid,
-            role: role,
-            branchId: rawBranchId.isEmpty ? 'all' : rawBranchId,
-          ));
         }
+
+        final username = (userData['username'] ?? userData['name'] ?? userData['email'] ?? '').toString();
+        final uid = (userData['uid'] ?? userData['id'] ?? username).toString();
+        final rawBranchId = (userData['branchId'] ?? '').toString().trim();
+        unawaited(CloudMessagingService().registerTokenForUser(
+          userId: uid,
+          role: role,
+          branchId: rawBranchId.isEmpty ? 'all' : rawBranchId,
+        ));
 
         // Periodically check for updates every 2 hours so users who never log out stay updated
         _periodicUpdateTimer?.cancel();
@@ -242,20 +253,16 @@ class _HomeRouterState extends State<HomeRouter> {
 
   Future<bool> _checkConnectivity() async {
     try {
-      final lookup = await InternetAddress.lookup('google.com').timeout(const Duration(milliseconds: 1200));
-      if (lookup.isNotEmpty && lookup[0].rawAddress.isNotEmpty) return true;
-    } catch (_) {}
-    try {
-      final lookup = await InternetAddress.lookup('firebase.google.com').timeout(const Duration(milliseconds: 1200));
-      if (lookup.isNotEmpty && lookup[0].rawAddress.isNotEmpty) return true;
-    } catch (_) {}
-    try {
       final connectivityResult = await Connectivity()
           .checkConnectivity()
-          .timeout(const Duration(milliseconds: 800));
-      if (connectivityResult.any((r) => r != ConnectivityResult.none)) return true;
+          .timeout(const Duration(milliseconds: 300));
+      if (connectivityResult.every((r) => r == ConnectivityResult.none)) return false;
     } catch (_) {}
-    return !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+    try {
+      final lookup = await InternetAddress.lookup('google.com').timeout(const Duration(milliseconds: 400));
+      if (lookup.isNotEmpty && lookup[0].rawAddress.isNotEmpty) return true;
+    } catch (_) {}
+    return false;
   }
 
   /// Authoritative role resolver across all roles, collections, legacy synonyms, local employees, and heuristics.
@@ -371,7 +378,8 @@ class _HomeRouterState extends State<HomeRouter> {
       if (idStr.contains('madrassa') && idStr.contains('teacher')) return 'madrassa teacher';
       if (idStr.contains('madrassa') && (idStr.contains('admin') || idStr.contains('principal') || idStr.contains('head'))) return 'madrassa admin';
       if (idStr.contains('guardian') || idStr.contains('parent')) return 'madrassa guardian';
-      if (idStr.contains('school') && (idStr.contains('admin') || idStr.contains('principal') || idStr.contains('head'))) return 'school principal';
+      if (idStr.contains('school') && idStr.contains('admin')) return 'school admin';
+      if (idStr.contains('school') && (idStr.contains('principal') || idStr.contains('head'))) return 'school principal';
       if (idStr.contains('school') && idStr.contains('teacher')) return 'school teacher';
       if (idStr.contains('principal') || idStr.contains('headmaster') || idStr.contains('headmistress')) return 'school principal';
       if (idStr.contains('teacher')) return 'madrassa teacher';
@@ -397,16 +405,18 @@ class _HomeRouterState extends State<HomeRouter> {
       return 'madrassa guardian';
     }
     if (rawRole == 'madrassa principal' || rawRole == 'madrassa admin' || rawRole == 'madrassa_principal' || rawRole == 'madrassa_admin' || rawRole == 'qari') return 'madrassa admin';
+    if (rawRole == 'school admin' ||
+        rawRole == 'school_admin' ||
+        rawRole == 'school' ||
+        rawRole.contains('school admin')) {
+      return 'school admin';
+    }
     if (rawRole == 'principal' ||
         rawRole == 'school principal' ||
         rawRole == 'school_principal' ||
-        rawRole == 'school admin' ||
-        rawRole == 'school_admin' ||
-        rawRole == 'school' ||
         rawRole == 'headmaster' ||
         rawRole == 'headmistress' ||
-        rawRole.contains('school principal') ||
-        rawRole.contains('school admin')) {
+        rawRole.contains('school principal')) {
       return 'school principal';
     }
     if (rawRole == 'teacher' || rawRole == 'faculty' || rawRole == 'educator') {
@@ -454,6 +464,24 @@ class _HomeRouterState extends State<HomeRouter> {
     if (currentUser == null && uid.isEmpty && emailLower.isEmpty && usernameHint.isEmpty) {
       debugPrint("HomeRouter: No active user session -> routing to login page");
       return null;
+    }
+
+    final isKashifSession = emailLower == 'kashif@khi.com' ||
+        emailLower.startsWith('kashif@') ||
+        emailPrefix == 'kashif' ||
+        usernameHint.toLowerCase() == 'kashif' ||
+        uid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+
+    if (isKashifSession) {
+      debugPrint("HomeRouter: 🛡️ Kashif account detected -> guaranteeing Karachi branch identity");
+      unawaited(LocalStorageService.healKashifAccount(syncToCloud: false));
+      if (widget.localUser != null) {
+        widget.localUser!['branchId'] = 'karachi';
+        widget.localUser!['branchName'] = 'Karachi';
+        widget.localUser!['branch'] = 'karachi';
+        widget.localUser!['role'] = 'rec+dis';
+        widget.localUser!['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+      }
     }
 
     // Normalization helper for resilient fuzzy matching (ignoring spaces, underscores, dashes)
@@ -545,7 +573,15 @@ class _HomeRouterState extends State<HomeRouter> {
                 (normUid.isNotEmpty && norm(m['uid']).isEmpty && norm(m['email']).isEmpty);
             if (isMatch) {
               m['role'] = r;
-              debugPrint("HomeRouter: ⚡ Fast authentic role resolution from app_settings (role=$r)");
+              if (isKashifSession) {
+                m['branchId'] = 'karachi';
+                m['branchName'] = 'Karachi';
+                m['branch'] = 'karachi';
+                m['role'] = 'rec+dis';
+                m['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+              }
+              debugPrint("HomeRouter: ⚡ Fast authentic role resolution from app_settings (role=${m['role']}, branch=${m['branchId']})");
+              _syncFreshUserProfileInBackground(m);
               return m;
             }
           }
@@ -568,12 +604,20 @@ class _HomeRouterState extends State<HomeRouter> {
                 u['role'] = r;
                 u['uid'] = uid.isNotEmpty ? uid : (u['uid'] ?? u['id'] ?? 'user');
                 u['email'] = currentUser?.email ?? emailLower;
-                debugPrint("HomeRouter: ⚡ Fast authentic role resolution from local_users scan (role=$r)");
+                if (isKashifSession) {
+                  u['branchId'] = 'karachi';
+                  u['branchName'] = 'Karachi';
+                  u['branch'] = 'karachi';
+                  u['role'] = 'rec+dis';
+                  u['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+                }
+                debugPrint("HomeRouter: ⚡ Fast authentic role resolution from local_users scan (role=${u['role']}, branch=${u['branchId']})");
                 await _cacheUserDataLocally(u);
                 final bId = u['branchId']?.toString();
                 if (bId != null && bId.isNotEmpty) {
                   unawaited(LocalStorageService.downloadUsers(bId));
                 }
+                _syncFreshUserProfileInBackground(u);
                 return u;
               }
             }
@@ -593,7 +637,15 @@ class _HomeRouterState extends State<HomeRouter> {
         final r = resolveRoleFromData(cachedOffline);
         if (r.isNotEmpty && r != 'unknown') {
           cachedOffline['role'] = r;
-          debugPrint("HomeRouter: ⚡ Fast resolution from OfflineAuthService (role=$r)");
+          if (isKashifSession) {
+            cachedOffline['branchId'] = 'karachi';
+            cachedOffline['branchName'] = 'Karachi';
+            cachedOffline['branch'] = 'karachi';
+            cachedOffline['role'] = 'rec+dis';
+            cachedOffline['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+          }
+          debugPrint("HomeRouter: ⚡ Fast resolution from OfflineAuthService (role=${cachedOffline['role']}, branch=${cachedOffline['branchId']})");
+          _syncFreshUserProfileInBackground(cachedOffline);
           return cachedOffline;
         }
       }
@@ -607,11 +659,18 @@ class _HomeRouterState extends State<HomeRouter> {
       if (localUserPre != null) {
         final r = resolveRoleFromData(localUserPre);
         if (r.isNotEmpty && r != 'unknown') {
-          debugPrint("HomeRouter: ⚡ Fast authentic role resolution from LocalStorageService (role=$r)");
           final effective = Map<String, dynamic>.from(localUserPre);
           effective['role'] = r;
           effective['uid'] = uid.isNotEmpty ? uid : (effective['uid'] ?? effective['id'] ?? 'user');
           effective['email'] = currentUser?.email ?? emailLower;
+          if (isKashifSession) {
+            effective['branchId'] = 'karachi';
+            effective['branchName'] = 'Karachi';
+            effective['branch'] = 'karachi';
+            effective['role'] = 'rec+dis';
+            effective['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+          }
+          debugPrint("HomeRouter: ⚡ Fast authentic role resolution from LocalStorageService (role=${effective['role']}, branch=${effective['branchId']})");
           final bId = effective['branchId']?.toString();
           unawaited(LocalStorageService.downloadUsers(bId));
           return effective;
@@ -621,36 +680,7 @@ class _HomeRouterState extends State<HomeRouter> {
       debugPrint("HomeRouter: Local pre-check notice: $e");
     }
 
-    // 5. Remote Firestore fetch with strict 3.5s total timeout (never hang or freeze!)
-    final isOnline = await _checkConnectivity();
-
-    if (isOnline) {
-      if (uid.isNotEmpty) {
-        DeviceInfoService.recordUserSession(userId: uid, email: currentUser?.email ?? emailLower);
-      }
-
-      try {
-        final remoteUser = await _fetchFromRemoteFirestore(
-          uid: uid,
-          emailLower: emailLower,
-          emailPrefix: emailPrefix,
-          currentUser: currentUser,
-        ).timeout(const Duration(milliseconds: 8000), onTimeout: () => null);
-
-        if (remoteUser != null) {
-          await _cacheUserDataLocally(remoteUser);
-          final bId = remoteUser['branchId']?.toString();
-          if (bId != null && bId.isNotEmpty) {
-            unawaited(LocalStorageService.downloadUsers(bId));
-          }
-          return remoteUser;
-        }
-      } catch (e) {
-        debugPrint("HomeRouter: Remote lookup timed out or failed: $e");
-      }
-    }
-
-    // 6. Safe Local Hive & Offline fallback
+    // 5. Safe Local Hive & Offline fallback (Instant <5ms resolution)
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final appSettingsUser = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
@@ -672,7 +702,8 @@ class _HomeRouterState extends State<HomeRouter> {
               m['status'] = 'active';
               m['accountStatus'] = 'active';
               m['isCorruptedOrOrphanAuth'] = false;
-              debugPrint("HomeRouter: Fallback resolution from app_settings (role=$r)");
+              debugPrint("HomeRouter: ⚡ Fallback instant resolution from app_settings (role=$r)");
+              _syncFreshUserProfileInBackground(m);
               return m;
             }
           }
@@ -681,32 +712,72 @@ class _HomeRouterState extends State<HomeRouter> {
 
       if (Hive.isBoxOpen('local_users')) {
         final box = Hive.box('local_users');
+        Map<String, dynamic>? activeMatch;
+        Map<String, dynamic>? deletedMatch;
         for (final val in box.values) {
           if (val is Map) {
             final u = Map<String, dynamic>.from(val);
             if (!matchesIdentity(u)) continue;
             final status = (u['status'] ?? u['accountStatus'] ?? '').toString().toLowerCase().trim();
-            if (u['isDeleted'] == true || status == 'deleted' || status == 'revoked') {
-              return {
+            final isDel = u['isDeleted'] == true || status == 'deleted' || status == 'revoked';
+            if (isDel) {
+              deletedMatch ??= {
                 ...u,
                 'isDeleted': true,
                 'status': 'deleted',
                 'accountStatus': 'deleted',
               };
-            }
-            final r = resolveRoleFromData(u);
-            if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
-              u['role'] = r;
-              u['status'] = 'active';
-              u['accountStatus'] = 'active';
-              u['isCorruptedOrOrphanAuth'] = false;
-              return u;
+            } else {
+              final r = resolveRoleFromData(u);
+              if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+                u['role'] = r;
+                u['status'] = 'active';
+                u['accountStatus'] = 'active';
+                u['isCorruptedOrOrphanAuth'] = false;
+                activeMatch = u;
+                break;
+              }
             }
           }
         }
+        if (activeMatch != null) {
+          debugPrint("HomeRouter: ⚡ Fallback instant resolution from local_users (role=${activeMatch['role']})");
+          _syncFreshUserProfileInBackground(activeMatch);
+          return activeMatch;
+        }
+        if (deletedMatch != null) return deletedMatch;
       }
     } catch (e) {
       debugPrint("HomeRouter: Error during fallback local user check: $e");
+    }
+
+    // 6. Remote Firestore fetch with strict 2.5s total timeout (never hang or freeze!)
+    final isOnline = await _checkConnectivity();
+
+    if (isOnline) {
+      if (uid.isNotEmpty) {
+        DeviceInfoService.recordUserSession(userId: uid, email: currentUser?.email ?? emailLower);
+      }
+
+      try {
+        final remoteUser = await _fetchFromRemoteFirestore(
+          uid: uid,
+          emailLower: emailLower,
+          emailPrefix: emailPrefix,
+          currentUser: currentUser,
+        ).timeout(const Duration(milliseconds: 2500), onTimeout: () => null);
+
+        if (remoteUser != null) {
+          await _cacheUserDataLocally(remoteUser);
+          final bId = remoteUser['branchId']?.toString();
+          if (bId != null && bId.isNotEmpty) {
+            unawaited(LocalStorageService.downloadUsers(bId));
+          }
+          return remoteUser;
+        }
+      } catch (e) {
+        debugPrint("HomeRouter: Remote lookup timed out or failed: $e");
+      }
     }
 
     // 7. Guard: If Firebase Auth is authenticated, but NO active user document exists in database:
@@ -1004,7 +1075,11 @@ class _HomeRouterState extends State<HomeRouter> {
 
     // 5. Check primary branch subcollection if known
     try {
-      final activeBranch = LocalStorageService.getActiveBranchId();
+      final isKashifRemote = emailLower == 'kashif@khi.com' ||
+          emailLower.startsWith('kashif@') ||
+          emailPrefix == 'kashif' ||
+          uid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+      final activeBranch = isKashifRemote ? 'karachi' : LocalStorageService.getActiveBranchId();
       if (activeBranch != null && activeBranch.isNotEmpty && activeBranch != 'all') {
         if (uid.isNotEmpty) {
           futures.add(FirebaseFirestore.instance
@@ -1022,9 +1097,11 @@ class _HomeRouterState extends State<HomeRouter> {
                 return {
                   ...data,
                   'branchId': activeBranch,
+                  if (isKashifRemote) 'branchName': 'Karachi',
+                  if (isKashifRemote) 'branch': 'karachi',
                   'uid': uid,
                   'email': currentUser?.email ?? emailLower,
-                  'role': role,
+                  'role': isKashifRemote ? 'rec+dis' : role,
                   'name': name,
                   'username': (data['username'] ?? data['userName'] ?? '').toString().trim().isNotEmpty
                       ? (data['username'] ?? data['userName'])
@@ -1060,6 +1137,86 @@ class _HomeRouterState extends State<HomeRouter> {
     } catch (e) {
       debugPrint("Warning: Error caching user data locally: $e");
     }
+  }
+
+  void _syncFreshUserProfileInBackground(Map<String, dynamic> cached) {
+    final uid = (cached['uid'] ?? cached['id'] ?? widget.user?.uid ?? FirebaseAuth.instance.currentUser?.uid ?? '').toString().trim();
+    final email = (cached['email'] ?? widget.user?.email ?? FirebaseAuth.instance.currentUser?.email ?? '').toString().trim().toLowerCase();
+    if (uid.isEmpty && email.isEmpty) return;
+
+    Future.microtask(() async {
+      try {
+        final isOnline = await _checkConnectivity();
+        if (!isOnline) return;
+
+        DocumentSnapshot? userDoc;
+        if (uid.isNotEmpty) {
+          try {
+            userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get().timeout(const Duration(seconds: 4));
+          } catch (_) {}
+        }
+        if ((userDoc == null || !userDoc.exists) && email.isNotEmpty) {
+          try {
+            final snap = await FirebaseFirestore.instance.collection('users').where('email', isEqualTo: email).limit(1).get().timeout(const Duration(seconds: 4));
+            if (snap.docs.isNotEmpty) userDoc = snap.docs.first;
+          } catch (_) {}
+        }
+
+        if (userDoc != null && userDoc.exists && userDoc.data() is Map) {
+          final liveData = Map<String, dynamic>.from(userDoc.data() as Map);
+          final liveStatus = (liveData['status'] ?? liveData['accountStatus'] ?? '').toString().toLowerCase().trim();
+          final isDel = liveData['isDeleted'] == true || liveStatus == 'deleted' || liveStatus == 'revoked';
+
+          if (isDel) {
+            if (mounted) {
+              setState(() {
+                _accessRevokedData = {...liveData, 'uid': uid};
+              });
+            }
+            return;
+          }
+
+          final liveName = (liveData['name'] ?? liveData['displayName'] ?? liveData['username'] ?? '').toString().trim();
+          final livePhoto = (liveData['profileImage'] ?? liveData['profilePictureUrl'] ?? liveData['photoUrl'] ?? liveData['avatarUrl'])?.toString() ?? '';
+          final liveRole = resolveRoleFromData(liveData);
+
+          final cachedName = (cached['name'] ?? cached['displayName'] ?? cached['username'] ?? '').toString().trim();
+          final cachedPhoto = (cached['profileImage'] ?? cached['profilePictureUrl'] ?? cached['photoUrl'] ?? cached['avatarUrl'])?.toString() ?? '';
+          final cachedRole = (cached['role'] ?? '').toString().trim().toLowerCase();
+
+          bool hasChanges = false;
+          final isLiveNameInvalid = liveName.isEmpty ||
+              liveName.toLowerCase().startsWith('loading') ||
+              liveName.toLowerCase() == 'user' ||
+              liveName.toLowerCase() == 'unknown';
+          if (!isLiveNameInvalid && liveName != cachedName) hasChanges = true;
+          if (livePhoto.isNotEmpty && livePhoto != cachedPhoto) hasChanges = true;
+          if (liveRole.isNotEmpty && liveRole != 'unknown' && liveRole != cachedRole) hasChanges = true;
+
+          if (hasChanges) {
+            debugPrint('[HomeRouter] 🔄 Background profile refresh detected updates for $uid: name="$liveName", hasPhoto=${livePhoto.isNotEmpty}');
+            final merged = {
+              ...cached,
+              ...liveData,
+              if (liveRole.isNotEmpty && liveRole != 'unknown') 'role': liveRole,
+              if (!isLiveNameInvalid) 'name': liveName,
+              if (livePhoto.isNotEmpty) 'profileImage': livePhoto,
+              if (livePhoto.isNotEmpty) 'photoUrl': livePhoto,
+              if (livePhoto.isNotEmpty) 'profilePictureUrl': livePhoto,
+            };
+
+            await _cacheUserDataLocally(merged);
+            if (mounted) {
+              setState(() {
+                _userDataFuture = Future.value(merged);
+              });
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[HomeRouter] Background profile sync notice: $e');
+      }
+    });
   }
 
   Future<void> _bootstrapReceptionistData(String branchId) async {
@@ -1166,7 +1323,11 @@ class _HomeRouterState extends State<HomeRouter> {
       case 'dispenser':
       case 'dispensar':
       case 'pharmacist':
-        return DispensarScreen(branchId: branchId);
+        return DispensarScreen(
+          branchId: branchId,
+          dispenserId: uid,
+          dispenserName: userName,
+        );
 
       case 'inventory':
         return InventoryPage(branchId: branchId);
@@ -1427,7 +1588,7 @@ class _HomeRouterState extends State<HomeRouter> {
         }
 
         // ── Normalize Role (handles lists, legacy synonyms, nulls, heuristics) ──
-        final role = resolveRoleFromData(data);
+        String role = resolveRoleFromData(data);
         final hasValidRole = role.isNotEmpty && role != 'unknown' && role != 'unassigned';
 
         // Auto-heal if previously falsely flagged as corrupted or orphan auth
@@ -1481,6 +1642,18 @@ class _HomeRouterState extends State<HomeRouter> {
 
         // ── Normalize Branch ID (handles null, 'null', empty strings) ──
         String rawBranch = (data['branchId']?.toString() ?? '').trim();
+        final checkEmail = (data['email'] ?? widget.user?.email ?? '').toString().toLowerCase().trim();
+        final checkUser = (data['username'] ?? data['userName'] ?? data['usernameLower'] ?? '').toString().toLowerCase().trim();
+        final checkUid = (data['uid'] ?? data['id'] ?? widget.user?.uid ?? '').toString().trim();
+        if (checkEmail == 'kashif@khi.com' || checkEmail.startsWith('kashif@') || checkUser == 'kashif' || checkUid == 'e5I5hQJQNpe08MuKmOc937dcMR43') {
+          rawBranch = 'karachi';
+          data['branchId'] = 'karachi';
+          data['branchName'] = 'Karachi';
+          data['branch'] = 'karachi';
+          data['role'] = 'rec+dis';
+          role = 'rec+dis';
+          data['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+        }
         if (rawBranch.isEmpty || rawBranch == 'null' || rawBranch == 'unknown') {
           rawBranch = 'all';
         }
@@ -1595,11 +1768,13 @@ class _HomeRouterState extends State<HomeRouter> {
               screenWidget = _getScreenByRole(activeRole, branchId, uid, userName, data);
             }
 
-            final content = KeyedSubtree(
-              key: ValueKey('sim_role_$activeRole'),
-              child: RoleThemeScope(
-                role: roleTheme,
-                child: screenWidget,
+            final content = BlurredUnderDialogBackground(
+              child: KeyedSubtree(
+                key: ValueKey('sim_role_$activeRole'),
+                child: RoleThemeScope(
+                  role: roleTheme,
+                  child: screenWidget,
+                ),
               ),
             );
 
@@ -1628,31 +1803,46 @@ class _HomeRouterState extends State<HomeRouter> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: DropdownButtonHideUnderline(
-                                child: DropdownButton<String>(
-                                  value: activeRole,
-                                  dropdownColor: const Color(0xFF1E293B),
-                                  isDense: true,
-                                  style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                                  items: const [
-                                    DropdownMenuItem(value: 'chairman', child: Text('👑 Chairman (God Mode)')),
-                                    DropdownMenuItem(value: 'ceo', child: Text('💼 CEO / HQ Executive')),
-                                    DropdownMenuItem(value: 'branch manager', child: Text('🏢 Branch Manager')),
-                                    DropdownMenuItem(value: 'supervisor', child: Text('👔 Supervisor')),
-                                    DropdownMenuItem(value: 'doctor', child: Text('🩺 Doctor')),
-                                    DropdownMenuItem(value: 'receptionist', child: Text('📋 Receptionist')),
-                                    DropdownMenuItem(value: 'dispenser', child: Text('💊 Dispensary / Pharmacist')),
-                                    DropdownMenuItem(value: 'donations', child: Text('🤝 Donations Officer')),
-                                    DropdownMenuItem(value: 'office boy', child: Text('🍲 Dasterkhwaan (Food Tokens)')),
-                                    DropdownMenuItem(value: 'kitchen', child: Text('🍳 Dasterkhwaan (Kitchen)')),
-                                    DropdownMenuItem(value: 'madrassa admin', child: Text('📖 Madrassa Principal / Admin')),
-                                    DropdownMenuItem(value: 'madrassa teacher', child: Text('📖 Madrassa Teacher')),
-                                    DropdownMenuItem(value: 'madrassa parent', child: Text('👪 Madrassa Guardian')),
-                                    DropdownMenuItem(value: 'school principal', child: Text('🏫 School Principal')),
-                                    DropdownMenuItem(value: 'school teacher', child: Text('👩‍🏫 School Teacher')),
-                                  ],
+                                child: Builder(
+                                  builder: (context) {
+                                    final menuItems = <DropdownMenuItem<String>>[
+                                      const DropdownMenuItem(value: 'chairman', child: Text('👑 Chairman (God Mode)')),
+                                      const DropdownMenuItem(value: 'ceo', child: Text('💼 CEO / HQ Executive')),
+                                      const DropdownMenuItem(value: 'branch manager', child: Text('🏢 Branch Manager')),
+                                      const DropdownMenuItem(value: 'supervisor', child: Text('👔 Supervisor')),
+                                      const DropdownMenuItem(value: 'doctor', child: Text('🩺 Doctor')),
+                                      const DropdownMenuItem(value: 'receptionist', child: Text('📋 Receptionist')),
+                                      const DropdownMenuItem(value: 'dispenser', child: Text('💊 Dispensary / Pharmacist')),
+                                      const DropdownMenuItem(value: 'donations', child: Text('🤝 Donations Officer')),
+                                      const DropdownMenuItem(value: 'office boy', child: Text('🍲 Dasterkhwaan (Food Tokens)')),
+                                      const DropdownMenuItem(value: 'kitchen', child: Text('🍳 Dasterkhwaan (Kitchen)')),
+                                      const DropdownMenuItem(value: 'madrassa admin', child: Text('📖 Madrassa Principal / Admin')),
+                                      const DropdownMenuItem(value: 'madrassa teacher', child: Text('📖 Madrassa Teacher')),
+                                      const DropdownMenuItem(value: 'madrassa parent', child: Text('👪 Madrassa Guardian')),
+                                      const DropdownMenuItem(value: 'school principal', child: Text('🏫 School Principal')),
+                                      const DropdownMenuItem(value: 'school teacher', child: Text('👩‍🏫 School Teacher')),
+                                      const DropdownMenuItem(value: 'school admin', child: Text('🏫 School Admin')),
+                                      const DropdownMenuItem(value: 'server', child: Text('🖥️ Local Server')),
+                                      const DropdownMenuItem(value: 'rec+dis', child: Text('🔄 Hybrid (Rec + Disp)')),
+                                    ];
 
-                                  onChanged: (val) {
-                                    if (val != null) RoleSimulatorService.simulate(val);
+                                    if (!menuItems.any((item) => item.value == activeRole)) {
+                                      menuItems.add(DropdownMenuItem(
+                                        value: activeRole,
+                                        child: Text('⚙️ ${activeRole.toUpperCase()}'),
+                                      ));
+                                    }
+
+                                    return DropdownButton<String>(
+                                      value: activeRole,
+                                      dropdownColor: const Color(0xFF1E293B),
+                                      isDense: true,
+                                      style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                                      items: menuItems,
+                                      onChanged: (val) {
+                                        if (val != null) RoleSimulatorService.simulate(val);
+                                      },
+                                    );
                                   },
                                 ),
                               ),

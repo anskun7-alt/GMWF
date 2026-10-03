@@ -37,6 +37,8 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
       await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanFoodLogsBox);
       if (mounted) setState(() {});
     }
+    // Background refresh from cloud
+    LocalStorageService.downloadDasterkhwaanFoodLogs(widget.branchId);
   }
 
   bool get _isDark => Theme.of(context).brightness == Brightness.dark;
@@ -526,8 +528,39 @@ class _AddFoodLogSheetState extends State<_AddFoodLogSheet> {
       final box = await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanFoodLogsBox);
       await box.put(logId, logData);
 
+      // ── Enqueue for Cloud Sync (Offline-first idempotent sync) ─────
+      await LocalStorageService.enqueueSync({
+        'type': 'save_dasterkhwan_food_log',
+        'entityId': logId,
+        'branchId': widget.branchId.toLowerCase(),
+        'dateKey': dateKey,
+        'data': logData,
+      });
+
+      // ── Direct cloud write if online and branch valid ───────────────
+      if (LocalStorageService.isValidBranchId(widget.branchId)) {
+        try {
+          final payload = Map<String, dynamic>.from(logData);
+          payload['updatedAt'] = FieldValue.serverTimestamp();
+          final parsedDate = DateTime.tryParse(logData['createdAt'].toString());
+          if (parsedDate != null) {
+            payload['timestamp'] = Timestamp.fromDate(parsedDate);
+          }
+          await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(widget.branchId.toLowerCase())
+              .collection('dasterkhwaan_food_logs')
+              .doc(logId)
+              .set(payload, SetOptions(merge: true));
+
+          logData['synced'] = true;
+          logData['syncStatus'] = 'synced';
+          await box.put(logId, logData);
+        } catch (_) {}
+      }
+
       // Trigger delta sync / server broadcast
-      SyncService().triggerUpload();
+      SyncService().triggerUpload(force: true);
 
       if (mounted) {
         Navigator.pop(context);

@@ -17,6 +17,8 @@ import 'package:gmwf/services/master_proforma_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'patient_form_helper.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
+import 'package:gmwf/realtime/connection_manager.dart';
+import 'package:gmwf/services/network_health_service.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/theme/app_theme.dart';
 import 'package:gmwf/theme/role_theme_provider.dart';
@@ -210,9 +212,9 @@ class _PatientFormState extends State<PatientForm> {
       final mySerial = _resolvedSerial.toLowerCase();
       final eventBranch = data['branchId']?.toString().trim().toLowerCase();
       final myBranch = widget.branchId.toLowerCase().trim();
-      if (eventBranch != null && eventBranch != myBranch) return;
-      if (eventSerial != null && eventSerial.isNotEmpty &&
-          mySerial.isNotEmpty && eventSerial != mySerial) return;
+      if (eventBranch != null && eventBranch.isNotEmpty && eventBranch != myBranch) return;
+      if (mySerial.isEmpty) return;
+      if (eventSerial != null && eventSerial.isNotEmpty && eventSerial != mySerial) return;
       if (type == RealtimeEvents.savePrescription ||
           type == RealtimeEvents.saveEntry ||
           type == 'dispense_completed') {
@@ -321,11 +323,25 @@ class _PatientFormState extends State<PatientForm> {
           }
         }
       }
-      if (found.isEmpty && serial.isNotEmpty && cnic.isNotEmpty) {
+      final status = (widget.queueEntry['status'] ?? '').toString().toLowerCase();
+      final isPrescribedOrCompleted = status == 'completed' ||
+          status == 'dispensed' ||
+          (widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+
+      // Zero-Quota & Offline Guard: Only attempt cloud Firestore fallback if:
+      // 1. Record is supposed to have a prescription (completed/dispensed)
+      // 2. LAN server is NOT connected (server has full local cache)
+      // 3. Device has stable internet
+      final bool canAttemptCloud = isPrescribedOrCompleted &&
+          !RealtimeManager().isConnected &&
+          !ConnectionManager().isConnected &&
+          NetworkHealthService().isStableOnline;
+
+      if (found.isEmpty && serial.isNotEmpty && cnic.isNotEmpty && canAttemptCloud) {
         found = await _fetchFromPrescriptionsByCnic(serial, cnic);
         if (found.isNotEmpty) await LocalStorageService.saveLocalPrescription(found);
       }
-      if (found.isEmpty && serial.isNotEmpty) {
+      if (found.isEmpty && serial.isNotEmpty && canAttemptCloud) {
         found = await _fetchFromSerialsEmbedded(serial);
         if (found.isNotEmpty) await LocalStorageService.saveLocalPrescription(found);
       }
@@ -854,7 +870,11 @@ class _PatientFormState extends State<PatientForm> {
 
         // Branch filter
         final b = (m['branchId'] ?? '').toString().toLowerCase().trim();
-        if (b.isNotEmpty && normBranch.isNotEmpty && b != normBranch && !b.contains(normBranch) && !normBranch.contains(b)) {
+        final matchesBranch = b.isEmpty || normBranch.isEmpty || normBranch == 'all' ||
+            CampSessionService.areBranchesMatching(normBranch, b) ||
+            (CampSessionService.isKarachiFamily(normBranch) && CampSessionService.isKarachiFamily(b)) ||
+            b == normBranch || b.contains(normBranch) || normBranch.contains(b);
+        if (!matchesBranch) {
           continue;
         }
 
@@ -1577,6 +1597,8 @@ class _PatientFormState extends State<PatientForm> {
                 'branchId': widget.branchId,
                 'serial': normSerial,
                 'dateKey': dateKey,
+                if ((fullEntry['entryUid'] ?? widget.queueEntry['entryUid'] ?? _data['entryUid']) != null)
+                  'entryUid': (fullEntry['entryUid'] ?? widget.queueEntry['entryUid'] ?? _data['entryUid']),
                 ...minimalUpdate,
                 if (doctorName.isNotEmpty && doctorName != 'Unknown') 'doctorName': doctorName,
                 if (doctorId.isNotEmpty) 'doctorId': doctorId,

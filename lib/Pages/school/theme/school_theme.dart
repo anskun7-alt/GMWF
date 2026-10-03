@@ -4,78 +4,81 @@ import 'package:flutter/material.dart';
 import '../../../theme/role_theme_provider.dart';
 
 class SchoolTheme {
-  // ── Brand Colors ──────────────────────────────────────────────────────────
-  static const Color primary       = Color(0xFF6366F1); // Indigo 500
-  static const Color primaryDark   = Color(0xFF4338CA); // Indigo 700
-  static const Color primaryLight  = Color(0xFFEEF2FF); // Indigo 50
+  // ── Brand Colors (Deep Ocean Academic) ──────────────────────────────────
+  static const Color primary       = Color(0xFF1B4965); // Deep Ocean Teal
+  static const Color primaryDark   = Color(0xFF0F2D3F); // Navy Dark
+  static const Color primaryLight  = Color(0xFFDAE8F0); // Pale Ocean Wash
 
-  static const Color accent        = Color(0xFF10B981); // Emerald 500
-  static const Color accentDark    = Color(0xFF059669); // Emerald 600
-  static const Color accentLight   = Color(0xFFECFDF5); // Emerald 50
+  static const Color accent        = Color(0xFF2D9B83); // Sage Teal
+  static const Color accentDark    = Color(0xFF1E7A66); // Deep Sage
+  static const Color accentLight   = Color(0xFFE6F5F0); // Mint Wash
 
-  static const Color sidebarBg     = Color(0xFF0F172A); // Slate 900
-  static const Color sidebarBorder = Color(0xFF1E293B); // Slate 800
-  static const Color sidebarText   = Color(0xFFCBD5E1); // Slate 300
-  static const Color sidebarMuted  = Color(0xFF94A3B8); // Slate 400 (High contrast WCAG AA)
+  static const Color secondary     = Color(0xFF3D5A80); // Muted Navy-Blue
+  static const Color secondaryLight = Color(0xFFE8EFF6); // Pale Steel
 
-  // ── Documented Status Palette ─────────────────────────────────────────────
-  /// Present / Active / Success -> Emerald
-  static const Color statusPresent = Color(0xFF10B981);
-  static const Color statusPresentBg = Color(0xFFECFDF5);
+  static const Color sidebarBg     = Color(0xFF0D2137); // Deep Navy
+  static const Color sidebarBorder = Color(0xFF1B3A54); // Navy Mid
+  static const Color sidebarText   = Color(0xFFB8CEDF); // Slate Cloud
+  static const Color sidebarMuted  = Color(0xFF7EA0B9); // Muted Ocean
 
-  /// Absent / Suspended / Error / Dropped -> Red
-  static const Color statusAbsent  = Color(0xFFEF4444);
-  static const Color statusAbsentBg  = Color(0xFFFEF2F2);
+  // ── Status Palette ─────────────────────────────────────────────────────
+  /// Present / Active / Success -> Sage Teal
+  static const Color statusPresent = Color(0xFF2D9B83);
+  static const Color statusPresentBg = Color(0xFFE6F5F0);
 
-  /// On Leave / Warning / Overdue -> Amber
-  static const Color statusLeave   = Color(0xFFF59E0B);
-  static const Color statusLeaveBg   = Color(0xFFFFFBEB);
+  /// Absent / Error -> Warm Coral Red
+  static const Color statusAbsent  = Color(0xFFDC4A4A);
+  static const Color statusAbsentBg  = Color(0xFFFDF2F2);
 
-  /// Late / Info / Registered -> Purple / Violet
-  static const Color statusLate    = Color(0xFF8B5CF6);
-  static const Color statusLateBg    = Color(0xFFF5F3FF);
+  /// On Leave / Warning -> Warm Amber
+  static const Color statusLeave   = Color(0xFFD4940A);
+  static const Color statusLeaveBg   = Color(0xFFFFF9E6);
 
-  /// Graduated / Transferred -> Blue
-  static const Color statusGraduated   = Color(0xFF3B82F6);
-  static const Color statusGraduatedBg = Color(0xFFEFF6FF);
+  /// Late / Info -> Soft Violet
+  static const Color statusLate    = Color(0xFF7C6CC4);
+  static const Color statusLateBg    = Color(0xFFF3F0FB);
 
-  // ── Grade Band Visual Colors ──────────────────────────────────────────────
+  /// Graduated / Transferred -> Academic Blue
+  static const Color statusGraduated   = Color(0xFF3B7DDD);
+  static const Color statusGraduatedBg = Color(0xFFEBF3FD);
+
+  // ── Grade Band Visual Colors ──────────────────────────────────────────
   static Color getGradeColor(String grade) {
     final g = grade.trim().toLowerCase();
-    if (g.contains('pre'))  return const Color(0xFF0D9488); // Teal
-    if (g.contains('9th') || g == '9')  return const Color(0xFF6366F1); // Indigo
-    if (g.contains('10th') || g == '10') return const Color(0xFF2563EB); // Royal Blue
-    if (g.contains('nursery') || g.contains('kg')) return const Color(0xFFEC4899); // Pink
-    return const Color(0xFF4B5563); // Slate
+    if (g.contains('pre'))  return const Color(0xFF2D9B83); // Sage Teal
+    if (g.contains('9th') || g == '9')  return const Color(0xFF1B4965); // Deep Ocean
+    if (g.contains('10th') || g == '10') return const Color(0xFF3B7DDD); // Academic Blue
+    if (g.contains('nursery') || g.contains('kg')) return const Color(0xFFC06C84); // Dusty Rose
+    return const Color(0xFF3D5A80); // Muted Navy
   }
 
-  // ── Letter Grade Spectrum Scale (A+ down to F) ────────────────────────────
+  // ── Letter Grade Spectrum Scale (A+ down to F) ────────────────────────
   static Color getLetterGradeColor(String letterGrade) {
     final lg = letterGrade.trim().toUpperCase();
-    if (lg == 'A+') return const Color(0xFF10B981); // Emerald
-    if (lg == 'A')  return const Color(0xFF059669); // Dark Emerald
-    if (lg == 'B')  return const Color(0xFF3B82F6); // Blue
-    if (lg == 'C')  return const Color(0xFFF59E0B); // Amber
-    if (lg == 'D')  return const Color(0xFFF97316); // Orange
-    return const Color(0xFFEF4444); // Red (F)
+    if (lg == 'A+') return const Color(0xFF2D9B83); // Sage Teal
+    if (lg == 'A')  return const Color(0xFF1E7A66); // Deep Sage
+    if (lg == 'B')  return const Color(0xFF3B7DDD); // Academic Blue
+    if (lg == 'C')  return const Color(0xFFD4940A); // Warm Amber
+    if (lg == 'D')  return const Color(0xFFD97706); // Orange
+    return const Color(0xFFDC4A4A); // Warm Red (F)
   }
 
-  // ── Surface & Neutral Light Tokens ─────────────────────────────────────────
-  static const Color bgLight        = Color(0xFFF8FAFC); // Slate 50
+  // ── Surface & Neutral Light Tokens ─────────────────────────────────────
+  static const Color bgLight        = Color(0xFFF7F9FB); // Cool Off-white
   static const Color cardLight      = Colors.white;
-  static const Color borderLight    = Color(0xFFE2E8F0); // Slate 200
-  static const Color textDark       = Color(0xFF0F172A); // Slate 900
-  static const Color textMid        = Color(0xFF475569); // Slate 600
-  static const Color textMuted      = Color(0xFF64748B); // Slate 500
+  static const Color borderLight    = Color(0xFFD5DDE5); // Soft Slate
+  static const Color textDark       = Color(0xFF0D2137); // Deep Navy
+  static const Color textMid        = Color(0xFF3D5A80); // Muted Navy-Blue
+  static const Color textMuted      = Color(0xFF6B8EAE); // Soft Steel-Blue
 
-  // ── Surface & Neutral Dark Tokens ──────────────────────────────────────────
-  static const Color bgDark         = Color(0xFF0B0F19);
-  static const Color cardDark       = Color(0xFF151D2A);
-  static const Color borderDark     = Color(0xFF232E42);
+  // ── Surface & Neutral Dark Tokens ──────────────────────────────────────
+  static const Color bgDark         = Color(0xFF091520);
+  static const Color cardDark       = Color(0xFF0F2438);
+  static const Color borderDark     = Color(0xFF1D3A54);
   static const Color textDarkTheme  = Color(0xFFF1F5F9);
-  static const Color textMidDark    = Color(0xFF94A3B8);
+  static const Color textMidDark    = Color(0xFF8FAFC8);
 
-  // ── Radii Constants ───────────────────────────────────────────────────────
+  // ── Radii Constants ───────────────────────────────────────────────────
   static const double r8  = 8.0;
   static const double r12 = 12.0;
   static const double r14 = 14.0;
@@ -90,14 +93,20 @@ class SchoolTheme {
   static BorderRadius radius20 = BorderRadius.circular(r20);
   static BorderRadius radius24 = BorderRadius.circular(r24);
 
-  // ── Card Shadows ──────────────────────────────────────────────────────────
+  // ── Card Shadows ──────────────────────────────────────────────────────
   static List<BoxShadow> cardShadow = [
     BoxShadow(
-      color: const Color(0xFF0F172A).withValues(alpha: 0.05),
-      blurRadius: 16,
+      color: const Color(0xFF0D2137).withValues(alpha: 0.06),
+      blurRadius: 18,
       offset: const Offset(0, 4),
     ),
+    BoxShadow(
+      color: const Color(0xFF1B4965).withValues(alpha: 0.03),
+      blurRadius: 6,
+      offset: const Offset(0, 1),
+    ),
   ];
+
 
   // ── Typography Scale ──────────────────────────────────────────────────────
   static const TextStyle titleStyle = TextStyle(

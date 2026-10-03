@@ -11,6 +11,7 @@ import '../utils/school_local_storage.dart';
 import '../utils/school_auth_helper.dart';
 import '../utils/school_admission_pdf_service.dart';
 import '../constants/school_constants.dart';
+import '../../../design/tokens/breakpoints.dart';
 
 class SchoolStudentManagementView extends StatefulWidget {
   final String branchId;
@@ -54,6 +55,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
   }
 
   void _initGradeFilters() {
+    _gradeOptions = SchoolConstants.filterGrades;
     if (_isTeacher) {
       final assigned = SchoolAuthHelper.getTeacherAssignedGrades(
         widget.branchId,
@@ -61,17 +63,14 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
         widget.userName,
       );
       if (assigned.isNotEmpty) {
-        _gradeOptions = assigned;
-        if (!_gradeOptions.contains(_selectedGradeFilter)) {
-          _selectedGradeFilter = _gradeOptions.first;
+        if (_selectedGradeFilter == 'All' || !_gradeOptions.contains(_selectedGradeFilter)) {
+          _selectedGradeFilter = assigned.first;
         }
       } else {
-        _gradeOptions = [];
-        _selectedGradeFilter = 'Unassigned';
+        _selectedGradeFilter = 'All';
       }
     } else {
-      _gradeOptions = SchoolConstants.filterGrades;
-      if (_selectedGradeFilter == 'Unassigned') {
+      if (_selectedGradeFilter == 'Unassigned' || !_gradeOptions.contains(_selectedGradeFilter)) {
         _selectedGradeFilter = 'All';
       }
     }
@@ -84,7 +83,6 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
   }
 
   void _openEnrollmentDialog([SchoolStudent? student]) async {
-    if (_isTeacher) return; // Teachers cannot enroll students
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => SchoolEnrollmentDialog(
@@ -99,95 +97,116 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = GBreakpoint.isMobile(context);
+
+    final searchField = TextField(
+      controller: _searchCtrl,
+      onChanged: (_) => setState(() {}),
+      decoration: InputDecoration(
+        hintText: 'Search student by name, roll no, father name or CNIC / B-Form...',
+        prefixIcon: const Icon(Icons.search_rounded, color: SchoolTheme.primary),
+        filled: true,
+        fillColor: const Color(0xFFF8FAFC),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+    );
+
+    final gradeDropdown = DropdownButtonHideUnderline(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: DropdownButton<String>(
+          value: _selectedGradeFilter,
+          items: _gradeOptions.map((g) {
+            return DropdownMenuItem(value: g, child: Text('Grade: $g'));
+          }).toList(),
+          onChanged: (v) {
+            if (v != null) setState(() => _selectedGradeFilter = v);
+          },
+        ),
+      ),
+    );
+
+    final statusDropdown = DropdownButtonHideUnderline(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: DropdownButton<String>(
+          value: _selectedStatusFilter,
+          items: const [
+            DropdownMenuItem(value: 'All', child: Text('Status: All')),
+            DropdownMenuItem(value: 'active', child: Text('Active')),
+            DropdownMenuItem(value: 'graduated', child: Text('Graduated')),
+            DropdownMenuItem(value: 'dropped', child: Text('Dropped')),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => _selectedStatusFilter = v);
+          },
+        ),
+      ),
+    );
+
+    final addStudentButton = ElevatedButton.icon(
+      onPressed: () => _openEnrollmentDialog(),
+      icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+      label: const Text('New Admission / داخلہ نیا طالب علم', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: SchoolTheme.primary,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        elevation: 0,
+      ),
+    );
+
     return Column(
       children: [
         // Search & Action Bar
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: EdgeInsets.all(isMobile ? 12 : 16),
           color: Colors.white,
-          child: Row(
-            children: [
-              // Search Input
-              Expanded(
-                child: TextField(
-                  controller: _searchCtrl,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    hintText: 'Search student by name, roll no, father name or CNIC / B-Form...',
-                    prefixIcon: const Icon(Icons.search_rounded, color: SchoolTheme.primary),
-                    filled: true,
-                    fillColor: const Color(0xFFF8FAFC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
+          child: isMobile
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    searchField,
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      alignment: WrapAlignment.spaceBetween,
+                      children: [
+                        gradeDropdown,
+                        statusDropdown,
+                        if (!_isTeacher) addStudentButton,
+                      ],
                     ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-
-              // Grade Filter
-              DropdownButtonHideUnderline(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF1F5F9),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: DropdownButton<String>(
-                    value: _selectedGradeFilter,
-                    items: _gradeOptions.map((g) {
-                      return DropdownMenuItem(value: g, child: Text('Grade: $g'));
-                    }).toList(),
-                    onChanged: (v) {
-                      if (v != null) setState(() => _selectedGradeFilter = v);
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-
-              // Status Filter
-              DropdownButtonHideUnderline(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF1F5F9),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: DropdownButton<String>(
-                    value: _selectedStatusFilter,
-                    items: const [
-                      DropdownMenuItem(value: 'All', child: Text('Status: All')),
-                      DropdownMenuItem(value: 'active', child: Text('Active')),
-                      DropdownMenuItem(value: 'graduated', child: Text('Graduated')),
-                      DropdownMenuItem(value: 'dropped', child: Text('Dropped')),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: searchField),
+                    const SizedBox(width: 12),
+                    gradeDropdown,
+                    const SizedBox(width: 12),
+                    statusDropdown,
+                    if (!_isTeacher) ...[
+                      const SizedBox(width: 16),
+                      addStudentButton,
                     ],
-                    onChanged: (v) {
-                      if (v != null) setState(() => _selectedStatusFilter = v);
-                    },
-                  ),
+                  ],
                 ),
-              ),
-              if (!_isTeacher) ...[
-                const SizedBox(width: 16),
-                // Add Student Button
-                ElevatedButton.icon(
-                  onPressed: () => _openEnrollmentDialog(),
-                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
-                  label: const Text('New Admission / داخلہ نیا طالب علم', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: SchoolTheme.primary,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    elevation: 0,
-                  ),
-                ),
-              ],
-            ],
-          ),
         ),
 
         const Divider(height: 1),
@@ -202,11 +221,8 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
 
               var filtered = rawList.map((m) => SchoolStudent.fromMap(m['id'] ?? '', m)).toList();
 
-              // Teacher Data Isolation:
-              // Teachers can ONLY see students belonging to their assigned class(es)!
-              if (_isTeacher) {
-                filtered = filtered.where((s) => _gradeOptions.contains(s.grade)).toList();
-              }
+              // Teachers and Admin can view all students in branch or filter by grade
+              // (previously locked teachers to only assigned grades)
 
               if (query.isNotEmpty) {
                 filtered = filtered.where((s) {
@@ -529,14 +545,168 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
   }
 
   Widget _buildStudentTile(SchoolStudent student) {
-    Color statusColor = const Color(0xFF10B981);
-    if (student.status == 'graduated') statusColor = const Color(0xFF3B82F6);
-    if (student.status == 'dropped') statusColor = const Color(0xFFEF4444);
+    Color statusColor = SchoolTheme.statusPresent;
+    if (student.status == 'graduated') statusColor = SchoolTheme.statusGraduated;
+    if (student.status == 'dropped') statusColor = SchoolTheme.statusAbsent;
 
     int docCount = (student.photoUrl.isNotEmpty ? 1 : 0) +
         (student.guardianCnicUrl.isNotEmpty ? 1 : 0) +
         (student.bformUrl.isNotEmpty ? 1 : 0) +
         student.additionalDocuments.length;
+
+    final isMobile = GBreakpoint.isMobile(context);
+
+    if (isMobile) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey.shade200),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.02),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _buildStudentAvatar(student),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              student.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14.5,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: SchoolTheme.primary.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              'Roll: ${student.rollNo}',
+                              style: const TextStyle(color: SchoolTheme.primary, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: SchoolTheme.getGradeColor(student.grade).withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              student.grade,
+                              style: TextStyle(
+                                color: SchoolTheme.getGradeColor(student.grade),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10.5,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Sec ${student.section}',
+                            style: TextStyle(color: Colors.grey.shade600, fontSize: 11.5),
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: statusColor.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              student.status.toUpperCase(),
+                              style: TextStyle(
+                                color: statusColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Divider(height: 1, color: Colors.grey.shade100),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Father: ${student.guardianName}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF334155)),
+                  ),
+                ),
+                Text(
+                  student.guardianPhone,
+                  style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showAdmissionSlipDialog(student),
+                  icon: const Icon(Icons.receipt_long_rounded, size: 14, color: SchoolTheme.primary),
+                  label: const Text('Slip', style: TextStyle(fontSize: 11, color: SchoolTheme.primary)),
+                  style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showStudentDocumentsDialog(student),
+                  icon: Badge(
+                    label: Text('$docCount'),
+                    isLabelVisible: docCount > 0,
+                    child: const Icon(Icons.folder_shared_rounded, size: 14, color: Color(0xFF1B4965)),
+                  ),
+                  label: const Text('Docs', style: TextStyle(fontSize: 11, color: Color(0xFF1B4965))),
+                  style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                ),
+                if (!_isTeacher)
+                  IconButton(
+                    tooltip: 'Edit Profile',
+                    icon: const Icon(Icons.edit_rounded, size: 16, color: Color(0xFF64748B)),
+                    onPressed: () => _openEnrollmentDialog(student),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -691,7 +861,7 @@ class _SchoolStudentManagementViewState extends State<SchoolStudentManagementVie
             icon: Badge(
               label: Text('$docCount'),
               isLabelVisible: docCount > 0,
-              child: const Icon(Icons.folder_shared_rounded, color: Color(0xFF6366F1)),
+              child: const Icon(Icons.folder_shared_rounded, color: Color(0xFF1B4965)),
             ),
             onPressed: () => _showStudentDocumentsDialog(student),
           ),

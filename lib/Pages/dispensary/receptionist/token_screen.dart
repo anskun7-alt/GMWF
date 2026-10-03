@@ -1,6 +1,7 @@
 // lib/pages/dispensary/receptionist/token_screen.dart
 
 import 'dart:async';
+import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/network_health_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
+import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/widgets/patient_audit_history_dialog.dart';
 import 'package:gmwf/utils/formatters.dart';
@@ -138,6 +140,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       final rawData = event['data'];
       final data = (rawData is Map) ? Map<String, dynamic>.from(rawData) : <String, dynamic>{};
       if (!mounted) return;
+      final senderId = (event['_clientId'] ?? event['decoded']?['_clientId'])?.toString() ?? '';
+      final myId = RealtimeManager().clientId;
+      if (senderId.isNotEmpty && myId != null && senderId == myId) {
+        // Ignore echo of tokens we just issued ourselves — UI already updated
+        return;
+      }
       final eventBranch = data['branchId']?.toString().toLowerCase().trim();
       final myBranch    = widget.branchId.toLowerCase().trim();
       if (eventBranch != null && eventBranch.isNotEmpty && eventBranch != myBranch) return;
@@ -390,15 +398,17 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     if (_isRefreshing) return;
     if (mounted) setState(() => _isRefreshing = true);
     try {
-      await LocalStorageService.downloadTodayTokens(widget.branchId).timeout(
-        const Duration(seconds: 3),
-        onTimeout: () => {},
-      );
-      // ── FIRESTORE FIX: always refresh restrictions on every update ────────
-      await LocalStorageService.downloadMedicineRestrictions(widget.branchId).timeout(
-        const Duration(seconds: 3),
-        onTimeout: () => {},
-      );
+      // Zero-Quota & Performance Guard: Only download from cloud if NOT connected to LAN server!
+      if (!RealtimeManager().isConnected && !ConnectionManager().isConnected) {
+        await LocalStorageService.downloadTodayTokens(widget.branchId).timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => {},
+        );
+        await LocalStorageService.downloadMedicineRestrictions(widget.branchId).timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => {},
+        );
+      }
       _estimateNextSerial();
       if (_patientData?['patientId'] != null) {
         final patientId = _patientData!['patientId'] as String;
@@ -1115,8 +1125,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       );
       final seqPadded = nextSeq.toString().padLeft(3, '0');
       final serial = '$dateKey-$normDispTag-$seqPadded';
+      final entryUid = 'ENT-${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(99999).toString().padLeft(5, '0')}';
       final entryData = <String, dynamic>{
         ...baseData,
+        'entryUid': entryUid,
         'serial': serial,
         'dispensaryTag': normDispTag,
         'dispensaryId': effectiveCampId,
@@ -1164,6 +1176,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
             branchId: widget.branchId,
             data: entryData,
           ),
+          'entryUid':  entryUid,
           'queueType': queueType,
           'dateKey':   dateKey,
           'serial':    serial,
@@ -1235,7 +1248,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     // [DEDUP] If connected to LAN server, the token already traveled via
     // WebSocket → Server SSM → Firestore.  Skip direct write to avoid
     // double/triple quota consumption.
-    final lanConnected = RealtimeManager().isConnected;
+    final lanConnected = RealtimeManager().isConnected || ConnectionManager().isConnected;
     if (lanConnected) {
       debugPrint('[TokenScreen] LAN connected — server will sync $serial to Firestore');
       return;
@@ -1879,22 +1892,11 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                   focusNode:    _cnicFocusNode,
                   maxLength:    15,
                   keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9\-]')),
+                    _TokenCnicOrPhoneFormatter(),
+                  ],
                   cursorColor:  isDark ? const Color(0xFF38BDF8) : Colors.green[900],
-                  onChanged: (v) {
-                    final d = v.replaceAll(RegExp(r'[^0-9]'), '');
-                    if (d.startsWith('03')) {
-                      final phoneDigits = d.length > 11 ? d.substring(0, 11) : d;
-                      cnicController.value = TextEditingValue(
-                          text: phoneDigits,
-                          selection: TextSelection.collapsed(offset: phoneDigits.length));
-                    } else {
-                      final cnicDigits = d.length > 13 ? d.substring(0, 13) : d;
-                      final f = _formatCnic(cnicDigits);
-                      cnicController.value = TextEditingValue(
-                          text: f,
-                          selection: TextSelection.collapsed(offset: f.length));
-                    }
-                  },
                   onSubmitted: (_) => triggerSearch(),
                   style: TextStyle(color: isDark ? Colors.white : Colors.green[900]),
                   decoration: InputDecoration(
@@ -3006,5 +3008,35 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
         ),
       ],
     );
+  }
+}
+
+class _TokenCnicOrPhoneFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    final d = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    if (d.isEmpty) return newValue.copyWith(text: '');
+    if (d.startsWith('03')) {
+      final phoneDigits = d.length > 11 ? d.substring(0, 11) : d;
+      return TextEditingValue(
+        text: phoneDigits,
+        selection: TextSelection.collapsed(offset: phoneDigits.length),
+      );
+    } else {
+      final cnicDigits = d.length > 13 ? d.substring(0, 13) : d;
+      final buffer = StringBuffer();
+      for (int i = 0; i < cnicDigits.length; i++) {
+        buffer.write(cnicDigits[i]);
+        if ((i == 4 || i == 11) && i != cnicDigits.length - 1) {
+          buffer.write('-');
+        }
+      }
+      final formatted = buffer.toString();
+      return TextEditingValue(
+        text: formatted,
+        selection: TextSelection.collapsed(offset: formatted.length),
+      );
+    }
   }
 }

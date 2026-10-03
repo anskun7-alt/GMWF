@@ -3688,7 +3688,7 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
     }
     final branchIds = cleanBranchIds.toList();
 
-    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds, allowRemoteFallback: isGlobalExec);
+    final Map<String, TodayVsYesterday> statsMap = await fetchTodayVsYesterdayPerBranch(branchIds, allowRemoteFallback: true);
     final weeklyPatients = await fetchWeeklyPatientCounts(branchIds);
     final List<HomeBranchRow> branchRows = [];
     final List<BranchStats> todayStatsList = [];
@@ -3778,7 +3778,7 @@ Future<SnapshotDashboardData> buildLocalSnapshotDashboardData(Map<String, dynami
   } else {
     final branchId = (userBranchId.isNotEmpty && userBranchId != 'all' && userBranchId != 'global') ? userBranchId : 'karachi';
 
-    final todayStats = await fetchLocalBranchStats(branchId, DateTime.now());
+    final todayStats = await fetchLocalBranchStats(branchId, DateTime.now(), allowRemoteFallback: true);
     final yesterdayStats = await fetchLocalBranchStats(branchId, DateTime.now().subtract(const Duration(days: 1)));
     final weeklyPatients = await fetchWeeklyPatientCounts([branchId]);
 
@@ -4368,7 +4368,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'School Students',
           value: fmtNum(data.studentPresentCount),
           icon: Icons.school_rounded,
-          color: const Color(0xFF10B981),
+          color: const Color(0xFF2D9B83),
           onTap: () => tryOpenModule('school_attendance'),
         );
 

@@ -200,12 +200,24 @@ class _FinancePageState extends State<FinancePage> {
   Future<void> _triggerDownloadForActiveBranch({bool force = false}) async {
     final bId = _activeBranchId;
     if (bId.isEmpty) return;
+
+    if (!force) {
+      // 24/7 HQ Quota Protection: Serve 100% from local Hive.
+      // Cloud downloads only execute when user explicitly clicks Refresh (force = true).
+      final hasLocal = FinanceLocalStorage.getEmployees(bId).isNotEmpty;
+      if (hasLocal) return;
+    }
+
     setState(() => _isDownloadingData = true);
     try {
       SyncService().start(bId);
+      if (force) {
+        await SyncService().broadcastUniversalForceUpload(branchId: bId);
+        await FinanceLocalStorage.deduplicateEmployeeRecords();
+      }
       await SyncService().triggerFinanceRefresh(force: force);
       await FinanceLoansStorage.migrateLegacyAdvancesToLoans(performedBy: 'System');
-      if (force && mounted) showCustomSnackBar(context, 'Financial data refreshed successfully.');
+      if (force && mounted) showCustomSnackBar(context, 'Universal sync broadcasted & data refreshed successfully.');
     } catch (e) {
       debugPrint('[FinancePage] Error: $e');
       if (force && mounted) showCustomSnackBar(context, 'Failed to refresh: $e', error: true);

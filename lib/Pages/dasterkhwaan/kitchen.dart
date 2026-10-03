@@ -23,6 +23,7 @@ import '../../realtime/realtime_manager.dart';
 import '../../realtime/realtime_events.dart';
 import '../../services/sync_service.dart';
 import '../settings_page.dart';
+import 'food_log_screen.dart';
 
 export 'widgets/cook_dialog.dart'
     show
@@ -958,6 +959,31 @@ class _TokensTabState extends State<_TokensTab> {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (LocalStorageService.canKitchenLogFoodDetails(widget.branchId)) ...[
+                    IconButton(
+                      tooltip: 'Food Details & Logs',
+                      icon: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(Icons.restaurant_menu_rounded, color: Colors.white, size: 20),
+                      ),
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => DasterkhwaanFoodLogScreen(
+                              branchId: widget.branchId,
+                              userName: widget.username,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   _settingsBtn(widget.onSettings),
                 ],
               ),

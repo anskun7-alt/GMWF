@@ -209,7 +209,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                     TextField(
                       decoration: InputDecoration(
                         hintText: 'Search by Student Name, Father, CNIC or PIN...',
-                        prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF0F766E)),
+                        prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF1B4965)),
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
                         isDense: true,
                       ),
@@ -235,7 +235,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                                     backgroundColor: SchoolTheme.primary.withValues(alpha: 0.1),
                                     backgroundImage: photoBytes != null && photoBytes.isNotEmpty ? MemoryImage(photoBytes) : null,
                                     child: photoBytes == null || photoBytes.isEmpty
-                                        ? const Icon(Icons.person_rounded, color: Color(0xFF0F766E))
+                                        ? const Icon(Icons.person_rounded, color: Color(0xFF1B4965))
                                         : null,
                                   ),
                                   title: Row(
@@ -249,7 +249,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                                             color: SchoolTheme.primary.withValues(alpha: 0.1),
                                             borderRadius: BorderRadius.circular(4),
                                           ),
-                                          child: Text('PIN: $pin', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF0F766E))),
+                                          child: Text('PIN: $pin', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF1B4965))),
                                         ),
                                       ],
                                     ],
@@ -503,7 +503,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(Icons.note_add_rounded, color: Color(0xFF0F766E)),
+            Icon(Icons.note_add_rounded, color: Color(0xFF1B4965)),
             SizedBox(width: 10),
             Text('دیگر دستاویزات / Add Custom Document', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           ],
@@ -775,7 +775,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                 height: 48,
                 width: 48,
                 fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Icon(Icons.school_rounded, size: 40, color: Color(0xFF0F766E)),
+                errorBuilder: (_, __, ___) => const Icon(Icons.school_rounded, size: 40, color: Color(0xFF1B4965)),
               ),
             ),
             const SizedBox(width: 12),
@@ -873,7 +873,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                           DateFormat('dd-MM-yyyy').format(_admissionDate),
                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF0F172A)),
                         ),
-                        const Icon(Icons.calendar_today_rounded, size: 16, color: Color(0xFF0F766E)),
+                        const Icon(Icons.calendar_today_rounded, size: 16, color: Color(0xFF1B4965)),
                       ],
                     ),
                   ),
@@ -1057,7 +1057,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Color(0xFF0F766E), width: 1.5),
+              borderSide: const BorderSide(color: Color(0xFF1B4965), width: 1.5),
             ),
           ),
           validator: customValidator ?? (isRequired ? (v) => v == null || v.trim().isEmpty ? '$englishLabel is required' : null : null),
@@ -1113,7 +1113,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
                     fontWeight: _dob != null ? FontWeight.bold : FontWeight.normal,
                   ),
                 ),
-                const Icon(Icons.cake_outlined, size: 18, color: Color(0xFF0F766E)),
+                const Icon(Icons.cake_outlined, size: 18, color: Color(0xFF1B4965)),
               ],
             ),
           ),
@@ -1225,7 +1225,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
           children: [
             const Row(
               children: [
-                Icon(Icons.perm_media_outlined, size: 18, color: Color(0xFF0F766E)),
+                Icon(Icons.perm_media_outlined, size: 18, color: Color(0xFF1B4965)),
                 SizedBox(width: 8),
                 Text(
                   'Official Documents & Student Photo',
@@ -1330,7 +1330,7 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
           child: OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
               foregroundColor: SchoolTheme.primary,
-              side: const BorderSide(color: Color(0xFF0F766E)),
+              side: const BorderSide(color: Color(0xFF1B4965)),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),

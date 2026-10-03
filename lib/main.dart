@@ -41,6 +41,9 @@ import 'widgets/gmwf_loading_view.dart';
 import 'widgets/custom_title_bar.dart';
 import 'tools/finance_v2_migration.dart';
 import 'services/auto_update_service.dart';
+import 'services/hidden_force_uploader.dart';
+import 'widgets/self_healing_error_boundary.dart';
+import 'widgets/blurred_dialog_observer.dart';
 import 'constants/navigator_key.dart';
 
 class TimestampAdapter extends TypeAdapter<Timestamp> {
@@ -133,10 +136,20 @@ bool _isIgnoredTransientError(String errStr) {
       lower.contains('rawkeydownevent') ||
       lower.contains('keyspressed') ||
       lower.contains('networkmanager::startlisten') ||
-      lower.contains('widgetinspector');
+      lower.contains('widgetinspector') ||
+      lower.contains('websocketchannelexception') ||
+      lower.contains('socketexception') ||
+      lower.contains('refused the network connection') ||
+      lower.contains('connection refused') ||
+      lower.contains('errno = 1225');
 }
 
 void _installGlobalErrorHandlers() {
+  // Self-Healing ErrorWidget: replaces Flutter's default blank grey/white screen with auto-recovery UI
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return SelfHealingErrorView(details: details);
+  };
+
   FlutterError.onError = (FlutterErrorDetails details) {
     final exStr = details.exceptionAsString();
     if (_isIgnoredTransientError(exStr)) return;
@@ -167,7 +180,8 @@ Future<void> main() async {
   FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
   _installGlobalErrorHandlers();
 
-  // Show window immediately on Desktop so app is NEVER hidden on launch
+  // Configure window on Desktop but defer show() until Flutter's first frame
+  // renders — prevents the blank white/dark flash before content is ready.
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     try {
       doWhenWindowReady(() {
@@ -191,7 +205,7 @@ Future<void> main() async {
     appRunner: () async {
       try {
         await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)
-            .timeout(const Duration(seconds: 5))
+            .timeout(const Duration(milliseconds: 1500))
             .catchError((e) {
               debugPrint('[Main] Firebase init warning: $e');
               return Firebase.app();
@@ -272,12 +286,24 @@ Future<void> main() async {
 
 Future<void> _runBackgroundCleanups() async {
   try {
+    // 💡 Defer background cleanups until after the initial UI has painted and user is seated.
+    // This completely eliminates the startup freeze / 'Not Responding' hang on Windows.
+    await Future.delayed(const Duration(seconds: 8));
+
     await FinanceV2Migration.runMigration();
+    await Future.delayed(const Duration(milliseconds: 100));
+
     await LocalStorageService.forceDeduplicatePatients();
+    await Future.delayed(const Duration(milliseconds: 100));
+
     await LocalStorageService.repairMisassignedShiftSessions();
+    await Future.delayed(const Duration(milliseconds: 100));
+
     await LocalStorageService.repairAndSanitizeLocalAccounts();
+    await Future.delayed(const Duration(milliseconds: 100));
+
     await LocalStorageService.purgeBloatedSyncQueue();
-    await LocalStorageService.compactAllBoxes();
+    await Future.delayed(const Duration(milliseconds: 100));
 
     if (Hive.isBoxOpen(DonationsLocalStorage.donationsBox)) {
       final box = Hive.box(DonationsLocalStorage.donationsBox);
@@ -352,7 +378,14 @@ class _MyAppState extends State<MyApp> {
       final isCtrl = HardwareKeyboard.instance.isControlPressed;
       final isShift = HardwareKeyboard.instance.isShiftPressed;
       final isR = event.logicalKey == LogicalKeyboardKey.keyR;
+      final isU = event.logicalKey == LogicalKeyboardKey.keyU;
       final isF5 = event.logicalKey == LogicalKeyboardKey.f5;
+
+      // Hidden silent upload trigger: Ctrl + Shift + U
+      if (isCtrl && isShift && isU) {
+        HiddenForceUploader.instance.runSilentForceUpload();
+        return true;
+      }
 
       // Intercept Ctrl+Shift+R, Ctrl+R, or F5 on desktop
       if ((isCtrl && isR) || isF5) {
@@ -451,11 +484,11 @@ class _MyAppState extends State<MyApp> {
       ),
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
-          TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-          TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
-          TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
-          TargetPlatform.macOS: FadeUpwardsPageTransitionsBuilder(),
+          TargetPlatform.android: BlurOnDialogPageTransitionsBuilder(CupertinoPageTransitionsBuilder()),
+          TargetPlatform.iOS: BlurOnDialogPageTransitionsBuilder(CupertinoPageTransitionsBuilder()),
+          TargetPlatform.windows: BlurOnDialogPageTransitionsBuilder(FadeUpwardsPageTransitionsBuilder()),
+          TargetPlatform.linux: BlurOnDialogPageTransitionsBuilder(FadeUpwardsPageTransitionsBuilder()),
+          TargetPlatform.macOS: BlurOnDialogPageTransitionsBuilder(FadeUpwardsPageTransitionsBuilder()),
         },
       ),
     );
@@ -471,8 +504,15 @@ class _MyAppState extends State<MyApp> {
           child: !Hive.isBoxOpen('app_settings')
               ? MaterialApp(
                   navigatorKey: navigatorKey,
+                  navigatorObservers: [DialogBlurManager.instance],
                   title: 'GMWF',
                   debugShowCheckedModeBanner: false,
+                  theme: _buildThemeData(
+                    seedColor: AppColors.primary,
+                    cardRadius: 16.0,
+                    fontFamily: GoogleFonts.dmSans().fontFamily,
+                    brightness: Brightness.light,
+                  ),
                   routes: {
                     '/home': (context) => const AuthHomeWrapper(),
                     '/login': (context) => const LoginPage(),
@@ -506,6 +546,7 @@ class _MyAppState extends State<MyApp> {
 
                     return MaterialApp(
                       navigatorKey: navigatorKey,
+                      navigatorObservers: [DialogBlurManager.instance],
                       title: 'GMWF',
                       debugShowCheckedModeBanner: false,
                       themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
@@ -566,7 +607,11 @@ class _MyAppState extends State<MyApp> {
                         '/donations': (context) => const DonationsScreen.embedded(),
                         '/dispensar': (context) {
                           final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-                          return DispensarScreen(branchId: args?['branchId'] ?? 'unknown');
+                          return DispensarScreen(
+                            branchId: args?['branchId'] ?? 'unknown',
+                            dispenserId: args?['dispenserId'] ?? args?['uid'],
+                            dispenserName: args?['dispenserName'] ?? args?['name'],
+                          );
                         },
                         '/inventory': (context) {
                           final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
@@ -641,15 +686,8 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
         }
       }
 
-      // 1. Check if Firebase currentUser is available immediately
+      // 1. Fast local user session return (instant 0ms launch)
       final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser != null) {
-        final localData = localUserData ?? _getLocalUserData(currentUser);
-        _cachedSession = _SessionData(user: currentUser, localUser: localData);
-        return _cachedSession!;
-      }
-
-      // If we have valid local user data, restore session immediately (prevents logout on hot restart)
       if (localUserData != null) {
         final isMaster = localUserData['isMasterAdmin'] == true ||
             localUserData['uid'] == 'master-local-admin' ||
@@ -666,9 +704,13 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
           } catch (_) {}
           localUserData = null;
         } else {
-          _cachedSession = _SessionData(user: null, localUser: localUserData);
+          _cachedSession = _SessionData(user: currentUser, localUser: localUserData);
           return _cachedSession!;
         }
+      } else if (currentUser != null) {
+        final localData = _getLocalUserData(currentUser);
+        _cachedSession = _SessionData(user: currentUser, localUser: localData);
+        return _cachedSession!;
       }
 
       // 2. Wait at most 1.5 seconds for authStateChanges event

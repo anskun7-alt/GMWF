@@ -214,12 +214,22 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
     super.dispose();
   }
 
-  Future<void> _syncPunches([DateTime? targetDate]) async {
+  Future<void> _syncPunches([DateTime? targetDate, bool force = false]) async {
     try {
       final d = targetDate ?? widget.date;
       final dateStr = DateFormat('yyyy-MM-dd').format(d);
-      await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
-      await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr, force: true);
+      if (force) {
+        await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
+        await FinanceLocalStorage.deduplicateEmployeeRecords();
+        await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr, force: true);
+      } else {
+        // Load from local Hive first for instant responsiveness, and fetch cloud attendance for target date
+        final hasEmps = FinanceLocalStorage.getEmployees(widget.branchId).isNotEmpty;
+        if (!hasEmps) {
+          await FinanceLocalStorage.downloadEmployees(widget.branchId);
+        }
+        await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr);
+      }
       await ZkTecoNetworkService.processPendingUnmappedPunches();
       if (mounted) setState(() {});
 
@@ -393,6 +403,11 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
                   final rEmpId = r['employeeId']?.toString();
                   if (rEmpId == empId || (altId.isNotEmpty && rEmpId == altId)) return true;
                   if (pin.isNotEmpty && (r['pin']?.toString() == pin || r['biometricPin']?.toString() == pin || r['employeeId']?.toString() == pin)) {
+                    // Exclusivity: if attendance explicitly belongs to another existing employee, don't cross-claim
+                    if (rEmpId != null && rEmpId.isNotEmpty && rEmpId != empId && rEmpId != altId) {
+                      final other = FinanceLocalStorage.getEmployee(rEmpId);
+                      if (other != null) return false;
+                    }
                     return true;
                   }
                   return false;

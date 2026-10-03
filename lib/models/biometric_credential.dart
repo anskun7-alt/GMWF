@@ -51,6 +51,32 @@ class BiometricCredential {
     );
   }
 
+  BiometricCredential copyWith({
+    String? id,
+    String? biometricPin,
+    List<String>? pinHistory,
+    String? entityId,
+    String? entityName,
+    String? entityType,
+    String? branchId,
+    DateTime? enrolledAt,
+    String? deviceSource,
+    bool? active,
+  }) {
+    return BiometricCredential(
+      id: id ?? this.id,
+      biometricPin: biometricPin ?? this.biometricPin,
+      pinHistory: pinHistory ?? this.pinHistory,
+      entityId: entityId ?? this.entityId,
+      entityName: entityName ?? this.entityName,
+      entityType: entityType ?? this.entityType,
+      branchId: branchId ?? this.branchId,
+      enrolledAt: enrolledAt ?? this.enrolledAt,
+      deviceSource: deviceSource ?? this.deviceSource,
+      active: active ?? this.active,
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       'id': id,

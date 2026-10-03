@@ -25,6 +25,7 @@ import '../services/device_info_service.dart';
 import '../services/finance_local_storage.dart';
 import '../services/staff_patient_link_service.dart';
 import '../services/sync_service.dart';
+import '../realtime/realtime_manager.dart';
 
 class UsersScreen extends StatefulWidget {
   final bool isPatientMode;
@@ -60,6 +61,29 @@ class _UsersScreenState extends State<UsersScreen>
   Box? _localBox;
   bool _filtersExpanded = false;
   final Set<String> _syncedBranches = {};
+  final Set<String> _collapsedCategories = {};
+
+  void _toggleCategory(String key) {
+    setState(() {
+      if (_collapsedCategories.contains(key)) {
+        _collapsedCategories.remove(key);
+      } else {
+        _collapsedCategories.add(key);
+      }
+    });
+  }
+
+  void _collapseAll(List<String> keys) {
+    setState(() {
+      _collapsedCategories.addAll(keys);
+    });
+  }
+
+  void _expandAll() {
+    setState(() {
+      _collapsedCategories.clear();
+    });
+  }
 
   @override
   void initState() {
@@ -370,6 +394,35 @@ class _UsersScreenState extends State<UsersScreen>
     }
   }
 
+  Future<void> _triggerHealKashif() async {
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Healing Kashif account and synchronizing with Cloud...'), duration: Duration(seconds: 1)),
+        );
+      }
+      final ok = await LocalStorageService.healKashifAccount(syncToCloud: true);
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(ok
+                ? '✅ Kashif account healed & fully activated! (rec+dis · Karachi · Pin: 1122)'
+                : 'Failed to heal Kashif account'),
+            backgroundColor: ok ? const Color(0xFF10B981) : Colors.redAccent,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Heal Kashif error: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
+  }
+
   Future<void> _pushUsersToCloud() async {
     try {
       if (mounted) {
@@ -496,12 +549,7 @@ class _UsersScreenState extends State<UsersScreen>
   Future<void> _syncUsersForBranch(String branchId) async {
     try {
       if (branchId == 'all' || branchId == 'global') {
-        for (final b in _branches) {
-          final bId = (b['id'] as String? ?? '').trim();
-          if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
-            await LocalStorageService.downloadUsers(bId);
-          }
-        }
+        await LocalStorageService.downloadUsers('all');
       } else {
         await LocalStorageService.downloadUsers(branchId);
       }
@@ -515,19 +563,36 @@ class _UsersScreenState extends State<UsersScreen>
             .timeout(const Duration(seconds: 5));
         if (Hive.isBoxOpen('local_users')) {
           final box = Hive.box('local_users');
+          final pendingBatch = <String, dynamic>{};
           for (final pDoc in pendingSnap.docs) {
             final data = pDoc.data();
-            final Map<String, dynamic> u = {'id': pDoc.id, 'uid': pDoc.id, ...data};
-            final sanitized = LocalStorageService.sanitize(u);
             final email = (data['email'] ?? '').toString().toLowerCase().trim();
             final usernameLower = (data['usernameLower'] ?? data['username'] ?? '').toString().toLowerCase().trim();
             final uid = pDoc.id.trim();
-            if (email.isNotEmpty) await box.put('user:$email', sanitized);
-            if (usernameLower.isNotEmpty) await box.put('user:$usernameLower', sanitized);
-            if (uid.isNotEmpty) {
-              await box.put('user:$uid', sanitized);
-              await box.put(uid, sanitized);
+
+            // Protect local resolution: if already approved/rejected locally, do not revert to pending!
+            final existing = (email.isNotEmpty ? box.get('user:$email') : null) ??
+                (usernameLower.isNotEmpty ? box.get('user:$usernameLower') : null) ??
+                (uid.isNotEmpty ? (box.get('user:$uid') ?? box.get(uid)) : null);
+            if (existing is Map) {
+              final localStatus = (existing['restoreRequestStatus'] ?? '').toString().toLowerCase().trim();
+              final localReq = existing['restoreRequested'] == true;
+              if (!localReq && (localStatus == 'approved' || localStatus == 'rejected')) {
+                continue;
+              }
             }
+
+            final Map<String, dynamic> u = {'id': pDoc.id, 'uid': pDoc.id, ...data};
+            final sanitized = LocalStorageService.sanitize(u);
+            if (email.isNotEmpty) pendingBatch['user:$email'] = sanitized;
+            if (usernameLower.isNotEmpty) pendingBatch['user:$usernameLower'] = sanitized;
+            if (uid.isNotEmpty) {
+              pendingBatch['user:$uid'] = sanitized;
+              pendingBatch[uid] = sanitized;
+            }
+          }
+          if (pendingBatch.isNotEmpty) {
+            await box.putAll(pendingBatch);
           }
           await box.flush();
         }
@@ -675,6 +740,19 @@ class _UsersScreenState extends State<UsersScreen>
               icon: const Icon(Icons.auto_fix_high_rounded, size: 18, color: Color(0xFF38BDF8)),
               label: const Text('Repair Accounts', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
               onPressed: () => _repairLocalAccounts(),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF065F46),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                elevation: 0,
+              ),
+              icon: const Icon(Icons.healing_rounded, size: 18, color: Color(0xFF34D399)),
+              label: const Text('Heal Kashif', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              onPressed: () => _triggerHealKashif(),
             ),
           ],
         ]),
@@ -893,7 +971,9 @@ class _UsersScreenState extends State<UsersScreen>
       builder: (context, box, _) {
         if (!_syncedBranches.contains('users_$branchId')) {
           _syncedBranches.add('users_$branchId');
-          _syncUsersForBranch(branchId);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _syncUsersForBranch(branchId);
+          });
         }
 
         final List<Map<String, dynamic>> canonicalUsers = [];
@@ -1157,7 +1237,7 @@ class _UsersScreenState extends State<UsersScreen>
           return _emptyState(t, widget.isGuardianMode ? Icons.people_outline : Icons.manage_accounts_rounded, widget.isGuardianMode ? 'No guardians found' : 'No users found', 'Try adjusting your search query');
         }
 
-        final listItems = <Widget>[];
+        final sectionItems = <_UserScreenSectionItem>[];
 
         // Check for pending restore requests
         final pendingRestoreList = revokedList.where((u) {
@@ -1166,95 +1246,175 @@ class _UsersScreenState extends State<UsersScreen>
         }).toList();
 
         if (pendingRestoreList.isNotEmpty) {
-          listItems.add(_buildPendingRequestsBanner(pendingRestoreList, branchId, t));
+          sectionItems.add(_UserScreenSectionItem.banner(pendingRestoreList));
         }
 
-        void addCategorySection(String title, int count, IconData icon, Color color, List<Map<String, dynamic>> items) {
+        void addCategorySection(String key, String title, int count, IconData icon, Color color, List<Map<String, dynamic>> items) {
           if (items.isEmpty) return;
-          listItems.add(_buildCategoryHeader(t, title, count, icon, color));
-          for (final item in items) {
-            listItems.add(_buildCard(item, branchId, t));
+          final isCollapsed = _searchQuery.isEmpty && _collapsedCategories.contains(key);
+          sectionItems.add(_UserScreenSectionItem.header(key, title, count, icon, color, isCollapsed: isCollapsed));
+          if (!isCollapsed) {
+            for (final item in items) {
+              sectionItems.add(_UserScreenSectionItem.card(item));
+            }
           }
         }
 
         if (_selectedCategoryFilter == 'online') {
-          addCategorySection('Currently Online', onlineList.length, Icons.fiber_manual_record, Colors.green, onlineList);
+          addCategorySection('online', 'Currently Online', onlineList.length, Icons.fiber_manual_record, Colors.green, onlineList);
         } else if (_selectedCategoryFilter == 'office') {
-          addCategorySection('Office & Administration', officeList.length, Icons.business_center_rounded, Colors.indigo, officeList);
+          addCategorySection('office', 'Office & Administration', officeList.length, Icons.business_center_rounded, Colors.indigo, officeList);
         } else if (_selectedCategoryFilter == 'kitchen') {
-          addCategorySection('Dasterkhawaan & Kitchen', kitchenList.length, Icons.soup_kitchen_rounded, Colors.amber.shade800, kitchenList);
+          addCategorySection('kitchen', 'Dasterkhawaan & Kitchen', kitchenList.length, Icons.soup_kitchen_rounded, Colors.amber.shade800, kitchenList);
         } else if (_selectedCategoryFilter == 'dispensary') {
-          addCategorySection('Dispensary Department', dispensaryList.length, Icons.local_hospital_rounded, Colors.blue, dispensaryList);
+          addCategorySection('dispensary', 'Dispensary Department', dispensaryList.length, Icons.local_hospital_rounded, Colors.blue, dispensaryList);
         } else if (_selectedCategoryFilter == 'madrassa_faculty') {
-          addCategorySection('Madrassa Faculty', madrassaFacultyList.length, Icons.school_rounded, Colors.teal, madrassaFacultyList);
+          addCategorySection('madrassa_faculty', 'Madrassa Faculty', madrassaFacultyList.length, Icons.school_rounded, Colors.teal, madrassaFacultyList);
         } else if (_selectedCategoryFilter == 'madrassa_guardian') {
-          addCategorySection('Madrassa Guardians', madrassaGuardianList.length, Icons.family_restroom_rounded, Colors.orange, madrassaGuardianList);
+          addCategorySection('madrassa_guardian', 'Madrassa Guardians', madrassaGuardianList.length, Icons.family_restroom_rounded, Colors.orange, madrassaGuardianList);
         } else if (_selectedCategoryFilter == 'school_faculty') {
-          addCategorySection('School Faculty', schoolFacultyList.length, Icons.account_balance_rounded, Colors.deepPurple, schoolFacultyList);
+          addCategorySection('school_faculty', 'School Faculty', schoolFacultyList.length, Icons.account_balance_rounded, Colors.deepPurple, schoolFacultyList);
         } else if (_selectedCategoryFilter == 'school_guardian') {
-          addCategorySection('School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
+          addCategorySection('school_guardian', 'School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
         } else if (_selectedCategoryFilter == 'revoked') {
-          addCategorySection('Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
+          addCategorySection('revoked', 'Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
         } else {
-          addCategorySection('Currently Online', onlineList.length, Icons.fiber_manual_record, Colors.green, onlineList);
-          addCategorySection('Office & Administration', officeList.length, Icons.business_center_rounded, Colors.indigo, officeList);
-          addCategorySection('Dasterkhawaan & Kitchen', kitchenList.length, Icons.soup_kitchen_rounded, Colors.amber.shade800, kitchenList);
-          addCategorySection('Dispensary Department', dispensaryList.length, Icons.local_hospital_rounded, Colors.blue, dispensaryList);
-          if (madrassaFacultyList.isNotEmpty) addCategorySection('Madrassa Faculty', madrassaFacultyList.length, Icons.school_rounded, Colors.teal, madrassaFacultyList);
-          if (madrassaGuardianList.isNotEmpty) addCategorySection('Madrassa Guardians', madrassaGuardianList.length, Icons.family_restroom_rounded, Colors.orange, madrassaGuardianList);
-          if (schoolFacultyList.isNotEmpty) addCategorySection('School Faculty', schoolFacultyList.length, Icons.account_balance_rounded, Colors.deepPurple, schoolFacultyList);
-          if (schoolGuardianList.isNotEmpty) addCategorySection('School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
-          addCategorySection('Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
+          addCategorySection('online', 'Currently Online', onlineList.length, Icons.fiber_manual_record, Colors.green, onlineList);
+          addCategorySection('office', 'Office & Administration', officeList.length, Icons.business_center_rounded, Colors.indigo, officeList);
+          addCategorySection('kitchen', 'Dasterkhawaan & Kitchen', kitchenList.length, Icons.soup_kitchen_rounded, Colors.amber.shade800, kitchenList);
+          addCategorySection('dispensary', 'Dispensary Department', dispensaryList.length, Icons.local_hospital_rounded, Colors.blue, dispensaryList);
+          if (madrassaFacultyList.isNotEmpty) addCategorySection('madrassa_faculty', 'Madrassa Faculty', madrassaFacultyList.length, Icons.school_rounded, Colors.teal, madrassaFacultyList);
+          if (madrassaGuardianList.isNotEmpty) addCategorySection('madrassa_guardian', 'Madrassa Guardians', madrassaGuardianList.length, Icons.family_restroom_rounded, Colors.orange, madrassaGuardianList);
+          if (schoolFacultyList.isNotEmpty) addCategorySection('school_faculty', 'School Faculty', schoolFacultyList.length, Icons.account_balance_rounded, Colors.deepPurple, schoolFacultyList);
+          if (schoolGuardianList.isNotEmpty) addCategorySection('school_guardian', 'School Guardians', schoolGuardianList.length, Icons.family_restroom_rounded, Colors.purpleAccent, schoolGuardianList);
+          addCategorySection('revoked', 'Revoked Users & Offboarded Employees', revokedList.length, Icons.no_accounts_rounded, Colors.red, revokedList);
         }
+
+        final activeCategoryKeys = <String>[
+          if (onlineList.isNotEmpty) 'online',
+          if (officeList.isNotEmpty) 'office',
+          if (kitchenList.isNotEmpty) 'kitchen',
+          if (dispensaryList.isNotEmpty) 'dispensary',
+          if (madrassaFacultyList.isNotEmpty) 'madrassa_faculty',
+          if (madrassaGuardianList.isNotEmpty) 'madrassa_guardian',
+          if (schoolFacultyList.isNotEmpty) 'school_faculty',
+          if (schoolGuardianList.isNotEmpty) 'school_guardian',
+          if (revokedList.isNotEmpty) 'revoked',
+        ];
+        final allCategoriesCollapsed = activeCategoryKeys.isNotEmpty && activeCategoryKeys.every((k) => _collapsedCategories.contains(k));
 
         return Column(children: [
           Container(
             color: t.bgCard,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _categoryChip(t, 'All (${list.length})', 'all', Icons.grid_view_rounded, t.accent),
-                  const SizedBox(width: 6),
-                  _categoryChip(t, 'Online (${onlineList.length})', 'online', Icons.fiber_manual_record, Colors.green),
-                  const SizedBox(width: 6),
-                  _categoryChip(t, 'Office (${officeList.length})', 'office', Icons.business_center_rounded, Colors.indigo),
-                  const SizedBox(width: 6),
-                  _categoryChip(t, 'Dasterkhawaan (${kitchenList.length})', 'kitchen', Icons.soup_kitchen_rounded, Colors.amber.shade800),
-                  const SizedBox(width: 6),
-                  _categoryChip(t, 'Dispensary (${dispensaryList.length})', 'dispensary', Icons.local_hospital_rounded, Colors.blue),
-                  const SizedBox(width: 6),
-                  // Madrassa faculty and guardians
-                  if (madrassaFacultyList.isNotEmpty) ...[
-                    _categoryChip(t, 'Madrassa Faculty (${madrassaFacultyList.length})', 'madrassa_faculty', Icons.school_rounded, Colors.teal),
-                    const SizedBox(width: 6),
-                  ],
-                  if (madrassaGuardianList.isNotEmpty) ...[
-                    _categoryChip(t, 'Madrassa Guardians (${madrassaGuardianList.length})', 'madrassa_guardian', Icons.family_restroom_rounded, Colors.orange),
-                    const SizedBox(width: 6),
-                  ],
-                  // School faculty and guardians
-                  if (schoolFacultyList.isNotEmpty) ...[
-                    _categoryChip(t, 'School Faculty (${schoolFacultyList.length})', 'school_faculty', Icons.account_balance_rounded, Colors.deepPurple),
-                    const SizedBox(width: 6),
-                  ],
-                  if (schoolGuardianList.isNotEmpty) ...[
-                    _categoryChip(t, 'School Guardians (${schoolGuardianList.length})', 'school_guardian', Icons.family_restroom_rounded, Colors.purpleAccent),
-                    const SizedBox(width: 6),
-                  ],
-                  _categoryChip(t, 'Revoked & Offboarded (${revokedList.length})', 'revoked', Icons.no_accounts_rounded, Colors.red),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(
+                      children: [
+                        _categoryChip(t, 'All (${list.length})', 'all', Icons.grid_view_rounded, t.accent),
+                        const SizedBox(width: 6),
+                        _categoryChip(t, 'Online (${onlineList.length})', 'online', Icons.fiber_manual_record, Colors.green),
+                        const SizedBox(width: 6),
+                        _categoryChip(t, 'Office (${officeList.length})', 'office', Icons.business_center_rounded, Colors.indigo),
+                        const SizedBox(width: 6),
+                        _categoryChip(t, 'Dasterkhawaan (${kitchenList.length})', 'kitchen', Icons.soup_kitchen_rounded, Colors.amber.shade800),
+                        const SizedBox(width: 6),
+                        _categoryChip(t, 'Dispensary (${dispensaryList.length})', 'dispensary', Icons.local_hospital_rounded, Colors.blue),
+                        const SizedBox(width: 6),
+                        if (madrassaFacultyList.isNotEmpty) ...[
+                          _categoryChip(t, 'Madrassa Faculty (${madrassaFacultyList.length})', 'madrassa_faculty', Icons.school_rounded, Colors.teal),
+                          const SizedBox(width: 6),
+                        ],
+                        if (madrassaGuardianList.isNotEmpty) ...[
+                          _categoryChip(t, 'Madrassa Guardians (${madrassaGuardianList.length})', 'madrassa_guardian', Icons.family_restroom_rounded, Colors.orange),
+                          const SizedBox(width: 6),
+                        ],
+                        if (schoolFacultyList.isNotEmpty) ...[
+                          _categoryChip(t, 'School Faculty (${schoolFacultyList.length})', 'school_faculty', Icons.account_balance_rounded, Colors.deepPurple),
+                          const SizedBox(width: 6),
+                        ],
+                        if (schoolGuardianList.isNotEmpty) ...[
+                          _categoryChip(t, 'School Guardians (${schoolGuardianList.length})', 'school_guardian', Icons.family_restroom_rounded, Colors.purpleAccent),
+                          const SizedBox(width: 6),
+                        ],
+                        _categoryChip(t, 'Revoked & Offboarded (${revokedList.length})', 'revoked', Icons.no_accounts_rounded, Colors.red),
+                      ],
+                    ),
+                  ),
+                ),
+                if (activeCategoryKeys.length > 1) ...[
+                  const SizedBox(width: 10),
+                  Tooltip(
+                    message: allCategoriesCollapsed ? 'Expand all categories' : 'Collapse all categories',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () {
+                        if (allCategoriesCollapsed) {
+                          _expandAll();
+                        } else {
+                          _collapseAll(activeCategoryKeys);
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6.5),
+                        decoration: BoxDecoration(
+                          color: t.bg,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: t.bgRule, width: 0.8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              allCategoriesCollapsed ? Icons.unfold_more_rounded : Icons.unfold_less_rounded,
+                              size: 14,
+                              color: t.accent,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              allCategoriesCollapsed ? 'Expand All' : 'Collapse All',
+                              style: TextStyle(
+                                color: t.textPrimary,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
-              ),
+              ],
             ),
           ),
           Expanded(
             child: RefreshIndicator(
               onRefresh: () => _refreshData(branchId),
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-                padding: const EdgeInsets.fromLTRB(10, 4, 10, 24),
-                children: listItems,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1440),
+                  child: ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                    padding: const EdgeInsets.fromLTRB(14, 8, 14, 32),
+                    itemCount: sectionItems.length,
+                    itemBuilder: (ctx, i) {
+                      final it = sectionItems[i];
+                      if (it.isBanner) {
+                        return _buildPendingRequestsBanner(it.bannerList!, branchId, t);
+                      }
+                      if (it.isHeader) {
+                        return _buildCategoryHeader(t, it.categoryKey!, it.title!, it.count!, it.icon!, it.color!, it.isCollapsed);
+                      }
+                      return _buildCard(it.userData!, branchId, t);
+                    },
+                  ),
+                ),
               ),
             ),
           ),
@@ -1319,44 +1479,127 @@ class _UsersScreenState extends State<UsersScreen>
     );
   }
 
-  Widget _buildCategoryHeader(RoleThemeData t, String title, int count, IconData icon, Color color) {
-    return Container(
-      margin: const EdgeInsets.only(top: 14, bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.25)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 8),
-          Text(
-            title,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 13,
-              color: color,
-            ),
-          ),
-          const Spacer(),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+  Widget _buildCategoryHeader(RoleThemeData t, String key, String title, int count, IconData icon, Color color, bool isCollapsed) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => _toggleCategory(key),
+          hoverColor: color.withValues(alpha: 0.06),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              '$count',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 11,
+              gradient: LinearGradient(
+                colors: [
+                  color.withValues(alpha: isCollapsed ? 0.08 : 0.14),
+                  color.withValues(alpha: isCollapsed ? 0.03 : 0.06),
+                  t.bgCard,
+                ],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
               ),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: isCollapsed ? color.withValues(alpha: 0.28) : color.withValues(alpha: 0.45),
+                width: 1.2,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: isCollapsed ? Colors.transparent : color.withValues(alpha: 0.08),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                // Category Icon Badge
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: color.withValues(alpha: 0.35), width: 0.8),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(icon, color: color, size: 17),
+                ),
+                const SizedBox(width: 10),
+                // Title and Subtitle hint
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13.5,
+                          color: color,
+                          letterSpacing: -0.2,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (isCollapsed)
+                        Text(
+                          'Collapsed · Tap to view $count accounts',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: t.textTertiary,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Count Badge
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3.5),
+                  decoration: BoxDecoration(
+                    color: isCollapsed ? color.withValues(alpha: 0.18) : color,
+                    borderRadius: BorderRadius.circular(12),
+                    border: isCollapsed ? Border.all(color: color.withValues(alpha: 0.4), width: 0.8) : null,
+                  ),
+                  child: Text(
+                    '$count',
+                    style: TextStyle(
+                      color: isCollapsed ? color : Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Smooth Animated Chevron
+                AnimatedRotation(
+                  turns: isCollapsed ? -0.25 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 20,
+                      color: color,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1409,13 +1652,21 @@ class _UsersScreenState extends State<UsersScreen>
     } : null);
 
     final isChairmanCard = rawRole == 'chairman';
+    final isServerDesk = rawRole == 'server' ||
+        name.toLowerCase().contains('dispensary') ||
+        name.toLowerCase().contains('haji camp') ||
+        name.toLowerCase().contains('kapaya') ||
+        name.toLowerCase().contains('saddar');
     final username = (data['username'] ?? '').toString().trim();
     final phone = (data['phone'] ?? '').toString().trim();
     final branchDisplay = (data['branchName'] ?? data['branchId'] ?? data['branch'] ?? branchId).toString().trim();
     final zkPin = (data['zkPin'] ?? data['biometricId'] ?? data['pin'] ?? '').toString().trim();
+    final isKashif = (data['uid'] == 'e5I5hQJQNpe08MuKmOc937dcMR43' ||
+        (data['email']?.toString().toLowerCase().trim() == 'kashif@khi.com') ||
+        (data['username']?.toString().toLowerCase().trim() == 'kashif'));
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: 9),
       decoration: BoxDecoration(
         gradient: isChairmanCard
             ? const LinearGradient(
@@ -1428,35 +1679,39 @@ class _UsersScreenState extends State<UsersScreen>
             ? null
             : (isPendingRestore
                 ? const Color(0xFFF59E0B).withValues(alpha: 0.08)
-                : (isRevoked ? Colors.red.withValues(alpha: 0.05) : t.bgCard)),
-        borderRadius: BorderRadius.circular(16),
+                : (isRevoked ? Colors.red.withValues(alpha: 0.04) : t.bgCard)),
+        borderRadius: BorderRadius.circular(15),
         border: Border.all(
           color: isChairmanCard
               ? const Color(0xFFFBBF24)
               : (isPendingRestore
                   ? const Color(0xFFF59E0B).withValues(alpha: 0.6)
-                  : (isRevoked ? Colors.red.withValues(alpha: 0.35) : t.bgRule)),
+                  : (isRevoked
+                      ? Colors.red.withValues(alpha: 0.35)
+                      : (isServerDesk ? const Color(0xFF0284C7).withValues(alpha: 0.35) : t.bgRule))),
           width: isChairmanCard ? 2.0 : (isPendingRestore ? 1.4 : 0.9),
         ),
         boxShadow: [
           BoxShadow(
             color: isChairmanCard
-                ? const Color(0xFFF59E0B).withValues(alpha: 0.35)
-                : Colors.black.withValues(alpha: 0.04),
-            blurRadius: isChairmanCard ? 18 : 10,
-            spreadRadius: isChairmanCard ? 1.5 : 0,
-            offset: const Offset(0, 3),
+                ? const Color(0xFFF59E0B).withValues(alpha: 0.30)
+                : (isServerDesk ? const Color(0xFF0284C7).withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.03)),
+            blurRadius: isChairmanCard ? 16 : 8,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(15),
         child: InkWell(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(15),
+          hoverColor: isChairmanCard
+              ? Colors.amber.withValues(alpha: 0.06)
+              : t.accent.withValues(alpha: 0.04),
           onTap: () => _openDetail(itemId, branchId),
           child: Padding(
-            padding: const EdgeInsets.all(13),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -1471,26 +1726,34 @@ class _UsersScreenState extends State<UsersScreen>
                         clipBehavior: Clip.none,
                         children: [
                           Container(
-                            width: 50,
-                            height: 50,
+                            width: 48,
+                            height: 48,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               color: isChairmanCard
                                   ? const Color(0xFF382207)
-                                  : (isFemale ? const Color(0xFFFCE7F3) : (isMale ? const Color(0xFFE0F2FE) : t.accentMuted)),
+                                  : (isServerDesk
+                                      ? const Color(0xFFE0F2FE)
+                                      : (isFemale ? const Color(0xFFFCE7F3) : (isMale ? const Color(0xFFE0F2FE) : t.accentMuted))),
                               border: Border.all(
                                 color: isChairmanCard
                                     ? const Color(0xFFFBBF24)
-                                    : (isOnline ? const Color(0xFF22C55E) : t.bgRule),
+                                    : (isOnline
+                                        ? const Color(0xFF22C55E)
+                                        : (isServerDesk ? const Color(0xFF0284C7).withValues(alpha: 0.6) : t.bgRule)),
                                 width: isChairmanCard ? 2.2 : (isOnline ? 1.8 : 1.0),
                               ),
                               image: profilePicUrl != null && profilePicUrl.trim().isNotEmpty
-                                  ? DecorationImage(
-                                      image: (ImageUploadService.decodeBase64ToBytes(profilePicUrl) != null
-                                          ? MemoryImage(ImageUploadService.decodeBase64ToBytes(profilePicUrl)!)
-                                          : NetworkImage(profilePicUrl) as ImageProvider),
-                                      fit: BoxFit.cover,
-                                    )
+                                  ? (() {
+                                      final b64Bytes = ImageUploadService.decodeBase64ToBytes(profilePicUrl);
+                                      if (b64Bytes != null) {
+                                        return DecorationImage(image: MemoryImage(b64Bytes), fit: BoxFit.cover);
+                                      }
+                                      if (profilePicUrl.startsWith('http://') || profilePicUrl.startsWith('https://')) {
+                                        return DecorationImage(image: NetworkImage(profilePicUrl), fit: BoxFit.cover);
+                                      }
+                                      return null;
+                                    })()
                                   : null,
                               boxShadow: [
                                 BoxShadow(
@@ -1506,11 +1769,13 @@ class _UsersScreenState extends State<UsersScreen>
                             child: (profilePicUrl == null || profilePicUrl.trim().isEmpty)
                                 ? (isChairmanCard
                                     ? const Text('👑', style: TextStyle(fontSize: 22))
-                                    : (isFemale
-                                        ? const Icon(Icons.face_3_rounded, size: 26, color: Color(0xFFDB2777))
-                                        : (isMale
-                                            ? const Icon(Icons.face_6_rounded, size: 26, color: Color(0xFF0284C7))
-                                            : Text(initials, style: TextStyle(color: t.accent, fontWeight: FontWeight.w900, fontSize: 16)))))
+                                    : (isServerDesk
+                                        ? const Icon(Icons.dns_rounded, size: 24, color: Color(0xFF0284C7))
+                                        : (isFemale
+                                            ? const Icon(Icons.face_3_rounded, size: 26, color: Color(0xFFDB2777))
+                                            : (isMale
+                                                ? const Icon(Icons.face_6_rounded, size: 26, color: Color(0xFF0284C7))
+                                                : Text(initials, style: TextStyle(color: t.accent, fontWeight: FontWeight.w900, fontSize: 16))))))
                                 : null,
                           ),
                           if (isOnline)
@@ -1582,6 +1847,23 @@ class _UsersScreenState extends State<UsersScreen>
                                 children: [
                                   Text('👑 ', style: TextStyle(fontSize: 9)),
                                   Text('CHAIRMAN', style: TextStyle(color: Color(0xFFFDE68A), fontSize: 9.5, fontWeight: FontWeight.w900)),
+                                ],
+                              ),
+                            )
+                          else if (isServerDesk && rawRole == 'server')
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF0284C7).withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: const Color(0xFF0284C7).withValues(alpha: 0.4), width: 0.6),
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.dns_rounded, size: 10, color: Color(0xFF0284C7)),
+                                  SizedBox(width: 4),
+                                  Text('SERVER DESK', style: TextStyle(color: Color(0xFF0284C7), fontSize: 9.5, fontWeight: FontWeight.w900)),
                                 ],
                               ),
                             ),
@@ -1810,221 +2092,254 @@ class _UsersScreenState extends State<UsersScreen>
                   ),
                 ),
                 const SizedBox(width: 10),
-                // Action Hub
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (!widget.isPatientMode && _canManageUserAccess(data)) ...[
-                      if (status == 'corrupted' || data['isCorruptedOrOrphanAuth'] == true) ...[
-                        Tooltip(
-                          message: 'Heal & Upload Account to Cloud',
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: () => _healSingleAccount(data),
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF10B981).withValues(alpha: 0.18),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFF10B981), width: 1.2),
+                // Action Hub Toolbar
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: isChairmanCard ? Colors.white.withValues(alpha: 0.08) : t.bg.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isChairmanCard ? Colors.white.withValues(alpha: 0.16) : t.bgRule,
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!widget.isPatientMode && _canManageUserAccess(data)) ...[
+                        if (isKashif || status == 'corrupted' || data['isCorruptedOrOrphanAuth'] == true) ...[
+                          Tooltip(
+                            message: isKashif ? 'Heal & Fully Activate Kashif Account' : 'Heal & Upload Account to Cloud',
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(9),
+                              onTap: () async {
+                                if (isKashif) {
+                                  await _triggerHealKashif();
+                                } else {
+                                  await _healSingleAccount(data);
+                                }
+                              },
+                              child: Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF10B981).withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(9),
+                                  border: Border.all(color: const Color(0xFF10B981), width: 1.0),
+                                ),
+                                alignment: Alignment.center,
+                                child: const Icon(Icons.auto_fix_high_rounded, size: 16, color: Color(0xFF10B981)),
                               ),
-                              alignment: Alignment.center,
-                              child: const Icon(Icons.auto_fix_high_rounded, size: 18, color: Color(0xFF10B981)),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
-                      // Quick Lock/Unlock toggle
-                      if (!isGuardianRole)
-                        Tooltip(
-                          message: isPendingRestore
-                              ? 'Allow Access (Restore Requested)'
-                              : (isRevoked ? 'Allow / Restore App Access' : 'Revoke App Access'),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: () => _showQuickRevokeDialog(data, branchId, t),
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: isPendingRestore
-                                    ? const Color(0xFF10B981).withValues(alpha: 0.18)
-                                    : (isRevoked ? Colors.green.withValues(alpha: 0.12) : Colors.red.withValues(alpha: 0.12)),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
+                          const SizedBox(width: 4),
+                        ],
+                        // Quick Lock/Unlock toggle
+                        if (!isGuardianRole)
+                          Tooltip(
+                            message: isPendingRestore
+                                ? 'Allow Access (Restore Requested)'
+                                : (isRevoked ? 'Allow / Restore App Access' : 'Revoke App Access'),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(9),
+                              onTap: () => _showQuickRevokeDialog(data, branchId, t),
+                              child: Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: isPendingRestore
+                                      ? const Color(0xFF10B981).withValues(alpha: 0.18)
+                                      : (isRevoked ? Colors.green.withValues(alpha: 0.14) : Colors.red.withValues(alpha: 0.12)),
+                                  borderRadius: BorderRadius.circular(9),
+                                  border: Border.all(
+                                    color: isPendingRestore
+                                        ? const Color(0xFF10B981)
+                                        : (isRevoked ? Colors.green.shade600 : Colors.red.shade400),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                alignment: Alignment.center,
+                                child: Icon(
+                                  isPendingRestore
+                                      ? Icons.check_circle_rounded
+                                      : (isRevoked ? Icons.lock_open_rounded : Icons.lock_person_rounded),
+                                  size: 16,
                                   color: isPendingRestore
                                       ? const Color(0xFF10B981)
                                       : (isRevoked ? Colors.green.shade600 : Colors.red.shade400),
+                                ),
+                              ),
+                            ),
+                          )
+                        else
+                          Tooltip(
+                            message: 'Update Student / Guardian Status',
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(9),
+                              onTap: () => _showGuardianStatusDialog(data, branchId, t),
+                              child: Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: Colors.teal.withValues(alpha: 0.14),
+                                  borderRadius: BorderRadius.circular(9),
+                                  border: Border.all(color: Colors.teal.withValues(alpha: 0.5), width: 0.8),
+                                ),
+                                alignment: Alignment.center,
+                                child: const Icon(Icons.school_rounded, size: 16, color: Colors.teal),
+                              ),
+                            ),
+                          ),
+                        const SizedBox(width: 4),
+                        // Primary Edit Button
+                        Tooltip(
+                          message: 'Edit Profile & Credentials',
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(9),
+                            onTap: () => _openDetail(itemId, branchId),
+                            child: Container(
+                              width: 34,
+                              height: 34,
+                              decoration: BoxDecoration(
+                                color: isChairmanCard ? const Color(0xFFFBBF24).withValues(alpha: 0.18) : t.accent.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(9),
+                                border: Border.all(
+                                  color: isChairmanCard ? const Color(0xFFFBBF24).withValues(alpha: 0.6) : t.accent.withValues(alpha: 0.5),
                                   width: 0.8,
                                 ),
                               ),
                               alignment: Alignment.center,
-                              child: Icon(
-                                isPendingRestore
-                                    ? Icons.check_circle_rounded
-                                    : (isRevoked ? Icons.lock_open_rounded : Icons.lock_person_rounded),
-                                size: 18,
-                                color: isPendingRestore
-                                    ? const Color(0xFF10B981)
-                                    : (isRevoked ? Colors.green.shade600 : Colors.red.shade400),
-                              ),
-                            ),
-                          ),
-                        )
-                      else
-                        Tooltip(
-                          message: 'Update Student / Guardian Status',
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: () => _showGuardianStatusDialog(data, branchId, t),
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.teal.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.teal.withValues(alpha: 0.5), width: 0.8),
-                              ),
-                              alignment: Alignment.center,
-                              child: const Icon(Icons.school_rounded, size: 18, color: Colors.teal),
+                              child: Icon(Icons.edit_rounded, size: 16, color: isChairmanCard ? const Color(0xFFFBBF24) : t.accent),
                             ),
                           ),
                         ),
-                      const SizedBox(width: 6),
-                      // Primary Edit Button
-                      Tooltip(
-                        message: 'Edit Profile & Credentials',
-                        child: InkWell(
+                        const SizedBox(width: 2),
+                        // Overflow Popup Menu for Medical History & Delete
+                        PopupMenuButton<String>(
+                          icon: Container(
+                            width: 30,
+                            height: 34,
+                            alignment: Alignment.center,
+                            child: Icon(Icons.more_vert_rounded, size: 18, color: isChairmanCard ? Colors.white70 : t.textSecondary),
+                          ),
+                          tooltip: 'More actions',
+                          color: t.bgCard,
+                          surfaceTintColor: Colors.transparent,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            side: BorderSide(color: t.bgRule),
+                          ),
+                          onSelected: (val) {
+                            if (val == 'detail') {
+                              _openDetail(itemId, branchId);
+                            } else if (val == 'sync_cloud') {
+                              _healSingleAccount(data);
+                            } else if (val == 'heal_kashif') {
+                              _triggerHealKashif();
+                            } else if (val == 'medical') {
+                              StaffPatientLinkService.openStaffMedicalHistory(
+                                context,
+                                name: name,
+                                cnic: data['cnic']?.toString(),
+                                branchId: branchId,
+                                role: data['role']?.toString(),
+                              );
+                            } else if (val == 'delete') {
+                              _showQuickDeleteUserDialog(data, branchId, t);
+                            } else if (val == 'guardian_status') {
+                              _showGuardianStatusDialog(data, branchId, t);
+                            }
+                          },
+                          itemBuilder: (ctx) => [
+                            PopupMenuItem(
+                              value: 'detail',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.person_pin_rounded, size: 17, color: t.accent),
+                                  const SizedBox(width: 10),
+                                  Text('View Profile', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                            PopupMenuItem(
+                              value: 'sync_cloud',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.cloud_upload_rounded, size: 17, color: const Color(0xFF10B981)),
+                                  const SizedBox(width: 10),
+                                  Text('Sync to Cloud', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                            if (isKashif)
+                              const PopupMenuItem(
+                                value: 'heal_kashif',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.healing_rounded, size: 17, color: Color(0xFF10B981)),
+                                    SizedBox(width: 10),
+                                    Text('Heal Kashif Account', style: TextStyle(color: Color(0xFF10B981), fontSize: 13, fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              ),
+                            if (isGuardianRole)
+                              PopupMenuItem(
+                                value: 'guardian_status',
+                                child: const Row(
+                                  children: [
+                                    Icon(Icons.school_rounded, size: 17, color: Colors.teal),
+                                    SizedBox(width: 10),
+                                    Text('Update Status', style: TextStyle(color: Colors.teal, fontSize: 13, fontWeight: FontWeight.w600)),
+                                  ],
+                                ),
+                              )
+                            else
+                              PopupMenuItem(
+                                value: 'medical',
+                                child: const Row(
+                                  children: [
+                                    Icon(Icons.medical_services_outlined, size: 17, color: Colors.teal),
+                                    SizedBox(width: 10),
+                                    Text('Medical History', style: TextStyle(color: Colors.teal, fontSize: 13, fontWeight: FontWeight.w600)),
+                                  ],
+                                ),
+                              ),
+                            const PopupMenuDivider(),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.delete_forever_rounded, size: 17, color: Colors.redAccent),
+                                  SizedBox(width: 10),
+                                  Text('Delete Account', style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w700)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ] else
+                        InkWell(
                           borderRadius: BorderRadius.circular(10),
                           onTap: () => _openDetail(itemId, branchId),
                           child: Container(
-                            width: 36,
-                            height: 36,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                             decoration: BoxDecoration(
-                              color: t.accent.withValues(alpha: 0.14),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: t.accent.withValues(alpha: 0.5), width: 0.8),
+                              color: t.accent.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(9),
+                              border: Border.all(color: t.accent.withValues(alpha: 0.3), width: 0.8),
                             ),
-                            alignment: Alignment.center,
-                            child: Icon(Icons.edit_rounded, size: 18, color: t.accent),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      // Overflow Popup Menu for Medical History & Delete
-                      PopupMenuButton<String>(
-                        icon: Container(
-                          width: 32,
-                          height: 36,
-                          alignment: Alignment.center,
-                          child: Icon(Icons.more_vert_rounded, size: 20, color: t.textSecondary),
-                        ),
-                        tooltip: 'More actions',
-                        color: t.bgCard,
-                        surfaceTintColor: Colors.transparent,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          side: BorderSide(color: t.bgRule),
-                        ),
-                        onSelected: (val) {
-                          if (val == 'detail') {
-                            _openDetail(itemId, branchId);
-                          } else if (val == 'sync_cloud') {
-                            _healSingleAccount(data);
-                          } else if (val == 'medical') {
-                            StaffPatientLinkService.openStaffMedicalHistory(
-                              context,
-                              name: name,
-                              cnic: data['cnic']?.toString(),
-                              branchId: branchId,
-                              role: data['role']?.toString(),
-                            );
-                          } else if (val == 'delete') {
-                            _showQuickDeleteUserDialog(data, branchId, t);
-                          } else if (val == 'guardian_status') {
-                            _showGuardianStatusDialog(data, branchId, t);
-                          }
-                        },
-                        itemBuilder: (ctx) => [
-                          PopupMenuItem(
-                            value: 'detail',
                             child: Row(
+                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                Icon(Icons.person_pin_rounded, size: 17, color: t.accent),
-                                const SizedBox(width: 10),
-                                Text('View Profile', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                                Text('View', style: TextStyle(color: t.accent, fontSize: 12, fontWeight: FontWeight.bold)),
+                                const SizedBox(width: 2),
+                                Icon(Icons.chevron_right_rounded, color: t.accent, size: 16),
                               ],
                             ),
                           ),
-                          PopupMenuItem(
-                            value: 'sync_cloud',
-                            child: Row(
-                              children: [
-                                Icon(Icons.cloud_upload_rounded, size: 17, color: const Color(0xFF10B981)),
-                                const SizedBox(width: 10),
-                                Text('Sync to Cloud', style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
-                              ],
-                            ),
-                          ),
-                          if (isGuardianRole)
-                            PopupMenuItem(
-                              value: 'guardian_status',
-                              child: const Row(
-                                children: [
-                                  Icon(Icons.school_rounded, size: 17, color: Colors.teal),
-                                  SizedBox(width: 10),
-                                  Text('Update Status', style: TextStyle(color: Colors.teal, fontSize: 13, fontWeight: FontWeight.w600)),
-                                ],
-                              ),
-                            )
-                          else
-                            PopupMenuItem(
-                              value: 'medical',
-                              child: const Row(
-                                children: [
-                                  Icon(Icons.medical_services_outlined, size: 17, color: Colors.teal),
-                                  SizedBox(width: 10),
-                                  Text('Medical History', style: TextStyle(color: Colors.teal, fontSize: 13, fontWeight: FontWeight.w600)),
-                                ],
-                              ),
-                            ),
-                          const PopupMenuDivider(),
-                          const PopupMenuItem(
-                            value: 'delete',
-                            child: Row(
-                              children: [
-                                Icon(Icons.delete_forever_rounded, size: 17, color: Colors.redAccent),
-                                SizedBox(width: 10),
-                                Text('Delete Account', style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w700)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ] else
-                      InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () => _openDetail(itemId, branchId),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: t.accent.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: t.accent.withValues(alpha: 0.3), width: 0.8),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text('View', style: TextStyle(color: t.accent, fontSize: 12, fontWeight: FontWeight.bold)),
-                              const SizedBox(width: 2),
-                              Icon(Icons.chevron_right_rounded, color: t.accent, size: 16),
-                            ],
-                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -2221,6 +2536,54 @@ class _UsersScreenState extends State<UsersScreen>
       curRole = RoleThemeScope.dataOf(context).roleLabel;
     } catch (_) {}
 
+    // Find target user
+    Map<String, dynamic>? targetUser = LocalStorageService.getLocalUserByUid(itemId);
+    if (targetUser == null && Hive.isBoxOpen(LocalStorageService.usersBox)) {
+      final uBox = Hive.box(LocalStorageService.usersBox);
+      final raw = uBox.get(itemId) ?? uBox.get('user:$itemId');
+      if (raw is Map) {
+        targetUser = Map<String, dynamic>.from(raw);
+      } else {
+        for (final v in uBox.values) {
+          if (v is Map && (v['id'] == itemId || v['uid'] == itemId || v['username'] == itemId || v['docId'] == itemId)) {
+            targetUser = Map<String, dynamic>.from(v);
+            break;
+          }
+        }
+      }
+    }
+    if (targetUser == null && _localBox != null) {
+      final raw = _localBox!.get(itemId) ?? _localBox!.get('user:$itemId');
+      if (raw is Map) {
+        targetUser = Map<String, dynamic>.from(raw);
+      }
+    }
+    if (targetUser == null && !itemId.startsWith('local-')) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(itemId)
+            .get()
+            .timeout(const Duration(seconds: 3));
+        if (doc.exists && doc.data() != null) {
+          targetUser = Map<String, dynamic>.from(doc.data()!);
+        }
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    targetUser ??= <String, dynamic>{};
+    final targetRole = (targetUser['role'] ?? targetUser['accountType'] ?? '').toString().toLowerCase().trim();
+    if (targetRole == 'chairman' && !_isChairmanActor()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text("Access Denied: Only the Chairman is allowed to access the Chairman's account."),
+          backgroundColor: Colors.red.shade800,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
     if (widget.isPatientMode) {
       Navigator.push(context, MaterialPageRoute(builder: (_) => PatientDetailScreen(
         patientId: itemId, isOnline: true, localBox: _localBox!,
@@ -2333,9 +2696,9 @@ class _UsersScreenState extends State<UsersScreen>
   bool _canManageUserAccess(Map<String, dynamic> targetData) {
     final targetRole = (targetData['role'] as String? ?? '').toLowerCase().trim();
 
-    // Chairman account is 100% immutable and CANNOT be deleted, edited, suspended, or demoted by ANY user.
+    // Only Chairman can manage or edit the Chairman account.
     if (targetRole == 'chairman') {
-      return false;
+      return _isChairmanActor();
     }
 
     final actorRole = _getActorRole();
@@ -2702,6 +3065,18 @@ class _UsersScreenState extends State<UsersScreen>
                     ),
                   ),
                   const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => _rejectUserAccess(user, branchId, t),
+                    icon: const Icon(Icons.cancel_outlined, size: 14),
+                    label: const Text('Reject'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red.shade400,
+                      side: BorderSide(color: Colors.red.shade400.withValues(alpha: 0.6)),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   ElevatedButton.icon(
                     onPressed: () => _allowUserAccess(user, branchId, t),
                     icon: const Icon(Icons.check_circle_rounded, size: 14),
@@ -2756,7 +3131,75 @@ class _UsersScreenState extends State<UsersScreen>
         data['accessRevoked'] == true ||
         isPendingRestore;
 
-    if (isRevoked || isPendingRestore) {
+    if (isPendingRestore) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: t.bgCard,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF59E0B).withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.notifications_active_rounded, color: Color(0xFFFBBF24), size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Access Restore Request',
+                  style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Review access restore request for @${data['name'] ?? data['username'] ?? 'User'}.', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+              if (data['restoreRequestReason'] != null && data['restoreRequestReason'].toString().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: t.bg, borderRadius: BorderRadius.circular(8)),
+                  child: Text('User Note: "${data['restoreRequestReason']}"', style: TextStyle(color: t.textTertiary, fontSize: 12, fontStyle: FontStyle.italic)),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'cancel'),
+              child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'reject'),
+              icon: const Icon(Icons.cancel_outlined, size: 16),
+              label: const Text('Reject'),
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'allow'),
+              icon: const Icon(Icons.check_circle_rounded, size: 16),
+              label: const Text('Allow & Restore'),
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
+            ),
+          ],
+        ),
+      );
+      if (choice == 'allow') {
+        await _allowUserAccess(data, branchId, t);
+      } else if (choice == 'reject') {
+        await _rejectUserAccess(data, branchId, t);
+      }
+      return;
+    }
+
+    if (isRevoked) {
       // Allow / Restore user access
       await _allowUserAccess(data, branchId, t);
     } else {
@@ -2886,35 +3329,23 @@ class _UsersScreenState extends State<UsersScreen>
       'updatedAt': nowIso,
     };
 
-    // Update locally
-    if (Hive.isBoxOpen('local_users')) {
-      final box = Hive.box('local_users');
-      for (final key in [uid, email]) {
-        if (key.isEmpty) continue;
-        final raw = box.get(key);
-        if (raw is Map) {
-          final u = Map<String, dynamic>.from(raw)..addAll(updates);
-          await box.put(key, u);
-        }
-      }
-      for (final k in box.keys) {
-        final val = box.get(k);
-        if (val is Map && (val['uid'] == uid || val['id'] == uid)) {
-          final u = Map<String, dynamic>.from(val)..addAll(updates);
-          await box.put(k, u);
-        }
-      }
-      await box.flush();
-    }
+    final username = (data['username'] ?? data['usernameLower'] ?? name).toString().trim();
+    await _persistUserAccessDecision(
+      data: data,
+      branch: branch,
+      uid: uid,
+      name: name,
+      username: username,
+      email: email,
+      updates: updates,
+      isAllow: false,
+      rejectionReason: finalReason,
+    );
 
-    // Update in Firestore
-    if (uid.isNotEmpty) {
-      try {
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          ...updates,
-          'revokedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
-      } catch (_) {}
+    // Clear offline credentials for the revoked user
+    final userKey = uid.isNotEmpty ? uid : (email.isNotEmpty ? email : username);
+    if (userKey.isNotEmpty) {
+      unawaited(OfflineAuthService.clearCredentialsForUser(userKey));
     }
 
     if (mounted) {
@@ -2930,10 +3361,11 @@ class _UsersScreenState extends State<UsersScreen>
 
   /// HQ Manager / Admin Allows and Restores User App Access
   Future<void> _allowUserAccess(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
-    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString();
-    final name = (data['name'] ?? data['username'] ?? 'User').toString();
-    final branch = (data['branchId'] ?? branchId).toString();
-    final email = (data['email'] ?? '').toString();
+    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString().trim();
+    final name = (data['name'] ?? data['username'] ?? 'User').toString().trim();
+    final username = (data['username'] ?? data['usernameLower'] ?? name).toString().trim();
+    final branch = (data['branchId'] ?? branchId).toString().trim();
+    final email = (data['email'] ?? '').toString().trim().toLowerCase();
 
     final confirm = await showDialog<bool>(
       context: context,
@@ -3014,112 +3446,16 @@ class _UsersScreenState extends State<UsersScreen>
       'updatedAt': nowIso,
     };
 
-    // Update in local Hive
-    if (Hive.isBoxOpen('local_users')) {
-      final box = Hive.box('local_users');
-      final cleanEmail = email.trim().toLowerCase();
-      if (cleanEmail.isNotEmpty) {
-        final raw = box.get('user:$cleanEmail') ?? box.get(cleanEmail);
-        if (raw is Map) {
-          final u = Map<String, dynamic>.from(raw)..addAll(updates);
-          await box.put('user:$cleanEmail', u);
-        }
-      }
-      if (uid.isNotEmpty) {
-        final raw = box.get('user:$uid') ?? box.get(uid);
-        if (raw is Map) {
-          final u = Map<String, dynamic>.from(raw)..addAll(updates);
-          await box.put('user:$uid', u);
-          await box.put(uid, u);
-        }
-      }
-      for (final k in box.keys) {
-        final val = box.get(k);
-        if (val is Map) {
-          final vUid = (val['uid'] ?? val['id'] ?? '').toString();
-          final vEmail = (val['email'] ?? '').toString().trim().toLowerCase();
-          if ((uid.isNotEmpty && vUid == uid) ||
-              (cleanEmail.isNotEmpty && vEmail == cleanEmail)) {
-            final u = Map<String, dynamic>.from(val)..addAll(updates);
-            await box.put(k, u);
-          }
-        }
-      }
-      await box.flush();
-    }
-
-    // Also unrevoke linked employee in local_employees if present
-    try {
-      if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
-        final empBox = Hive.box(LocalStorageService.employeesBox);
-        final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? '').toString();
-        final cnic = (data['cnic'] ?? data['identification'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
-        final cleanEmail = email.trim().toLowerCase();
-        for (final k in empBox.keys) {
-          final val = empBox.get(k);
-          if (val is Map) {
-            final eId = (val['localId'] ?? val['id'] ?? '').toString();
-            final eCnic = (val['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
-            final eEmail = (val['email'] ?? '').toString().trim().toLowerCase();
-            if ((empId.isNotEmpty && eId == empId) ||
-                (cnic.isNotEmpty && eCnic == cnic) ||
-                (cleanEmail.isNotEmpty && eEmail == cleanEmail)) {
-              final updatedEmp = Map<String, dynamic>.from(val)
-                ..['isActive'] = true
-                ..['status'] = 'active'
-                ..['employeeStatus'] = 'active';
-              await empBox.put(k, updatedEmp);
-            }
-          }
-        }
-        await empBox.flush();
-      }
-    } catch (_) {}
-
-    // Update in Firestore
-    if (uid.isNotEmpty) {
-      try {
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          ...updates,
-          'restoredAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
-      } catch (_) {}
-    }
-
-    await LocalStorageService.enqueueSync({
-      'type': 'save_user',
-      'branchId': branch,
-      'uid': uid,
-      'data': {
-        ...data,
-        ...updates,
-        'uid': uid,
-        'branchId': branch,
-      },
-    });
-
-    try {
-      SyncService().triggerUpload(force: true);
-    } catch (_) {}
-
-    // Send confirmation notification to user
-    try {
-      final notifId = 'restored_${uid}_${DateTime.now().millisecondsSinceEpoch}';
-      final notif = {
-        'id': notifId,
-        'title': '🎉 Access Restored',
-        'message': 'Your app access has been approved and restored by the HQ Manager. You can now log in and use the app normally.',
-        'category': 'Account Alert',
-        'type': 'access_restored',
-        'targetUserId': uid,
-        'branchId': branch,
-        'timestamp': nowIso,
-        'seen': false,
-      };
-      if (Hive.isBoxOpen(LocalStorageService.notificationsBox)) {
-        await Hive.box(LocalStorageService.notificationsBox).put(notifId, notif);
-      }
-    } catch (_) {}
+    await _persistUserAccessDecision(
+      data: data,
+      branch: branch,
+      uid: uid,
+      name: name,
+      username: username,
+      email: email,
+      updates: updates,
+      isAllow: true,
+    );
 
     if (mounted) {
       setState(() {});
@@ -3130,6 +3466,350 @@ class _UsersScreenState extends State<UsersScreen>
         ),
       );
     }
+  }
+
+  /// HQ Manager / Admin Rejects User Access Restore Request
+  Future<void> _rejectUserAccess(Map<String, dynamic> data, String branchId, RoleThemeData t) async {
+    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? '').toString().trim();
+    final name = (data['name'] ?? data['username'] ?? 'User').toString().trim();
+    final username = (data['username'] ?? data['usernameLower'] ?? name).toString().trim();
+    final branch = (data['branchId'] ?? branchId).toString().trim();
+    final email = (data['email'] ?? '').toString().trim().toLowerCase();
+
+    final reasonCtrl = TextEditingController(text: 'Request rejected by HQ');
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: t.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.cancel_rounded, color: Colors.red, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Reject Restore Request',
+                style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Reject access restoration request for @$name?', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+            const SizedBox(height: 14),
+            Text('Reason / Notes:', style: TextStyle(color: t.textSecondary, fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: reasonCtrl,
+              decoration: InputDecoration(
+                hintText: 'Enter reason for rejection...',
+                hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
+                filled: true,
+                fillColor: t.bg,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+              ),
+              style: TextStyle(color: t.textPrimary, fontSize: 13),
+              maxLines: 2,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.cancel_rounded, size: 16),
+            label: const Text('Reject Request'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final rejectionReason = reasonCtrl.text.trim().isNotEmpty ? reasonCtrl.text.trim() : 'Request rejected by HQ';
+    final nowIso = DateTime.now().toIso8601String();
+    final updates = <String, dynamic>{
+      'restoreRequested': false,
+      'restoreRequestStatus': 'rejected',
+      'rejectionReason': rejectionReason,
+      'rejectedAt': nowIso,
+      'rejectedBy': widget.currentUserRole ?? 'HQ Manager',
+      'isRevoked': true,
+      'accessRevoked': true,
+      'status': 'revoked',
+      'updatedAt': nowIso,
+    };
+
+    await _persistUserAccessDecision(
+      data: data,
+      branch: branch,
+      uid: uid,
+      name: name,
+      username: username,
+      email: email,
+      updates: updates,
+      isAllow: false,
+      rejectionReason: rejectionReason,
+    );
+
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Access restore request rejected for @$name'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    }
+  }
+
+  /// Comprehensive decision persistence across local Hive, Firestore, and LAN broadcast
+  Future<void> _persistUserAccessDecision({
+    required Map<String, dynamic> data,
+    required String branch,
+    required String uid,
+    required String name,
+    required String username,
+    required String email,
+    required Map<String, dynamic> updates,
+    required bool isAllow,
+    String? rejectionReason,
+  }) async {
+    final nowIso = DateTime.now().toIso8601String();
+    final cleanUid = uid.trim().toLowerCase();
+    final cleanUsername = username.trim().toLowerCase();
+    final cleanName = name.trim().toLowerCase();
+    final cleanEmail = email.trim().toLowerCase();
+    final effectiveBranch = (branch.isNotEmpty && branch != 'all' && branch != 'global') ? branch.toLowerCase().trim() : 'karachi';
+
+    // 1. Update in local Hive local_users
+    if (Hive.isBoxOpen('local_users')) {
+      final box = Hive.box('local_users');
+
+      bool matchesUser(dynamic k, Map val) {
+        final kStr = k.toString().toLowerCase().trim();
+        final vUid = (val['uid'] ?? val['id'] ?? val['docId'] ?? '').toString().toLowerCase().trim();
+        final vEmail = (val['email'] ?? '').toString().toLowerCase().trim();
+        final vUsername = (val['usernameLower'] ?? val['username'] ?? '').toString().toLowerCase().trim();
+        final vName = (val['name'] ?? '').toString().toLowerCase().trim();
+
+        if (cleanUid.isNotEmpty && (vUid == cleanUid || kStr == cleanUid || kStr == 'user:$cleanUid')) return true;
+        if (cleanEmail.isNotEmpty && (vEmail == cleanEmail || kStr == cleanEmail || kStr == 'user:$cleanEmail')) return true;
+        if (cleanUsername.isNotEmpty && (vUsername == cleanUsername || kStr == cleanUsername || kStr == 'user:$cleanUsername')) return true;
+        if (cleanName.isNotEmpty && (vName == cleanName || kStr == cleanName || kStr == 'user:$cleanName')) return true;
+        return false;
+      }
+
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map && matchesUser(k, val)) {
+          final u = Map<String, dynamic>.from(val)..addAll(updates);
+          await box.put(k, u);
+        }
+      }
+      if (cleanEmail.isNotEmpty) {
+        final raw = box.get('user:$cleanEmail') ?? box.get(cleanEmail);
+        if (raw is Map) await box.put('user:$cleanEmail', Map<String, dynamic>.from(raw)..addAll(updates));
+      }
+      if (cleanUsername.isNotEmpty) {
+        final raw = box.get('user:$cleanUsername') ?? box.get(cleanUsername);
+        if (raw is Map) await box.put('user:$cleanUsername', Map<String, dynamic>.from(raw)..addAll(updates));
+      }
+      if (cleanUid.isNotEmpty) {
+        final raw = box.get('user:$cleanUid') ?? box.get(cleanUid);
+        if (raw is Map) {
+          await box.put('user:$cleanUid', Map<String, dynamic>.from(raw)..addAll(updates));
+          await box.put(cleanUid, Map<String, dynamic>.from(raw)..addAll(updates));
+        }
+      }
+      await box.flush();
+    }
+
+    // 2. Update linked employee in local_employees
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final empBox = Hive.box(LocalStorageService.employeesBox);
+        final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? data['employeeId'] ?? '').toString().toLowerCase().trim();
+        final cnic = (data['cnic'] ?? data['identification'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+
+        bool matchesEmp(dynamic k, Map val) {
+          final kStr = k.toString().toLowerCase().trim();
+          final eId = (val['localId'] ?? val['id'] ?? val['employeeId'] ?? '').toString().toLowerCase().trim();
+          final eCnic = (val['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final eEmail = (val['email'] ?? '').toString().toLowerCase().trim();
+          final eName = (val['name'] ?? val['employeeName'] ?? '').toString().toLowerCase().trim();
+
+          if (empId.isNotEmpty && (eId == empId || kStr == empId || kStr == 'emp_$empId')) return true;
+          if (cnic.isNotEmpty && eCnic == cnic) return true;
+          if (cleanEmail.isNotEmpty && eEmail == cleanEmail) return true;
+          if (cleanName.isNotEmpty && eName == cleanName) return true;
+          return false;
+        }
+
+        for (final k in empBox.keys) {
+          final val = empBox.get(k);
+          if (val is Map && matchesEmp(k, val)) {
+            final updatedEmp = Map<String, dynamic>.from(val)
+              ..['isActive'] = isAllow ? true : (val['isActive'] ?? false)
+              ..['status'] = isAllow ? 'active' : (val['status'] ?? 'offboarded')
+              ..['employeeStatus'] = isAllow ? 'active' : (val['employeeStatus'] ?? 'offboarded')
+              ..['restoreRequested'] = false
+              ..['restoreRequestStatus'] = isAllow ? 'approved' : 'rejected'
+              ..['restoreRequestReason'] = null
+              ..['restoredAt'] = isAllow ? nowIso : null
+              ..['restoredBy'] = isAllow ? (widget.currentUserRole ?? 'HQ Manager') : null
+              ..['rejectedAt'] = !isAllow ? nowIso : null
+              ..['rejectedBy'] = !isAllow ? (widget.currentUserRole ?? 'HQ Manager') : null
+              ..['rejectionReason'] = !isAllow ? rejectionReason : null;
+            await empBox.put(k, updatedEmp);
+          }
+        }
+        await empBox.flush();
+      }
+    } catch (_) {}
+
+    // 3. Update across Firestore (root /users, branches/{branch}/users, candidate branches)
+    final candidateBranches = <String>{};
+    candidateBranches.add(effectiveBranch);
+    try {
+      final customBranches = FinanceLocalStorage.getAllBranches([]);
+      for (final b in customBranches) {
+        final id = (b['id'] ?? '').toString().toLowerCase().trim();
+        if (id.isNotEmpty && id != 'all' && id != 'global') {
+          candidateBranches.add(id);
+        }
+      }
+    } catch (_) {}
+    candidateBranches.addAll(['karachi', 'khi', 'gujrat', 'grt', 'saddar', 'main']);
+
+    final targetDocIds = <String>{};
+    if (uid.isNotEmpty) targetDocIds.add(uid);
+    if (cleanUsername.isNotEmpty) targetDocIds.add(cleanUsername);
+    if (cleanEmail.isNotEmpty) targetDocIds.add(cleanEmail);
+
+    final fsPayload = <String, dynamic>{
+      ...updates,
+      if (isAllow) 'restoredAt': FieldValue.serverTimestamp(),
+      if (!isAllow) 'rejectedAt': FieldValue.serverTimestamp(),
+    };
+
+    // Update root /users
+    for (final docId in targetDocIds) {
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(docId).set(fsPayload, SetOptions(merge: true));
+      } catch (e) {
+        debugPrint('[Users] root users update failed for $docId: $e');
+      }
+    }
+
+    // Update branch-level collections
+    for (final bId in candidateBranches) {
+      for (final docId in targetDocIds) {
+        try {
+          await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(bId)
+              .collection('users')
+              .doc(docId)
+              .set(fsPayload, SetOptions(merge: true));
+        } catch (_) {}
+      }
+
+      final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? '').toString().trim();
+      if (empId.isNotEmpty) {
+        try {
+          await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(bId)
+              .collection('employees')
+              .doc(empId)
+              .set({
+            'restoreRequested': false,
+            'restoreRequestStatus': isAllow ? 'approved' : 'rejected',
+            'isActive': isAllow,
+            'status': isAllow ? 'active' : 'offboarded',
+            'employeeStatus': isAllow ? 'active' : 'offboarded',
+            if (isAllow) 'restoredAt': FieldValue.serverTimestamp(),
+            if (!isAllow) 'rejectedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        } catch (_) {}
+      }
+    }
+
+    // 4. Enqueue in offline sync queue
+    await LocalStorageService.enqueueSync({
+      'type': 'save_user',
+      'branchId': effectiveBranch,
+      'uid': uid.isNotEmpty ? uid : cleanUsername,
+      'data': {
+        ...data,
+        ...updates,
+        'uid': uid.isNotEmpty ? uid : cleanUsername,
+        'branchId': effectiveBranch,
+      },
+    });
+
+    try {
+      SyncService().triggerUpload(force: true);
+    } catch (_) {}
+
+    // 5. Broadcast LAN event
+    try {
+      RealtimeManager().sendMessage({
+        'event_type': 'user_access_updated',
+        'branchId': effectiveBranch,
+        'userId': uid.isNotEmpty ? uid : cleanUsername,
+        'username': cleanUsername,
+        'name': name,
+        'email': email,
+        'status': isAllow ? 'active' : 'revoked',
+        'restoreRequested': false,
+        'restoreRequestStatus': isAllow ? 'approved' : 'rejected',
+        'isRevoked': !isAllow,
+        'accessRevoked': !isAllow,
+        'timestamp': nowIso,
+      });
+    } catch (_) {}
+
+    // 6. User notification
+    try {
+      final notifId = '${isAllow ? 'restored' : 'rejected'}_${uid.isNotEmpty ? uid : cleanUsername}_${DateTime.now().millisecondsSinceEpoch}';
+      final notif = {
+        'id': notifId,
+        'title': isAllow ? '🎉 Access Restored' : '🚫 Access Request Declined',
+        'message': isAllow
+            ? 'Your app access has been approved and restored by HQ. You can now log in normally.'
+            : 'Your access restoration request was reviewed and declined by HQ${rejectionReason != null ? ': "$rejectionReason"' : '.'}',
+        'category': 'Account Alert',
+        'type': isAllow ? 'access_restored' : 'access_rejected',
+        'targetUserId': uid.isNotEmpty ? uid : cleanUsername,
+        'branchId': effectiveBranch,
+        'timestamp': nowIso,
+        'seen': false,
+      };
+      if (Hive.isBoxOpen(LocalStorageService.notificationsBox)) {
+        await Hive.box(LocalStorageService.notificationsBox).put(notifId, notif);
+      }
+    } catch (_) {}
   }
 
   /// Dialog to reactivate an offboarded employee profile (HR/Payroll)
@@ -3927,4 +4607,45 @@ class _AccessControlMatrixViewState extends State<_AccessControlMatrixView> with
       ),
     );
   }
+}
+
+class _UserScreenSectionItem {
+  final bool isBanner;
+  final bool isHeader;
+  final String? categoryKey;
+  final String? title;
+  final int? count;
+  final IconData? icon;
+  final Color? color;
+  final bool isCollapsed;
+  final List<Map<String, dynamic>>? bannerList;
+  final Map<String, dynamic>? userData;
+
+  _UserScreenSectionItem.banner(this.bannerList)
+      : isBanner = true,
+        isHeader = false,
+        categoryKey = null,
+        title = null,
+        count = null,
+        icon = null,
+        color = null,
+        isCollapsed = false,
+        userData = null;
+
+  _UserScreenSectionItem.header(this.categoryKey, this.title, this.count, this.icon, this.color, {this.isCollapsed = false})
+      : isBanner = false,
+        isHeader = true,
+        bannerList = null,
+        userData = null;
+
+  _UserScreenSectionItem.card(this.userData)
+      : isBanner = false,
+        isHeader = false,
+        categoryKey = null,
+        title = null,
+        count = null,
+        icon = null,
+        color = null,
+        isCollapsed = false,
+        bannerList = null;
 }

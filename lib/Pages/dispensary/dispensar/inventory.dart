@@ -26,6 +26,7 @@ import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/services/auto_update_service.dart';
 import 'inventory_pdf_helper.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/widgets/blurred_dialog_observer.dart';
 
 class InventoryPage extends StatefulWidget {
   final String branchId;
@@ -329,7 +330,7 @@ class _InventoryPageState extends State<InventoryPage>
   void _onActiveCampChanged() {
     if (!mounted) return;
     final active = CampSessionService.getActiveCamp(widget.branchId);
-    if (active != null && active.isNotEmpty && active != 'all' && active != _selectedCampFilter) {
+    if (active != null && active.isNotEmpty && active != _selectedCampFilter) {
       setState(() {
         _selectedCampFilter = active;
       });
@@ -354,14 +355,22 @@ class _InventoryPageState extends State<InventoryPage>
 
   String get _effectiveBranchId {
     final b = widget.branchId.trim().toLowerCase();
-    if (b.isNotEmpty && b != 'all' && b != 'unknown') return b;
+    if (b.isNotEmpty && b != 'all' && b != 'unknown') {
+      if (CampSessionService.isKarachiFamily(b)) return 'karachi';
+      return b;
+    }
     final active = LocalStorageService.getActiveBranchId();
-    if (active != null && active.isNotEmpty && active != 'all') return active.toLowerCase().trim();
+    if (active != null && active.isNotEmpty && active != 'all') {
+      if (CampSessionService.isKarachiFamily(active)) return 'karachi';
+      return active.toLowerCase().trim();
+    }
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final saved = Hive.box('app_settings').get('selected_branch');
         if (saved != null && saved.toString().isNotEmpty && saved != 'all') {
-          return saved.toString().toLowerCase().trim();
+          final s = saved.toString().toLowerCase().trim();
+          if (CampSessionService.isKarachiFamily(s)) return 'karachi';
+          return s;
         }
       }
     } catch (_) {}
@@ -415,7 +424,11 @@ class _InventoryPageState extends State<InventoryPage>
     }
 
     try {
-      await LocalStorageService.downloadInventory(effBranch, forceFull: true, campId: activeCamp);
+      if (CampSessionService.isKarachiFamily(effBranch)) {
+        await LocalStorageService.restoreAndSyncKarachiInventory('karachi');
+      } else {
+        await LocalStorageService.downloadInventory(effBranch, forceFull: true, campId: activeCamp);
+      }
       if (mounted) {
         _loadDataFromHive();
         if (showToast) {
@@ -515,7 +528,8 @@ class _InventoryPageState extends State<InventoryPage>
         m['id'] = cleanId;
 
         // Skip duplicate records in stockBox (which stores both 'stock:$id' and '$id')
-        final dedupKey = cleanId.toLowerCase().trim();
+        final itemCamp = (m['campId'] ?? m['dispensaryId'] ?? '').toString().toLowerCase().trim();
+        final dedupKey = '${itemCamp}_${cleanId.toLowerCase().trim()}';
         if (seenIds.contains(dedupKey)) continue;
         seenIds.add(dedupKey);
 
@@ -546,6 +560,8 @@ class _InventoryPageState extends State<InventoryPage>
       if (normBranch == 'all' || normBranch.isEmpty) return true;
       final b = v['branchId']?.toString().toLowerCase().trim();
       if (b == null || b.isEmpty) return true; // Branch stock fallback
+      if (CampSessionService.areBranchesMatching(normBranch, b)) return true;
+      if (CampSessionService.isKarachiFamily(normBranch) && CampSessionService.isKarachiFamily(b)) return true;
       return b == normBranch ||
           b == 'branch_$normBranch' ||
           'branch_$b' == normBranch ||
@@ -553,7 +569,7 @@ class _InventoryPageState extends State<InventoryPage>
           (b.isNotEmpty && normBranch.contains(b));
     }).toList();
 
-    if (CampSessionService.hasCampsForBranch(widget.branchId) || widget.branchId.toLowerCase().contains('karachi')) {
+    if (CampSessionService.hasCampsForBranch(widget.branchId) || CampSessionService.isKarachiFamily(widget.branchId)) {
       final activeCamp = _selectedCampFilter ?? 'all';
 
       if (activeCamp.isNotEmpty && activeCamp != 'all') {
@@ -566,6 +582,15 @@ class _InventoryPageState extends State<InventoryPage>
             serial: (v['barcode'] ?? v['code'] ?? v['id'])?.toString(),
           );
         }).toList();
+
+        // Safety fallback: if activeCamp is haji_camp and filtered result is empty,
+        // but allMapDocs has Karachi items, do not leave the dispenser stranded with an empty screen
+        if (filtered.isEmpty && allMapDocs.isNotEmpty && CampSessionService.isKarachiFamily(widget.branchId)) {
+          filtered = allMapDocs.where((v) {
+            final b = v['branchId']?.toString().toLowerCase().trim() ?? '';
+            return b.isEmpty || CampSessionService.isKarachiFamily(b);
+          }).toList();
+        }
       }
     }
 
@@ -836,6 +861,9 @@ class _InventoryPageState extends State<InventoryPage>
       String displayName = name;
       String displayFormula = formula;
 
+      final itemCamp = (data['campId'] ?? data['dispensaryId'] ?? '').toString().toLowerCase().trim();
+      final campSuffix = (_selectedCampFilter == null || _selectedCampFilter == 'all') && itemCamp.isNotEmpty ? '|$itemCamp' : '';
+
       if (_mergeByFormula) {
         // Canonical formula resolution
         final rawForm = formula.isNotEmpty ? formula : name;
@@ -843,12 +871,12 @@ class _InventoryPageState extends State<InventoryPage>
         final effFormula = cleanForm.isNotEmpty ? cleanForm : rawForm.trim();
 
         // Key groups strictly by normalized generic formula so same formula quantities merge together
-        key = effFormula.toLowerCase().trim();
+        key = '${effFormula.toLowerCase().trim()}$campSuffix';
         displayFormula = effFormula;
         displayName = effFormula;
       } else {
         // Normal mode: separated by batch (monthYear) and item name
-        key = '$name|$type|$dose|$monthYear';
+        key = '$name|$type|$dose|$monthYear$campSuffix';
       }
 
       if (map.containsKey(key)) {
@@ -900,6 +928,9 @@ class _InventoryPageState extends State<InventoryPage>
           'quantity': qty,
           'price': price,
           'batchKey': key,
+          'campId': data['campId'] ?? itemCamp,
+          'dispensaryId': data['dispensaryId'] ?? itemCamp,
+          'branchId': data['branchId'],
           '_docIds': <String>[docId],
           '_mergedCount': 1,
           '_isMerged': _mergeByFormula,
@@ -1260,7 +1291,8 @@ class _InventoryPageState extends State<InventoryPage>
                   style: TextStyle(
                       color: Colors.white, fontWeight: FontWeight.bold)),
             ),
-      body: Row(
+      body: BlurredUnderDialogBackground(
+        child: Row(
         children: [
           if (!isMobile)
             Container(
@@ -1324,6 +1356,7 @@ class _InventoryPageState extends State<InventoryPage>
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -1999,13 +2032,21 @@ class _InventoryPageState extends State<InventoryPage>
                       side: BorderSide(color: _isDark ? const Color(0xFF5EEAD4) : _teal),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
-                    onPressed: () {
-                      LocalStorageService.downloadInventory(widget.branchId, forceFull: true).then((_) {
-                        if (mounted) _loadDataFromHive();
-                      });
+                    onPressed: () async {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('🔄 Syncing branch inventory from cloud...'), duration: Duration(seconds: 2)),
+                        const SnackBar(content: Text('🔄 Restoring and syncing branch inventory from cloud & server...'), duration: Duration(seconds: 3)),
                       );
+                      if (widget.branchId.toLowerCase().contains('karachi')) {
+                        await LocalStorageService.restoreAndSyncKarachiInventory(widget.branchId);
+                      } else {
+                        await LocalStorageService.downloadInventory(widget.branchId, forceFull: true, campId: _selectedCampFilter);
+                      }
+                      if (mounted) {
+                        _loadDataFromHive();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('✅ Inventory sync complete.'), backgroundColor: Color(0xFF00695C), duration: Duration(seconds: 2)),
+                        );
+                      }
                     },
                     icon: const Icon(Icons.cloud_sync_outlined, size: 18),
                     label: const Text('Sync Cloud'),
@@ -2165,7 +2206,7 @@ class _InventoryPageState extends State<InventoryPage>
           _displayLimit = 50;
           _loadDataFromHive();
         });
-        CampSessionService.setActiveCamp(campId);
+        CampSessionService.setActiveCamp(campId, isManual: true);
       },
       borderRadius: BorderRadius.circular(6),
       child: Container(
@@ -4433,9 +4474,10 @@ class _InventoryPageState extends State<InventoryPage>
       return CampSessionService.getCampLabel(rawCamp);
     }
 
+    final isKarachi = CampSessionService.isKarachiFamily(widget.branchId);
     return (_selectedCampFilter != null && _selectedCampFilter != 'all')
-        ? CampSessionService.getCampLabel(_selectedCampFilter!)
-        : 'Saddar Camp';
+        ? CampSessionService.getCampLabel(_selectedCampFilter!, widget.branchId)
+        : (isKarachi ? 'Saddar Camp' : 'Main Facility');
   }
 
   Widget _requestCard(
@@ -4822,37 +4864,94 @@ class _InventoryPageState extends State<InventoryPage>
     final batch = FirebaseFirestore.instance.batch();
 
     final originalDocId = requestData['docId']?.toString();
+    final effCamp = (requestData['dispensaryId'] ?? requestData['campId'])?.toString();
 
     for (final item in items) {
       final name = (item['name'] ?? '').toString().trim();
       final type = (item['type'] ?? '').toString().trim();
       final dose = (item['dose'] ?? '').toString().trim();
-      final price = item['price']?.toString() ?? '0';
+      final formula = (item['formula'] ?? item['name'] ?? '').toString().trim();
+      final price = _parsePrice(item['price']);
       final expiry = (item['expiryDate'] ?? '').toString().trim();
-      final barcode = (item['barcode'] ?? '').toString().trim();
+      final barcode = (item['barcode'] ?? item['code'] ?? '').toString().trim();
+      final qty = (item['quantity'] is num)
+          ? (item['quantity'] as num).toInt()
+          : (int.tryParse(item['quantity']?.toString() ?? '') ?? 0);
+      final distilledWater = (item['distilledWater'] as num?)?.toInt();
+      final drops = (item['drops'] as num?)?.toInt();
 
       final updateData = <String, dynamic>{
         'name': name,
         'name_lower': name.toLowerCase(),
+        'formula': formula,
+        'formula_lower': formula.toLowerCase(),
         'type': type,
-        'dose': dose,
+        'dose': type == 'Nebulization' ? '' : dose,
+        'quantity': qty,
         'price': price,
-        'barcode': barcode,
+        if (barcode.isNotEmpty) 'barcode': barcode,
+        if (barcode.isNotEmpty) 'code': barcode,
         'expiryDate': expiry,
         'updatedAt': FieldValue.serverTimestamp(),
         'approvedBy': reviewerUid,
         'approvedByName': reviewerName ?? 'Supervisor',
+        if (effCamp != null && effCamp.isNotEmpty) 'dispensaryId': effCamp,
+        if (effCamp != null && effCamp.isNotEmpty)
+          'dispensaryTag': CampSessionService.getDispensaryKeyword(effCamp),
       };
-
-      final targetDocId =
-          originalDocId ?? item['oldId']?.toString();
-
-      if (targetDocId != null && targetDocId.isNotEmpty) {
-        batch.update(inventory.doc(targetDocId), updateData);
+      if (type == 'Nebulization') {
+        updateData['distilledWater'] = distilledWater ?? 0;
+        updateData['drops'] = drops ?? 0;
       }
+
+      String cleanDocId(dynamic raw) {
+        final s = (raw ?? '').toString().trim();
+        return s.startsWith('stock:') ? s.substring(6) : s;
+      }
+
+      final targetDocId = cleanDocId(originalDocId ?? item['oldId']);
+      final newId = RequestUtils.generateDocId(
+        name,
+        type,
+        type == 'Nebulization' ? '' : dose,
+        expiry,
+        distilledWater: distilledWater,
+        drops: drops,
+        campId: effCamp,
+      );
+
+      if (targetDocId.isNotEmpty && targetDocId == newId) {
+        batch.update(inventory.doc(targetDocId), updateData);
+      } else {
+        if (targetDocId.isNotEmpty) {
+          batch.delete(inventory.doc(targetDocId));
+          LocalStorageService.deleteLocalStockItem(targetDocId);
+          RealtimeManager().sendMessage({
+            'event_type': RealtimeEvents.deleteStockItem,
+            'id': targetDocId,
+            'branchId': widget.branchId,
+          });
+        }
+        updateData['addedAt'] = FieldValue.serverTimestamp();
+        batch.set(inventory.doc(newId), updateData);
+      }
+
+      final finalMedId =
+          (targetDocId.isNotEmpty && targetDocId == newId) ? targetDocId : newId;
+      final hiveData = Map<String, dynamic>.from(updateData);
+      hiveData['id'] = finalMedId;
+      hiveData['branchId'] = widget.branchId;
+      LocalStorageService.saveLocalInventoryItem(hiveData);
+
+      RealtimeManager().sendMessage({
+        'event_type': RealtimeEvents.saveStockItem,
+        'branchId': widget.branchId,
+        'data': hiveData,
+      });
     }
 
     await batch.commit();
+    _loadDataFromHive();
   }
 
   Future<void> _applyDeleteMedicine(

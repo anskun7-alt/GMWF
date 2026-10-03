@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../services/permission_service.dart';
 import '../services/local_storage_service.dart';
+import '../utils/formatters.dart';
 import '../pages/dispensary/receptionist/receptionist_screen.dart';
 import '../pages/dispensary/doctor/doctor_screen.dart';
 import '../pages/dispensary/dispensar/dispensar_screen.dart';
@@ -429,6 +430,8 @@ class ModuleRegistry {
       hideFromExecutives: true,
       builder: (context, data) => DispensarScreen(
         branchId: data['branchId'] ?? 'unknown',
+        dispenserId: data['uid'] ?? data['id'],
+        dispenserName: resolveUserDisplayName(data),
         isEmbedded: true,
       ),
       category: ModuleCategory.dispensary,

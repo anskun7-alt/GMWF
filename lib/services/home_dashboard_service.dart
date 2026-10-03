@@ -28,7 +28,7 @@ class _CachedLocalBranchStats {
   final DateTime cachedAt;
   _CachedLocalBranchStats(this.stats) : cachedAt = DateTime.now();
 
-  bool get isValid => DateTime.now().difference(cachedAt).inSeconds < 5;
+  bool get isValid => DateTime.now().difference(cachedAt).inSeconds < 45;
 }
 
 String _dayKey(String branchId, DateTime day) =>
@@ -75,7 +75,16 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
   final dateKeyYmd = DateFormat('yyyy-MM-dd').format(date);
   final cacheTTLKey = '$bId|$dateKeyYmd';
 
-  if (_localStatsTTLCache.containsKey(cacheTTLKey) && _localStatsTTLCache[cacheTTLKey]!.isValid) {
+  final now = DateTime.now();
+  final isToday = (date.year == now.year && date.month == now.month && date.day == now.day);
+
+  // Instant historical cache lookup (past dates are immutable)
+  if (!isToday && _historicalStatsCache.containsKey(cacheTTLKey)) {
+    return _historicalStatsCache[cacheTTLKey]!;
+  }
+
+  // Instant today cache lookup (valid for 45s)
+  if (isToday && _localStatsTTLCache.containsKey(cacheTTLKey) && _localStatsTTLCache[cacheTTLKey]!.isValid) {
     return _localStatsTTLCache[cacheTTLKey]!.stats;
   }
 
@@ -109,7 +118,7 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
     debugPrint('Error fetching local donations: $e');
   }
 
-  // 2. Calculate tokens & dispensary revenue
+  // 2. Calculate tokens & dispensary revenue (high-performance values scan)
   int z = 0, nz = 0, gm = 0, das = 0, served = 0, dispensed = 0, dispRev = 0;
   int zRev = 0, nzRev = 0, gmRev = 0;
 
@@ -118,8 +127,7 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
       final box = Hive.box(LocalStorageService.entriesBox);
       final Map<String, Map<String, dynamic>> entryMap = {};
 
-      for (final k in box.keys) {
-        final val = box.get(k);
+      for (final val in box.values) {
         if (val is Map) {
           final e = Map<String, dynamic>.from(val);
           final status = e['status']?.toString().toLowerCase();
@@ -130,7 +138,7 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
           final dk = e['dateKey']?.toString();
           final rawDate = e['dateKey'] ?? e['date'] ?? e['createdAt'] ?? e['timestamp'] ?? e['serial'];
           if (_isMatchingBranch(b, bId) && (dk == dateKeyDmyy || _isSameDate(rawDate, dateKeyYmd, dateKeyDmyy))) {
-            final rawSerial = (e['serial'] ?? e['id'] ?? e['tokenNumber'] ?? k).toString().trim().toLowerCase();
+            final rawSerial = (e['serial'] ?? e['id'] ?? e['tokenNumber'] ?? '').toString().trim().toLowerCase();
             final parts = rawSerial.split('-');
             final sNum = parts.length > 1 ? parts.last : rawSerial;
             final canonicalKey = parts.length > 2
@@ -308,7 +316,11 @@ Future<BranchStats> fetchLocalBranchStats(String branchId, DateTime date, {bool 
     } catch (_) {}
   }
 
-  _localStatsTTLCache[cacheTTLKey] = _CachedLocalBranchStats(res);
+  if (!isToday) {
+    _historicalStatsCache[cacheTTLKey] = res;
+  } else {
+    _localStatsTTLCache[cacheTTLKey] = _CachedLocalBranchStats(res);
+  }
   return res;
 }
 
@@ -1331,9 +1343,9 @@ Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {
   final today = DateTime(now.year, now.month, now.day);
   final cacheKey = '${(List<String>.from(branchIds)..sort()).join('_')}_$months';
 
-  // 1. Return instantaneous in-memory cached chart data if valid (5 min TTL)
+  // 1. Return instantaneous in-memory cached chart data if valid (15 min TTL)
   final cached = _chartPointsMemoryCache[cacheKey];
-  if (cached != null && now.difference(cached.$1).inMinutes < 5) {
+  if (cached != null && now.difference(cached.$1).inMinutes < 15) {
     return cached.$2;
   }
 

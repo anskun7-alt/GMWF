@@ -77,12 +77,7 @@ void showAddStudentDialog(
     } catch (_) {}
   }
 
-  final isCreatorTeacher = role.toLowerCase().contains('teacher') ||
-      username.toLowerCase().contains('teacher');
-
-  if (isCreatorTeacher && teacherBranch != null && teacherBranch.isNotEmpty) {
-    effectiveBranch = teacherBranch;
-  } else if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
+  if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
     if (teacherBranch != null && teacherBranch.isNotEmpty) {
       effectiveBranch = teacherBranch;
     } else if (studentData != null) {
@@ -458,6 +453,25 @@ void showAddStudentDialog(
                 const SizedBox(height: 16),
                 
                 sectionLabel(context.l.studentInformation),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF008080).withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFF008080).withValues(alpha: 0.25)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.location_on_rounded, color: Color(0xFF008080), size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${context.isUrdu ? 'کیمپس / برانچ: ' : 'Target Branch: '} ${effectiveBranch.toUpperCase()}',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF008080)),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 10),
                 if (isNazraOnly) ...[
                   Container(

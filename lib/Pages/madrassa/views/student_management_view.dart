@@ -90,6 +90,20 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   bool _showFilters = false;
 
 
+  @override
+  void initState() {
+    super.initState();
+    MadrassaLocalStorage.downloadStudents(widget.branchId);
+  }
+
+  @override
+  void didUpdateWidget(covariant StudentManagementView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.branchId != widget.branchId) {
+      MadrassaLocalStorage.downloadStudents(widget.branchId);
+    }
+  }
+
   Future<void> _importStudentsFile() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -937,21 +951,36 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(context.l.guardianFullName, style: context.urduStyle(style: TextStyle(fontSize: 10, color: textMuted))),
-                          const SizedBox(height: 2),
-                          Text(d['guardianName'] ?? '—', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary)),
-                        ],
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(context.l.guardianFullName, style: context.urduStyle(style: TextStyle(fontSize: 10, color: textMuted))),
+                            const SizedBox(height: 2),
+                            Text(
+                              d['guardianName'] ?? '—',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary),
+                            ),
+                          ],
+                        ),
                       ),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(context.l.contactPhone, style: context.urduStyle(style: TextStyle(fontSize: 10, color: textMuted))),
-                          const SizedBox(height: 2),
-                          Text(d['contactPhone'] ?? d['phone'] ?? '—', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary)),
-                        ],
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(context.l.contactPhone, style: context.urduStyle(style: TextStyle(fontSize: 10, color: textMuted))),
+                            const SizedBox(height: 2),
+                            Text(
+                              d['contactPhone'] ?? d['phone'] ?? '—',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: textPrimary),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -1219,9 +1248,29 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
 
                 if (filteredStudents.isEmpty) {
                   return Center(
-                    child: Text(
-                      context.l.noData,
-                      style: context.urduStyle(style: const TextStyle(color: Colors.grey)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(32.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.school_outlined, size: 64, color: Colors.grey.withValues(alpha: 0.5)),
+                          const SizedBox(height: 16),
+                          Text(
+                            context.isUrdu 
+                                ? 'اس برانچ (${widget.branchId.toUpperCase()}) میں کوئی طالب علم نہیں ملا'
+                                : 'No students found in branch: ${widget.branchId.toUpperCase()}',
+                            style: context.urduStyle(style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            context.isUrdu
+                                ? 'اگر طلبہ دوسری برانچ (مثلاً گجرات) میں ہیں تو اوپر برانچ ڈراپ ڈاؤن تبدیل کریں، یا نیا طالب علم داخل کریں۔'
+                                : 'If students are enrolled in another branch (e.g. Gujrat), switch the branch selector in the top bar, or click "+ Add Student".',
+                            textAlign: TextAlign.center,
+                            style: context.urduStyle(style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+                          ),
+                        ],
+                      ),
                     ),
                   );
                 }
@@ -1233,8 +1282,12 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   studentsByBatch.putIfAbsent(batch, () => []).add(student);
                 }
 
-                // Define batch order
-                const batchOrder = ['active', 'left', 'dropped', 'dropped_out', 'hifz_completed', 'hifz_complete', 'nazra_completed', 'nazra_complete', 'archived', 'inactive'];
+                // Define batch order - include pending and ensure ALL batches render
+                const batchOrder = ['active', 'pending', 'left', 'dropped', 'dropped_out', 'hifz_completed', 'hifz_complete', 'nazra_completed', 'nazra_complete', 'archived', 'inactive'];
+                final orderedBatches = [
+                  ...batchOrder.where((b) => studentsByBatch.containsKey(b)),
+                  ...studentsByBatch.keys.where((b) => !batchOrder.contains(b)),
+                ];
 
                 if (isMobile) {
                   return RefreshIndicator(
@@ -1246,7 +1299,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.only(bottom: 24),
                       children: [
-                        for (final batch in batchOrder)
+                        for (final batch in orderedBatches)
                           if (studentsByBatch.containsKey(batch))
                             ...[
                               _buildBatchHeader(context, batch),
@@ -1269,7 +1322,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        for (final batch in batchOrder)
+                        for (final batch in orderedBatches)
                           if (studentsByBatch.containsKey(batch))
                             ...[
                               _buildBatchHeader(context, batch),
@@ -1655,6 +1708,11 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
         displayName = 'Active Students';
         batchColor = Colors.green;
         batchIcon = Icons.check_circle;
+        break;
+      case 'pending':
+        displayName = context.isUrdu ? 'زیر التواء / Pending' : 'Pending Students';
+        batchColor = const Color(0xFF8B5CF6);
+        batchIcon = Icons.hourglass_top_rounded;
         break;
       case 'left':
         displayName = 'Students Left';

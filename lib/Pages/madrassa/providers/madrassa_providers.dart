@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:collection/collection.dart';
-import 'package:hive_flutter/hive_flutter.dart';
 import '../utils/madrassa_local_storage.dart';
 import '../../../services/local_storage_service.dart';
 import '../models/madrassa_config.dart';
@@ -15,8 +14,9 @@ final madrassaConfigProvider = StreamProvider.family<MadrassaConfig, String>((re
   return MadrassaLocalStorage.streamConfigCached(branchId);
 });
 
-// Students List Stream Provider (from Hive local storage)
+// Students List Stream Provider (from Hive local storage + Firestore realtime sync)
 final madrassaStudentsProvider = StreamProvider.family<List<Map<String, dynamic>>, String>((ref, branchId) {
+  MadrassaLocalStorage.listenToStudentsRealtime(branchId);
   return MadrassaLocalStorage.streamStudentsCached(branchId);
 });
 

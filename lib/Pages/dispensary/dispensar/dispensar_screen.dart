@@ -21,6 +21,7 @@ import 'package:gmwf/widgets/gmwf_app_bar.dart';
 import 'package:gmwf/widgets/camp_selection_dialog.dart';
 import 'package:gmwf/widgets/update_dialog_widget.dart';
 import 'package:gmwf/utils/notification_deduper.dart';
+import 'package:gmwf/utils/formatters.dart';
 import '../user_settings_dialog.dart';
 import 'inventory.dart';
 import 'patient_form.dart';
@@ -84,18 +85,16 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
   @override
   void initState() {
     super.initState();
+    _dispenserName = _resolveInitialDispenserName();
     LocalStorageService.ensureDoctorBoxesOpen();
     if (!widget.isEmbedded) {
-      SyncService().start(widget.branchId);
+      SyncService().start(widget.branchId, moduleScope: 'dispensary');
     }
     _listenConnectivity();
     _startLiveInventoryListener();
     _listenPendingRestockRequests();
 
-    // [FIX-USERNAME] Load name first, then start ConnectionManager with it.
-    // We do NOT call ConnectionManager().start() in postFrameCallback anymore
-    // because at that point _dispenserName is still null (async fetch pending).
-    // Instead _fetchDispenserName() starts the connection once the name is resolved.
+    // [FIX-USERNAME] Load/refresh name and start ConnectionManager with it.
     _fetchDispenserName();
     _loadBranchName();
 
@@ -123,6 +122,54 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     _realtimeSub = RealtimeManager().messageStream.listen(_handleRealtimeMessage);
   }
 
+  @override
+  void didUpdateWidget(DispensarScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.dispenserName != null &&
+        widget.dispenserName!.trim().isNotEmpty &&
+        widget.dispenserName != oldWidget.dispenserName) {
+      final newName = widget.dispenserName!.trim();
+      setState(() {
+        _dispenserName = newName;
+      });
+      RealtimeManager().updateUsername(newName);
+    }
+  }
+
+  /// Synchronously resolve the dispenser's name on widget initialization so the UI
+  /// immediately renders with a known username instead of showing "Loading...".
+  String _resolveInitialDispenserName() {
+    if (widget.dispenserName != null &&
+        widget.dispenserName!.trim().isNotEmpty &&
+        widget.dispenserName!.trim().toLowerCase() != 'loading...') {
+      return widget.dispenserName!.trim();
+    }
+    final uid = widget.dispenserId ?? FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null && uid.isNotEmpty) {
+      final local = LocalStorageService.getLocalUserByUid(uid);
+      if (local != null) {
+        final n = resolveUserDisplayName(local);
+        if (n.isNotEmpty && n != 'User' && n != 'Dispenser') return n;
+      }
+    }
+    final activeData = LocalStorageService.getActiveUserData();
+    if (activeData.isNotEmpty) {
+      final n = resolveUserDisplayName(activeData);
+      if (n.isNotEmpty && n != 'User' && n != 'Dispenser') return n;
+    }
+    final activeName = LocalStorageService.getActiveUsername();
+    if (activeName.isNotEmpty && activeName != 'Admin' && activeName != 'User') {
+      return activeName;
+    }
+    final email = FirebaseAuth.instance.currentUser?.email;
+    if (email != null && email.contains('@')) {
+      return email.split('@').first;
+    }
+    return widget.dispenserName?.trim().isNotEmpty == true
+        ? widget.dispenserName!.trim()
+        : 'Dispenser';
+  }
+
   void _startLiveInventoryListener() {
     for (final s in _inventoryLiveSubs) {
       s.cancel();
@@ -133,50 +180,88 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
 
   // [FIX-USERNAME] Resolve dispenser name then start/update connection with it.
   Future<void> _fetchDispenserName() async {
-    String? resolvedName;
-
-    // 1. Try local cache first (fast, no network needed).
-    final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      final local = LocalStorageService.getLocalUserByUid(user.uid);
-      resolvedName = (local?['username'] as String?)?.trim();
-      if (resolvedName?.isEmpty == true) resolvedName = null;
+    bool isInvalid(String? s) {
+      if (s == null) return true;
+      final t = s.trim().toLowerCase();
+      return t.isEmpty || t == 'dispenser' || t == 'user' || t == 'null' || t.startsWith('loading');
     }
 
-    // 2. Fall back to email prefix while Firestore loads.
-    resolvedName ??= user?.email?.split('@').first;
+    String? resolvedName = !isInvalid(_dispenserName) ? _dispenserName : null;
 
-    if (mounted) setState(() => _dispenserName = resolvedName);
+    // 1. Try local cache if not yet resolved or placeholder
+    final uid = widget.dispenserId ?? FirebaseAuth.instance.currentUser?.uid;
+    if (resolvedName == null) {
+      if (uid != null && uid.isNotEmpty) {
+        final local = LocalStorageService.getLocalUserByUid(uid);
+        if (local != null) {
+          final n = resolveUserDisplayName(local);
+          if (!isInvalid(n)) {
+            resolvedName = n;
+          }
+        }
+      }
+    }
 
-    // 3. Start connection with whatever name we have so far.
-    //    This ensures the identify message goes out quickly.
+    // 2. Check active app_settings cache
+    if (resolvedName == null) {
+      final activeData = LocalStorageService.getActiveUserData();
+      if (activeData.isNotEmpty) {
+        final n = resolveUserDisplayName(activeData);
+        if (!isInvalid(n)) {
+          resolvedName = n;
+        }
+      }
+    }
+
+    // 3. Fall back to active username or email prefix
+    if (resolvedName == null) {
+      final activeUser = LocalStorageService.getActiveUsername();
+      if (!isInvalid(activeUser) && activeUser != 'Admin') {
+        resolvedName = activeUser;
+      } else {
+        final email = FirebaseAuth.instance.currentUser?.email;
+        if (email != null && email.contains('@')) {
+          resolvedName = email.split('@').first;
+        }
+      }
+    }
+
+    // Fall back to widget dispenserName if available
+    if (widget.dispenserName != null && !isInvalid(widget.dispenserName)) {
+      resolvedName ??= widget.dispenserName!.trim();
+    }
+
+    resolvedName ??= 'Dispenser';
+
+    // Update state only with a valid resolved name (never overwrite with loading!)
+    if (mounted && resolvedName != _dispenserName && !isInvalid(resolvedName)) {
+      setState(() => _dispenserName = resolvedName);
+    }
+
+    // 4. Start connection with whatever name we have so far.
     if (!widget.isEmbedded) {
       ConnectionManager().start(
         role:     'dispenser',
         branchId: widget.branchId,
         username: resolvedName,
       );
-      if (resolvedName != null) {
-        RealtimeManager().updateUsername(resolvedName);
-      }
+      RealtimeManager().updateUsername(resolvedName);
     }
 
-    // 4. Fetch from Firestore for the authoritative display name.
-    if (user != null) {
+    // 5. Fetch from Firestore for the authoritative display name if available online.
+    if (uid != null && uid.isNotEmpty) {
       try {
         final doc = await FirebaseFirestore.instance
             .collection('users')
-            .doc(user.uid)
+            .doc(uid)
             .get();
-        final firestoreName =
-            (doc.data()?['username'] as String?)?.trim() ??
-            (doc.data()?['name']     as String?)?.trim();
-        if (firestoreName != null && firestoreName.isNotEmpty) {
-          if (mounted) setState(() => _dispenserName = firestoreName);
-          // [FIX-USERNAME] Push updated name into RealtimeManager so future
-          // messages carry the correct attribution.
-          if (!widget.isEmbedded) {
-            RealtimeManager().updateUsername(firestoreName);
+        if (doc.exists && doc.data() != null) {
+          final firestoreName = resolveUserDisplayName(doc.data());
+          if (!isInvalid(firestoreName) && firestoreName != _dispenserName) {
+            if (mounted) setState(() => _dispenserName = firestoreName);
+            if (!widget.isEmbedded) {
+              RealtimeManager().updateUsername(firestoreName);
+            }
           }
         }
       } catch (e) {
@@ -222,11 +307,19 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     final myId = RealtimeManager().clientId;
     if (senderId.isNotEmpty && myId != null && senderId == myId) return;
 
-    final serial = data['serial']?.toString().trim();
+    final serial = (data['serial'] ?? data['id'])?.toString().trim();
     final branch = (data['branchId'] ?? event['branchId'] ?? event['_senderBranch'] ?? '')
         .toString().toLowerCase().trim();
 
-    if (branch.isNotEmpty && branch != widget.branchId.toLowerCase().trim()) return;
+    if (branch.isNotEmpty &&
+        branch != 'all' &&
+        branch != 'default' &&
+        widget.branchId.isNotEmpty &&
+        widget.branchId.toLowerCase().trim() != 'all' &&
+        widget.branchId.toLowerCase().trim() != 'default' &&
+        !CampSessionService.areBranchesMatching(branch, widget.branchId)) {
+      return;
+    }
 
     // ── Handle INVENTORY events (no patient serial) ───────────────────────────
     if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered' || type == 'inventory_stock_sync') {
@@ -345,26 +438,60 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     if (type == RealtimeEvents.savePrescription || type == 'prescription_created') {
       LocalStorageService.saveLocalPrescription(data);
 
-      final normBranch = widget.branchId.toLowerCase().trim();
-      final normSerial = serial.toLowerCase().trim();
-      final box = Hive.box(LocalStorageService.entriesBox);
-      dynamic actualKey;
       dynamic entry;
-      for (final k in ['$normBranch-$serial', '$normBranch-${serial.toUpperCase()}', '$normBranch-$normSerial', serial, serial.toUpperCase()]) {
-        if (box.containsKey(k)) {
-          actualKey = k;
-          entry = box.get(k);
-          break;
+      final cleanSerial = (serial ?? data['serial'] ?? data['id'] ?? '').toString().trim();
+      if (cleanSerial.isNotEmpty) {
+        final normBranch = widget.branchId.toLowerCase().trim();
+        final normSerial = cleanSerial.toLowerCase();
+        final upperSerial = cleanSerial.toUpperCase();
+        final box = Hive.box(LocalStorageService.entriesBox);
+        dynamic actualKey;
+        for (final k in [
+          '$normBranch-$cleanSerial',
+          '$normBranch-$upperSerial',
+          '$normBranch-$normSerial',
+          cleanSerial,
+          upperSerial,
+          normSerial
+        ]) {
+          if (box.containsKey(k)) {
+            actualKey = k;
+            entry = box.get(k);
+            break;
+          }
         }
-      }
 
-      if (entry != null && actualKey != null) {
-        final updated = Map<String, dynamic>.from(entry as Map);
+        final updated = (entry != null && entry is Map)
+            ? Map<String, dynamic>.from(entry)
+            : <String, dynamic>{
+                'branchId': normBranch,
+                'serial': cleanSerial,
+                'tokenNumber': cleanSerial,
+                'dateKey': data['dateKey'] ?? DateTime.now().toIso8601String().substring(0, 10),
+                'createdAt': data['createdAt'] ?? DateTime.now().toIso8601String(),
+              };
+
         updated['status'] = 'completed';
         updated['completedAt'] = data['completedAt'] ?? DateTime.now().toIso8601String();
         updated['prescription'] = data;
-        box.put(actualKey, updated);
-        if (serial.toUpperCase() == (_selectedQueueEntry?['serial'] ?? _selectedQueueEntry?['id'] ?? '').toString().toUpperCase()) {
+        updated['prescriptionId'] = data['id'] ?? cleanSerial;
+        if (data['patientName'] != null) updated['patientName'] = data['patientName'];
+        if (data['name'] != null) updated['name'] = data['name'];
+        if (data['patientCnic'] != null) updated['patientCnic'] = data['patientCnic'];
+        if (data['cnic'] != null) updated['cnic'] = data['cnic'];
+        if (data['doctorName'] != null) updated['doctorName'] = data['doctorName'];
+        if (data['doctorId'] != null) updated['doctorId'] = data['doctorId'];
+        if (data['daysOfMedicine'] != null) updated['daysOfMedicine'] = data['daysOfMedicine'];
+        if (data['dispenseStatus'] != null) updated['dispenseStatus'] = data['dispenseStatus'];
+        if (data['campId'] != null) updated['campId'] = data['campId'];
+        if (data['dispensaryTag'] != null) updated['dispensaryTag'] = data['dispensaryTag'];
+
+        final writeKey = actualKey ?? '$normBranch-$upperSerial';
+        box.put(writeKey, updated);
+        box.put('$normBranch-$upperSerial', updated);
+        box.put('$normBranch-$normSerial', updated);
+
+        if (cleanSerial.toUpperCase() == (_selectedQueueEntry?['serial'] ?? _selectedQueueEntry?['id'] ?? '').toString().toUpperCase()) {
           _selectedQueueEntry = updated;
         }
       }
@@ -527,7 +654,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
   PreferredSizeWidget _buildAppBar(bool isMobile) {
     return GmwfAppBar(
       isFloating: false,
-      title: 'Dispensary – ${_dispenserName ?? widget.dispenserName ?? 'Loading...'}',
+      title: 'Dispensary – ${_dispenserName?.isNotEmpty == true ? _dispenserName! : (widget.dispenserName?.isNotEmpty == true ? widget.dispenserName! : 'Dispenser')}',
       subtitle: CampSessionService.getBranchAndCampDisplayName(
         branchName: _branchName ?? LocalStorageService.getBranchName(widget.branchId),
         branchId: widget.branchId,
@@ -809,8 +936,12 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
         double liveQty = 0;
         for (final val in stockBox.values) {
           if (val is Map) {
-            final b = (val['branchId'] ?? '').toString().toLowerCase().trim();
-            if (b.isNotEmpty && normBranch.isNotEmpty && b != normBranch && !b.contains(normBranch) && !normBranch.contains(b)) continue;
+            final b = (val['branchId'] ?? val['branch'] ?? '').toString().toLowerCase().trim();
+            final bMatches = b.isEmpty || normBranch.isEmpty || normBranch == 'all' ||
+                CampSessionService.areBranchesMatching(normBranch, b) ||
+                (CampSessionService.isKarachiFamily(normBranch) && CampSessionService.isKarachiFamily(b)) ||
+                b == normBranch || b.contains(normBranch) || normBranch.contains(b);
+            if (!bMatches) continue;
             final vName = (val['name'] ?? val['formula'] ?? '').toString().toLowerCase().trim();
             if (vName == alertMed || (alertMed.length > 3 && vName.contains(alertMed)) || (vName.length > 3 && alertMed.contains(vName))) {
               final q = val['quantity'] ?? val['stock'] ?? 0;

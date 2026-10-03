@@ -75,10 +75,10 @@ class _SchoolHomeroomDialogState extends State<SchoolHomeroomDialog> {
                     Container(
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF6366F1).withValues(alpha: 0.1),
+                        color: const Color(0xFF1B4965).withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Icon(Icons.supervisor_account_rounded, color: Color(0xFF6366F1), size: 24),
+                      child: const Icon(Icons.supervisor_account_rounded, color: Color(0xFF1B4965), size: 24),
                     ),
                     const SizedBox(width: 14),
                     Expanded(
@@ -164,17 +164,17 @@ class _SchoolHomeroomDialogState extends State<SchoolHomeroomDialog> {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: currentTeacherId.isNotEmpty ? const Color(0xFFEEF2FF) : const Color(0xFFFEF3C7),
+                    color: currentTeacherId.isNotEmpty ? SchoolTheme.primaryLight : SchoolTheme.statusLeaveBg,
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                      color: currentTeacherId.isNotEmpty ? const Color(0xFF6366F1).withValues(alpha: 0.3) : const Color(0xFFF59E0B).withValues(alpha: 0.3),
+                      color: currentTeacherId.isNotEmpty ? SchoolTheme.primary.withValues(alpha: 0.3) : SchoolTheme.statusLeave.withValues(alpha: 0.3),
                     ),
                   ),
                   child: Row(
                     children: [
                       Icon(
                         currentTeacherId.isNotEmpty ? Icons.check_circle_rounded : Icons.info_outline_rounded,
-                        color: currentTeacherId.isNotEmpty ? const Color(0xFF6366F1) : const Color(0xFFD97706),
+                        color: currentTeacherId.isNotEmpty ? SchoolTheme.primary : SchoolTheme.statusLeave,
                         size: 20,
                       ),
                       const SizedBox(width: 10),
@@ -186,7 +186,7 @@ class _SchoolHomeroomDialogState extends State<SchoolHomeroomDialog> {
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 13,
-                            color: currentTeacherId.isNotEmpty ? const Color(0xFF4338CA) : const Color(0xFF92400E),
+                            color: currentTeacherId.isNotEmpty ? SchoolTheme.primary : SchoolTheme.statusLeave,
                           ),
                         ),
                       ),
@@ -228,8 +228,8 @@ class _SchoolHomeroomDialogState extends State<SchoolHomeroomDialog> {
                     if (currentTeacherId.isNotEmpty)
                       OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFFEF4444),
-                          side: const BorderSide(color: Color(0xFFEF4444)),
+                          foregroundColor: const Color(0xFFDC4A4A),
+                          side: const BorderSide(color: Color(0xFFDC4A4A)),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                         ),
                         icon: const Icon(Icons.person_remove_rounded, size: 18),

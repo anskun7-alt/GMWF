@@ -954,8 +954,8 @@ _changeNotifier.value++;
                                               Expanded(
                                                 child: Text(
                                                   context.isUrdu
-                                                      ? 'صرف ناظرہ سسٹم: صرف حاضری اور سبق لاگ ہوتے ہیں۔ فیس، یونیفارم اور سبقی/منزل سسٹم بند ہے۔'
-                                                      : 'Only Nazra System Active: Tracking Attendance & Sabak only. Uniform & Sabqi/Manzil disabled.',
+                                                      ? 'صرف ناظرہ سسٹم: حاضری، یونیفارم اور سبق لاگ فعال ہے۔ سبقی/منزل سسٹم بند ہے۔'
+                                                      : 'Only Nazra System Active: Tracking Attendance, Uniform & Sabak. Sabqi/Manzil disabled.',
                                                   style: context.urduStyle(
                                                     style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0D9488)),
                                                   ),
@@ -3643,14 +3643,13 @@ class _StudentLogCard extends StatelessWidget {
                 },
                 showLabel: false,
               ),
-              if (!isStudentNazra)
-                _switchCol(
-                  context,
-                  context.l.uniform,
-                  (att == 'leave' || uni == true || uni == 'leave'),
-                  (att == 'present' && !isReadOnly) ? (v) => onUpdateLocal(sId, 'uniform', v) : null,
-                  isDark: isDark,
-                ),
+              _switchCol(
+                context,
+                context.l.uniform,
+                (att == 'leave' || uni == true || uni == 'leave'),
+                (att == 'present' && !isReadOnly) ? (v) => onUpdateLocal(sId, 'uniform', v) : null,
+                isDark: isDark,
+              ),
               _switchCol(
                 context,
                 context.l.parentReplied,
@@ -3918,15 +3917,13 @@ class _StudentLogCard extends StatelessWidget {
                 },
                 showLabel: true,
               ),
-            if (!isStudentNazra) ...[
-              const SizedBox(width: 24),
-              _switchCol(
-                context,
-                context.l.uniform,
-                (att == 'leave' || uni == true || uni == 'leave'),
-                (att == 'present' && !isReadOnly) ? (v) => onUpdateLocal(sId, 'uniform', v) : null,
-              ),
-            ],
+            const SizedBox(width: 24),
+            _switchCol(
+              context,
+              context.l.uniform,
+              (att == 'leave' || uni == true || uni == 'leave'),
+              (att == 'present' && !isReadOnly) ? (v) => onUpdateLocal(sId, 'uniform', v) : null,
+            ),
             const SizedBox(width: 24),
             _switchCol(
               context,

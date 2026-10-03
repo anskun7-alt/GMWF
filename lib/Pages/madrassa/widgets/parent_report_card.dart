@@ -4655,7 +4655,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           Row(
             children: [
               Expanded(child: attCard),
-              if (!isNazraStudent) Expanded(child: uniformCard),
+              Expanded(child: uniformCard),
             ],
           ),
           const SizedBox(height: 8),
@@ -4671,7 +4671,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       return Row(
         children: [
           Expanded(child: attCard),
-          if (!isNazraStudent) Expanded(child: uniformCard),
+          Expanded(child: uniformCard),
           Expanded(child: replyCard),
           Expanded(child: ptmCard),
         ],
@@ -4697,9 +4697,19 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           children: [
             Icon(icon, color: color, size: 22),
             const SizedBox(height: 6),
-            Text(label, style: TextStyle(fontSize: 10, color: textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null)),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 10, color: textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+            ),
             const SizedBox(height: 2),
-            Text(value, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null)),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+            ),
           ],
         ),
       ),

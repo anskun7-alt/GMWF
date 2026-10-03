@@ -49,7 +49,7 @@ class _SchoolTeacherAttendanceViewState extends State<SchoolTeacherAttendanceVie
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: const [
-            Icon(Icons.warning_amber_rounded, color: Color(0xFFF59E0B)),
+            Icon(Icons.warning_amber_rounded, color: Color(0xFFD4940A)),
             SizedBox(width: 10),
             Text('Unsaved Faculty Attendance Edits'),
           ],

@@ -904,6 +904,7 @@ class _SettingsPageState extends State<SettingsPage> {
           'is_dark_mode',
           'language',
           'font_scale',
+          'dialog_blur_enabled',
         ]),
         builder: (context, Box box, child) {
           final t = RoleThemeScope.dataOf(context);
@@ -925,6 +926,7 @@ class _SettingsPageState extends State<SettingsPage> {
           final activeFontScale = box.get('font_scale', defaultValue: 1.0) as double;
           final isDarkMode = box.get('is_dark_mode', defaultValue: false) as bool;
           final activeLanguage = box.get('language', defaultValue: 'en') as String;
+          final isDialogBlur = box.get('dialog_blur_enabled', defaultValue: true) as bool;
 
           return Directionality(
             textDirection: activeLanguage == 'ur' ? TextDirection.rtl : TextDirection.ltr,
@@ -1653,7 +1655,41 @@ class _SettingsPageState extends State<SettingsPage> {
                               ),
                               _divider(t),
 
-                              // 5. Logout Button
+                              // 5. Frosted Glass Dialog Blur
+                              SwitchListTile(
+                                value: isDialogBlur,
+                                activeThumbColor: t.accent,
+                                onChanged: (val) async {
+                                  await box.put('dialog_blur_enabled', val);
+                                  setState(() {});
+                                },
+                                secondary: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: t.accent.withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Icon(
+                                    Icons.blur_on_rounded,
+                                    color: t.accent,
+                                    size: 20,
+                                  ),
+                                ),
+                                title: Text(
+                                  'Frosted Dialog Backdrop Blur',
+                                  style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
+                                ),
+                                subtitle: Text(
+                                  isDialogBlur
+                                      ? 'Active: Softly blurs the app background when any dialog opens'
+                                      : 'Disabled: Uses standard dimmed overlay backdrop',
+                                  style: TextStyle(color: t.textSecondary, fontSize: 12),
+                                ),
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                              _divider(t),
+
+                              // 6. Logout Button
                               _LogoutTile(t: t),
                             ],
                           ),

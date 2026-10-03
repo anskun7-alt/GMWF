@@ -752,15 +752,11 @@ class DispensaryNotifier
       final fetchKey = '$targetBranchId-$dayKey';
       final lastFetch = _lastFirestoreFetch[fetchKey];
       final isRecentlyFetched = lastFetch != null &&
-          DateTime.now().difference(lastFetch).inSeconds < 120;
-      final hasUnknownPatients = combined.values.any((e) {
-        final name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
-        return name.isEmpty || name == 'unknown' || name == 'unknown patient';
-      });
+          DateTime.now().difference(lastFetch).inSeconds < 300;
 
-      // Quota Protection: If all patient data is already locally known and complete,
-      // and we checked Firestore within the last 2 minutes, avoid unnecessary reads.
-      if (isRecentlyFetched && !hasUnknownPatients && combined.isNotEmpty) {
+      // Quota Protection: If data is already in local Hive and was checked within 5 minutes,
+      // serve instantly from local storage (0 Firestore reads).
+      if (isRecentlyFetched && combined.isNotEmpty) {
         return combined.values.toList();
       }
 
@@ -768,22 +764,12 @@ class DispensaryNotifier
       final hasNetwork = connectivity.any((r) => r != ConnectivityResult.none);
       if (hasNetwork) {
         _lastFirestoreFetch[fetchKey] = DateTime.now();
-        // Standalone branches check: Gujrat might be stored in Firestore as 'gujrat' or 'grt', Sialkot as 'sialkot' or 'skt'
         final candidateBranches = <String>{};
         if (targetBranchId.isEmpty || targetBranchId == 'all') {
           candidateBranches.addAll(['karachi', 'gujrat', 'sialkot', 'rawalpindi', 'jalalpur_jattan']);
         } else {
-          final t = targetBranchId.toLowerCase().trim();
-          candidateBranches.add(t);
-          if (t == 'gujrat' || t == 'grt' || t == 'gjt') {
-            candidateBranches.addAll(['gujrat', 'grt']);
-          } else if (t == 'sialkot' || t == 'skt') {
-            candidateBranches.addAll(['sialkot', 'skt']);
-          } else if (t == 'rawalpindi' || t == 'rwp') {
-            candidateBranches.addAll(['rawalpindi', 'rwp']);
-          } else if (t == 'jalalpur_jattan' || t == 'jalalpur' || t == 'jlj') {
-            candidateBranches.addAll(['jalalpur_jattan', 'jalalpur', 'jlj']);
-          }
+          final canonical = LocalStorageService.sanitizeBranchId(targetBranchId, fallback: targetBranchId.toLowerCase().trim());
+          candidateBranches.add(canonical);
         }
 
         final queues = ['zakat', 'non-zakat', 'gmwf'];

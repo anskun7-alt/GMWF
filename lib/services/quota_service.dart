@@ -13,17 +13,22 @@ class QuotaService {
   static bool get isQuotaExhausted => isQuotaExhaustedNotifier.value;
 
   // ── Daily Write Counter ──────────────────────────────────────────────────
-  // Firestore Spark plan: 20,000 writes/day. We set our ceiling lower to
-  // leave headroom for real-time UI reads and other services.
-  static const int _dailyWriteCeiling = 15000;
+  // Raised ceiling to accommodate multi-branch operations and massive backlog flushes.
+  static const int _dailyWriteCeiling = 200000;
   static const String _writeCountKey = 'quota_daily_writes';
   static const String _writeDateKey = 'quota_daily_date';
   static const String _quotaPausedUntilKey = 'quota_paused_until';
 
   /// Returns true if a write operation is allowed. Records the write.
   /// Call this BEFORE every Firestore write in SyncService.
-  static bool canWrite({int count = 1}) {
+  /// If [isPriority] is true (e.g. Tokens, Donations, Madrassa, Employees), writes proceed even during soft pauses.
+  static bool canWrite({int count = 1, bool isPriority = false}) {
     try {
+      if (isPriority) {
+        // Priority business writes are never blocked by soft exhaustion or pauses
+        return true;
+      }
+
       if (isQuotaExhausted) return false;
 
       // Check if paused due to a quota error backoff

@@ -61,16 +61,27 @@ class _AttendanceTabState extends State<AttendanceTab> {
     _syncPunches(widget.date);
   }
 
-  Future<void> _syncPunches([DateTime? targetDate]) async {
+  Future<void> _syncPunches([DateTime? targetDate, bool force = false]) async {
     if (_isSyncing) return;
     if (mounted) setState(() => _isSyncing = true);
     try {
       final date = targetDate ?? widget.date;
       final dateStr = DateFormat('yyyy-MM-dd').format(date);
-      // 1. Download employees from cloud so active staff roster is immediately loaded
-      await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
-      // 2. Download attendance records from cloud (force fresh pull for target date)
-      await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr, force: true);
+      if (force) {
+        // 1. Download employees from cloud so active staff roster is immediately loaded
+        await FinanceLocalStorage.downloadEmployees(widget.branchId, force: true);
+        // Run deduplication to clean up shadow lowercase accounts if any exist
+        await FinanceLocalStorage.deduplicateEmployeeRecords();
+        // 2. Download attendance records from cloud (force fresh pull for target date)
+        await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr, force: true);
+      } else {
+        // Load from local Hive first for instant responsiveness, and fetch cloud attendance for target date
+        final hasEmps = FinanceLocalStorage.getEmployees(widget.branchId).isNotEmpty;
+        if (!hasEmps) {
+          await FinanceLocalStorage.downloadEmployees(widget.branchId);
+        }
+        await FinanceLocalStorage.downloadAttendance(widget.branchId, specificDateStr: dateStr);
+      }
       // 3. Re-route any pending unmapped punches
       await ZkTecoNetworkService.processPendingUnmappedPunches();
       if (mounted) setState(() {});
@@ -312,8 +323,12 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   final dbRec = dbRecords.firstWhereOrNull((r) {
                     final rEmpId = r['employeeId']?.toString();
                     if (rEmpId == empId || (altId.isNotEmpty && rEmpId == altId)) return true;
-                    final canMatchFallback = rEmpId == null || rEmpId.isEmpty || rEmpId == empId || (altId.isNotEmpty && rEmpId == altId);
-                    if (canMatchFallback && pin.isNotEmpty && (r['pin']?.toString() == pin || r['biometricPin']?.toString() == pin)) {
+                    if (pin.isNotEmpty && (r['pin']?.toString() == pin || r['biometricPin']?.toString() == pin || r['employeeId']?.toString() == pin)) {
+                      // Exclusivity: if attendance explicitly belongs to another existing employee, don't cross-claim
+                      if (rEmpId != null && rEmpId.isNotEmpty && rEmpId != empId && rEmpId != altId) {
+                        final other = FinanceLocalStorage.getEmployee(rEmpId);
+                        if (other != null) return false;
+                      }
                       return true;
                     }
                     return false;
@@ -1279,7 +1294,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
             Tooltip(
               message: 'Sync & Pull Hardware & Cloud Punches',
               child: InkWell(
-                onTap: () => _syncPunches(widget.date),
+                onTap: () => _syncPunches(widget.date, true),
                 borderRadius: BorderRadius.circular(8),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),

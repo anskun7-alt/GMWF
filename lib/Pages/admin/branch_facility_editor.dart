@@ -1,5 +1,6 @@
 // lib/pages/admin/branch_facility_editor.dart
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -80,6 +81,7 @@ class _BranchFacilityEditorDialogState
   late String _madrassaProgramMode;
   late bool _allowVitalsToken;
   late bool _allowDoctorInventoryApproval;
+  late String _foodDetailsPolicy;
   final List<String> _newCampDepts = ['dispensary'];
   bool _isSaving = false;
 
@@ -115,15 +117,27 @@ class _BranchFacilityEditorDialogState
       'allowDoctorInventoryApproval': _allowDoctorInventoryApproval,
     };
 
-    // Dasterkhwaan Config (Evening, Night, Morning, Lunch)
+    // Dasterkhwaan Config (Evening, Night, Morning, Lunch, Food Details Policy)
     final rawDast = initSess['dasterkhwaan'] is Map ? initSess['dasterkhwaan'] as Map : {};
     final eveSource = rawDast['evening'] ?? rawDast['dinner'] ?? defaultDast['evening'] ?? defaultDast['dinner'];
+    final policyFromStorage = LocalStorageService.getDasterkhwaanFoodDetailsPolicy(widget.branchId);
+    final rawPolicy = rawDast['foodDetailsPolicy'] ??
+        rawDast['dasterkhwaanFoodDetailsPolicy'] ??
+        initSess['foodDetailsPolicy'] ??
+        initSess['dasterkhwaanFoodDetailsPolicy'] ??
+        policyFromStorage;
+    _foodDetailsPolicy = (rawPolicy == 'office_boy' || rawPolicy == 'kitchen' || rawPolicy == 'both')
+        ? rawPolicy.toString()
+        : LocalStorageService.dasterkhwaanFoodDetailsPolicyDisabled;
+
     final dastConfig = {
       'evening': Map<String, dynamic>.from(eveSource ?? {'enabled': true, 'openTime': '16:00', 'closeTime': '20:00'}),
       'dinner':  Map<String, dynamic>.from(eveSource ?? {'enabled': true, 'openTime': '16:00', 'closeTime': '20:00'}),
       'night':   Map<String, dynamic>.from(rawDast['night']   ?? defaultDast['night']   ?? {'enabled': true, 'openTime': '20:00', 'closeTime': '02:00'}),
       'morning': Map<String, dynamic>.from(rawDast['morning'] ?? defaultDast['morning'] ?? {'enabled': false, 'openTime': '06:00', 'closeTime': '10:00'}),
       'lunch':   Map<String, dynamic>.from(rawDast['lunch']   ?? defaultDast['lunch']   ?? {'enabled': false, 'openTime': '12:00', 'closeTime': '16:00'}),
+      'foodDetailsPolicy': _foodDetailsPolicy,
+      'dasterkhwaanFoodDetailsPolicy': _foodDetailsPolicy,
     };
 
     // Madrassa Config & Fee Factor & Program Mode (Both / Hifz Only / Nazra Only)
@@ -177,6 +191,8 @@ class _BranchFacilityEditorDialogState
       'madrassaMode': _madrassaProgramMode,
       'allowVitalsToken': _allowVitalsToken,
       'allowDoctorInventoryApproval': _allowDoctorInventoryApproval,
+      'foodDetailsPolicy': _foodDetailsPolicy,
+      'dasterkhwaanFoodDetailsPolicy': _foodDetailsPolicy,
       // Backward-compatible top-level keys
       'morning': dispConfig['morning']!,
       'evening': dispConfig['evening']!,
@@ -523,6 +539,13 @@ class _BranchFacilityEditorDialogState
       _sessionsConfig['allowVitalsToken'] = _allowVitalsToken;
       _sessionsConfig['allowDoctorInventoryApproval'] = _allowDoctorInventoryApproval;
 
+      if (_sessionsConfig['dasterkhwaan'] is Map) {
+        (_sessionsConfig['dasterkhwaan'] as Map)['foodDetailsPolicy'] = _foodDetailsPolicy;
+        (_sessionsConfig['dasterkhwaan'] as Map)['dasterkhwaanFoodDetailsPolicy'] = _foodDetailsPolicy;
+      }
+      _sessionsConfig['foodDetailsPolicy'] = _foodDetailsPolicy;
+      _sessionsConfig['dasterkhwaanFoodDetailsPolicy'] = _foodDetailsPolicy;
+
       final isNazra = _madrassaProgramMode == 'nazra_only';
       final effectiveMadrassaFees = isNazra ? false : _madrassaFeeEnabled;
 
@@ -541,6 +564,8 @@ class _BranchFacilityEditorDialogState
       final docData = <String, dynamic>{
         'name': newName,
         'sessionsConfig': _sessionsConfig,
+        'foodDetailsPolicy': _foodDetailsPolicy,
+        'dasterkhwaanFoodDetailsPolicy': _foodDetailsPolicy,
         'madrassaFeeEnabled': effectiveMadrassaFees,
         'madrassaProgramMode': _madrassaProgramMode,
         'madrassaMode': _madrassaProgramMode,
@@ -571,6 +596,7 @@ class _BranchFacilityEditorDialogState
         await box.put('branch:${widget.branchId}', localPayload);
         await box.put(widget.branchId, localPayload);
       }
+      unawaited(LocalStorageService.setDasterkhwaanFoodDetailsPolicy(widget.branchId, _foodDetailsPolicy));
 
       // 2. Cloud Firestore Update with strict 3-second timeout (never blocks modal close)
       try {
@@ -1124,6 +1150,15 @@ class _BranchFacilityEditorDialogState
             ),
           ],
 
+          if (deptKey == 'dasterkhwaan') ...[
+            const SizedBox(height: 14),
+            _buildDasterkhwaanFoodDetailsPolicySelector(
+              isDark: isDark,
+              borderColor: borderColor,
+              subtextColor: subtextColor,
+            ),
+          ],
+
           if (deptKey == 'madrassa') ...[
             const SizedBox(height: 14),
             _buildMadrassaSessionPresets(
@@ -1539,6 +1574,208 @@ class _BranchFacilityEditorDialogState
                 _sessionsConfig['allowDoctorInventoryApproval'] = val;
               });
             },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDasterkhwaanFoodDetailsPolicySelector({
+    required bool isDark,
+    required Color borderColor,
+    required Color subtextColor,
+  }) {
+    final policies = [
+      {
+        'key': LocalStorageService.dasterkhwaanFoodDetailsPolicyDisabled,
+        'title': 'Disabled (Default)',
+        'urdu': 'بند ہے (عام حالت)',
+        'desc': 'Food details logging is turned off. Staff cannot log cooked/procured food details.',
+        'badge': 'DISABLED 🚫',
+        'color': const Color(0xFF64748B),
+        'icon': Icons.block_rounded,
+      },
+      {
+        'key': LocalStorageService.dasterkhwaanFoodDetailsPolicyOfficeBoy,
+        'title': 'Office Boy Only',
+        'urdu': 'صرف آفس بوائے',
+        'desc': 'Allows the branch Office Boy to record cooked and hotel food procurement entries.',
+        'badge': 'OFFICE BOY 🧑‍💼',
+        'color': const Color(0xFF0284C7),
+        'icon': Icons.badge_rounded,
+      },
+      {
+        'key': LocalStorageService.dasterkhwaanFoodDetailsPolicyKitchen,
+        'title': 'Kitchen User Only',
+        'urdu': 'صرف کچن عملہ',
+        'desc': 'Allows kitchen staff to record cooking sessions and outside food entries.',
+        'badge': 'KITCHEN 👨‍🍳',
+        'color': const Color(0xFFEA580C),
+        'icon': Icons.restaurant_rounded,
+      },
+      {
+        'key': LocalStorageService.dasterkhwaanFoodDetailsPolicyBoth,
+        'title': 'Both (Office Boy & Kitchen)',
+        'urdu': 'آفس بوائے اور کچن دونوں',
+        'desc': 'Both Office Boy and Kitchen personnel are authorized to log food details.',
+        'badge': 'BOTH AUTHORIZED 🤝',
+        'color': const Color(0xFF10B981),
+        'icon': Icons.groups_rounded,
+      },
+    ];
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: borderColor, width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEA580C).withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.receipt_long_rounded, color: Color(0xFFEA580C), size: 20),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Food Details Logging Permission (کھانے کی تفصیلات کا اندراج)',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white : const Color(0xFF0F172A),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Determine who can record meal cooking & outside food details. Disabled by default.',
+                      style: TextStyle(fontSize: 11, color: subtextColor),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Column(
+            children: policies.map((p) {
+              final isSelected = _foodDetailsPolicy == p['key'];
+              final color = p['color'] as Color;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? color.withValues(alpha: isDark ? 0.2 : 0.08)
+                      : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC)),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isSelected ? color : borderColor,
+                    width: isSelected ? 2 : 1,
+                  ),
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () {
+                      setState(() {
+                        _foodDetailsPolicy = p['key'] as String;
+                        if (_sessionsConfig['dasterkhwaan'] is Map) {
+                          (_sessionsConfig['dasterkhwaan'] as Map)['foodDetailsPolicy'] = _foodDetailsPolicy;
+                          (_sessionsConfig['dasterkhwaan'] as Map)['dasterkhwaanFoodDetailsPolicy'] = _foodDetailsPolicy;
+                        }
+                        _sessionsConfig['foodDetailsPolicy'] = _foodDetailsPolicy;
+                        _sessionsConfig['dasterkhwaanFoodDetailsPolicy'] = _foodDetailsPolicy;
+                      });
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                            color: isSelected ? color : subtextColor,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 4,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(p['icon'] as IconData, size: 16, color: color),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          p['title'] as String,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.bold,
+                                            color: isSelected
+                                                ? (isDark ? Colors.white : const Color(0xFF0F172A))
+                                                : (isDark ? Colors.white70 : const Color(0xFF334155)),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Text(
+                                      '(${p['urdu']})',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: isSelected ? color : subtextColor,
+                                      ),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: color.withValues(alpha: 0.15),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        p['badge'] as String,
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.bold,
+                                          color: color,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  p['desc'] as String,
+                                  style: TextStyle(fontSize: 11, color: subtextColor),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
           ),
         ],
       ),

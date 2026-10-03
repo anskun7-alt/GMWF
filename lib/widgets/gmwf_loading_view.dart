@@ -63,7 +63,8 @@ class _GmwfLoadingViewState extends State<GmwfLoadingView>
 
     _entryController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1000),
+      duration: const Duration(milliseconds: 600),
+      value: 1.0, // Instantly visible on first frame so screen is NEVER blank
     );
 
     _fadeIn = CurvedAnimation(parent: _entryController, curve: Curves.easeOut);
@@ -95,8 +96,6 @@ class _GmwfLoadingViewState extends State<GmwfLoadingView>
 
     _dotAnim = CurvedAnimation(parent: _dotController, curve: Curves.easeInOut);
 
-    _entryController.forward();
-
     if (widget.message == null) {
       _messageTimer = Timer.periodic(const Duration(seconds: 2), (_) {
         if (mounted) {
@@ -107,7 +106,7 @@ class _GmwfLoadingViewState extends State<GmwfLoadingView>
       });
     }
 
-    _emergencyTimer = Timer(const Duration(seconds: 12), () {
+    _emergencyTimer = Timer(const Duration(seconds: 5), () {
       if (mounted) setState(() => _showEmergencyButton = true);
     });
   }

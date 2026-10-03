@@ -300,7 +300,9 @@ class DonationsLocalStorage {
     final rawStatus = data['status'];
     recordMap['status'] = rawStatus?.toString() ?? kStatusPending;
     recordMap['firestoreId'] = null;
-    recordMap['lastUpdatedAt'] = DateTime.now().toIso8601String();
+    final nowIso = DateTime.now().toIso8601String();
+    recordMap['lastUpdatedAt'] = nowIso;
+    recordMap['updatedAt'] = nowIso;
 
     final existingReceipt = (recordMap['receiptNo'] as String? ?? '').trim();
     if (existingReceipt.isEmpty) {
@@ -504,6 +506,7 @@ class DonationsLocalStorage {
     final updated = Map<String, dynamic>.from(raw as Map)
       ..addAll(_sanitize(fields))
       ..['lastUpdatedAt'] = now
+      ..['updatedAt'] = now
       ..['isEdited'] = true
       ..['localId'] = resolvedLocalId;
 
@@ -1091,7 +1094,7 @@ class DonationsLocalStorage {
           continue;
         }
 
-        final docUpdatedAt = d['updatedAt']?.toString();
+        final docUpdatedAt = d['updatedAt']?.toString() ?? d['lastUpdatedAt']?.toString();
         if (docUpdatedAt != null) {
           if (maxServerTs == null || docUpdatedAt.compareTo(maxServerTs) > 0) {
             maxServerTs = docUpdatedAt;

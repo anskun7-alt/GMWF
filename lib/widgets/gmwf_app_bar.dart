@@ -6,6 +6,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../realtime/connection_manager.dart';
 import '../services/user_theme_service.dart';
 import '../design/tokens/breakpoints.dart';
+import 'lan_server_config_dialog.dart';
 
 class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
@@ -180,6 +181,7 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
                     if (connectionStatus != null && !isMobile) ...[
                       const SizedBox(width: 8),
                       _buildLanStatusPill(
+                        context: context,
                         isDark: isDark,
                         status: connectionStatus!,
                         isCompact: isCompact,
@@ -333,6 +335,7 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
   }
 
   Widget _buildLanStatusPill({
+    required BuildContext context,
     required bool isDark,
     required ConnectionStatus status,
     required bool isCompact,
@@ -359,7 +362,15 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     }
 
     return InkWell(
-      onTap: !isConnected ? onRetryConnection : null,
+      onTap: () {
+        // When disconnected and retry callback exists, retry immediately
+        // instead of opening the config dialog.
+        if (!isConnected && onRetryConnection != null) {
+          onRetryConnection!();
+          return;
+        }
+        LanServerConfigDialog.show(context);
+      },
       borderRadius: BorderRadius.circular(14),
       child: Container(
         height: 40,

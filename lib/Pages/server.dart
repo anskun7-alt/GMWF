@@ -181,6 +181,7 @@ class _ServerDashboardWithSyncState
 
   bool _isOnline     = false;
   bool _isManualSyncing = false;
+  bool _isCatchingUp    = false;
   double _pulseTick  = 0.0;
   int  _syncQueueSize = 0;
   int  _syncedToday   = 0;
@@ -194,6 +195,7 @@ class _ServerDashboardWithSyncState
   Timer? _updateTimer;
   Timer? _syncTimer;
   Timer? _udpBroadcastTimer;
+  Timer? _clientUiThrottleTimer;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   StreamSubscription<Map<String, dynamic>>? _punchSubscription;
   StreamSubscription<SystemSnapshot>? _metricsSubscription;
@@ -497,16 +499,21 @@ class _ServerDashboardWithSyncState
           _addLog('📨 $rawType: from $sender');
         }
 
-        if (mounted) {
-          setState(() {
-            for (final entry in _connectedClients.entries) {
-              if (entry.key == socketId || entry.value.clientId == clientId || entry.value.username == sender) {
-                entry.value.messagesCount++;
-                entry.value.lastActiveAt = DateTime.now();
-                entry.value.currentActivity = _describeActivity(rawType, message['data']);
-              }
-            }
-          });
+        bool clientUpdated = false;
+        for (final entry in _connectedClients.entries) {
+          if (entry.key == socketId || entry.value.clientId == clientId || entry.value.username == sender) {
+            entry.value.messagesCount++;
+            entry.value.lastActiveAt = DateTime.now();
+            entry.value.currentActivity = _describeActivity(rawType, message['data']);
+            clientUpdated = true;
+          }
+        }
+        if (clientUpdated && mounted) {
+          if (_clientUiThrottleTimer?.isActive != true) {
+            _clientUiThrottleTimer = Timer(const Duration(seconds: 1), () {
+              if (mounted) setState(() {});
+            });
+          }
         }
       };
 
@@ -526,6 +533,7 @@ class _ServerDashboardWithSyncState
         branchId: widget.branchId,
         server:   _server!,
         onSyncComplete: (int count) {
+          if (!mounted) return;
           setState(() {
             _syncedToday += count;
             _lastSyncTime = DateTime.now();
@@ -533,6 +541,7 @@ class _ServerDashboardWithSyncState
           _addLog('✅ Synced $count items to Firestore');
         },
         onSyncError: (error) {
+          if (!mounted) return;
           setState(() => _syncErrors++);
           _addLog('❌ Sync error: $error');
         },
@@ -590,6 +599,21 @@ class _ServerDashboardWithSyncState
           connectedClientsCount: _connectedClients.length,
           syncQueueSize: _syncManager?.queueSize ?? 0,
         );
+
+        // Also publish directly to Firestore branches doc so all network desks discover this server automatically
+        if (_serverIp != '127.0.0.1' && _serverIp != 'localhost') {
+          try {
+            FirebaseFirestore.instance.collection('branches').doc(widget.branchId).set({
+              'activeServerIp': _serverIp,
+              'activeServerPort': AppNetwork.websocketPort,
+              'serverLastSeen': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true)).catchError((e) {
+              debugPrint('[Server] Could not publish activeServerIp to Firestore: $e');
+            });
+          } catch (e) {
+            debugPrint('[Server] Exception publishing activeServerIp to Firestore: $e');
+          }
+        }
       }
 
       _addLog('✅ Server started on $_serverIp:${AppNetwork.websocketPort}');
@@ -705,6 +729,79 @@ class _ServerDashboardWithSyncState
       if (mounted) {
         setState(() {
           _isManualSyncing = false;
+          _syncQueueSize = _syncManager?.queueSize ?? 0;
+        });
+      }
+    }
+  }
+
+  Future<void> _triggerCatchUpAndFixMismatch() async {
+    if (_syncManager == null || !_isRunning) {
+      _showError('Server is not currently running');
+      return;
+    }
+    setState(() => _isCatchingUp = true);
+    _addLog('⚡ Starting full LAN Catch-Up & Data Mismatch Healing...');
+
+    try {
+      final purged = _syncManager!.purgeInvalidQueue();
+      if (purged > 0) {
+        _addLog('🧹 Cleaned $purged stale entries from sync queue');
+      }
+
+      final stats = await _syncManager!.triggerCatchUpAndFixMismatch(forceAll: true);
+
+      // Run cloud upload and biometric hardware sync in background so UI completes immediately
+      unawaited(() async {
+        try {
+          await SyncService().triggerUpload(force: true);
+        } catch (e) {
+          debugPrint('[Server] CatchUp SyncService upload notice: $e');
+        }
+
+        try {
+          await ZkTecoNetworkService.syncAllDevices().timeout(const Duration(seconds: 4));
+        } catch (_) {}
+      }());
+
+      final clients = stats['clients'] ?? 0;
+      final entries = stats['entries'] ?? 0;
+      final stock = stats['stock'] ?? 0;
+      final requests = stats['requests'] ?? 0;
+
+      _addLog('✅ Catch-Up Complete: Pushed $entries tokens, $stock stock items, $requests requests to $clients connected workstation(s)');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.bolt_rounded, color: Colors.white, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    clients > 0
+                        ? 'LAN Catch-Up Complete: Pushed $entries tokens, $stock stock items, $requests requests to $clients workstation(s).'
+                        : 'Catch-Up Complete: Server cache reset. Synced with Cloud Firestore.',
+                    style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF0D9488),
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        );
+      }
+    } catch (e) {
+      _addLog('❌ Catch-Up error: $e');
+      _showError('Catch-Up encountered an error: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCatchingUp = false;
           _syncQueueSize = _syncManager?.queueSize ?? 0;
         });
       }
@@ -879,6 +976,15 @@ class _ServerDashboardWithSyncState
                   },
                 ),
                 ElevatedButton.icon(
+                  icon: const Icon(Icons.bolt_rounded, size: 16, color: Colors.white),
+                  label: const Text('Catch-Up LAN Devices', style: TextStyle(color: Colors.white)),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D9488)),
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await _triggerCatchUpAndFixMismatch();
+                  },
+                ),
+                ElevatedButton.icon(
                   icon: const Icon(Icons.cloud_upload_outlined, size: 16, color: Colors.white),
                   label: const Text('Force Cloud Sync', style: TextStyle(color: Colors.white)),
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF3B82F6)),
@@ -901,6 +1007,7 @@ class _ServerDashboardWithSyncState
   }
 
   void _addLog(String message) {
+    if (!mounted) return;
     setState(() {
       _activityLog.insert(
           0, '${_formatTime(DateTime.now())} - $message');
@@ -1112,6 +1219,7 @@ class _ServerDashboardWithSyncState
     _updateTimer?.cancel();
     _syncTimer?.cancel();
     _udpBroadcastTimer?.cancel();
+    _clientUiThrottleTimer?.cancel();
     _connectivitySub?.cancel();
     _syncManager?.stop();
     _server?.stop();
@@ -1429,6 +1537,30 @@ class _ServerDashboardWithSyncState
                   ),
                 ),
                 const SizedBox(height: 8),
+
+                if (_isRunning) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: !_isCatchingUp ? _triggerCatchUpAndFixMismatch : null,
+                      icon: _isCatchingUp
+                          ? const SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.bolt_rounded, size: 15),
+                      label: Text(
+                        _isCatchingUp ? 'Catching Up...' : 'Catch-Up & Fix Mismatch',
+                        style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 11.5),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF0D9488),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 9),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
 
                 // Utility actions row
                 Row(
@@ -1834,6 +1966,34 @@ class _ServerDashboardWithSyncState
                   );
                 },
               ),
+
+              if (_isRunning) ...[
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Push all broadcast drops, missed tokens, and stock updates to LAN devices',
+                  child: ElevatedButton.icon(
+                    onPressed: !_isCatchingUp ? _triggerCatchUpAndFixMismatch : null,
+                    icon: _isCatchingUp
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.bolt_rounded, size: 14),
+                    label: Text(
+                      _isCatchingUp ? 'Catching Up...' : 'Catch-Up & Fix Mismatch',
+                      style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0D9488),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ],
@@ -2136,9 +2296,29 @@ class _ServerDashboardWithSyncState
                 ),
               ),
               const SizedBox(height: 12),
-              // Actions: Force Cloud Sync & Copy Gateway URL
+              // Actions: Catch-Up & Fix Mismatch, Force Cloud Sync & Copy Gateway URL
               Row(
                 children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: (_isRunning && !_isCatchingUp) ? _triggerCatchUpAndFixMismatch : null,
+                      icon: _isCatchingUp
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.bolt_rounded, size: 16),
+                      label: Text(
+                        _isCatchingUp ? 'Catching Up...' : 'Catch-Up & Fix Mismatch',
+                        style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF0D9488),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: ElevatedButton.icon(
                       onPressed: (_isOnline && !_isManualSyncing) ? _manualSync : null,
@@ -3956,14 +4136,22 @@ class ServerSyncManager {
   final LanServer server;
   final Function(int) onSyncComplete;
   final Function(String) onSyncError;
-  final Function(Map<String, dynamic>) onMessageReceived;
+  final FutureOr<void> Function(Map<String, dynamic>) onMessageReceived;
 
   Timer? _syncTimer;
   Timer? _catchUpTimer;
   Timer? _downloadTimer;
   Timer? _compactionTimer;
+  Timer? _syncDebounceTimer;
   bool _isSyncing = false;
   int _syncedThisRun = 0;
+
+  void _scheduleSyncDebounced({Duration delay = const Duration(seconds: 4)}) {
+    _syncDebounceTimer?.cancel();
+    _syncDebounceTimer = Timer(delay, () {
+      triggerSync();
+    });
+  }
 
   // ── Non-persistence / heartbeat event types that must NOT be queued ─────────
   static const Set<String> _ignoredEventTypes = {
@@ -4004,6 +4192,9 @@ class ServerSyncManager {
   // skipped instead of being re-blasted on every reconnect.
   final Map<String, Set<String>> _clientSeenStock = {};
   static const int _maxSeenStockPerClient = 5000;
+
+  // [A4] Cross-socket serial write lock queue to prevent concurrent race conditions
+  final Map<String, Future<void>> _serialLocks = {};
 
   // ── Saved previous callbacks so the dashboard UI keeps working ─────────────
   Function(String socketId, Map<String, dynamic> info)? _prevOnClientConnected;
@@ -4150,12 +4341,12 @@ class ServerSyncManager {
 
   Future<void> _downloadTodayTokens({bool force = false}) async {
     final now = DateTime.now();
-    if (!force && _lastTokenDownloadTime != null && now.difference(_lastTokenDownloadTime!).inMinutes < 15) {
+    if (!force && _lastTokenDownloadTime != null && now.difference(_lastTokenDownloadTime!).inSeconds < 30) {
       return;
     }
     _lastTokenDownloadTime = now;
     try {
-      await LocalStorageService.downloadTodayTokens(branchId);
+      await LocalStorageService.downloadTodayTokens(branchId, null, true);
     } catch (e) {
       debugPrint('[SSM] _downloadTodayTokens error: $e');
     }
@@ -4220,10 +4411,10 @@ class ServerSyncManager {
   }
 
   // ── Message interception — local saves + catch-up + Firestore queue ────────
-  void _handleIncomingMessage(Map<String, dynamic> message) {
+  Future<void> _handleIncomingMessage(Map<String, dynamic> message) async {
     final eventType = message['event_type'] as String?;
     if (eventType == null) return;
-    onMessageReceived(message);
+    await onMessageReceived(message);
 
         // ── Handle catch-up / ACK events (do NOT queue for Firestore) ────────────
     if (eventType == 'ack_serials') {
@@ -4236,7 +4427,7 @@ class ServerSyncManager {
       return;
     }
 
-        if (eventType == 'request_catch_up') {
+    if (eventType == 'request_catch_up' || eventType == 'request_full_lan_sync') {
       final socketId = message['_socketId']?.toString();
       if (socketId != null) {
         _clientSeenSerials.remove(socketId); // Clear seen set so forced catchup works
@@ -4248,20 +4439,30 @@ class ServerSyncManager {
             break;
           }
         }
-        if (info != null) {
-          final clientInfo = info;
-          debugPrint('[SSM] Catch-up requested by $socketId');
-          _downloadTodayTokens().then((_) {
-            _pushCatchUpToSocket(socketId, clientInfo);
-            _pushInventoryCatchUpToSocket(socketId, clientInfo);
-          });
-        }
+        final clientInfo = info ?? {
+          'socketId': socketId,
+          'role': message['_senderRole'] ?? message['role'] ?? 'doctor',
+          'branchId': message['_senderBranch'] ?? message['branchId'] ?? branchId,
+          'username': message['_senderUsername'] ?? message['username'] ?? '',
+        };
+        debugPrint('[SSM] Catch-up requested by $socketId');
+        // 1. Immediately push local tokens and inventory over LAN (0ms delay)
+        _pushCatchUpToSocket(socketId, clientInfo, forceAll: true);
+        _pushInventoryCatchUpToSocket(socketId, clientInfo, forceAll: true);
+
+        // 2. Fetch today tokens from cloud in background without blocking LAN response
+        _downloadTodayTokens().then((_) {
+          _pushCatchUpToSocket(socketId, clientInfo);
+          _pushInventoryCatchUpToSocket(socketId, clientInfo);
+        }).catchError((e) {
+          debugPrint('[SSM] Background cloud download error: $e');
+        });
       }
       return;
     }
 
     // ── Save data locally on the server device ───────────────────────────────
-    _saveToLocalHive(eventType, message);
+    await _saveToLocalHive(eventType, message);
 
     // ── Queue for Firestore sync ─────────────────────────────────────────────
     _queueForSync(message);
@@ -4291,7 +4492,16 @@ class ServerSyncManager {
         case 'token_created':
           final serial = data['serial']?.toString().trim();
           if (serial != null && serial.isNotEmpty) {
-            LocalStorageService.saveEntryLocal(msgBranch, serial, data);
+            // [A4] Cross-socket write lock queue for this specific serial
+            final lockKey = '$msgBranch-$serial';
+            final currentLock = _serialLocks[lockKey] ?? Future.value();
+            final nextLock = currentLock.then((_) async {
+              await LocalStorageService.saveEntryLocal(msgBranch, serial, data);
+            }).catchError((e) {
+              debugPrint('[SSM] Error in serial write lock for $lockKey: $e');
+            });
+            _serialLocks[lockKey] = nextLock;
+            await nextLock;
             debugPrint('[SSM] ✅ Entry saved locally: $msgBranch-$serial');
           }
           break;
@@ -4299,8 +4509,9 @@ class ServerSyncManager {
         case 'save_prescription':
         case 'prescription_created':
           final serial = data['serial']?.toString().trim();
+          final entryUid = (data['entryUid'] ?? message['entryUid'])?.toString().trim();
           if (serial != null && serial.isNotEmpty) {
-            LocalStorageService.saveLocalPrescription(data);
+            await LocalStorageService.saveLocalPrescription(data);
             try {
               if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
                 final eBox = Hive.box(LocalStorageService.entriesBox);
@@ -4309,14 +4520,30 @@ class ServerSyncManager {
                 final key = '$normBranch-$serial';
 
                 dynamic targetKey = key;
-                dynamic existing = eBox.get(key);
-                if (existing == null) {
+                dynamic existing;
+
+                // [A4] Look up by entryUid first if present to match the exact collision entry
+                if (entryUid != null && entryUid.isNotEmpty) {
                   for (final k in eBox.keys) {
-                    final kStr = k.toString().toLowerCase().trim();
-                    if (kStr == '$normBranch-$normSerial' || kStr == normSerial || kStr.endsWith('-$normSerial')) {
+                    final val = eBox.get(k);
+                    if (val is Map && (val['entryUid']?.toString().trim() == entryUid)) {
                       targetKey = k;
-                      existing = eBox.get(k);
+                      existing = val;
                       break;
+                    }
+                  }
+                }
+
+                if (existing == null) {
+                  existing = eBox.get(key);
+                  if (existing == null) {
+                    for (final k in eBox.keys) {
+                      final kStr = k.toString().toLowerCase().trim();
+                      if (kStr == '$normBranch-$normSerial' || kStr == normSerial || kStr.endsWith('-$normSerial')) {
+                        targetKey = k;
+                        existing = eBox.get(k);
+                        break;
+                      }
                     }
                   }
                 }
@@ -4327,7 +4554,10 @@ class ServerSyncManager {
                   updated['prescription'] = data;
                   updated['prescriptionId'] = data['id'] ?? serial;
                   updated['completedAt'] ??= data['completedAt'] ?? DateTime.now().toIso8601String();
-                  eBox.put(targetKey, updated);
+                  if (entryUid != null && entryUid.isNotEmpty) {
+                    updated['entryUid'] = entryUid;
+                  }
+                  await eBox.put(targetKey, updated);
                 }
               }
             } catch (_) {}
@@ -4337,6 +4567,7 @@ class ServerSyncManager {
 
         case 'dispense_completed':
           final serial = data['serial']?.toString().trim();
+          final entryUid = (data['entryUid'] ?? message['entryUid'])?.toString().trim();
           if (serial != null && serial.isNotEmpty) {
             try {
               if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
@@ -4351,18 +4582,34 @@ class ServerSyncManager {
                 final canonicalKey = '$normBranch-$normSerialUpper';
 
                 dynamic targetKey = canonicalKey;
-                dynamic existing = eBox.get(canonicalKey) ?? eBox.get('$normBranch-$cleanSerial');
-                if (existing == null) {
+                dynamic existing;
+
+                // [A4] Look up by entryUid first if present
+                if (entryUid != null && entryUid.isNotEmpty) {
                   for (final k in eBox.keys) {
-                    final kStr = k.toString().toLowerCase().trim();
-                    if (kStr == canonicalKey.toLowerCase() ||
-                        kStr == '$normBranch-$normSerial' ||
-                        kStr == normSerial ||
-                        kStr.endsWith('-$normSerial') ||
-                        kStr.endsWith('-$normSerialUpper'.toLowerCase())) {
+                    final val = eBox.get(k);
+                    if (val is Map && (val['entryUid']?.toString().trim() == entryUid)) {
                       targetKey = k;
-                      existing = eBox.get(k);
+                      existing = val;
                       break;
+                    }
+                  }
+                }
+
+                if (existing == null) {
+                  existing = eBox.get(canonicalKey) ?? eBox.get('$normBranch-$cleanSerial');
+                  if (existing == null) {
+                    for (final k in eBox.keys) {
+                      final kStr = k.toString().toLowerCase().trim();
+                      if (kStr == canonicalKey.toLowerCase() ||
+                          kStr == '$normBranch-$normSerial' ||
+                          kStr == normSerial ||
+                          kStr.endsWith('-$normSerial') ||
+                          kStr.endsWith('-$normSerialUpper'.toLowerCase())) {
+                        targetKey = k;
+                        existing = eBox.get(k);
+                        break;
+                      }
                     }
                   }
                 }
@@ -4376,13 +4623,16 @@ class ServerSyncManager {
                   updated['dispensedBy'] = data['dispensedBy'] ?? data['dispenserName'];
                   updated['completedAt'] =
                       data['completedAt'] ?? DateTime.now().toIso8601String();
-                  eBox.put(targetKey, updated);
-                  if (targetKey != canonicalKey) {
-                    eBox.put(canonicalKey, updated);
+                  if (entryUid != null && entryUid.isNotEmpty) {
+                    updated['entryUid'] = entryUid;
                   }
-                  debugPrint('[SSM] ✅ Dispense saved locally: $canonicalKey');
+                  await eBox.put(targetKey, updated);
+                  if (targetKey != canonicalKey && !targetKey.toString().contains('-COLLISION-')) {
+                    await eBox.put(canonicalKey, updated);
+                  }
+                  debugPrint('[SSM] ✅ Dispense saved locally: $targetKey');
                 }
-                LocalStorageService.updateDispenseStatus(normBranch, normSerialUpper, 'dispensed');
+                await LocalStorageService.updateDispenseStatus(normBranch, normSerialUpper, 'dispensed');
               }
             } catch (_) {}
           }
@@ -4595,15 +4845,48 @@ class ServerSyncManager {
         case 'workflow_decision':
           try {
             final reqId = (data['requestId'] ?? data['id'] ?? data['docId'])?.toString();
+            final resolvedStatus = (eventType == 'request_rejected' || data['status'] == 'rejected') ? 'rejected' : 'approved';
             if (reqId != null && reqId.isNotEmpty) {
               if (Hive.isBoxOpen('local_edit_requests')) {
                 final box = Hive.box('local_edit_requests');
                 final raw = box.get(reqId);
                 final map = raw is Map ? Map<String, dynamic>.from(raw) : Map<String, dynamic>.from(data);
-                map['status'] = eventType == 'request_rejected' ? 'rejected' : 'approved';
+                map['status'] = resolvedStatus;
+                if (data['reviewedAt'] != null) map['reviewedAt'] = data['reviewedAt'];
+                if (data['reviewedBy'] != null) map['reviewedBy'] = data['reviewedBy'];
+                if (data['reviewedByName'] != null) map['reviewedByName'] = data['reviewedByName'];
+                if (data['doctorReason'] != null) map['doctorReason'] = data['doctorReason'];
+                if (data['rejectionReason'] != null) map['rejectionReason'] = data['rejectionReason'];
                 await box.put(reqId, map);
-                debugPrint('[SSM] ✅ Request $reqId status updated to ${map['status']} on server');
+                debugPrint('[SSM] ✅ Request $reqId status updated to $resolvedStatus on server');
               }
+              if (Hive.isBoxOpen(LocalStorageService.restockRequestsBox)) {
+                final rBox = Hive.box(LocalStorageService.restockRequestsBox);
+                final raw = rBox.get(reqId);
+                if (raw is Map) {
+                  final map = Map<String, dynamic>.from(raw);
+                  map['status'] = resolvedStatus;
+                  if (data['reviewedAt'] != null) map['reviewedAt'] = data['reviewedAt'];
+                  if (data['reviewedBy'] != null) map['reviewedBy'] = data['reviewedBy'];
+                  if (data['reviewedByName'] != null) map['reviewedByName'] = data['reviewedByName'];
+                  if (data['doctorReason'] != null) map['doctorReason'] = data['doctorReason'];
+                  if (data['rejectionReason'] != null) map['rejectionReason'] = data['rejectionReason'];
+                  await rBox.put(reqId, map);
+                }
+              }
+              // Enqueue Firestore sync on server
+              final bId = (data['branchId']?.toString() ?? msgBranch).toLowerCase().trim();
+              final col = (data['collection'] ?? 'edit_requests').toString();
+              await LocalStorageService.enqueueSync({
+                'type': resolvedStatus == 'approved' ? 'approve_request' : 'reject_request',
+                'requestId': reqId,
+                'id': reqId,
+                'docId': reqId,
+                'status': resolvedStatus,
+                'collection': col,
+                'branchId': bId.isNotEmpty ? bId : branchId,
+                'data': data,
+              });
             }
           } catch (e) {
             debugPrint('[SSM] request status update local error: $e');
@@ -4668,43 +4951,61 @@ class ServerSyncManager {
     }
   }
 
-  // ── Catch-up push — send unseen today's entries to a client ────────────────
-  Future<void> _pushCatchUpToSocket(
-      String socketId, Map<String, dynamic> info) async {
+  // ── Catch-up push — send today's entries to a client (supports forceAll) ──
+  Future<int> _pushCatchUpToSocket(
+      String socketId, Map<String, dynamic> info, {bool forceAll = false}) async {
     final role = (info['role'] ?? '').toString().toLowerCase();
 
     final today = _todayKey();
     List<Map<String, dynamic>> entries;
     try {
-      entries = LocalStorageService.getLocalEntries(branchId).where((e) {
-        final dk = (e['dateKey'] ?? '').toString().trim();
-        final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
-        final serialDk = CampSessionService.getDateKeyFromSerial(serial);
-        // [FIX] Strict today-only: no 24h fallback window.
-        // The fallback was causing yesterday's entries to be re-sent on every
-        // periodic catch-up (every 2 min), creating the 'old tokens reappearing'
-        // bug. Clients that need historical data should fetch from Firestore.
-        if (dk == today || dk.startsWith(today) || serialDk == today || serialDk.startsWith(today)) {
-          return true;
+      final clientBranch = (info['branchId'] ?? info['branch'] ?? '').toString().toLowerCase().trim();
+      final branchesToQuery = <String>{branchId};
+      if (clientBranch.isNotEmpty && clientBranch != 'all') branchesToQuery.add(clientBranch);
+      if (CampSessionService.isKarachiFamily(branchId)) {
+        branchesToQuery.addAll(['karachi', 'saddar', 'haji_camp', 'haji', 'hajicamp']);
+      }
+
+      final Map<String, Map<String, dynamic>> dedupedEntries = {};
+      for (final b in branchesToQuery) {
+        for (final e in LocalStorageService.getLocalEntries(b)) {
+          final dk = (e['dateKey'] ?? '').toString().trim();
+          final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
+          final serialDk = CampSessionService.getDateKeyFromSerial(serial);
+          bool isToday = (dk == today || dk.startsWith(today) || serialDk == today || serialDk.startsWith(today));
+          if (!isToday) {
+            final createdAt = (e['createdAt'] ?? e['timestamp'] ?? '').toString().trim();
+            if (createdAt.isNotEmpty) {
+              final parsed = DateTime.tryParse(createdAt);
+              if (parsed != null) {
+                final entryDk = CampSessionService.resolveShiftAndDateKey(parsed, branchId).dateKey;
+                if (entryDk == today) isToday = true;
+              }
+            }
+          }
+          if (isToday && serial.isNotEmpty) {
+            dedupedEntries[serial.toUpperCase()] = e;
+          }
         }
-        return false;
-      }).toList();
+      }
+      entries = dedupedEntries.values.toList();
     } catch (e) {
       debugPrint('[SSM] Catch-up read failed: $e');
-      return;
+      return 0;
     }
 
     final clientSeen = _clientSeenSerials[socketId] ?? <String>{};
-    final unseen = entries.where((e) {
+    final candidates = entries.where((e) {
       final serial = e['serial']?.toString().trim() ?? '';
-      return serial.isNotEmpty && !clientSeen.contains(serial);
+      return serial.isNotEmpty && (forceAll || !clientSeen.contains(serial));
     }).toList();
 
-    if (unseen.isEmpty) return;
+    if (candidates.isEmpty) return 0;
 
-    debugPrint('[SSM] 📤 Catch-up to $role ($socketId): ${unseen.length} unseen entry(ies)');
+    debugPrint('[SSM] 📤 Catch-up to $role ($socketId): ${candidates.length} entry(ies) (forceAll=$forceAll)');
+    int pushedCount = 0;
 
-    for (final entry in unseen) {
+    for (final entry in candidates) {
       final serial = entry['serial']?.toString() ?? '';
       if (serial.isEmpty) continue;
 
@@ -4757,6 +5058,7 @@ class ServerSyncManager {
         'branchId': branchId,
         'data': entryCopy,
         '_serverPush': true,
+        'isCatchUp': true,
       });
 
       bool allSent = entrySent;
@@ -4767,6 +5069,7 @@ class ServerSyncManager {
           'branchId': branchId,
           'data': presc,
           '_serverPush': true,
+          'isCatchUp': true,
         });
         if (!prescSent) allSent = false;
       }
@@ -4777,6 +5080,7 @@ class ServerSyncManager {
           'branchId': branchId,
           'data': entryCopy,
           '_serverPush': true,
+          'isCatchUp': true,
         });
         if (!dispSent) allSent = false;
       }
@@ -4784,6 +5088,7 @@ class ServerSyncManager {
       // [FIX-A] Only mark seen if ALL related messages (entry + presc + dispense)
       // were confirmed successful on socket. If any failed, retry next sweep.
       if (allSent) {
+        pushedCount++;
         _clientSeenSerials[socketId] ??= {};
         _clientSeenSerials[socketId]!.add(serial);
 
@@ -4795,22 +5100,16 @@ class ServerSyncManager {
         }
       }
 
-      await Future.delayed(const Duration(milliseconds: 20));
+      await Future.delayed(const Duration(milliseconds: 4));
     }
+    return pushedCount;
   }
 
-  // ── [FIX-INV-CATCHUP] Push full current stock snapshot to a reconnecting
-  // client. Unlike tokens, inventory has no per-item "seen" tracking — we
-  // just replay every non-deleted stock item as a full save_stock_item
-  // (no _quantityDelta), which the existing client-side handler already
-  // treats as an authoritative overwrite via saveLocalInventoryItem. This
-  // guarantees a doctor/dispenser device that was offline during a restock
-  // ends up with correct totals once it reconnects, instead of relying on
-  // having been online for every individual live broadcast.
-   Future<void> _pushInventoryCatchUpToSocket(
-      String socketId, Map<String, dynamic> info) async {
+  // ── [FIX-INV-CATCHUP] Push full current stock snapshot to clients ──────────
+  Future<int> _pushInventoryCatchUpToSocket(
+      String socketId, Map<String, dynamic> info, {bool forceAll = false}) async {
     try {
-      if (!Hive.isBoxOpen(LocalStorageService.stockBox)) return;
+      if (!Hive.isBoxOpen(LocalStorageService.stockBox)) return 0;
       final stockBox = Hive.box(LocalStorageService.stockBox);
       final targetBranch = branchId.toLowerCase().trim();
       final seen = _clientSeenStock[socketId] ??= {};
@@ -4831,13 +5130,9 @@ class ServerSyncManager {
         final medicineId = (item['id'] ?? item['medicineId'] ?? item['docId'] ?? k).toString().trim();
         if (medicineId.isEmpty) continue;
 
-        // [INV-CATCHUP] version = last-write timestamp on this item. A client
-        // that already acked this exact medicineId+version is skipped — a
-        // fresh restock bumps lastUpdated/updatedAt, producing a new version
-        // string, so it's always treated as unseen and gets pushed again.
         final version = (item['updatedAt'] ?? item['lastUpdated'] ?? item['createdAt'] ?? '').toString();
         final seenMarker = '$medicineId|$version';
-        if (seen.contains(seenMarker)) {
+        if (!forceAll && seen.contains(seenMarker)) {
           skipped++;
           continue;
         }
@@ -4861,8 +5156,8 @@ class ServerSyncManager {
         await Future.delayed(const Duration(milliseconds: 10));
       }
 
-            if (pushed > 0 || skipped > 0) {
-        debugPrint('[SSM] 📦 Inventory catch-up → $socketId: $pushed pushed, $skipped already-seen');
+      if (pushed > 0 || skipped > 0) {
+        debugPrint('[SSM] 📦 Inventory catch-up → $socketId: $pushed pushed, $skipped already-seen (forceAll=$forceAll)');
         onMessageReceived({
           'event_type': 'inventory_catchup_pushed',
           '_senderRole': 'server',
@@ -4870,35 +5165,46 @@ class ServerSyncManager {
           'data': {'socketId': socketId, 'itemsPushed': pushed, 'itemsSkipped': skipped},
         });
       }
+      return pushed;
     } catch (e) {
       debugPrint('[SSM] _pushInventoryCatchUpToSocket error: $e');
+      return 0;
     }
   }
 
-  Future<void> _pushPendingRequestsCatchUpToSocket(
+  Future<int> _pushPendingRequestsCatchUpToSocket(
       String socketId, Map<String, dynamic> info) async {
+    int pushed = 0;
     try {
-      if (!Hive.isBoxOpen('local_edit_requests')) return;
-      final box = Hive.box('local_edit_requests');
-      for (final key in box.keys) {
-        final raw = box.get(key);
-        if (raw is! Map) continue;
-        final reqMap = Map<String, dynamic>.from(raw);
-        final status = (reqMap['status'] ?? 'pending').toString().toLowerCase();
-        if (status != 'pending') continue;
-        final reqBranch = (reqMap['branchId'] ?? '').toString().toLowerCase().trim();
-        if (reqBranch.isNotEmpty && reqBranch != branchId.toLowerCase().trim()) continue;
-        _sendToSocket(socketId, {
-          'event_type': 'request_created',
-          'branchId': branchId,
-          'data': reqMap,
-          '_serverPush': true,
-        });
-        await Future.delayed(const Duration(milliseconds: 20));
+      final boxNames = ['local_edit_requests', 'local_token_reversals', 'local_inventory_requests', 'local_requests'];
+      for (final boxName in boxNames) {
+        if (!Hive.isBoxOpen(boxName)) continue;
+        final box = Hive.box(boxName);
+        for (final key in box.keys) {
+          final raw = box.get(key);
+          if (raw is! Map) continue;
+          final reqMap = Map<String, dynamic>.from(raw);
+          final reqBranch = (reqMap['branchId'] ?? '').toString().toLowerCase().trim();
+          if (reqBranch.isNotEmpty && reqBranch != branchId.toLowerCase().trim()) continue;
+          final status = (reqMap['status'] ?? 'pending').toString().toLowerCase().trim();
+          final eventType = status == 'approved'
+              ? 'request_approved'
+              : (status == 'rejected' ? 'request_rejected' : 'request_created');
+          final sent = _sendToSocket(socketId, {
+            'event_type': eventType,
+            'branchId': branchId,
+            'data': reqMap,
+            '_serverPush': true,
+            'isCatchUp': true,
+          });
+          if (sent) pushed++;
+          await Future.delayed(const Duration(milliseconds: 15));
+        }
       }
     } catch (e) {
       debugPrint('[SSM] _pushPendingRequestsCatchUpToSocket error: $e');
     }
+    return pushed;
   }
 
   bool _sendToSocket(String socketId, Map<String, dynamic> payload) {
@@ -4910,7 +5216,7 @@ class ServerSyncManager {
     }
   }
 
-    void _handleClientAck(Map<String, dynamic> msg) {
+  void _handleClientAck(Map<String, dynamic> msg) {
     var socketId = (msg['_socketId'] ?? '').toString();
     final clientId = (msg['_clientId'] ?? '').toString();
     if (socketId.isEmpty && clientId.isNotEmpty) {
@@ -4970,18 +5276,92 @@ class ServerSyncManager {
     }
   }
 
-  void pushCatchUpAll() => _periodicCatchUpAll();
+  void pushCatchUpAll({bool forceAll = false}) => _periodicCatchUpAll(forceAll: forceAll);
 
-        void _periodicCatchUpAll() {
+  Future<Map<String, int>> _periodicCatchUpAll({bool forceAll = false}) async {
     final clients = server.getConnectedClients();
-    if (clients.isEmpty) return;
+    int entriesCount = 0;
+    int stockCount = 0;
+    int requestsCount = 0;
+    if (clients.isEmpty) {
+      return {'clients': 0, 'entries': 0, 'stock': 0, 'requests': 0};
+    }
     for (final client in clients) {
       final socketId = client['socketId']?.toString();
       if (socketId == null || socketId.isEmpty) continue;
-      _pushCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
-      _pushInventoryCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
-      _pushPendingRequestsCatchUpToSocket(socketId, Map<String, dynamic>.from(client));
+      final cMap = Map<String, dynamic>.from(client);
+      final e = await _pushCatchUpToSocket(socketId, cMap, forceAll: forceAll);
+      final s = await _pushInventoryCatchUpToSocket(socketId, cMap, forceAll: forceAll);
+      final r = await _pushPendingRequestsCatchUpToSocket(socketId, cMap);
+      entriesCount += e;
+      stockCount += s;
+      requestsCount += r;
     }
+    return {
+      'clients': clients.length,
+      'entries': entriesCount,
+      'stock': stockCount,
+      'requests': requestsCount,
+    };
+  }
+
+  // ── [CATCH-UP & FIX MISMATCH] Authoritative Data Healing ─────────────────────
+  // Resets client seen trackers so no device is skipped due to past broadcast drops,
+  // pushes today's tokens, prescriptions, inventory, and requests to all connected
+  // workstations, and broadcasts signals to trigger local queue synchronization.
+  Future<Map<String, int>> triggerCatchUpAndFixMismatch({bool forceAll = true}) async {
+    if (forceAll) {
+      _clientSeenSerials.clear();
+      _clientSeenStock.clear();
+      debugPrint('[SSM] ⚡ Cleared client seen serials & stock caches for full catch-up resync');
+    }
+
+    // 1. Download latest tokens from Firestore if online
+    try {
+      await _downloadTodayTokens(force: true);
+    } catch (e) {
+      debugPrint('[SSM] catchup token download note: $e');
+    }
+
+    // 2. Push all data to all connected clients
+    final stats = await _periodicCatchUpAll(forceAll: forceAll);
+
+    // 3. Broadcast sync signals to all clients
+    try {
+      server.broadcast(jsonEncode({
+        'event_type': 'force_all_users_cloud_sync',
+        'branchId': branchId,
+        'timestamp': DateTime.now().toIso8601String(),
+        '_serverPush': true,
+      }));
+      server.broadcast(jsonEncode({
+        'event_type': 'server_catchup_completed',
+        'branchId': branchId,
+        'entriesPushed': stats['entries'] ?? 0,
+        'stockPushed': stats['stock'] ?? 0,
+        'requestsPushed': stats['requests'] ?? 0,
+        'clientCount': stats['clients'] ?? 0,
+        'timestamp': DateTime.now().toIso8601String(),
+        '_serverPush': true,
+      }));
+    } catch (e) {
+      debugPrint('[SSM] broadcast catchup signals error: $e');
+    }
+
+    // 4. Backfill any offline local queues
+    unawaited(_enqueueMissingEntries());
+    unawaited(_enqueueMissingDonations());
+    unawaited(_enqueueMissingEmployees());
+    unawaited(_enqueueMissingAttendance());
+    unawaited(_enqueueMissingPatients());
+    unawaited(_enqueueMissingMadrassaStudents());
+
+    // 5. Trigger cloud sync in background (never block LAN catchup response)
+    try {
+      unawaited(triggerSync(force: true));
+    } catch (_) {}
+
+    return stats;
   }
 
   // ── Queue for Firestore — strict whitelist of non-ignored event types ──────
@@ -5044,6 +5424,7 @@ class ServerSyncManager {
 
           final medicines = data['medicines'];
           if (medicines is List && medicines.isNotEmpty) {
+            final entryUid = (data['entryUid'] ?? message['entryUid'])?.toString().trim();
             for (int i = 0; i < medicines.length; i++) {
               final med = medicines[i];
               if (med is! Map) continue;
@@ -5056,7 +5437,9 @@ class ServerSyncManager {
                   : double.tryParse(qty.toString()) ?? 0.0;
               if (medicineId.isEmpty || qtyNum <= 0) continue;
 
-              final invKey = 'sync_dispense_${bId}_${serial}_inv_${medicineId.toLowerCase()}';
+              final invKey = (entryUid != null && entryUid.isNotEmpty)
+                  ? 'sync_dispense_${bId}_${serial}_${entryUid}_inv_${medicineId.toLowerCase()}'
+                  : 'sync_dispense_${bId}_${serial}_inv_${medicineId.toLowerCase()}';
               box.put(invKey, {
                 'type':       'update_inventory',
                 'branchId':   bId,
@@ -5109,7 +5492,12 @@ class ServerSyncManager {
                 ? rawDelta.toDouble()
                 : double.tryParse(rawDelta.toString()) ?? 0.0;
             if (delta != 0) {
-              box.put('sync_stock_delta_${bId}_${medicineId}_${DateTime.now().microsecondsSinceEpoch}', {
+              // [A3] Replay-safe deterministic key instead of random microseconds timestamp
+              final txId = (data['txId'] ?? data['requestId'] ?? message['requestId'] ?? message['id'] ?? data['batchId'] ?? data['dateKey'] ?? data['createdAt'])?.toString().trim();
+              final invKey = (txId != null && txId.isNotEmpty)
+                  ? 'sync_stock_delta_${bId}_${medicineId}_$txId'
+                  : 'sync_stock_delta_${bId}_${medicineId}_${DateTime.now().millisecondsSinceEpoch}';
+              box.put(invKey, {
                 'type': 'update_inventory',
                 'branchId': bId,
                 'medicineId': medicineId,
@@ -5156,6 +5544,8 @@ class ServerSyncManager {
           : branchId;
 
       final rawSerial = (message['serial'] ?? (message['data'] is Map ? (message['data']['serial'] ?? message['data']['id']) : null))?.toString().trim().toUpperCase();
+      final entryUid = (message['entryUid'] ?? (message['data'] is Map ? message['data']['entryUid'] : null))?.toString().trim();
+      final hasCollision = message['hasCollision'] == true || (message['data'] is Map && message['data']['hasCollision'] == true);
 
       const serialTypes = {'save_entry', 'save_prescription', 'update_serial_status'};
       final mappedType = _mapEventTypeToSyncType(eventType);
@@ -5164,7 +5554,11 @@ class ServerSyncManager {
 
       String targetKey;
       if (isSerialType && rawSerial != null && rawSerial.isNotEmpty) {
-        targetKey = 'sync_${bId}_${rawSerial}_$mappedType';
+        if (hasCollision && entryUid != null && entryUid.isNotEmpty) {
+          targetKey = 'sync_${bId}_${rawSerial}_${entryUid}_$mappedType';
+        } else {
+          targetKey = 'sync_${bId}_${rawSerial}_$mappedType';
+        }
       } else if (mappedType == 'save_attendance') {
         final empId = (payloadData['employeeId'] ?? payloadData['entityId'] ?? payloadData['id'] ?? payloadData['pin'] ?? '').toString().trim();
         final dtKey = (message['dateKey'] ?? payloadData['date'] ?? payloadData['dateKey'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now())).toString().trim();
@@ -5214,7 +5608,7 @@ class ServerSyncManager {
       if (box.length > 25) {
         purgeInvalidQueue();
       }
-      unawaited(triggerSync());
+      _scheduleSyncDebounced();
     } catch (e) {
       debugPrint('[SSM] Error queuing message: $e');
     }
@@ -5857,12 +6251,18 @@ class ServerSyncManager {
           dispensaryTag: cleanData['dispensaryTag']?.toString(),
           serial: s,
         );
+        final entryUid = (cleanData['entryUid'] ?? data['entryUid'])?.toString().trim();
+        final hasCollision = cleanData['hasCollision'] == true || data['hasCollision'] == true;
+        final docId = (hasCollision && entryUid != null && entryUid.isNotEmpty)
+            ? '${s}_COLLISION_$entryUid'
+            : s;
+
         final entryRef = db
             .collection('branches').doc(effectiveBranchId)
             .collection('serials').doc(campDocKey)
-            .collection(qt).doc(s);
+            .collection(qt).doc(docId);
         await setDoc(entryRef, cleanData);
-        debugPrint('✅ save_entry → serials/$campDocKey/$qt/$s');
+        debugPrint('✅ save_entry → serials/$campDocKey/$qt/$docId');
 
         // Update local entry so pendingSync is cleared and marked synced on the server
         try {
@@ -5872,14 +6272,29 @@ class ServerSyncManager {
             final normS = s.toUpperCase().trim();
             final localKey = '$normB-$normS';
             dynamic targetKey = localKey;
-            dynamic existing = eBox.get(localKey);
-            if (existing == null) {
+            dynamic existing;
+
+            if (entryUid != null && entryUid.isNotEmpty) {
               for (final k in eBox.keys) {
-                final kStr = k.toString().toUpperCase().trim();
-                if (kStr == localKey.toUpperCase() || kStr == normS || kStr.endsWith('-$normS')) {
+                final val = eBox.get(k);
+                if (val is Map && (val['entryUid']?.toString().trim() == entryUid)) {
                   targetKey = k;
-                  existing = eBox.get(k);
+                  existing = val;
                   break;
+                }
+              }
+            }
+
+            if (existing == null) {
+              existing = eBox.get(localKey);
+              if (existing == null) {
+                for (final k in eBox.keys) {
+                  final kStr = k.toString().toUpperCase().trim();
+                  if (kStr == localKey.toUpperCase() || kStr == normS || kStr.endsWith('-$normS')) {
+                    targetKey = k;
+                    existing = eBox.get(k);
+                    break;
+                  }
                 }
               }
             }
@@ -6633,6 +7048,30 @@ class ServerSyncManager {
         }
         break;
 
+      // ── Requests & Edit Requests Module sync ─────────────────────────────
+      case 'update_request_status':
+      case 'approve_request':
+      case 'reject_request':
+      case 'request_approved':
+      case 'request_rejected':
+      case 'save_edit_request':
+      case 'request_created':
+        final reqId = (cleanData['id'] ?? cleanData['requestId'] ?? cleanData['docId'] ?? '').toString().trim();
+        final col = (cleanData['collection'] ?? cleanData['col'] ?? 'edit_requests').toString().trim();
+        final bId = (cleanData['branchId'] ?? effectiveBranchId).toString().trim();
+        if (reqId.isNotEmpty && bId.isNotEmpty) {
+          final payload = cleanData['data'] is Map ? Map<String, dynamic>.from(cleanData['data']) : Map<String, dynamic>.from(cleanData);
+          payload['lastSyncedAt'] = FieldValue.serverTimestamp();
+          if (type == 'approve_request' || type == 'request_approved') {
+            payload['status'] = 'approved';
+          } else if (type == 'reject_request' || type == 'request_rejected') {
+            payload['status'] = 'rejected';
+          }
+          await setDoc(db.collection('branches').doc(bId).collection(col).doc(reqId), payload, merge: true);
+          debugPrint('✅ $type → branches/$bId/$col/$reqId (status: ${payload['status']})');
+        }
+        break;
+
       default:
         debugPrint('ℹ️ [SSM] Generic sync type "$type" — saving to branches/$effectiveBranchId/records');
         final recordId = (cleanData['id'] ?? cleanData['key'] ?? DateTime.now().millisecondsSinceEpoch.toString()).toString();
@@ -6646,6 +7085,7 @@ class ServerSyncManager {
   }
 
   Future<void> stop() async {
+    _syncDebounceTimer?.cancel();
     _downloadTimer?.cancel();
     _syncTimer?.cancel();
     _catchUpTimer?.cancel();

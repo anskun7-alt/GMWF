@@ -57,7 +57,7 @@ class _PatientQueueState extends State<PatientQueue> {
   static const _queueCacheTTL = Duration(milliseconds: 500);  // Cache for 500ms
   bool _isSyncingQueue = false;
   bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(widget.branchId);
-  String get _todayKey => CampSessionService.resolveShiftAndDateKey().dateKey;
+  String get _todayKey => CampSessionService.resolveShiftAndDateKey(null, widget.branchId).dateKey;
 
   late StreamSubscription<Map<String, dynamic>> _realtimeSub;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
@@ -202,9 +202,11 @@ class _PatientQueueState extends State<PatientQueue> {
     final effectiveCamp = _hasMultiCamps
         ? ((_selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all')
             ? _selectedCampFilter
-            : (allowedCamps.isNotEmpty && !allowedCamps.contains('all')
-                ? allowedCamps.first
-                : CampSessionService.getActiveCamp(widget.branchId)))
+            : (_selectedCampFilter == 'all'
+                ? 'all'
+                : (allowedCamps.isNotEmpty && !allowedCamps.contains('all')
+                    ? allowedCamps.first
+                    : CampSessionService.getActiveCamp(widget.branchId))))
         : null;
 
     final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -436,6 +438,8 @@ class _PatientQueueState extends State<PatientQueue> {
     return 'zakat';
   }
 
+  Timer? _lanFallbackTimer;
+
   @override
   void initState() {
     super.initState();
@@ -478,9 +482,6 @@ class _PatientQueueState extends State<PatientQueue> {
       } else if (type == RealtimeEvents.savePrescription || type == 'prescription_created' || type == 'save_prescription') {
         if (data.isNotEmpty) {
           LocalStorageService.saveLocalPrescription(data);
-          // [FIX] Link prescription → entry in entriesBox (mirrors server SSM).
-          // Without this, the entry stays 'waiting' because only prescriptionsBox
-          // was updated — the queue reads from entriesBox.
           final serial = (data['serial'] ?? data['id'])?.toString().trim();
           if (serial != null && serial.isNotEmpty) {
             try {
@@ -532,7 +533,7 @@ class _PatientQueueState extends State<PatientQueue> {
             _localExceptionRequests = _loadLocalExceptionRequests();
           });
         }
-            } else if (type == RealtimeEvents.tokenExceptionApproved ||
+      } else if (type == RealtimeEvents.tokenExceptionApproved ||
                  type == 'token_exception_approved' ||
                  type == 'token_exception_rejected') {
         final reqId = (data['requestId'] ?? data['id'])?.toString();
@@ -554,13 +555,41 @@ class _PatientQueueState extends State<PatientQueue> {
 
     _connSub = Connectivity().onConnectivityChanged.listen((results) {
       final online = results.any((r) => r != ConnectivityResult.none);
+      final wasOffline = !_isOnline && online;
       if (_isOnline != online && mounted) {
         setState(() => _isOnline = online);
       }
+      if (online) {
+        debugPrint('[PatientQueue] ⚡ Network online -> Immediate LAN reconnect & Cloud Token Pull');
+        ConnectionManager().reconnectNow();
+        if (wasOffline || !RealtimeManager().isConnected) {
+          manualCloudPull(showToast: false, force: true);
+        }
+      }
     });
+
+    _startLanFallbackTimer();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _tryAutoSelectSmallestWaiting();
+    });
+  }
+
+  void _startLanFallbackTimer() {
+    _lanFallbackTimer?.cancel();
+    // Safety Net: When LAN server is disconnected OR when connected, periodically
+    // pull cloud tokens so doctor gets tokens issued by disconnected desks (e.g. Receptionist)
+    // without waiting for manual clicks.
+    _lanFallbackTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted) return;
+      if (_isOnline && !_isCloudPulling) {
+        final cooldown = RealtimeManager().isConnected ? const Duration(seconds: 30) : const Duration(seconds: 10);
+        final now = DateTime.now();
+        if (_lastCloudPullTime == null || now.difference(_lastCloudPullTime!) >= cooldown) {
+          debugPrint('[PatientQueue] 🔄 Periodic cloud check for tokens created by disconnected desks');
+          manualCloudPull(showToast: false, force: false);
+        }
+      }
     });
   }
 
@@ -590,6 +619,7 @@ class _PatientQueueState extends State<PatientQueue> {
 
   @override
   void dispose() {
+    _lanFallbackTimer?.cancel();
     _debounceRebuildTimer?.cancel();
     _realtimeSub.cancel();
     _connSub?.cancel();
@@ -605,8 +635,12 @@ class _PatientQueueState extends State<PatientQueue> {
       RealtimeManager().sendMessage({
         'event_type': 'request_catch_up',
         'branchId': widget.branchId,
+        'forceAll': true,
       });
     } catch (_) {}
+    // Also pull cloud once to resolve any tokens synced to Firestore while offline
+    manualCloudPull(showToast: false, force: true);
+    setState(() {}); // Instant local queue refresh from Hive
     _debouncedRebuild();
   }
   
@@ -614,21 +648,27 @@ class _PatientQueueState extends State<PatientQueue> {
   void _debouncedRebuild() {
     if (_debounceRebuildTimer?.isActive ?? false) return;
     _debounceRebuildTimer = Timer(const Duration(milliseconds: 150), () {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _tryAutoSelectSmallestWaiting();
+        });
+      }
     });
   }
 
-  // ─── On-Demand Cloud Recovery with 30s Cooldown (Zero Continuous Reads) ───
+  // ─── On-Demand Cloud Recovery with Cooldown (Zero Continuous Reads) ───
   DateTime? _lastCloudPullTime;
   bool _isCloudPulling = false;
 
-  Future<void> manualCloudPull({bool showToast = true}) async {
+  Future<void> manualCloudPull({bool showToast = true, bool force = false}) async {
     final now = DateTime.now();
-    if (_lastCloudPullTime != null && now.difference(_lastCloudPullTime!) < const Duration(seconds: 30)) {
+    final cooldown = RealtimeManager().isConnected ? const Duration(seconds: 30) : const Duration(seconds: 10);
+    if (!force && _lastCloudPullTime != null && now.difference(_lastCloudPullTime!) < cooldown) {
       if (showToast && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Please wait 30 seconds before pulling from cloud again.'),
-          duration: Duration(seconds: 2),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Please wait ${cooldown.inSeconds} seconds before pulling from cloud again.'),
+          duration: const Duration(seconds: 2),
         ));
       }
       return;
@@ -2913,7 +2953,8 @@ class _PatientQueueState extends State<PatientQueue> {
   }
 
   Widget _buildQueueContent(BuildContext context) {
-        final allPatients = _getSortedQueue();
+    try {
+      final allPatients = _getSortedQueue();
 
         bool isPatientDone(Map<String, dynamic> p) {
           final s = (p['status'] ?? '').toString().toLowerCase();
@@ -3083,10 +3124,14 @@ class _PatientQueueState extends State<PatientQueue> {
                     Container(height: 16, width: 1, color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
                     const SizedBox(width: 10),
                     _buildCampChip('all', '🏥 All Camps'),
-                    const SizedBox(width: 5),
-                    _buildCampChip('saddar', 'Saddar'),
-                    const SizedBox(width: 5),
-                    _buildCampChip('haji_camp', 'Haji Camp'),
+                    ...CampSessionService.getCampsForBranch(widget.branchId).map((c) {
+                      final cId = (c['id'] ?? '').toString();
+                      final cName = (c['name'] ?? CampSessionService.getCampLabel(cId, widget.branchId)).toString();
+                      return Padding(
+                        padding: const EdgeInsets.only(left: 5),
+                        child: _buildCampChip(cId, cName),
+                      );
+                    }),
                   ],
                 ],
               ),
@@ -3386,14 +3431,24 @@ class _PatientQueueState extends State<PatientQueue> {
                                 }),
                                 Builder(builder: (_) {
                                   if (!_hasMultiCamps) return const SizedBox.shrink();
+                                  final rawCamp = (patient['campId'] ?? patient['dispensaryId'] ?? '').toString();
                                   final ser = serial.toUpperCase();
-                                  final dispId = (patient['dispensaryId'] ?? patient['campId'])?.toString();
-                                  final isHaji = ser.contains('-HAJI-') || ser.contains('-HC-') || (dispId ?? '').contains('haji');
+                                  final isKarachi = CampSessionService.isKarachiFamily(widget.branchId);
+                                  final String campName;
+                                  if (isKarachi) {
+                                    final isHaji = ser.contains('-HAJI-') || ser.contains('-HC-') || rawCamp.toLowerCase().contains('haji');
+                                    campName = isHaji ? 'Haji Camp' : 'Saddar';
+                                  } else {
+                                    campName = rawCamp.isNotEmpty
+                                        ? CampSessionService.getCampLabel(rawCamp, widget.branchId)
+                                        : 'Main';
+                                  }
+                                  final isHajiColor = campName.toLowerCase().contains('haji');
                                   return Container(
                                     margin: const EdgeInsets.only(right: 4),
                                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: isHaji ? const Color(0xFF6366F1) : const Color(0xFF0D9488),
+                                      color: isHajiColor ? const Color(0xFF6366F1) : const Color(0xFF0D9488),
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Row(
@@ -3402,7 +3457,7 @@ class _PatientQueueState extends State<PatientQueue> {
                                         const Icon(Icons.location_on_rounded, size: 10, color: Colors.white),
                                         const SizedBox(width: 2),
                                         Text(
-                                          isHaji ? 'Haji Camp' : 'Saddar',
+                                          campName,
                                           style: const TextStyle(color: Colors.white, fontSize: 9.5, fontWeight: FontWeight.bold),
                                         ),
                                       ],
@@ -3581,6 +3636,31 @@ class _PatientQueueState extends State<PatientQueue> {
             ),
           ),
         ]);
+    } catch (e, st) {
+      debugPrint('[PatientQueue] Render error in _buildQueueContent: $e\n$st');
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.people_outline, size: 36, color: _teal),
+              const SizedBox(height: 12),
+              const Text('Queue updating...', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+              const SizedBox(height: 8),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Reload Queue'),
+                style: ElevatedButton.styleFrom(backgroundColor: _teal, foregroundColor: Colors.white),
+                onPressed: () {
+                  if (mounted) setState(() {});
+                },
+              ),
+            ],
+          ),
+        ),
+      );
+    }
   }
 
   Widget _buildFilterTab(

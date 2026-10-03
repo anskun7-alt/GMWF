@@ -48,12 +48,15 @@ class SchoolSyncService {
   static const int _maxRetries = 5;
 
   Stream<SchoolSyncStatus> get statusStream => _statusController.stream;
+  Timer? _statusDebounceTimer;
+  int _cachedFailedCount = 0;
+  DateTime? _lastFailedScanTime;
 
   void init() {
     _connectivitySub?.cancel();
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       _isOnline = results.any((r) => r != ConnectivityResult.none);
-      _updateStatus();
+      _scheduleUpdateStatus();
       if (_isOnline) {
         syncNow();
       }
@@ -65,13 +68,21 @@ class SchoolSyncService {
 
     if (syncBox != null) {
       _syncBoxSub?.cancel();
-      _syncBoxSub = syncBox.watch().listen((_) => _updateStatus());
+      _syncBoxSub = syncBox.watch().listen((_) => _scheduleUpdateStatus());
     }
 
     _updateStatus();
   }
 
+  void _scheduleUpdateStatus() {
+    _statusDebounceTimer?.cancel();
+    _statusDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+      _updateStatus();
+    });
+  }
+
   void dispose() {
+    _statusDebounceTimer?.cancel();
     _connectivitySub?.cancel();
     _syncBoxSub?.cancel();
   }
@@ -113,7 +124,12 @@ class SchoolSyncService {
 
   void _updateStatus() {
     final pending = getPendingSchoolQueueCount();
-    final failed = getFailedSchoolRecordsCount('all');
+    final now = DateTime.now();
+    if (_lastFailedScanTime == null || now.difference(_lastFailedScanTime!).inSeconds >= 15) {
+      _cachedFailedCount = getFailedSchoolRecordsCount('all');
+      _lastFailedScanTime = now;
+    }
+    final failed = _cachedFailedCount;
 
     SchoolSyncState state;
     if (_isSyncing) {
@@ -168,6 +184,8 @@ class SchoolSyncService {
       if (targetBranch != 'all' && targetBranch != 'global' && targetBranch.isNotEmpty) {
         branchesToSync.add(targetBranch);
       } else {
+        // Always include default branch 'gujrat' for school data
+        branchesToSync.add('gujrat');
         if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
           final bBox = Hive.box(LocalStorageService.branchesBox);
           for (final k in bBox.keys) {
@@ -223,9 +241,13 @@ class SchoolSyncService {
       'school_students',
       'school_teachers',
       'school_books',
+      'school_book_loans',
+      'school_attendance',
+      'school_teacher_attendance',
       'school_grades',
       'school_fees',
       'school_homerooms',
+      'school_audit_logs',
     ];
 
     for (final col in collections) {
@@ -242,10 +264,6 @@ class SchoolSyncService {
               .collection('branches')
               .doc(branchId)
               .collection(col);
-
-          if (lastSyncedTs != null) {
-            query = query.where('updatedAt', isGreaterThan: lastSyncedTs).orderBy('updatedAt', descending: false);
-          }
 
           query = query.limit(500);
           if (lastDoc != null) {
@@ -285,6 +303,12 @@ class SchoolSyncService {
                   await SchoolLocalStorage.cacheTeacher(branchId, doc.id, data);
                 } else if (col == 'school_books') {
                   await SchoolLocalStorage.cacheBook(branchId, doc.id, data);
+                } else if (col == 'school_book_loans') {
+                  await SchoolLocalStorage.cacheBookLoan(branchId, doc.id, data);
+                } else if (col == 'school_attendance') {
+                  await SchoolLocalStorage.cacheLog(branchId, doc.id, data);
+                } else if (col == 'school_teacher_attendance') {
+                  await SchoolLocalStorage.cacheTeacherAttendanceLog(branchId, doc.id, data);
                 } else if (col == 'school_grades') {
                   final box = Hive.box(SchoolLocalStorage.gradesBox);
                   await box.put('${branchId.toLowerCase()}__${doc.id}', data);
@@ -293,6 +317,9 @@ class SchoolSyncService {
                   await box.put('${branchId.toLowerCase()}__${doc.id}', data);
                 } else if (col == 'school_homerooms') {
                   final box = Hive.box(SchoolLocalStorage.homeroomBox);
+                  await box.put('${branchId.toLowerCase()}__${doc.id}', data);
+                } else if (col == 'school_audit_logs') {
+                  final box = Hive.box(LocalStorageService.schoolAuditLogsBox);
                   await box.put('${branchId.toLowerCase()}__${doc.id}', data);
                 }
               },

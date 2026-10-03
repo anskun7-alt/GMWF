@@ -174,7 +174,15 @@ class CampSessionService {
         b == 'karachi_saddar' ||
         b == 'karachi_haji' ||
         b == 'saddar' ||
+        b == 'haji' ||
         b == 'haji_camp' ||
+        b == 'hajicamp' ||
+        b == 'kapaya' ||
+        b == 'kapayya' ||
+        b.contains('karachi') ||
+        b.contains('saddar') ||
+        b.contains('haji') ||
+        b.contains('kapaya') ||
         b.startsWith('karachi_') ||
         b.startsWith('karachi-');
   }
@@ -307,7 +315,7 @@ class CampSessionService {
     if (parts.length >= 2) {
       final tag = parts[1].toLowerCase();
       // Karianwala tag (KAP)
-      if (tag == 'kap' && !b.contains('kap') && !b.contains('karianwala')) return false;
+      if (tag == 'kap' && !b.contains('kap') && !b.contains('karianwala') && !isKarachiFamily(b)) return false;
       // Jalalpur Jattan tags (JLJ / JPJ)
       if ((tag == 'jlj' || tag == 'jpj') && !b.contains('jalalpur') && !b.contains('jattan') && !b.contains('temp')) return false;
       // Gujrat tags (GRT / GJT)
@@ -319,7 +327,11 @@ class CampSessionService {
       // Rawalpindi tags (RWP / PND)
       if ((tag == 'rwp' || tag == 'pnd') && !b.contains('rawalpindi') && !b.contains('pindi')) return false;
       // Karachi camp tags (SADD / SADDAR / HAJI / KAPAYYA)
-      if ((tag == 'saddar' || tag == 'sadd' || tag == 'haji_camp' || tag == 'haji' || tag == 'kapayya') && !b.contains('karachi')) return false;
+      if ((tag == 'saddar' || tag == 'sadd' || tag == 'haji_camp' || tag == 'haji' || tag == 'kapayya') &&
+          !b.contains('karachi') &&
+          !isKarachiFamily(b)) {
+        return false;
+      }
     }
     return true;
   }
@@ -1428,11 +1440,11 @@ class CampSessionService {
     // Karachi legacy check
     if (isKarachiFamily(b)) {
       if (sel == 'saddar' || sel == 'kapayya' || sel == 'kap') {
-        return ['inventory_saddar'];
+        return ['inventory_saddar', 'inventory'];
       } else if (sel == 'haji_camp' || sel == 'haji' || sel == 'hc') {
-        return ['inventory_haji'];
+        return ['inventory_haji', 'inventory_haji_camp', 'inventory'];
       }
-      return ['inventory_saddar', 'inventory_haji'];
+      return ['inventory_saddar', 'inventory_haji', 'inventory_haji_camp', 'inventory'];
     }
 
     // Dynamic camps for any branch
@@ -1506,10 +1518,24 @@ class CampSessionService {
           userAssigned = getAssignedCampsFromHive();
         }
 
-        // CRITICAL FIX: If user is assigned to EXACTLY 1 camp (e.g. Haji Camp),
-        // that camp has absolute authority! It MUST NOT be overridden by a stale
-        // active_camp_id or bound_dispensary_id from an earlier session on this machine.
-        if (userAssigned.length == 1) {
+        final currentShift = getCurrentSession(null, effBranch);
+        final manualVal = box.get(_activeCampKey)?.toString().trim().toLowerCase();
+        final manualShift = box.get('active_camp_manual_shift')?.toString().trim().toLowerCase();
+        final manualTime = box.get('active_camp_manual_time') as int?;
+        final isRecentManual = manualTime != null &&
+            DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(manualTime)).inHours < 12;
+
+        final hasManualForCurrentShift = (manualShift == currentShift || isRecentManual) &&
+            manualVal != null &&
+            manualVal.isNotEmpty;
+
+        if (hasManualForCurrentShift) {
+          final canonManual = canonicalizeCampId(manualVal);
+          return canonManual;
+        }
+
+        // Only enforce sole camp or hardware binding if user has not manually chosen a camp for this shift
+        if (userAssigned.length == 1 && !isRecentManual) {
           final soleCamp = userAssigned.first;
           final currentStored = box.get(_activeCampKey)?.toString().trim().toLowerCase();
           if (currentStored != soleCamp) {
@@ -1526,7 +1552,7 @@ class CampSessionService {
         }
 
         final bound = getBoundDispensaryId();
-        if (bound != null && bound.isNotEmpty) {
+        if (bound != null && bound.isNotEmpty && !isRecentManual) {
           final canonBound = canonicalizeCampId(bound);
           if (userAssigned.isEmpty || userAssigned.contains(canonBound)) {
             return canonBound; // Hardware desk binding for multi-camp users
@@ -1534,7 +1560,6 @@ class CampSessionService {
         }
 
         // Automatic Time-Based Detection for Multi-Camp Staff (e.g. Saddar Morning / Haji Camp Evening):
-        final currentShift = getCurrentSession(null, effBranch);
         debugPrint('[CampSessionService] getActiveCamp: shift=$currentShift, assigned=$userAssigned, branch=$effBranch');
         String? scheduledCamp;
         if (uData is Map) {
@@ -1544,7 +1569,6 @@ class CampSessionService {
           if (matching.length == 1) {
             scheduledCamp = matching.first;
           } else if (matching.length > 1) {
-            // Multiple camps match current shift — unusual, pick first and warn
             debugPrint('[CampSessionService] WARNING: multiple camps match shift $currentShift: $matching — using first');
             scheduledCamp = matching.first;
           }
@@ -1556,26 +1580,8 @@ class CampSessionService {
           debugPrint('[CampSessionService] getActiveCamp: Karachi fallback -> $scheduledCamp');
         }
 
-        // Check if user manually switched camps during THIS current shift
-        final manualVal = box.get(_activeCampKey)?.toString().trim().toLowerCase();
-        final manualShift = box.get('active_camp_manual_shift')?.toString().trim().toLowerCase();
-        final hasManualForCurrentShift = manualShift != null &&
-            manualShift == currentShift &&
-            manualVal != null &&
-            manualVal.isNotEmpty &&
-            manualVal != 'all';
-
-        if (hasManualForCurrentShift) {
-          final canonManual = canonicalizeCampId(manualVal);
-          if (userAssigned.isEmpty || userAssigned.contains(canonManual)) {
-            debugPrint('[CampSessionService] getActiveCamp: using manual override $canonManual (shift=$manualShift)');
-            return canonManual;
-          }
-          debugPrint('[CampSessionService] getActiveCamp: manual $canonManual NOT in assigned $userAssigned — ignoring');
-        }
-
-        // Auto-detection takes precedence when entering a shift or if no manual choice made in this shift:
-        if (scheduledCamp != null) {
+        // Auto-detection takes precedence ONLY when there is NO recent manual selection
+        if (scheduledCamp != null && !isRecentManual) {
           final canonScheduled = canonicalizeCampId(scheduledCamp);
           final currentStored = box.get(_activeCampKey)?.toString().trim().toLowerCase();
           if (currentStored != canonScheduled) {
@@ -1593,12 +1599,9 @@ class CampSessionService {
           return canonScheduled;
         }
 
-        if (manualVal != null && manualVal.isNotEmpty && manualVal != 'all') {
+        if (manualVal != null && manualVal.isNotEmpty) {
           final canonManual = canonicalizeCampId(manualVal);
-          // Enforce that cached active_camp_id MUST be assigned to current user
-          if (userAssigned.isEmpty || userAssigned.contains(canonManual)) {
-            return canonManual;
-          }
+          return canonManual;
         }
 
         if (userAssigned.isNotEmpty) {
@@ -1707,7 +1710,7 @@ class CampSessionService {
     // 2. Secondary fallback by dispensaryId / campId
     final isHajiToken = dId.contains('haji') || cId.contains('haji');
     final isSaddarToken = dId.contains('sadd') || dId.contains('kap') || cId.contains('sadd') || cId.contains('kap');
-    final isSharedGeneralStock = (dId == 'all' || cId == 'all' || (dId.isEmpty && cId.isEmpty)) && ser.isEmpty;
+    final isSharedGeneralStock = (dId == 'all' || cId == 'all' || (dId.isEmpty && cId.isEmpty)) && !isExplicitSaddar && !isExplicitHaji;
 
     if (isSharedGeneralStock) return true;
 
@@ -1718,7 +1721,7 @@ class CampSessionService {
 
     if (isHaji) {
       if (isSaddarToken) return false;
-      return isHajiToken || dId == 'all' || cId == 'all';
+      return isHajiToken || dId == 'all' || cId == 'all' || isSharedGeneralStock || (!isSaddarToken && !isExplicitSaddar);
     }
 
     // Generic fallback for any other camp ID
@@ -1892,7 +1895,7 @@ class CampSessionService {
   }
 
   /// Store the active camp ID into Hive app_settings for this session.
-  static Future<void> setActiveCamp(String campId, {bool isManual = false}) async {
+  static Future<void> setActiveCamp(String campId, {bool isManual = true}) async {
     try {
       final norm = canonicalizeCampId(campId.trim().toLowerCase());
 

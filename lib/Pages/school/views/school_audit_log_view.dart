@@ -117,10 +117,10 @@ class SchoolAuditLogView extends StatelessWidget {
                                 Container(
                                   padding: const EdgeInsets.all(10),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF6366F1).withValues(alpha: 0.1),
+                                    color: const Color(0xFF1B4965).withValues(alpha: 0.1),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
-                                  child: const Icon(Icons.security_rounded, color: Color(0xFF6366F1), size: 20),
+                                  child: const Icon(Icons.security_rounded, color: Color(0xFF1B4965), size: 20),
                                 ),
                                 const SizedBox(width: 14),
                                 Expanded(

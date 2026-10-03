@@ -1912,7 +1912,6 @@ class ZkTecoNetworkService {
         await LocalStorageService.openBoxSafe(LocalStorageService.attendanceBox);
       }
       final box = Hive.box(LocalStorageService.attendanceBox);
-      final db = FirebaseFirestore.instance;
 
       for (final key in box.keys) {
         final val = box.get(key);
@@ -1930,37 +1929,21 @@ class ZkTecoNetworkService {
         if (record['synced'] == true && record['syncStatus'] == 'synced') continue;
 
         try {
-          final fsData = Map<String, dynamic>.from(record)
-            ..remove('syncStatus')
-            ..['synced'] = true;
-
-          await db
-              .collection('branches')
-              .doc(effectiveBranch)
-              .collection('employee_attendance')
-              .doc(dateStr)
-              .set({'date': dateStr, 'branchId': effectiveBranch, 'lastUpdated': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-
-          await db
-              .collection('branches')
-              .doc(effectiveBranch)
-              .collection('employee_attendance')
-              .doc(dateStr)
-              .collection('records')
-              .doc(employeeId)
-              .set(fsData, SetOptions(merge: true));
-
-          record['synced'] = true;
-          record['syncStatus'] = 'synced';
-          await box.put(key, record);
+          await LocalStorageService.enqueueSync({
+            'type': 'save_attendance_record',
+            'branchId': effectiveBranch,
+            'date': dateStr,
+            'employeeId': employeeId,
+            'data': record,
+          });
           syncedCount++;
         } catch (e) {
-          debugPrint('[ZkTecoNetworkService] Error pushing attendance record $key: $e');
+          debugPrint('[ZkTecoNetworkService] Error enqueuing attendance record $key: $e');
         }
       }
       if (syncedCount > 0) {
-        await box.flush();
-        debugPrint('[ZkTecoNetworkService] Synced $syncedCount attendance records to Cloud Firestore.');
+        await SyncService().triggerUpload();
+        debugPrint('[ZkTecoNetworkService] Enqueued $syncedCount attendance records for unified cloud upload.');
       }
     } catch (e) {
       debugPrint('[ZkTecoNetworkService] syncAllRecordedAttendanceToFirestore error: $e');
@@ -2256,9 +2239,9 @@ class ZkTecoNetworkService {
             final cred = BiometricCredential.fromMap(val);
             final credPin = cred.biometricPin.trim();
             final isMatch = credPin == cleanPin || (int.tryParse(credPin) != null && int.tryParse(credPin) == int.tryParse(cleanPin));
-            final isHistoryMatch = cred.pinHistory.any((hp) => hp.trim() == cleanPin || (int.tryParse(hp.trim()) != null && int.tryParse(hp.trim()) == int.tryParse(cleanPin)));
 
-            if (cred.active && (isMatch || isHistoryMatch)) {
+            // Strict exclusivity: match ONLY active current PIN to prevent attendance sharing
+            if (cred.active && isMatch) {
               return cred;
             }
           } catch (_) {}
@@ -2464,18 +2447,11 @@ class ZkTecoNetworkService {
     await unassignPinFromOtherEntities(cleanPin, targetEntityId: entityId);
 
     // 1. Save / Update in biometricCredentialsBox
-    final existing = getCredentialByEntityId(entityId);
-    final history = List<String>.from(existing?.pinHistory ?? []);
-    if (existing != null && existing.biometricPin.isNotEmpty && existing.biometricPin != cleanPin) {
-      if (!history.contains(existing.biometricPin)) {
-        history.add(existing.biometricPin);
-      }
-    }
-
+    // Do NOT retain old PIN in active matching history — the new PIN is the single reality
     final cred = BiometricCredential(
       id: entityId,
       biometricPin: cleanPin,
-      pinHistory: history,
+      pinHistory: const [], // Clean slate: single true active PIN
       entityId: entityId,
       entityName: entityName,
       entityType: entityType,
@@ -2544,19 +2520,29 @@ class ZkTecoNetworkService {
     if (Hive.isBoxOpen(LocalStorageService.biometricCredentialsBox)) {
       final credBox = Hive.box(LocalStorageService.biometricCredentialsBox);
       final keysToRemove = <dynamic>[];
+      final credsToUpdate = <dynamic, Map<String, dynamic>>{};
       for (final key in credBox.keys) {
         final val = credBox.get(key);
         if (val is Map) {
           try {
             final cred = BiometricCredential.fromMap(val);
-            if (cred.biometricPin.trim() == cleanPin && cred.entityId.trim() != targetEntityId.trim()) {
-              keysToRemove.add(key);
+            if (cred.entityId.trim() != targetEntityId.trim()) {
+              if (cred.biometricPin.trim() == cleanPin) {
+                keysToRemove.add(key);
+              } else if (cred.pinHistory.contains(cleanPin)) {
+                final newHistory = cred.pinHistory.where((p) => p.trim() != cleanPin).toList();
+                final updatedCred = cred.copyWith(pinHistory: newHistory);
+                credsToUpdate[key] = updatedCred.toMap();
+              }
             }
           } catch (_) {}
         }
       }
       for (final k in keysToRemove) {
         await credBox.delete(k);
+      }
+      for (final entry in credsToUpdate.entries) {
+        await credBox.put(entry.key, entry.value);
       }
     }
 
@@ -2930,17 +2916,11 @@ class ZkTecoNetworkService {
 
     // Check if user already had a credential
     final existing = existingCreds.where((c) => c.entityId == entityId).firstOrNull;
-    final history = List<String>.from(existing?.pinHistory ?? []);
-    if (existing != null && existing.biometricPin.isNotEmpty && existing.biometricPin != finalPin) {
-      if (!history.contains(existing.biometricPin)) {
-        history.add(existing.biometricPin);
-      }
-    }
 
     final cred = BiometricCredential(
       id: existing?.id ?? _uuid.v4(),
       biometricPin: finalPin,
-      pinHistory: history,
+      pinHistory: const [], // Strict exclusivity: do not retain old PINs for active punches
       entityId: entityId,
       entityName: entityName,
       entityType: entityType,
@@ -3357,9 +3337,14 @@ class ZkTecoNetworkService {
           await registerBiometricCredential(cred);
 
           // Update employee record in local storage & Cloud Firestore
-          empMap['biometricPin'] = assignedPin;
-          empMap['pin'] = assignedPin;
-          await empBox.put(key, empMap);
+          final rawEmpExisting = empBox.get(key);
+          final mergedEmp = <String, dynamic>{
+            if (rawEmpExisting is Map) ...Map<String, dynamic>.from(rawEmpExisting),
+            ...empMap,
+            'biometricPin': assignedPin,
+            'pin': assignedPin,
+          };
+          await empBox.put(key, mergedEmp);
 
           try {
             FirebaseFirestore.instance
@@ -3412,9 +3397,14 @@ class ZkTecoNetworkService {
           await registerBiometricCredential(cred);
 
           // Update student record in Hive & Cloud Firestore
-          map['biometricPin'] = assignedPin;
-          map['pin'] = assignedPin;
-          await mBox.put(key, map);
+          final rawMadrassaExisting = mBox.get(key);
+          final mergedMadrassa = <String, dynamic>{
+            if (rawMadrassaExisting is Map) ...Map<String, dynamic>.from(rawMadrassaExisting),
+            ...map,
+            'biometricPin': assignedPin,
+            'pin': assignedPin,
+          };
+          await mBox.put(key, mergedMadrassa);
 
           try {
             FirebaseFirestore.instance
@@ -3467,9 +3457,14 @@ class ZkTecoNetworkService {
           await registerBiometricCredential(cred);
 
           // Update student record in Hive & Cloud Firestore
-          map['biometricPin'] = assignedPin;
-          map['pin'] = assignedPin;
-          await sBox.put(key, map);
+          final rawSchoolExisting = sBox.get(key);
+          final mergedSchool = <String, dynamic>{
+            if (rawSchoolExisting is Map) ...Map<String, dynamic>.from(rawSchoolExisting),
+            ...map,
+            'biometricPin': assignedPin,
+            'pin': assignedPin,
+          };
+          await sBox.put(key, mergedSchool);
 
           try {
             FirebaseFirestore.instance

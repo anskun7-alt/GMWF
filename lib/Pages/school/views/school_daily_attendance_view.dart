@@ -54,26 +54,22 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
   }
 
   void _initGradeFilters() {
+    _gradeOptions = SchoolConstants.filterGrades;
     if (_isTeacher) {
-      // Teacher can ONLY access their assigned grades / homeroom
       final assigned = SchoolAuthHelper.getTeacherAssignedGrades(
         widget.branchId,
         widget.userRole,
         widget.editorName,
       );
       if (assigned.isNotEmpty) {
-        _gradeOptions = assigned;
-        if (!_gradeOptions.contains(_selectedGradeFilter)) {
-          _selectedGradeFilter = _gradeOptions.first;
+        if (_selectedGradeFilter == 'All' || !_gradeOptions.contains(_selectedGradeFilter)) {
+          _selectedGradeFilter = assigned.first;
         }
       } else {
-        _gradeOptions = [];
-        _selectedGradeFilter = 'Unassigned';
+        _selectedGradeFilter = 'All';
       }
     } else {
-      // Admins, Principals, HQ Manager, Chairman can select any grade
-      _gradeOptions = SchoolConstants.filterGrades;
-      if (_selectedGradeFilter == 'Unassigned') {
+      if (_selectedGradeFilter == 'Unassigned' || !_gradeOptions.contains(_selectedGradeFilter)) {
         _selectedGradeFilter = 'All';
       }
     }
@@ -87,7 +83,7 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: const [
-            Icon(Icons.warning_amber_rounded, color: Color(0xFFF59E0B)),
+            Icon(Icons.warning_amber_rounded, color: SchoolTheme.statusLeave),
             SizedBox(width: 10),
             Text('Unsaved Attendance Edits'),
           ],
@@ -102,7 +98,7 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFE11D48),
+              backgroundColor: SchoolTheme.statusAbsent,
               foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
@@ -204,10 +200,10 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: const BoxDecoration(
-                  color: Color(0xFFFEF3C7),
+                  color: SchoolTheme.statusLeaveBg,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.assignment_ind_rounded, size: 40, color: Color(0xFFD97706)),
+                child: const Icon(Icons.assignment_ind_rounded, size: 40, color: SchoolTheme.statusLeave),
               ),
               const SizedBox(height: 20),
               const Text(
@@ -249,12 +245,12 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
             if (_isHighestAuthority) ...[
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                color: effectiveAllowLeave ? const Color(0xFFFEF3C7) : const Color(0xFFEEF2FF),
+                color: effectiveAllowLeave ? SchoolTheme.statusLeaveBg : SchoolTheme.primaryLight,
                 child: Row(
                   children: [
                     Icon(
                       effectiveAllowLeave ? Icons.event_available_rounded : Icons.event_busy_rounded,
-                      color: effectiveAllowLeave ? const Color(0xFFD97706) : SchoolTheme.primary,
+                      color: effectiveAllowLeave ? SchoolTheme.statusLeave : SchoolTheme.primary,
                       size: 20,
                     ),
                     const SizedBox(width: 10),
@@ -266,7 +262,7 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: effectiveAllowLeave ? const Color(0xFF92400E) : SchoolTheme.primaryDark,
+                          color: effectiveAllowLeave ? SchoolTheme.statusLeave : SchoolTheme.primaryDark,
                         ),
                       ),
                     ),
@@ -284,7 +280,7 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
                       icon: Icon(effectiveAllowLeave ? Icons.block_rounded : Icons.check_circle_rounded, size: 14),
                       label: Text(effectiveAllowLeave ? 'Disable Leave' : 'Enable Leave', style: const TextStyle(fontSize: 11)),
                       style: TextButton.styleFrom(
-                        foregroundColor: effectiveAllowLeave ? const Color(0xFFE11D48) : SchoolTheme.primary,
+                        foregroundColor: effectiveAllowLeave ? SchoolTheme.statusAbsent : SchoolTheme.primary,
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                       ),
                     ),
@@ -475,20 +471,9 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
                       .where((s) => (s['status'] ?? 'active') == 'active')
                       .toList();
 
-                  // Teacher Data Isolation:
-                  // A teacher can ONLY see students belonging to their assigned class(es)!
-                  List<Map<String, dynamic>> visibleStudents;
-                  if (_isTeacher) {
-                    visibleStudents = allStudents.where((s) {
-                      final g = (s['grade'] ?? '').toString().trim();
-                      return _gradeOptions.contains(g) &&
-                          (_selectedGradeFilter == 'All' || g == _selectedGradeFilter);
-                    }).toList();
-                  } else {
-                    visibleStudents = _selectedGradeFilter == 'All'
-                        ? allStudents
-                        : allStudents.where((s) => s['grade'] == _selectedGradeFilter).toList();
-                  }
+                  List<Map<String, dynamic>> visibleStudents = _selectedGradeFilter == 'All'
+                      ? allStudents
+                      : allStudents.where((s) => s['grade'] == _selectedGradeFilter).toList();
 
                   // Sort by roll number or name
                   visibleStudents.sort((a, b) {
@@ -589,13 +574,15 @@ class _SchoolDailyAttendanceViewState extends State<SchoolDailyAttendanceView> {
                                         ),
                                       ),
                                       const SizedBox(height: 2),
-                                      Row(
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 2,
+                                        crossAxisAlignment: WrapCrossAlignment.center,
                                         children: [
                                           Text(
                                             'Grade $grade - Sec $section',
                                             style: const TextStyle(color: SchoolTheme.textMuted, fontSize: 11.5),
                                           ),
-                                          const SizedBox(width: 8),
                                           InkWell(
                                             onTap: () {
                                               setState(() {

@@ -47,6 +47,12 @@ class ConnectionStatusBadge extends StatelessWidget {
 
         return InkWell(
           onTap: () {
+            // When disconnected and retry callback exists, retry immediately
+            // instead of opening the config dialog.
+            if (!isConnected && onRetry != null) {
+              onRetry!();
+              return;
+            }
             LanServerConfigDialog.show(context);
           },
           borderRadius: BorderRadius.circular(16),

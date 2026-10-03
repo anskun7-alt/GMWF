@@ -27,6 +27,26 @@ class SchoolAuthHelper {
         r == 'master admin';
   }
 
+  /// Returns true if the user is explicitly a School Administrator.
+  static bool isSchoolAdmin(String role) {
+    final r = role.toLowerCase().trim();
+    return r.contains('school admin') ||
+        r.contains('school_admin') ||
+        r == 'school' ||
+        (r.contains('admin') && !r.contains('super') && !r.contains('global') && !r.contains('master'));
+  }
+
+  /// Returns true if the user is explicitly a Principal / Headmaster / Headmistress.
+  static bool isPrincipal(String role) {
+    final r = role.toLowerCase().trim();
+    if (r.contains('admin')) return false;
+    return r.contains('principal') ||
+        r == 'headmaster' ||
+        r == 'headmistress' ||
+        r.contains('headmaster') ||
+        r.contains('headmistress');
+  }
+
   /// Returns true if the user is an Administrator or Principal (or highest executive).
   static bool isAdminOrPrincipal(String role) {
     if (isHighestAuthority(role)) return true;

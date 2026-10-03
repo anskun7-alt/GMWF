@@ -113,10 +113,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAllStudentsCached(String branchId) {
-    final prefix = '${branchId.toLowerCase().trim()}__std__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__std__';
     final box = _getStudentsBox();
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) {
           final raw = box.get(k);
           if (raw == null) return null;
@@ -155,10 +157,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAllTeachersCached(String branchId) {
-    final prefix = '${branchId.toLowerCase().trim()}__tch__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__tch__';
     final box = _getTeachersBox();
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) {
           final raw = box.get(k);
           if (raw == null) return null;
@@ -197,10 +201,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAllBooksCached(String branchId) {
-    final prefix = '${branchId.toLowerCase().trim()}__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__';
     final box = _getBooksBox();
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) {
           final raw = box.get(k);
           if (raw == null) return null;
@@ -224,10 +230,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAllBookLoansCached(String branchId) {
-    final prefix = '${branchId.toLowerCase().trim()}__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__';
     final box = _getBookLoansBox();
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) {
           final raw = box.get(k);
           if (raw == null) return null;
@@ -250,20 +258,50 @@ class SchoolLocalStorage {
     await box.flush();
   }
 
+  static Future<void> cacheTeacherAttendanceLog(String branchId, String dateKey, Map<String, dynamic> logData) async {
+    final key = '${branchId.toLowerCase().trim()}__tchlog__$dateKey';
+    final box = Hive.box(LocalStorageService.schoolLogsBox);
+    await box.put(key, _sanitize(logData));
+    await box.flush();
+  }
+
   static Map<String, dynamic>? getLogCached(String branchId, String dateKey) {
-    final key = _logKey(branchId, dateKey);
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
     final box = _getLogsBox();
+    if (isAll) {
+      final suffix = '__log__$dateKey';
+      final combinedEntries = <String, dynamic>{};
+      for (final k in box.keys) {
+        if (k.toString().endsWith(suffix)) {
+          final raw = box.get(k);
+          if (raw is Map && raw['entries'] is Map) {
+            combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
+          }
+        }
+      }
+      return {
+        'date': dateKey,
+        'entries': combinedEntries,
+      };
+    }
+    final key = _logKey(b, dateKey);
     final raw = box.get(key);
     if (raw == null) return null;
     return Map<String, dynamic>.from(raw as Map);
   }
 
   static Stream<Map<String, dynamic>?> streamLogCached(String branchId, String dateKey) {
-    final targetKey = _logKey(branchId, dateKey);
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final targetKey = _logKey(b, dateKey);
+    final suffix = '__log__$dateKey';
     Stream<Map<String, dynamic>?> source() async* {
       yield getLogCached(branchId, dateKey);
       await for (final event in _getLogsBox().watch()) {
-        if (event.key == targetKey) {
+        if (isAll && event.key.toString().endsWith(suffix)) {
+          yield getLogCached(branchId, dateKey);
+        } else if (event.key == targetKey) {
           yield getLogCached(branchId, dateKey);
         }
       }
@@ -531,8 +569,27 @@ class SchoolLocalStorage {
   }
 
   static int getPresentTeachersCount(String branchId, String dateKey) {
-    final key = '${branchId.toLowerCase().trim()}__tchlog__$dateKey';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
     final box = Hive.box(LocalStorageService.schoolLogsBox);
+    if (isAll) {
+      final suffix = '__tchlog__$dateKey';
+      int count = 0;
+      for (final k in box.keys) {
+        if (k.toString().endsWith(suffix)) {
+          final raw = box.get(k);
+          if (raw is Map && raw['entries'] is Map) {
+            (raw['entries'] as Map).forEach((_, v) {
+              if (v is Map && (v['status'] ?? '').toString().toLowerCase() == 'present') {
+                count++;
+              }
+            });
+          }
+        }
+      }
+      return count;
+    }
+    final key = '${b}__tchlog__$dateKey';
     final raw = box.get(key);
     if (raw == null) return 0;
     final log = Map<String, dynamic>.from(raw as Map);
@@ -547,13 +604,41 @@ class SchoolLocalStorage {
   }
 
   static Stream<Map<String, dynamic>?> streamTeacherLogCached(String branchId, String dateKey) {
-    final targetKey = '${branchId.toLowerCase().trim()}__tchlog__$dateKey';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final targetKey = '${b}__tchlog__$dateKey';
+    final suffix = '__tchlog__$dateKey';
     final box = Hive.box(LocalStorageService.schoolLogsBox);
     Stream<Map<String, dynamic>?> source() async* {
-      final raw = box.get(targetKey);
-      yield raw != null ? Map<String, dynamic>.from(raw as Map) : null;
+      if (isAll) {
+        final combinedEntries = <String, dynamic>{};
+        for (final k in box.keys) {
+          if (k.toString().endsWith(suffix)) {
+            final raw = box.get(k);
+            if (raw is Map && raw['entries'] is Map) {
+              combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
+            }
+          }
+        }
+        yield {'date': dateKey, 'entries': combinedEntries};
+      } else {
+        final raw = box.get(targetKey);
+        yield raw != null ? Map<String, dynamic>.from(raw as Map) : null;
+      }
+
       await for (final event in box.watch()) {
-        if (event.key == targetKey) {
+        if (isAll && event.key.toString().endsWith(suffix)) {
+          final combinedEntries = <String, dynamic>{};
+          for (final k in box.keys) {
+            if (k.toString().endsWith(suffix)) {
+              final raw = box.get(k);
+              if (raw is Map && raw['entries'] is Map) {
+                combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
+              }
+            }
+          }
+          yield {'date': dateKey, 'entries': combinedEntries};
+        } else if (event.key == targetKey) {
           final r = box.get(targetKey);
           yield r != null ? Map<String, dynamic>.from(r as Map) : null;
         }
@@ -596,10 +681,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAuditLogsCached(String branchId) {
-    final prefix = '${branchId.toLowerCase()}__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__';
     final box = Hive.box(LocalStorageService.schoolAuditLogsBox);
     final list = box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) => Map<String, dynamic>.from(box.get(k) as Map))
         .toList();
 
@@ -646,10 +733,12 @@ class SchoolLocalStorage {
   }
 
   static List<Map<String, dynamic>> getAllGradesCached(String branchId) {
-    final prefix = '${branchId.toLowerCase()}__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__';
     final box = Hive.box(gradesBox);
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) => Map<String, dynamic>.from(box.get(k) as Map))
         .toList();
   }
@@ -709,10 +798,12 @@ class SchoolLocalStorage {
 
   static List<Map<String, dynamic>> getAllFeeRecordsCached(String branchId) {
     if (!Hive.isBoxOpen(feesBox)) return [];
-    final prefix = '${branchId.toLowerCase()}__';
+    final b = branchId.toLowerCase().trim();
+    final isAll = b == 'all' || b == 'global' || b.isEmpty;
+    final prefix = '${b}__';
     final box = Hive.box(feesBox);
     return box.keys
-        .where((k) => k.toString().startsWith(prefix) || branchId == 'all')
+        .where((k) => isAll || k.toString().startsWith(prefix))
         .map((k) {
           final val = box.get(k);
           if (val is Map) return Map<String, dynamic>.from(val);

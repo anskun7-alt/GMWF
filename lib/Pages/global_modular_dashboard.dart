@@ -27,12 +27,12 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../services/local_storage_service.dart';
 import '../services/auth_service.dart';
-import '../realtime/realtime_manager.dart';
 import '../constants/navigator_key.dart';
 import 'login_page.dart';
 import '../services/offline_auth_service.dart' as offline_auth;
 import '../services/image_upload_service.dart';
 import '../services/auto_update_service.dart';
+import '../services/finance_local_storage.dart';
 import '../utils/formatters.dart';
 
 const String _kGlobalBranchId = 'all';
@@ -70,36 +70,67 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
   late List<AppModule> _availableModules;
   void refresh() { if (mounted) setState(() {}); }
   
-  String get _userName {
-    final email = widget.userData['email']?.toString();
-    Map<String, dynamic> data = Map<String, dynamic>.from(widget.userData);
-    if (email != null && email.isNotEmpty) {
-      try {
-        if (Hive.isBoxOpen('local_users')) {
-          final user = Hive.box('local_users').get('user:${email.toLowerCase()}');
-          if (user != null && user is Map) {
-            data.addAll(Map<String, dynamic>.from(user));
+  late Map<String, dynamic> _cachedUserData;
+  String _cachedDisplayName = '';
+  String _cachedPhotoUrl = '';
+
+  void _updateCachedUserData() {
+    _cachedUserData = _resolveFreshUserData();
+    _cachedDisplayName = resolveUserDisplayName(_cachedUserData);
+    _cachedPhotoUrl = (_cachedUserData['profileImage'] ??
+        _cachedUserData['profilePictureUrl'] ??
+        _cachedUserData['photoUrl'] ??
+        _cachedUserData['avatarUrl'])?.toString() ?? '';
+  }
+
+  Map<String, dynamic> _resolveFreshUserData() {
+    final data = Map<String, dynamic>.from(widget.userData);
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final cached = Hive.box('app_settings').get('user_data');
+        if (cached is Map) {
+          for (final k in cached.keys) {
+            final v = cached[k];
+            if (v != null && v != '' && v != 'null') {
+              data[k.toString()] = v;
+            }
           }
         }
-      } catch (_) {}
+      }
+    } catch (_) {}
+
+    final uid = (data['uid'] ?? data['id'])?.toString().trim();
+    final email = (data['email'] ?? '').toString().trim().toLowerCase();
+
+    // Fast O(1) keyed lookups only — NEVER do full box scans during build/getters
+    if (uid != null && uid.isNotEmpty) {
+      final local = LocalStorageService.getLocalUserByUid(uid);
+      if (local != null) {
+        for (final k in local.keys) {
+          final v = local[k];
+          if (v != null && v != '' && v != 'null') data[k] = v;
+        }
+      }
     }
-    return resolveUserDisplayName(data);
+    if (email.isNotEmpty) {
+      final local = LocalStorageService.getLocalUserByEmail(email);
+      if (local != null) {
+        for (final k in local.keys) {
+          final v = local[k];
+          if (v != null && v != '' && v != 'null') data[k] = v;
+        }
+      }
+    }
+    return data;
+  }
+
+  String get _userName {
+    if (_cachedDisplayName.isNotEmpty) return _cachedDisplayName;
+    return resolveUserDisplayName(widget.userData);
   }
 
   String get _userPhotoUrl {
-    final email = widget.userData['email']?.toString();
-    Map<String, dynamic> data = Map<String, dynamic>.from(widget.userData);
-    if (email != null && email.isNotEmpty) {
-      try {
-        if (Hive.isBoxOpen('local_users')) {
-          final user = Hive.box('local_users').get('user:${email.toLowerCase()}');
-          if (user != null && user is Map) {
-            data.addAll(Map<String, dynamic>.from(user));
-          }
-        }
-      } catch (_) {}
-    }
-    return (data['profileImage'] ?? data['profilePictureUrl'] ?? data['photoUrl'] ?? data['avatarUrl'])?.toString() ?? '';
+    return _cachedPhotoUrl;
   }
 
   String get _role {
@@ -209,6 +240,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
   @override
   void didUpdateWidget(GlobalModularDashboard oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _updateCachedUserData();
     _loadAvailableModules();
     _recomputeFilteredModules();
   }
@@ -216,6 +248,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
   @override
   void initState() {
     super.initState();
+    _updateCachedUserData();
     _loadAvailableModules();
 
     // ── START SYNC SERVICE ────────────────────────────────────────────────────
@@ -223,24 +256,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     if (branchId.isNotEmpty && branchId != _kGlobalBranchId) {
       SyncService().start(branchId);
     } else {
-      // Executive roles (chairman, CEO) have branchId='all' or empty.
-      // Start sync with all known real branches so data still uploads to Firestore.
-      try {
-        final localBox = Hive.box(LocalStorageService.branchesBox);
-        final realIds = <String>[];
-        for (final val in localBox.values) {
-          if (val is Map) {
-            final id = (val['id'] ?? '').toString().trim().toLowerCase();
-            final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
-            if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
-              realIds.add(id);
-            }
-          }
-        }
-        if (realIds.isNotEmpty) {
-          SyncService().start(realIds.first, authorizedBranches: realIds);
-        }
-      } catch (_) {}
+      _startSyncForExecutive();
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -278,10 +294,35 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
     _recomputeFilteredModules();
     if (!kIsWeb && (_isGlobalExecutive || _isFullExecutive)) {
-      Future.delayed(const Duration(seconds: 2), () {
+      Future.delayed(const Duration(seconds: 10), () {
         if (mounted) _startBackgroundFullSync();
       });
     }
+
+    // Refresh user profile picture and display name across devices in background
+    Future.microtask(() async {
+      try {
+        final uid = (widget.userData['uid'] ?? widget.userData['id'] ?? FirebaseAuth.instance.currentUser?.uid ?? '').toString();
+        if (uid.isNotEmpty) {
+          final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get().timeout(const Duration(seconds: 5));
+          if (doc.exists && doc.data() is Map) {
+            final data = Map<String, dynamic>.from(doc.data() as Map);
+            final pImg = (data['profileImage'] ?? data['profilePictureUrl'] ?? data['photoUrl'] ?? data['avatarUrl'])?.toString();
+            final name = (data['name'] ?? data['displayName'] ?? '').toString();
+            if ((pImg != null && pImg.isNotEmpty && pImg != _userPhotoUrl) ||
+                (name.isNotEmpty && name != _userName)) {
+              if (mounted) {
+                setState(() {
+                  if (pImg != null && pImg.isNotEmpty) widget.userData['profileImage'] = pImg;
+                  if (name.isNotEmpty) widget.userData['name'] = name;
+                });
+                unawaited(LocalStorageService.saveLocalUser(widget.userData));
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    });
   }
 
   // ── Role helpers ──────────────────────────────────────────────────────────
@@ -382,6 +423,31 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     }
   }
 
+  Future<void> _startSyncForExecutive() async {
+    try {
+      if (!Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+        await LocalStorageService.openBoxSafe(LocalStorageService.branchesBox);
+      }
+      final localBox = Hive.box(LocalStorageService.branchesBox);
+      final realIds = <String>[];
+      for (final val in localBox.values) {
+        if (val is Map) {
+          final id = (val['id'] ?? '').toString().trim().toLowerCase();
+          final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+          if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+            realIds.add(id);
+          }
+        }
+      }
+      final effectiveBranch = realIds.isNotEmpty ? realIds.first : 'karachi';
+      SyncService().start(effectiveBranch, authorizedBranches: realIds);
+      debugPrint('[GlobalModularDashboard] SyncService started for executive on $effectiveBranch (authorized: $realIds)');
+    } catch (e) {
+      debugPrint('[GlobalModularDashboard] Error starting SyncService for executive: $e');
+      SyncService().start('karachi');
+    }
+  }
+
   void _logout() async {
     try {
       await AuthService().signOut();
@@ -466,17 +532,14 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     );
 
     try {
-      // 1. Broadcast over LAN to all connected client devices & server
-      RealtimeManager().sendMessage({
-        'event_type': 'force_all_users_cloud_sync',
-        'timestamp': DateTime.now().toIso8601String(),
-        'triggeredBy': _userName,
-        'triggeredByRole': _role,
-        'branchId': _branchId,
-      });
-
-      // 2. Upload executive node local sync queue
-      await SyncService().triggerUpload();
+      // 1. Broadcast universal force upload across LAN and Firestore cloud to all branches
+      await SyncService().broadcastUniversalForceUpload(branchId: _branchId);
+      await LocalStorageService.downloadUsers();
+      try {
+        final todayStr = DateTime.now().toIso8601String().substring(0, 10);
+        await FinanceLocalStorage.downloadAttendance(_branchId, specificDateStr: todayStr, force: true);
+      } catch (_) {}
+      if (mounted) setState(() {});
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -525,19 +588,8 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
     Navigator.push(
       context,
-      PageRouteBuilder(
-        pageBuilder: (_, anim, _) => dest,
-        transitionsBuilder: (_, anim, _, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
-          child: SlideTransition(
-            position: Tween<Offset>(
-                    begin: const Offset(0.025, 0), end: Offset.zero)
-                .animate(CurvedAnimation(
-                    parent: anim, curve: Curves.easeOutCubic)),
-            child: child,
-          ),
-        ),
-        transitionDuration: const Duration(milliseconds: 300),
+      MaterialPageRoute(
+        builder: (_) => dest,
       ),
     );
   }
@@ -2066,7 +2118,7 @@ class _LogoPulse extends StatelessWidget {
 
 // ── Category colors map for vibrant distinct badges ──────────────────────────
 
-Color _getCatColor(DashboardCategoryFilter cat) {
+Color _getCatColor(DashboardCategoryFilter cat, {bool dark = false}) {
   switch (cat) {
     case DashboardCategoryFilter.overall:
       return const Color(0xFF0EA5E9); // Sky Blue
@@ -2079,7 +2131,7 @@ Color _getCatColor(DashboardCategoryFilter cat) {
     case DashboardCategoryFilter.madrassa:
       return const Color(0xFFE11D48); // Berry Rose
     case DashboardCategoryFilter.school:
-      return const Color(0xFF10B981); // Emerald Green
+      return dark ? const Color(0xFF38BDF8) : const Color(0xFF1B4965); // Deep Ocean Navy (SchoolTheme)
   }
 }
 
@@ -2119,7 +2171,7 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
   Widget build(BuildContext context) {
     final sel = widget.selected;
     final dark = widget.dark;
-    final catColor = _getCatColor(widget.cat);
+    final catColor = _getCatColor(widget.cat, dark: dark);
     final label = widget.cat == DashboardCategoryFilter.overall
         ? 'Dashboard'
         : widget.cat.name[0].toUpperCase() + widget.cat.name.substring(1);
@@ -4384,8 +4436,8 @@ class _ModuleCardState extends State<_ModuleCard>
         categoryLabel = 'MADRASSA';
         break;
       case ModuleCategory.school:
-        categoryColor = const Color(0xFF10B981); // Emerald / Sage Green
-        ambientGlowColor = const Color(0xFF34D399);
+        categoryColor = dark ? const Color(0xFF38BDF8) : const Color(0xFF1B4965); // Deep Ocean Navy / Sky Blue
+        ambientGlowColor = const Color(0xFF2D9B83); // Sage Teal
         categoryLabel = 'SCHOOL';
         break;
     }
@@ -4404,64 +4456,61 @@ class _ModuleCardState extends State<_ModuleCard>
         child: ScaleTransition(
           scale: _pressScale,
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 260),
+            duration: const Duration(milliseconds: 240),
             curve: Curves.easeOutCubic,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(26),
+              borderRadius: BorderRadius.circular(22),
               // Ambient outer radial glow shadow
               boxShadow: [
                 BoxShadow(
-                  color: ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.35 : 0.25) : (dark ? 0.14 : 0.08)),
-                  blurRadius: _hov ? 28 : 16,
-                  spreadRadius: _hov ? 2 : 0,
-                  offset: Offset(0, _hov ? 10 : 4),
+                  color: ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.30 : 0.16) : (dark ? 0.12 : 0.06)),
+                  blurRadius: _hov ? 24 : 12,
+                  spreadRadius: _hov ? 1 : 0,
+                  offset: Offset(0, _hov ? 8 : 3),
                 ),
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: dark ? 0.40 : 0.04),
-                  blurRadius: 10,
-                  offset: const Offset(0, 3),
+                  color: Colors.black.withValues(alpha: dark ? 0.35 : 0.05),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(26),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(26),
-                    // High-blur translucent frosted glass background with gradient tint
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: dark
-                          ? [
-                              const Color(0xFF1E293B).withValues(alpha: _hov ? 0.85 : 0.65),
-                              const Color(0xFF0F172A).withValues(alpha: _hov ? 0.80 : 0.60),
-                            ]
-                          : [
-                              Colors.white.withValues(alpha: _hov ? 0.90 : 0.78),
-                              Colors.white.withValues(alpha: _hov ? 0.75 : 0.60),
-                            ],
-                    ),
-                    // Subtle top/left inner white border stroke (1px at 30% opacity)
-                    border: Border.all(
-                      color: _hov
-                          ? categoryColor.withValues(alpha: dark ? 0.65 : 0.50)
-                          : (dark
-                              ? Colors.white.withValues(alpha: 0.16)
-                              : Colors.white.withValues(alpha: 0.60)),
-                      width: _hov ? 1.5 : 1.0,
-                    ),
+              borderRadius: BorderRadius.circular(22),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  // High contrast crisp card background
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: dark
+                        ? [
+                            const Color(0xFF1E293B),
+                            const Color(0xFF0F172A),
+                          ]
+                        : [
+                            Colors.white,
+                            const Color(0xFFF8FAFC),
+                          ],
                   ),
-                  child: Stack(
-                    children: [
-                      // Ambient Radial Glow Spot (Top-Left behind icon)
-                      Positioned(
-                        top: -30,
-                        left: -30,
-                        width: 140,
-                        height: 140,
+                  border: Border.all(
+                    color: _hov
+                        ? categoryColor.withValues(alpha: dark ? 0.70 : 0.60)
+                        : (dark
+                            ? const Color(0xFF334155)
+                            : const Color(0xFFE2E8F0)),
+                    width: _hov ? 1.6 : 1.2,
+                  ),
+                ),
+                child: Stack(
+                  children: [
+                    // Ambient Radial Glow Spot (Top-Left behind icon)
+                    Positioned(
+                      top: -24,
+                      left: -24,
+                      width: 120,
+                      height: 120,
                         child: IgnorePointer(
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 300),
@@ -4671,7 +4720,6 @@ class _ModuleCardState extends State<_ModuleCard>
             ),
           ),
         ),
-      ),
-    );
+      );
   }
 }

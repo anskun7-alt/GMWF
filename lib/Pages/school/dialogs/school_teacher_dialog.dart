@@ -111,7 +111,7 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(Icons.note_add_rounded, color: Color(0xFF6366F1)),
+            Icon(Icons.note_add_rounded, color: Color(0xFF1B4965)),
             SizedBox(width: 10),
             Text('Add Faculty Document', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           ],
@@ -139,7 +139,7 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1B4965), foregroundColor: Colors.white),
             onPressed: () {
               final text = titleCtrl.text.trim();
               if (text.isNotEmpty) Navigator.pop(ctx, text);
@@ -232,10 +232,10 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
                       Container(
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF10B981).withValues(alpha: 0.1),
+                          color: const Color(0xFF2D9B83).withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: const Icon(Icons.person_add_alt_1_rounded, color: Color(0xFF10B981)),
+                        child: const Icon(Icons.person_add_alt_1_rounded, color: Color(0xFF2D9B83)),
                       ),
                       const SizedBox(width: 12),
                       Text(
@@ -369,8 +369,8 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
                     alignment: Alignment.centerLeft,
                     child: OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF10B981),
-                        side: const BorderSide(color: Color(0xFF10B981)),
+                        foregroundColor: const Color(0xFF2D9B83),
+                        side: const BorderSide(color: Color(0xFF2D9B83)),
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
@@ -568,8 +568,8 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
                       return FilterChip(
                         label: Text(grade),
                         selected: isSelected,
-                        selectedColor: const Color(0xFF10B981).withValues(alpha: 0.2),
-                        checkmarkColor: const Color(0xFF10B981),
+                        selectedColor: const Color(0xFF2D9B83).withValues(alpha: 0.2),
+                        checkmarkColor: const Color(0xFF2D9B83),
                         labelStyle: TextStyle(
                           color: isSelected ? const Color(0xFF047857) : const Color(0xFF475569),
                           fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
@@ -600,7 +600,7 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
                       ElevatedButton(
                         onPressed: _isSaving ? null : _saveTeacher,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF10B981),
+                          backgroundColor: const Color(0xFF2D9B83),
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),

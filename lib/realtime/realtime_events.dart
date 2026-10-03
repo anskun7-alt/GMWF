@@ -109,6 +109,9 @@ class RealtimeEvents {
   static const String approveEditRequest = 'approve_edit_request';
   static const String rejectEditRequest = 'reject_edit_request';
 
+  // ---- Force Sync Broadcast Event ----
+  static const String forceSyncUpload = 'force_sync_upload';
+
   // ---- Connection events ----
   static const String clientConnected = 'client_connected';
   static const String clientDisconnected = 'client_disconnected';

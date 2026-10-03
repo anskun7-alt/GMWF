@@ -32,6 +32,7 @@ enum RoleTheme {
   dispenser,
   receptionist,
   madrassa,
+  school,
 }
 
 class RoleThemeData {
@@ -513,6 +514,38 @@ class RoleThemeData {
     chartGrid:             Color(0xFFD8DEED),
   );
 
+  // ── School – sophisticated navy-teal academic palette ──────────────────────
+  // A refined, professional educational theme — deep ocean teal conveys
+  // institutional trust and academic excellence, paired with warm slate
+  // neutrals and soft sage accents for data visualization.
+  static const RoleThemeData _school = RoleThemeData(
+    roleLabel:             'SCHOOL',
+    isDarkCanvas:          false,
+    bg:                    Color(0xFFF7F9FB), // Cool off-white
+    bgCard:                Color(0xFFFFFFFF),
+    bgCardAlt:             Color(0xFFF0F4F8), // Slate-tinted alt card
+    bgRule:                Color(0xFFD5DDE5), // Soft slate border
+    accent:                Color(0xFF1B4965), // Deep Ocean Teal
+    accentLight:           Color(0xFF2C6E8A), // Medium Ocean
+    accentMuted:           Color(0xFFDAE8F0), // Pale ocean wash
+    accentGradient:        LinearGradient(colors: [Color(0xFF1B4965), Color(0xFF2C6E8A)]),
+    glassTint:             Color(0x1A1B4965),
+    textPrimary:           Color(0xFF0D2137), // Deep navy text
+    textSecondary:         Color(0xFF3D5A80), // Muted navy-blue
+    textTertiary:          Color(0xFF6B8EAE), // Soft steel-blue
+    danger:                Color(0xFFDC4A4A), // Warm red (not neon)
+    zakat:                 Color(0xFF2D9B83), // Teal-sage green
+    nonZakat:              Color(0xFF3B7DDD), // Academic blue
+    gmwf:                  Color(0xFFB8963E), // Warm antique gold
+    cardFillTokens:        Color(0xFF1B4965),
+    cardFillPrescriptions: Color(0xFF153B52),
+    cardFillDispensary:    Color(0xFF0F2D3F),
+    chartBar1:             Color(0xFF1B4965),
+    chartBar2:             Color(0xFF2D9B83),
+    chartBar3:             Color(0xFFB8963E),
+    chartGrid:             Color(0xFFD5DDE5),
+  );
+
   // ── Factory ───────────────────────────────────────────────────────────────
 
   factory RoleThemeData.of(RoleTheme role, [Color? customAccent]) {
@@ -530,6 +563,7 @@ class RoleThemeData {
       case RoleTheme.dispenser:     base = _dispenser; break;
       case RoleTheme.receptionist:  base = _receptionist; break;
       case RoleTheme.madrassa:      base = _madrassa; break;
+      case RoleTheme.school:        base = _school; break;
     }
 
     if (customAccent == null) return base;
@@ -597,7 +631,7 @@ class RoleThemeData {
       case 'principal':
       case 'school admin':
       case 'school teacher':
-      case 'school':          return RoleTheme.madrassa;
+      case 'school':          return RoleTheme.school;
       case 'admin':
       case 'global admin':
       default:                return RoleTheme.admin;

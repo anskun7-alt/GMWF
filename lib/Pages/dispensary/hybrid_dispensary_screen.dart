@@ -90,7 +90,7 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
     }
 
     // Start services once
-    SyncService().start(widget.branchId);
+    SyncService().start(widget.branchId, moduleScope: 'dispensary');
     _listenConnectivity();
     _loadBranchName();
 
@@ -111,9 +111,9 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
     CampSessionService.activeCampNotifier.addListener(_onCampChanged);
 
-    // Run receptionist bootstrap if "rec" is included in role
+    // Run receptionist bootstrap in background if "rec" is included in role
     if (widget.role.toLowerCase().contains('rec')) {
-      _bootstrapReceptionistData(widget.branchId);
+      Future.microtask(() => _bootstrapReceptionistData(widget.branchId));
     }
   }
 
@@ -314,6 +314,12 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
       // 2. If online, sync with cloud
       if (_online) {
+        final effBranch = widget.branchId.toLowerCase().trim();
+        if (CampSessionService.isKarachiFamily(effBranch)) {
+          await LocalStorageService.restoreAndSyncKarachiInventory('karachi');
+        } else {
+          await LocalStorageService.downloadInventory(effBranch, forceFull: true);
+        }
         await SyncService().syncTodayOnly(widget.branchId);
         await SyncService().triggerUpload();
       }
@@ -346,8 +352,8 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
       await LocalStorageService.ensureBoxOpen(LocalStorageService.patientsBox);
       await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
       // Only do a bulk patient download if local storage is fresh/empty (< 5 patients)
-      final localCount = LocalStorageService.getAllLocalPatients(branchId: branchId).length;
-      if (localCount < 5) {
+      final hasEnough = LocalStorageService.hasEnoughLocalPatients(branchId: branchId, minCount: 5);
+      if (!hasEnough) {
         final List<Patient> patients =
             await firestoreService.getAllPatientsForBranch(branchId);
         final patientsList = patients.map((p) => p.toMap()).toList();

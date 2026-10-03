@@ -792,7 +792,7 @@ class _DesktopCampDropdown extends StatelessWidget {
               items: items,
               onChanged: (val) {
                 if (val != null) {
-                  CampSessionService.setActiveCamp(val);
+                  CampSessionService.setActiveCamp(val, isManual: true);
                 }
               },
             ),

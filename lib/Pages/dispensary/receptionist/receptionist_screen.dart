@@ -122,7 +122,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     lss.LocalStorageService.ensureBoxOpen(lss.LocalStorageService.entriesBox);
 
     if (!widget.isEmbedded) {
-      SyncService().start(widget.branchId);
+      SyncService().start(widget.branchId, moduleScope: 'dispensary');
     }
     _loadBranchName();
     _listenConnectivity();
@@ -860,20 +860,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     // 1. Exact match with today's dateKey or ISO date string only
     if (dk == currentTodayKey || (serialDk.isNotEmpty && serialDk == currentTodayKey)) {
       return true;
-    } else if (rawTime != null) {
-      final rawStr = rawTime.toString();
-      if (rawStr.startsWith(todayIso)) {
-        return true;
-      } else {
-        final dt = DateTime.tryParse(rawStr);
-        if (dt != null) {
-          final dtKey = CampSessionService.resolveShiftAndDateKey(dt, widget.branchId).dateKey;
-          if (dtKey == currentTodayKey) return true;
-        }
-      }
+    }
+    if (rawTime != null && rawTime.toString().startsWith(todayIso)) {
+      return true;
     }
 
-    // Never accept yesterday's tokens regardless of status (waiting, skipped, in-progress, etc.)
     return false;
   }
 
@@ -1217,9 +1208,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     );
   }
 
-  Widget _buildSummaryCards(bool isMobile) {
+  Widget _buildSummaryCards([bool isMobile = false, List<Map<String, dynamic>>? precomputedEntries]) {
     try {
-      final todayEntries = _getFilteredTodayTokens();
+      final todayEntries = precomputedEntries ?? _getFilteredTodayTokens();
 
       int zakat = 0, nonZakat = 0, gmwf = 0;
       int zakatAmount = 0, nonZakatAmount = 0;
@@ -1436,8 +1427,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     );
   }
 
-  Widget _buildTokenLog(bool isMobile) {
-    final rawList = _getFilteredTodayTokens();
+  Widget _buildTokenLog([bool isMobile = false, List<Map<String, dynamic>>? precomputedEntries]) {
+    final rawList = List<Map<String, dynamic>>.from(precomputedEntries ?? _getFilteredTodayTokens());
 
     rawList.sort((a, b) {
       final sa = (a['serial'] as String? ?? '000000-000').split('-').last;
@@ -2248,15 +2239,15 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 child: ValueListenableBuilder<int>(
                   valueListenable: _refreshNotifier,
                   builder: (context, _, _) => _buildWithEntriesListenable(
-                    (context, _, _) => Column(
-                      children: [
-                        _buildSummaryCards(false),
-                        const SizedBox(height: 16),
-                        Expanded(
-                          child: Builder(
-                            builder: (context) {
-                              final todayCount = _getFilteredTodayTokens().length;
-                              return Card(
+                    (context, _, _) {
+                      final todayEntries = _getFilteredTodayTokens();
+                      final todayCount = todayEntries.length;
+                      return Column(
+                        children: [
+                          _buildSummaryCards(false, todayEntries),
+                          const SizedBox(height: 16),
+                          Expanded(
+                            child: Card(
                                 elevation: 8,
                                 color: _isDark ? const Color(0xFF1E293B) : Colors.white,
                                 shape: RoundedRectangleBorder(
@@ -2341,18 +2332,17 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                                             ],
                                           ),
                                           const Divider(height: 20),
-                                          Expanded(child: _buildTokenLog(false)),
+                                          Expanded(child: _buildTokenLog(false, todayEntries)),
                                         ],
                                       ),
                                     ),
                                   ],
                                 ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
                 ),
               ),

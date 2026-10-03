@@ -24,10 +24,10 @@ import '../widgets/device_badge_widget.dart';
 import '../utils/formatters.dart';
 import '../services/camp_session_service.dart';
 import '../services/auto_update_service.dart';
-import 'office/offboard_dialog.dart';
 import '../services/staff_patient_link_service.dart';
 import '../services/sync_service.dart';
 import '../services/device_info_service.dart';
+import '../realtime/realtime_manager.dart';
 
 class UserDetailScreen extends StatefulWidget {
   final String userId;
@@ -56,7 +56,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
   Future<void> _updateFirebaseAuthUser(String email, String password, {String? newEmail, String? newPassword, String? newDisplayName}) async {
     final cleanEmail = email.trim();
     final cleanPass = password.trim();
-    if (cleanEmail.isEmpty || cleanPass.isEmpty) return;
+    if (cleanEmail.isEmpty) return;
 
     FirebaseApp? secondaryApp;
     try {
@@ -71,20 +71,20 @@ class _UserDetailScreenState extends State<UserDetailScreen>
               email: currentUser.email ?? cleanEmail,
               password: cleanPass,
             );
-            await currentUser.reauthenticateWithCredential(cred);
+            await currentUser.reauthenticateWithCredential(cred).timeout(const Duration(seconds: 3));
           } catch (reauthErr) {
             debugPrint('[UserDetailScreen] Reauthentication skipped/failed: $reauthErr');
           }
         }
         if (newEmail != null && newEmail.isNotEmpty && newEmail.toLowerCase() != cleanEmail.toLowerCase()) {
-          await currentUser.verifyBeforeUpdateEmail(newEmail);
+          await currentUser.verifyBeforeUpdateEmail(newEmail).timeout(const Duration(seconds: 3)).catchError((_) {});
         }
         if (newPassword != null && newPassword.isNotEmpty && newPassword != cleanPass) {
-          await currentUser.updatePassword(newPassword);
+          await currentUser.updatePassword(newPassword).timeout(const Duration(seconds: 3)).catchError((_) {});
           await OfflineAuthService.updateCachedPassword(newPassword, usernameOrEmail: currentUser.email ?? cleanEmail);
         }
         if (newDisplayName != null && newDisplayName.isNotEmpty) {
-          await currentUser.updateDisplayName(newDisplayName);
+          await currentUser.updateDisplayName(newDisplayName).timeout(const Duration(seconds: 3)).catchError((_) {});
         }
         return;
       }
@@ -93,16 +93,15 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       secondaryApp = await Firebase.initializeApp(
         name: appName,
         options: Firebase.app().options,
-      ).timeout(const Duration(seconds: 4));
+      ).timeout(const Duration(seconds: 3));
       final secondaryAuth = FirebaseAuth.instanceFor(app: secondaryApp);
       UserCredential? creds;
-      for (final p in [cleanPass, '123456', '112233', '1122', '12345678', 'password']) {
+      if (cleanPass.isNotEmpty) {
         try {
           creds = await secondaryAuth.signInWithEmailAndPassword(
             email: cleanEmail,
-            password: p,
-          ).timeout(const Duration(seconds: 3));
-          if (creds.user != null) break;
+            password: cleanPass,
+          ).timeout(const Duration(seconds: 2));
         } catch (_) {}
       }
 
@@ -114,22 +113,22 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           creds = await secondaryAuth.createUserWithEmailAndPassword(
             email: cleanEmail,
             password: createPw,
-          ).timeout(const Duration(seconds: 4));
+          ).timeout(const Duration(seconds: 3));
         } catch (_) {}
       }
 
       final user = creds?.user;
       if (user != null) {
         if (newEmail != null && newEmail.isNotEmpty && newEmail.toLowerCase() != cleanEmail.toLowerCase()) {
-          await user.verifyBeforeUpdateEmail(newEmail).timeout(const Duration(seconds: 3)).catchError((_) {});
+          await user.verifyBeforeUpdateEmail(newEmail).timeout(const Duration(seconds: 2)).catchError((_) {});
         }
         if (newPassword != null && newPassword.isNotEmpty) {
           final authPw = newPassword.length >= 6 ? newPassword : '${newPassword}33';
-          await user.updatePassword(authPw).timeout(const Duration(seconds: 3)).catchError((_) {});
+          await user.updatePassword(authPw).timeout(const Duration(seconds: 2)).catchError((_) {});
           await OfflineAuthService.updateCachedPassword(newPassword, usernameOrEmail: cleanEmail);
         }
         if (newDisplayName != null && newDisplayName.isNotEmpty) {
-          await user.updateDisplayName(newDisplayName).timeout(const Duration(seconds: 3)).catchError((_) {});
+          await user.updateDisplayName(newDisplayName).timeout(const Duration(seconds: 2)).catchError((_) {});
         }
       }
     } catch (e) {
@@ -294,7 +293,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           .get();
       if (doc.exists) {
         setState(() =>
-            branchName = doc.data()!['name'] as String? ?? widget.branchId);
+            branchName = doc.data()?['name'] as String? ?? widget.branchId);
       }
     } catch (_) {}
   }
@@ -444,6 +443,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           if (uid == target ||
               (username.isNotEmpty && username == target) ||
               (email.isNotEmpty && email == target)) {
+            box.put(widget.userId, u);
             return u;
           }
         }
@@ -455,11 +455,18 @@ class _UserDetailScreenState extends State<UserDetailScreen>
   }
 
   void _showEditDialog(Map<String, dynamic> data, RoleThemeData t) async {
+    final targetRole = (data['role']?.toString() ?? '').toLowerCase().trim();
+    final actorRole = _getActorRole();
+    if (targetRole == 'chairman' && actorRole != 'chairman') {
+      _snack(
+        'Access Denied: Only the Chairman is allowed to modify the Chairman account.',
+        error: true,
+      );
+      return;
+    }
     if (!_canManageUserAccess(data)) {
       _snack(
-        (data['role']?.toString().toLowerCase().trim() == 'chairman')
-            ? 'Access Denied: The Chairman account is 100% immutable and CANNOT be edited or restricted by ANY user.'
-            : 'Access Denied: Only the Chairman has authority to edit or manage user accounts.',
+        'Access Denied: You do not have authority to edit or manage user accounts.',
         error: true,
       );
       return;
@@ -472,9 +479,9 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       text: data['password']?.toString() ?? '',
     );
 
-    _usernameController.text = data['username'] ?? '';
-    _emailController.text = data['email'] ?? '';
-    _phoneController.text = data['phone'] ?? '';
+    _usernameController.text = data['username']?.toString() ?? '';
+    _emailController.text = data['email']?.toString() ?? '';
+    _phoneController.text = data['phone']?.toString() ?? '';
     
     // Roles configuration for dropdown and normalization
     List<Map<String, dynamic>> roleConfigs = [
@@ -532,11 +539,11 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       (s) => s.toLowerCase() == rawStatus.toLowerCase(),
       orElse: () => 'Active',
     );
-    _degreeController.text = data['degree'] ?? '';
-    _identificationController.text = data['identification'] ?? '';
-    _addressController.text = data['address'] ?? '';
-    _bankNameController.text = data['bankName'] ?? '';
-    _bankAccountController.text = data['bankAccount'] ?? '';
+    _degreeController.text = data['degree']?.toString() ?? '';
+    _identificationController.text = data['identification']?.toString() ?? '';
+    _addressController.text = data['address']?.toString() ?? '';
+    _bankNameController.text = data['bankName']?.toString() ?? '';
+    _bankAccountController.text = data['bankAccount']?.toString() ?? '';
     final initialUserPin = ZkTecoNetworkService.getCredentialByEntityId(widget.userId)?.biometricPin ?? data['biometricPin']?.toString() ?? '';
     final pinController = TextEditingController(text: initialUserPin);
     bool editedCanRegisterMed = data['canRegisterMedicine'] == true;
@@ -572,18 +579,20 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     String editedMadrassaSession = (data['session'] ?? (data['sessions'] is List && (data['sessions'] as List).isNotEmpty ? (data['sessions'] as List).first : 'morning')).toString().toLowerCase().trim();
     if (editedMadrassaSession.isEmpty) editedMadrassaSession = 'morning';
 
+    final availableBranches = await _loadAvailableBranchesForEdit();
+    bool isSaving = false;
+
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setS) {
-          final isDoctor = _selectedRole != null &&
-              (_selectedRole!.toLowerCase() == 'doctor' ||
-                  _selectedRole!.toLowerCase().contains('doc'));
-          final isMadrassaTeacher = _selectedRole != null &&
-              _selectedRole!.toLowerCase().trim() == 'madrassa teacher';
-          final isDispensaryRole = _selectedRole != null &&
-              ['doctor', 'receptionist', 'dispenser', 'rec+dis', 'doc+rec', 'doc+dis', 'doc+rec+dis', 'supervisor', 'branch manager']
-                  .contains(_selectedRole!.toLowerCase().trim());
+          final roleLower = (_selectedRole ?? '').toLowerCase().trim();
+          final isDoctor = roleLower == 'doctor' || roleLower.contains('doc');
+          final isMadrassaTeacher = roleLower == 'madrassa teacher';
+          final isDispensaryRole = [
+            'doctor', 'receptionist', 'dispenser', 'rec+dis', 'doc+rec',
+            'doc+dis', 'doc+rec+dis', 'supervisor', 'branch manager'
+          ].contains(roleLower);
           // Use editedBranchId so branch selection affects camp chips immediately
           final branchCamps = CampSessionService.getCampsForBranch(editedBranchId, includeClosed: false);
 
@@ -652,14 +661,31 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                             ],
                             maxLen: 11),
                         _editField(t, passCtrl,
-                            'Password',
+                            'Password (min 6 characters)',
                             Icons.lock_outline_rounded,
-                            obscure: true),
+                            obscure: true,
+                            validator: (v) {
+                              if (v != null && v.trim().isNotEmpty && v.trim().length < 6) {
+                                return 'Password must be at least 6 characters';
+                              }
+                              return null;
+                            }),
                         _editField(
                             t,
                             _identificationController,
-                            'Identification',
-                            Icons.credit_card_outlined),
+                            'CNIC (xxxxx-xxxxxxxx-x)',
+                            Icons.credit_card_outlined,
+                            type: TextInputType.number,
+                            formatters: [
+                              _CnicInputFormatter(),
+                              LengthLimitingTextInputFormatter(15),
+                            ],
+                            validator: (v) {
+                              if (v == null || v.trim().isEmpty) return null;
+                              final digits = v.replaceAll('-', '');
+                              if (digits.length != 13) return 'CNIC must be 13 digits';
+                              return null;
+                            }),
                         _editField(t, _addressController, 'Address',
                             Icons.home_outlined,
                             maxLines: 2),
@@ -704,10 +730,9 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                         ),
                         const SizedBox(height: 12),
                         // Branch selector — always editable
-                        FutureBuilder<List<Map<String, dynamic>>>(
-                          future: _loadAvailableBranchesForEdit(),
-                          builder: (ctx, snap) {
-                            final branches = snap.data ?? [];
+                        Builder(
+                          builder: (ctx) {
+                            final branches = availableBranches;
                             if (branches.isEmpty) return const SizedBox.shrink();
                             final branchItems = branches.map((b) =>
                               (b['id'] ?? '').toString().toLowerCase().trim()
@@ -1221,6 +1246,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                           ),
                         ],
 
+                        if (isDoctor || roleLower == 'dispenser' || roleLower == 'doc+dis' || roleLower == 'rec+dis' || roleLower == 'doc+rec+dis') ...[
                         const SizedBox(height: 12),
                         Container(
                           decoration: BoxDecoration(
@@ -1236,6 +1262,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                             onChanged: (val) => setS(() => editedCanRegisterMed = val),
                           ),
                         ),
+                        ],
 
                         if (isDoctor) ...[
                           const SizedBox(height: 12),
@@ -1288,28 +1315,44 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                     Expanded(
                       flex: 2,
                       child: ElevatedButton.icon(
-                        icon: const Icon(Icons.save_rounded,
-                            size: 18),
-                        label: const Text('Save Changes',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700)),
-                        onPressed: () async => _saveUser(ctx,
-                            editKey, data, passCtrl, isDoctor,
-                            pinController: pinController,
-                            dispensaryIds: editedDispensaryIds,
-                            campSchedule: editedSchedule,
-                            canRegisterMedicine: editedCanRegisterMed,
-                            editedBranchId: editedBranchId,
-                            madrassaTeachingType: editedTeachingType,
-                            madrassaSession: editedMadrassaSession),
+                        icon: isSaving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.save_rounded, size: 18),
+                        label: Text(isSaving ? 'Saving...' : 'Save Changes',
+                            style: const TextStyle(fontWeight: FontWeight.w700)),
+                        onPressed: isSaving
+                            ? null
+                            : () async {
+                                setS(() => isSaving = true);
+                                try {
+                                  await _saveUser(ctx,
+                                      editKey, data, passCtrl, isDoctor,
+                                      pinController: pinController,
+                                      dispensaryIds: editedDispensaryIds,
+                                      campSchedule: editedSchedule,
+                                      canRegisterMedicine: editedCanRegisterMed,
+                                      editedBranchId: editedBranchId,
+                                      madrassaTeachingType: editedTeachingType,
+                                      madrassaSession: editedMadrassaSession);
+                                } finally {
+                                  if (ctx.mounted) {
+                                    setS(() => isSaving = false);
+                                  }
+                                }
+                              },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: t.accent,
                           foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 14),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
                           shape: RoundedRectangleBorder(
-                              borderRadius:
-                                  BorderRadius.circular(12)),
+                              borderRadius: BorderRadius.circular(12)),
                           elevation: 0,
                         ),
                       ),
@@ -1338,11 +1381,12 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       String madrassaTeachingType = 'hifz',
       String madrassaSession = 'morning',
   }) async {
-    if (!key.currentState!.validate()) return;
+    if (key.currentState != null && !key.currentState!.validate()) return;
 
     final String targetRole = (old['role'] ?? '').toString().toLowerCase().trim();
-    if (targetRole == 'chairman') {
-      _snack('Access Denied: The Chairman account is 100% immutable and CANNOT be edited or restricted by ANY user!', error: true);
+    final actorRole = _getActorRole();
+    if (targetRole == 'chairman' && actorRole != 'chairman') {
+      _snack('Access Denied: Only the Chairman is allowed to modify the Chairman account!', error: true);
       return;
     }
     if (!_canManageUserAccess(old)) {
@@ -1376,6 +1420,10 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           ? _phoneController.text.trim()
           : null,
       'identification':
+          _identificationController.text.trim().isNotEmpty
+              ? _identificationController.text.trim()
+              : null,
+      'cnic':
           _identificationController.text.trim().isNotEmpty
               ? _identificationController.text.trim()
               : null,
@@ -1427,23 +1475,47 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     }
 
     Future<String> upload(XFile f, String name) async {
-      final path =
-          'branches/${widget.branchId}/users/${widget.userId}/$name.${f.name.split('.').last}';
-      final ref = FirebaseStorage.instance.ref(path);
-      await ref.putFile(File(f.path)).timeout(const Duration(seconds: 15));
-      return await ref.getDownloadURL().timeout(const Duration(seconds: 8));
+      try {
+        final path = f.path.trim();
+        // Direct Base64 data string handling
+        if (path.startsWith('data:') || path.length > 200 || ImageUploadService.isValidMediaString(path)) {
+          return path;
+        }
+        final file = File(path);
+        if (await file.exists()) {
+          try {
+            final storagePath =
+                'branches/${widget.branchId}/users/${widget.userId}/$name.${f.name.split('.').last}';
+            final ref = FirebaseStorage.instance.ref(storagePath);
+            await ref.putFile(file).timeout(const Duration(seconds: 10));
+            return await ref.getDownloadURL().timeout(const Duration(seconds: 6));
+          } catch (_) {
+            final bytes = await file.readAsBytes();
+            final b64 = ImageUploadService.processBytesToBase64(bytes);
+            if (b64 != null) return b64;
+          }
+        }
+      } catch (e) {
+        debugPrint('[UserDetailScreen] upload error: $e');
+      }
+      return '';
     }
 
     if (_profileFile != null) {
-      updates['profilePictureUrl'] =
-          await upload(_profileFile!, 'profile');
+      final res = await upload(_profileFile!, 'profile');
+      if (res.isNotEmpty) {
+        updates['profilePictureUrl'] = res;
+        updates['photoUrl'] = res;
+        updates['profileImage'] = res;
+      }
     }
     if (_idFile != null) {
-      updates['identificationUrl'] =
-          await upload(_idFile!, 'identification');
+      final res = await upload(_idFile!, 'identification');
+      if (res.isNotEmpty) updates['identificationUrl'] = res;
     }
     if (isDoctor && _degreeFile != null) {
-      updates['degreeUrl'] = await upload(_degreeFile!, 'degree');
+      final res = await upload(_degreeFile!, 'degree');
+      if (res.isNotEmpty) updates['degreeUrl'] = res;
     }
 
     try {
@@ -1464,19 +1536,18 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       final bool hasPasswordChanged = passCtrl.text.trim().isNotEmpty;
       final isLocal = widget.userId.startsWith('local-');
 
-      // Attempt secondary Firebase Auth sync for accounts that changed their password and have a cloud identity
-      if (!isLocal && hasPasswordChanged) {
-        try {
-          await _updateFirebaseAuthUser(
-            oldEmail,
-            oldPassword,
-            newEmail: newEmail,
-            newPassword: newPassword,
-            newDisplayName: newName,
-          );
-        } catch (e) {
-          debugPrint('[UserDetailScreen] Auth sync note: $e');
-        }
+      // Attempt Firebase Auth sync for accounts that changed credentials (password, email, or name)
+      final bool hasEmailChanged = newEmail.toLowerCase() != oldEmail.toLowerCase();
+      final bool hasNameChanged = newName.isNotEmpty && newName != (old['name']?.toString() ?? old['username']?.toString() ?? '');
+      final bool hasCredentialChanged = hasPasswordChanged || hasEmailChanged || hasNameChanged;
+      if (!isLocal && hasCredentialChanged) {
+        unawaited(_updateFirebaseAuthUser(
+          oldEmail,
+          oldPassword,
+          newEmail: hasEmailChanged ? newEmail : null,
+          newPassword: hasPasswordChanged ? newPassword : null,
+          newDisplayName: hasNameChanged ? newName : null,
+        ));
       }
 
       // Preserve and deduplicate studentIds for student/guardian portal profiles
@@ -1568,31 +1639,33 @@ class _UserDetailScreenState extends State<UserDetailScreen>
         );
       }
 
-      // Always attempt instant Firestore push (not just when online flag is set)
-      try {
-        final firestoreData = Map<String, dynamic>.from(fullUserData);
-        firestoreData.remove('password'); // Never store plaintext password in Firestore
-        firestoreData['updatedAt'] = FieldValue.serverTimestamp();
+      // Instant Firestore push (with short timeout so UI is never blocked)
+      unawaited(() async {
+        try {
+          final firestoreData = Map<String, dynamic>.from(fullUserData);
+          firestoreData.remove('password'); // Never store plaintext password in Firestore
+          firestoreData['updatedAt'] = FieldValue.serverTimestamp();
 
-        await _firestore
-            .collection('users')
-            .doc(widget.userId)
-            .set(firestoreData, SetOptions(merge: true))
-            .timeout(const Duration(seconds: 6));
-
-        if (resolvedBranchId != 'all' && resolvedBranchId.isNotEmpty && resolvedBranchId != 'global') {
           await _firestore
-              .collection('branches')
-              .doc(resolvedBranchId)
               .collection('users')
               .doc(widget.userId)
               .set(firestoreData, SetOptions(merge: true))
-              .timeout(const Duration(seconds: 6));
+              .timeout(const Duration(seconds: 4));
+
+          if (resolvedBranchId != 'all' && resolvedBranchId.isNotEmpty && resolvedBranchId != 'global') {
+            await _firestore
+                .collection('branches')
+                .doc(resolvedBranchId)
+                .collection('users')
+                .doc(widget.userId)
+                .set(firestoreData, SetOptions(merge: true))
+                .timeout(const Duration(seconds: 4));
+          }
+          debugPrint('[UserDetailScreen] ✅ Instant Firestore sync complete for ${widget.userId}');
+        } catch (e) {
+          debugPrint('[UserDetailScreen] ⚠️ Firestore update note (will retry via sync queue): $e');
         }
-        debugPrint('[UserDetailScreen] ✅ Instant Firestore sync complete for ${widget.userId}');
-      } catch (e) {
-        debugPrint('[UserDetailScreen] ⚠️ Firestore update note (will retry via sync queue): $e');
-      }
+      }());
 
       SyncService().triggerUpload(force: true);
 
@@ -1891,35 +1964,19 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                 slivers: [
                   _buildSliverAppBar(merged, t),
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
-                    sliver: SliverList(
-                      delegate: SliverChildListDelegate([
-                        const SizedBox(height: 20),
-                        _buildInfoSection(merged, t),
-                        const SizedBox(height: 16),
-                        _buildLinkedEmployeeSection(merged, t),
-                        const SizedBox(height: 16),
-                        _buildContactSection(merged, t),
-                        const SizedBox(height: 16),
-                        _buildFinancialSection(merged, t),
-                        if ((merged['role'] as String?) != null &&
-                            ((merged['role'] as String).toLowerCase() == 'doctor' ||
-                                (merged['role'] as String).toLowerCase().contains('doc'))) ...[
-                          const SizedBox(height: 16),
-                          _buildMedicalSection(merged, t),
-                        ],
-                        if (merged['identificationUrl'] != null ||
-                            merged['degreeUrl'] != null) ...[
-                          const SizedBox(height: 16),
-                          _buildDocumentsSection(merged, t),
-                        ],
-                        const SizedBox(height: 16),
-                        _buildActiveDeviceSection(merged, t),
-                        const SizedBox(height: 16),
-                        _buildMetaSection(merged, t),
-                        const SizedBox(height: 16),
-                        _buildRevokeAccessCard(merged, t),
-                      ]),
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
+                    sliver: SliverToBoxAdapter(
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 1440),
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final isWide = constraints.maxWidth >= 950;
+                              return _buildResponsiveBody(merged, t, isWide: isWide);
+                            },
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ],
@@ -1928,6 +1985,540 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           );
         },
       ),
+    );
+  }
+
+  Widget _buildResponsiveBody(Map<String, dynamic> data, RoleThemeData t, {required bool isWide}) {
+    final hasDoctor = (data['role'] as String?) != null &&
+        ((data['role'] as String).toLowerCase() == 'doctor' ||
+            (data['role'] as String).toLowerCase().contains('doc'));
+    final hasDocs = data['identificationUrl'] != null || data['degreeUrl'] != null;
+    final hasDispensary = _hasDispensaryOrCamps(data);
+
+    if (isWide) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Left Column (Quick Overview, HR Link, Devices, Access Management)
+          Expanded(
+            flex: 5,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildQuickOverviewCard(data, t),
+                const SizedBox(height: 18),
+                _buildLinkedEmployeeSection(data, t),
+                const SizedBox(height: 18),
+                _buildActiveDeviceSection(data, t),
+                const SizedBox(height: 18),
+                _buildRevokeAccessCard(data, t),
+              ],
+            ),
+          ),
+          const SizedBox(width: 20),
+          // Right Column (Account Info, Dispensary/Camps, Contact, Financials, Medical, Documents, Audit)
+          Expanded(
+            flex: 7,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildInfoSection(data, t),
+                if (hasDispensary) ...[
+                  const SizedBox(height: 18),
+                  _buildDispensaryScheduleCard(data, t),
+                ],
+                const SizedBox(height: 18),
+                _buildContactSection(data, t),
+                const SizedBox(height: 18),
+                _buildFinancialSection(data, t),
+                if (hasDoctor) ...[
+                  const SizedBox(height: 18),
+                  _buildMedicalSection(data, t),
+                ],
+                if (hasDocs) ...[
+                  const SizedBox(height: 18),
+                  _buildDocumentsSection(data, t),
+                ],
+                const SizedBox(height: 18),
+                _buildMetaSection(data, t),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    // Narrow / Mobile Layout
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildQuickOverviewCard(data, t),
+        const SizedBox(height: 16),
+        _buildInfoSection(data, t),
+        if (hasDispensary) ...[
+          const SizedBox(height: 16),
+          _buildDispensaryScheduleCard(data, t),
+        ],
+        const SizedBox(height: 16),
+        _buildLinkedEmployeeSection(data, t),
+        const SizedBox(height: 16),
+        _buildContactSection(data, t),
+        const SizedBox(height: 16),
+        _buildFinancialSection(data, t),
+        if (hasDoctor) ...[
+          const SizedBox(height: 16),
+          _buildMedicalSection(data, t),
+        ],
+        if (hasDocs) ...[
+          const SizedBox(height: 16),
+          _buildDocumentsSection(data, t),
+        ],
+        const SizedBox(height: 16),
+        _buildActiveDeviceSection(data, t),
+        const SizedBox(height: 16),
+        _buildMetaSection(data, t),
+        const SizedBox(height: 16),
+        _buildRevokeAccessCard(data, t),
+      ],
+    );
+  }
+
+  bool _hasDispensaryOrCamps(Map<String, dynamic> data) {
+    if (data['dispensaryIds'] is List && (data['dispensaryIds'] as List).isNotEmpty) return true;
+    if (data['dispensaryId'] != null && data['dispensaryId'].toString().isNotEmpty) return true;
+    if (data['campSchedule'] is List && (data['campSchedule'] as List).isNotEmpty) return true;
+    final r = (data['role'] ?? '').toString().toLowerCase();
+    if (r.contains('dis') || r.contains('camp') || r.contains('rec+dis')) return true;
+    return false;
+  }
+
+  Widget _buildQuickOverviewCard(Map<String, dynamic> data, RoleThemeData t) {
+    final status = (data['status'] ?? data['accountStatus'] ?? 'active').toString().toLowerCase().trim();
+    final isRevoked = status == 'inactive' ||
+        status == 'suspended' ||
+        status == 'terminated' ||
+        status == 'resigned' ||
+        status == 'retired' ||
+        status == 'offboarded' ||
+        status == 'revoked' ||
+        data['isActive'] == false ||
+        data['isRevoked'] == true ||
+        data['accessRevoked'] == true;
+    final rawRole = (data['role'] as String? ?? 'User').trim();
+    final role = rawRole.toLowerCase() == 'madrassa parent' ? 'GUARDIAN' : rawRole.toUpperCase();
+    final email = (data['email'] ?? '').toString().toLowerCase().trim();
+    final username = (data['username'] ?? data['name'] ?? 'User').toString().trim();
+    final uid = (data['uid'] ?? data['id'] ?? widget.userId).toString();
+    final isKashif = email.contains('kashif') || username.toLowerCase() == 'kashif' || uid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+    final branch = (branchName ?? data['branchId'] ?? widget.branchId).toString().toUpperCase();
+    final isOnline = DeviceInfoService.isUserOnline(data, thresholdMinutes: 5);
+
+    final linkedEmpId = (data['linkedEmployeeId'] ?? data['employeeId'])?.toString();
+    final isHrLinked = linkedEmpId != null && linkedEmpId.isNotEmpty;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: t.bgCard,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: t.bgRule, width: 0.9),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 14,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header banner
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+            decoration: BoxDecoration(
+              color: t.accent.withValues(alpha: 0.07),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+              border: Border(bottom: BorderSide(color: t.bgRule)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: t.accent.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: t.accent.withValues(alpha: 0.3)),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(Icons.person_pin_rounded, color: t.accent, size: 20),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Profile Overview',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                          color: t.textPrimary,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                      Text(
+                        '@$username • $branch',
+                        style: TextStyle(fontSize: 11.5, color: t.textSecondary, fontWeight: FontWeight.w500),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: (isRevoked ? const Color(0xFFEF4444) : const Color(0xFF10B981)).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: isRevoked ? const Color(0xFFEF4444) : const Color(0xFF10B981), width: 0.8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isRevoked ? const Color(0xFFEF4444) : const Color(0xFF10B981),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        isRevoked ? 'REVOKED' : 'ACTIVE',
+                        style: TextStyle(
+                          color: isRevoked ? const Color(0xFFEF4444) : const Color(0xFF10B981),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Quick Badges
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _overviewChip(icon: Icons.badge_outlined, label: role, color: t.accent),
+                    _overviewChip(icon: Icons.location_on_outlined, label: branch, color: const Color(0xFF0284C7)),
+                    if (isHrLinked)
+                      _overviewChip(icon: Icons.fingerprint_rounded, label: 'HR LINKED', color: const Color(0xFF10B981))
+                    else
+                      _overviewChip(icon: Icons.link_off_rounded, label: 'UNLINKED', color: Colors.amber.shade800),
+                    if (isOnline)
+                      _overviewChip(icon: Icons.wifi_rounded, label: 'ONLINE NOW', color: const Color(0xFF22C55E)),
+                    if (isKashif)
+                      _overviewChip(icon: Icons.local_hospital_rounded, label: 'KARACHI DISPENSARY', color: const Color(0xFF0D9488)),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Divider(height: 1, color: t.bgRule),
+                const SizedBox(height: 14),
+                Text(
+                  'QUICK ACTIONS',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.8,
+                    color: t.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (_canManageUserAccess(data)) ...[
+                      _actionButton(
+                        icon: Icons.edit_rounded,
+                        label: 'Edit Details',
+                        color: t.accent,
+                        onTap: () => _showEditDialog(data, t),
+                      ),
+                      if (isKashif)
+                        _actionButton(
+                          icon: Icons.healing_rounded,
+                          label: 'Heal Kashif',
+                          color: Colors.amber.shade800,
+                          onTap: () async {
+                            await LocalStorageService.healKashifAccount(syncToCloud: true);
+                            await _refreshUser();
+                            _snack('✅ Kashif account successfully healed to Karachi with all camps!', success: true);
+                          },
+                        ),
+                    ],
+                    _actionButton(
+                      icon: Icons.medical_services_outlined,
+                      label: 'Medical File',
+                      color: const Color(0xFF0D9488),
+                      onTap: () => StaffPatientLinkService.openStaffMedicalHistory(
+                        context,
+                        name: resolveUserDisplayName(data),
+                        cnic: data['cnic']?.toString(),
+                        branchId: data['branchId']?.toString() ?? widget.branchId,
+                        role: role,
+                      ),
+                    ),
+                    _actionButton(
+                      icon: Icons.copy_rounded,
+                      label: 'Copy User ID',
+                      color: t.textSecondary,
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: uid));
+                        _snack('Copied User ID to clipboard', success: true);
+                      },
+                    ),
+                    _actionButton(
+                      icon: Icons.refresh_rounded,
+                      label: 'Sync Fresh Data',
+                      color: t.textSecondary,
+                      onTap: _refreshUser,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _overviewChip({required IconData icon, required String label, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.3), width: 0.8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(color: color, fontSize: 10.5, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionButton({required IconData icon, required String label, required Color color, required VoidCallback onTap}) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color.withValues(alpha: 0.25), width: 0.8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: color),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(color: color, fontSize: 11.5, fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDispensaryScheduleCard(Map<String, dynamic> data, RoleThemeData t) {
+    final dispensaryIds = (data['dispensaryIds'] is List)
+        ? (data['dispensaryIds'] as List).map((e) => e.toString()).toList()
+        : (data['dispensaryId'] != null ? [data['dispensaryId'].toString()] : <String>[]);
+    final scheduleList = (data['campSchedule'] is List)
+        ? (data['campSchedule'] as List).whereType<Map>().toList()
+        : <Map>[];
+
+    final branch = (data['branchId'] ?? widget.branchId ?? '').toString();
+    final activeCampId = CampSessionService.getActiveCamp(branch.isNotEmpty ? branch : null) ??
+        (dispensaryIds.isNotEmpty ? dispensaryIds.first : 'saddar');
+    final currentSession = CampSessionService.getCurrentSession(null, branch.isNotEmpty ? branch : null);
+    final isMorning = currentSession.toLowerCase() == 'morning';
+
+    return _card(
+      t,
+      'Dispensary Sessions & Camp Shifts',
+      Icons.local_hospital_rounded,
+      const Color(0xFF0D9488),
+      trailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D9488).withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF0D9488).withValues(alpha: 0.3)),
+        ),
+        child: Text(
+          isMorning ? 'MORNING SHIFT ACTIVE' : 'EVENING SHIFT ACTIVE',
+          style: const TextStyle(color: Color(0xFF0D9488), fontSize: 10, fontWeight: FontWeight.w800),
+        ),
+      ),
+      [
+        // Active shift notice banner
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0D9488).withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFF0D9488).withValues(alpha: 0.25)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.access_time_filled_rounded, size: 18, color: Color(0xFF0D9488)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Current Operating Shift: ${isMorning ? "Morning (10:00 AM – 01:00 PM)" : "Evening (05:00 PM – 08:00 PM)"} • Active Camp: ${CampSessionService.getCampLabel(activeCampId, branch.isNotEmpty ? branch : null)}',
+                  style: TextStyle(color: t.textPrimary, fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text('ASSIGNED DISPENSARIES / CAMPS',
+            style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: t.textSecondary, letterSpacing: 0.5)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: dispensaryIds.map((cid) {
+            final isCurrent = cid == activeCampId;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: isCurrent ? const Color(0xFF0D9488).withValues(alpha: 0.15) : t.bgCardAlt,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: isCurrent ? const Color(0xFF0D9488) : t.bgRule,
+                  width: isCurrent ? 1.4 : 0.8,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isCurrent ? Icons.check_circle_rounded : Icons.location_on_outlined,
+                    size: 15,
+                    color: isCurrent ? const Color(0xFF0D9488) : t.textSecondary,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    CampSessionService.getCampLabel(cid),
+                    style: TextStyle(
+                      color: isCurrent ? const Color(0xFF0D9488) : t.textPrimary,
+                      fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w600,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                  if (isCurrent) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0D9488),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text('ACTIVE', style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w900)),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          }).toList(),
+        ),
+        if (scheduleList.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Text('DAILY SHIFT SCHEDULE',
+              style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: t.textSecondary, letterSpacing: 0.5)),
+          const SizedBox(height: 8),
+          Column(
+            children: scheduleList.map((s) {
+              final cid = s['campId']?.toString() ?? '';
+              final session = (s['session'] ?? '').toString();
+              final start = (s['startTime'] ?? '').toString();
+              final end = (s['endTime'] ?? '').toString();
+              final isCurrent = cid == activeCampId;
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: t.bgCardAlt.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: isCurrent ? const Color(0xFF0D9488).withValues(alpha: 0.5) : t.bgRule, width: 0.8),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      session.toLowerCase() == 'morning' ? Icons.wb_sunny_rounded : Icons.nightlight_round,
+                      size: 16,
+                      color: session.toLowerCase() == 'morning' ? Colors.amber.shade700 : Colors.indigo.shade400,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      '${session.toUpperCase()}:',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: t.textPrimary),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      CampSessionService.getCampLabel(cid),
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.accent),
+                    ),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: t.bg,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: t.bgRule),
+                      ),
+                      child: Text(
+                        '$start – $end',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: t.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ],
     );
   }
 
@@ -1981,6 +2572,36 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           tooltip: 'Refresh User Data',
           onPressed: _refreshUser,
         ),
+        if (data['email']?.toString().toLowerCase().contains('kashif') == true ||
+            data['username']?.toString().toLowerCase() == 'kashif' ||
+            widget.userId == 'e5I5hQJQNpe08MuKmOc937dcMR43')
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: IconButton(
+              icon: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade800.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.amber.shade300, width: 0.9),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.healing_rounded, size: 16, color: Colors.amberAccent),
+                    SizedBox(width: 5),
+                    Text('Heal Kashif', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+              tooltip: 'Self-Heal Kashif account to Karachi branch with active camps',
+              onPressed: () async {
+                await LocalStorageService.healKashifAccount(syncToCloud: true);
+                await _refreshUser();
+                _snack('✅ Kashif account healed to Karachi with active camps!', success: true);
+              },
+            ),
+          ),
         if (_canManageUserAccess(data)) ...[
           IconButton(
             icon: Container(
@@ -2066,11 +2687,14 @@ class _UserDetailScreenState extends State<UserDetailScreen>
             ),
           ),
           child: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 52, 20, 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1440),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 52, 20, 16),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
                   GestureDetector(
                     onTap: () => _showEnlargedPhotoDialog(context, username, photoUrl, role, t),
                     child: MouseRegion(
@@ -2257,68 +2881,126 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           ),
         ),
       ),
-    );
+    ),
+  ),
+);
   }
 
   Widget _buildInfoSection(
       Map<String, dynamic> data, RoleThemeData t) {
-    return _card(t, 'Account Info', Icons.person_outline_rounded,
-        t.accent, [
-      _infoRow(t, 'User ID', widget.userId,
-          Icons.fingerprint_rounded),
-      _infoRow(
-          t, 'Username', data['username'] ?? 'N/A', Icons.alternate_email_rounded),
-      _infoRow(t, 'Email', data['email'] ?? 'N/A',
-          Icons.mail_outline_rounded),
-      _infoRow(
-          t,
-          'Role',
-          (data['role'] as String? ?? 'N/A').toLowerCase() == 'madrassa parent'
-              ? 'GUARDIAN'
-              : (data['role'] as String? ?? 'N/A').toUpperCase(),
-          Icons.badge_outlined),
-    ]);
+    final rawRole = (data['role'] as String? ?? 'N/A').trim();
+    final role = rawRole.toLowerCase() == 'madrassa parent' ? 'GUARDIAN' : rawRole.toUpperCase();
+    final bId = (branchName ?? data['branchId'] ?? widget.branchId).toString().toUpperCase();
+    final hasPassword = (data['password'] != null && data['password'].toString().isNotEmpty) ||
+        (data['passwordHash'] != null && data['passwordHash'].toString().isNotEmpty);
+
+    return _card(
+      t,
+      'Account Credentials & Identity',
+      Icons.badge_rounded,
+      t.accent,
+      trailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: t.accent.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: t.accent.withValues(alpha: 0.3)),
+        ),
+        child: Text(
+          role,
+          style: TextStyle(color: t.accent, fontSize: 10, fontWeight: FontWeight.w800),
+        ),
+      ),
+      [
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final is2Col = constraints.maxWidth >= 520;
+            if (is2Col) {
+              return Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: _infoRow(t, 'User ID', widget.userId, Icons.fingerprint_rounded)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _infoRow(t, 'Username', data['username'] ?? 'N/A', Icons.alternate_email_rounded)),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Expanded(child: _infoRow(t, 'Email Address', data['email'] ?? 'N/A', Icons.mail_outline_rounded)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _infoRow(t, 'Assigned Role', role, Icons.admin_panel_settings_outlined)),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Expanded(child: _infoRow(t, 'Branch Location', bId, Icons.location_on_outlined)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _infoRow(t, 'Offline Password', hasPassword ? 'Configured' : 'Default (1122)', Icons.password_rounded, copyable: false)),
+                    ],
+                  ),
+                ],
+              );
+            }
+            return Column(
+              children: [
+                _infoRow(t, 'User ID', widget.userId, Icons.fingerprint_rounded),
+                _infoRow(t, 'Username', data['username'] ?? 'N/A', Icons.alternate_email_rounded),
+                _infoRow(t, 'Email Address', data['email'] ?? 'N/A', Icons.mail_outline_rounded),
+                _infoRow(t, 'Assigned Role', role, Icons.admin_panel_settings_outlined),
+                _infoRow(t, 'Branch Location', bId, Icons.location_on_outlined),
+                _infoRow(t, 'Offline Password', hasPassword ? 'Configured' : 'Default (1122)', Icons.password_rounded, copyable: false),
+              ],
+            );
+          },
+        ),
+      ],
+    );
   }
 
   Widget _buildContactSection(
       Map<String, dynamic> data, RoleThemeData t) {
-    return _card(t, 'Contact', Icons.contact_phone_outlined,
-        const Color(0xFF00695C), [
-      _infoRow(t, 'Phone', data['phone'] ?? 'N/A',
-          Icons.phone_outlined),
-      _infoRow(t, 'ID / CNIC',
-          data['identification'] ?? 'N/A',
-          Icons.credit_card_outlined),
-      _infoRow(t, 'Address', data['address'] ?? 'N/A',
-          Icons.home_outlined),
-      _infoRow(t, 'Branch', branchName ?? widget.branchId,
-          Icons.location_on_outlined),
-      if (data['dispensaryIds'] is List && (data['dispensaryIds'] as List).isNotEmpty)
-        _infoRow(
-          t,
-          'Assigned Camps',
-          (data['dispensaryIds'] as List)
-              .map((id) => CampSessionService.getCampLabel(id.toString()))
-              .join(', '),
-          Icons.local_hospital_outlined,
-        )
-      else if (data['dispensaryId'] != null && data['dispensaryId'].toString().isNotEmpty)
-        _infoRow(t, 'Dispensary', (data['dispensaryId'] == 'kapayya' || data['dispensaryId'] == 'saddar')
-            ? 'Saddar Dispensary'
-            : (data['dispensaryId'] == 'haji_camp' ? 'Haji Camp Dispensary' : data['dispensaryId'].toString().toUpperCase()),
-            Icons.local_hospital_outlined),
-      if (data['campSchedule'] is List && (data['campSchedule'] as List).isNotEmpty)
-        _infoRow(
-          t,
-          'Shift Schedule',
-          (data['campSchedule'] as List).map((s) {
-            if (s is! Map) return '';
-            final c = CampSessionService.getCampLabel(s['campId']?.toString() ?? '');
-            return '$c (${s['startTime']}–${s['endTime']})';
-          }).where((str) => str.isNotEmpty).join('\n'),
-          Icons.access_time_rounded,
+    return _card(
+      t,
+      'Contact & Location',
+      Icons.contact_phone_rounded,
+      const Color(0xFF00695C),
+      [
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final is2Col = constraints.maxWidth >= 520;
+            if (is2Col) {
+              return Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: _infoRow(t, 'Phone Number', data['phone'] ?? 'N/A', Icons.phone_outlined)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _infoRow(t, 'National ID / CNIC', data['identification'] ?? data['cnic'] ?? 'N/A', Icons.credit_card_outlined)),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Expanded(child: _infoRow(t, 'Assigned Branch', branchName ?? widget.branchId, Icons.location_on_outlined)),
+                      const SizedBox(width: 10),
+                      Expanded(child: _infoRow(t, 'Residential Address', data['address'] ?? 'N/A', Icons.home_outlined)),
+                    ],
+                  ),
+                ],
+              );
+            }
+            return Column(
+              children: [
+                _infoRow(t, 'Phone Number', data['phone'] ?? 'N/A', Icons.phone_outlined),
+                _infoRow(t, 'National ID / CNIC', data['identification'] ?? data['cnic'] ?? 'N/A', Icons.credit_card_outlined),
+                _infoRow(t, 'Assigned Branch', branchName ?? widget.branchId, Icons.location_on_outlined),
+                _infoRow(t, 'Residential Address', data['address'] ?? 'N/A', Icons.home_outlined),
+              ],
+            );
+          },
         ),
-    ]);
+      ],
+    );
   }
 
   Widget _buildLinkedEmployeeSection(Map<String, dynamic> data, RoleThemeData t) {
@@ -2341,7 +3023,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       const Color(0xFF0284C7),
       [
         if (isLinked) ...[
-          _infoRow(t, 'Employee ID', emp['id']?.toString() ?? emp['localId']?.toString() ?? linkedEmpId!, Icons.fingerprint_rounded),
+          _infoRow(t, 'Employee ID', emp['id']?.toString() ?? emp['localId']?.toString() ?? linkedEmpId ?? 'N/A', Icons.fingerprint_rounded),
           const SizedBox(height: 8),
           _infoRow(t, 'Staff Name', emp['name']?.toString() ?? 'N/A', Icons.person_outline),
           const SizedBox(height: 8),
@@ -2386,20 +3068,35 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           ),
         ] else ...[
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: t.bgCardAlt,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: t.bgRule),
+              color: Colors.amber.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
             ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.info_outline, color: t.textSecondary, size: 20),
-                const SizedBox(width: 10),
+                Icon(Icons.warning_amber_rounded, color: Colors.amber.shade700, size: 22),
+                const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    'This login user is not linked to any Employee profile. It will NOT appear in Attendance, Staff Payroll, or Biometrics until linked.',
-                    style: TextStyle(color: t.textSecondary, fontSize: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'No Linked HR Profile',
+                        style: TextStyle(
+                          color: Colors.amber.shade900,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        'This login user is not attached to an Employee record. It will not appear in attendance, staff payroll, or biometrics until linked.',
+                        style: TextStyle(color: t.textSecondary, fontSize: 11.5, height: 1.3),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -2414,10 +3111,11 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                     backgroundColor: const Color(0xFF0284C7),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
                   ),
                   icon: const Icon(Icons.link_rounded, size: 16),
-                  label: const Text('Link Existing Employee', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  label: const Text('Link Existing', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                   onPressed: () => _showManualLinkEmployeeDialog(data, t),
                 ),
               ),
@@ -2428,10 +3126,11 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                     backgroundColor: t.accent,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
                   ),
                   icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
-                  label: const Text('Create & Link Employee', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  label: const Text('Create & Link', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                   onPressed: () => _showManualCreateEmployeeDialog(data, t),
                 ),
               ),
@@ -2544,7 +3243,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                         Navigator.pop(dialogCtx);
                         final success = await FinanceLocalStorage.linkUserToEmployee(
                           userId: widget.userId,
-                          employeeId: selectedId!,
+                          employeeId: selectedId ?? '',
                         );
                         if (success) {
                           setState(() {
@@ -2991,7 +3690,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
   }
 
   Widget _card(RoleThemeData t, String title, IconData icon,
-      Color accent, List<Widget> children) {
+      Color accent, List<Widget> children, {Widget? trailing}) {
     return Container(
       decoration: BoxDecoration(
         color: t.bgCard,
@@ -3024,22 +3723,25 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                   child: Icon(icon, color: accent, size: 18),
                 ),
                 const SizedBox(width: 12),
-                Text(
-                  title,
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                    color: t.textPrimary,
-                    letterSpacing: -0.2,
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: t.textPrimary,
+                      letterSpacing: -0.2,
+                    ),
                   ),
                 ),
+                if (trailing != null) trailing,
               ],
             ),
           ),
           Divider(height: 1, color: t.bgRule),
           Padding(
             padding: const EdgeInsets.all(14),
-            child: Column(children: children),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
           ),
         ],
       ),
@@ -3164,9 +3866,11 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                         child: Icon(Icons.broken_image_outlined, color: t.textTertiary),
                       ),
                     )
-                  : (ImageUploadService.decodeBase64ToBytes(url) != null
-                      ? Image.memory(
-                          ImageUploadService.decodeBase64ToBytes(url)!,
+                  : (() {
+                      final b64Bytes = ImageUploadService.decodeBase64ToBytes(url);
+                      if (b64Bytes != null) {
+                        return Image.memory(
+                          b64Bytes,
                           height: 160,
                           width: double.infinity,
                           fit: BoxFit.cover,
@@ -3176,13 +3880,15 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                             alignment: Alignment.center,
                             child: Icon(Icons.broken_image_outlined, color: t.textTertiary),
                           ),
-                        )
-                      : Container(
-                          height: 80,
-                          color: t.bg,
-                          alignment: Alignment.center,
-                          child: Icon(Icons.insert_drive_file_outlined, color: t.textTertiary),
-                        )),
+                        );
+                      }
+                      return Container(
+                        height: 80,
+                        color: t.bg,
+                        alignment: Alignment.center,
+                        child: Icon(Icons.insert_drive_file_outlined, color: t.textTertiary),
+                      );
+                    })(),
             )
           else
             GestureDetector(
@@ -4036,18 +4742,23 @@ class _UserDetailScreenState extends State<UserDetailScreen>
 
   bool _canManageUserAccess(Map<String, dynamic> targetData) {
     final targetRole = (targetData['role'] as String? ?? '').toLowerCase().trim();
+    final actorRole = _getActorRole();
 
-    // Chairman account is 100% immutable and CANNOT be deleted, edited, suspended, or demoted by ANY user.
+    // Only Chairman can manage or edit the Chairman account.
     if (targetRole == 'chairman') {
-      return false;
+      return actorRole == 'chairman';
     }
 
-    final actorRole = _getActorRole();
     const allowedRoles = {'chairman', 'global admin', 'admin', 'ceo', 'hq manager', 'branch manager', 'supervisor'};
     return allowedRoles.contains(actorRole);
   }
 
   Future<void> _showDeleteUserDialog(Map<String, dynamic> data, RoleThemeData t) async {
+    final targetRole = (data['role'] as String? ?? '').toLowerCase().trim();
+    if (targetRole == 'chairman') {
+      _snack('Access Denied: The Chairman account can NEVER be deleted.', error: true);
+      return;
+    }
     if (!_canManageUserAccess(data)) {
       _snack('Access Denied: You do not have permission to delete ${(data['role'] as String? ?? 'User').toUpperCase()} accounts.', error: true);
       return;
@@ -4194,21 +4905,170 @@ class _UserDetailScreenState extends State<UserDetailScreen>
         status == 'retired' ||
         status == 'offboarded' ||
         status == 'revoked' ||
-        data['isActive'] == false;
+        data['isActive'] == false ||
+        data['isRevoked'] == true ||
+        data['accessRevoked'] == true;
+
+    final userName = (data['username'] ?? data['name'] ?? 'User').toString();
 
     if (!isRevoked) {
-      final offboardResult = await OffboardDialog.show(
-        context,
-        employeeData: data,
-        performedBy: widget.currentUserRole ?? 'Admin',
+      // ── REVOKE / SUSPEND APP ACCESS ───────────────────────────────────────
+      final reasonCtrl = TextEditingController();
+      String selectedPredefinedReason = 'Administrative Revocation';
+      bool alsoOffboardEmployee = false;
+      final predefinedReasons = [
+        'Administrative Revocation',
+        'Suspicious Activity',
+        'Temporary Suspension',
+        'Role Reassignment',
+        'Disciplinary Action',
+        'Resigned / Terminated',
+        'Other',
+      ];
+
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setS) => AlertDialog(
+            backgroundColor: t.bgCard,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.lock_person_rounded, color: Colors.red, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Revoke App Access',
+                    style: TextStyle(color: t.textPrimary, fontSize: 17, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Are you sure you want to revoke app access for @$userName?', style: TextStyle(color: t.textSecondary, fontSize: 13)),
+                  const SizedBox(height: 14),
+                  Text('Reason for Revoking Access', style: TextStyle(color: t.textPrimary, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 6),
+                  DropdownButtonFormField<String>(
+                    value: selectedPredefinedReason,
+                    dropdownColor: t.bgCard,
+                    style: TextStyle(color: t.textPrimary, fontSize: 13),
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: t.bg,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+                    ),
+                    items: predefinedReasons.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+                    onChanged: (val) {
+                      if (val != null) setS(() => selectedPredefinedReason = val);
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: reasonCtrl,
+                    style: TextStyle(color: t.textPrimary, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Additional remarks (optional)...',
+                      hintStyle: TextStyle(color: t.textTertiary, fontSize: 12),
+                      filled: true,
+                      fillColor: t.bg,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    value: alsoOffboardEmployee,
+                    onChanged: (val) => setS(() => alsoOffboardEmployee = val ?? false),
+                    title: Text(
+                      'Also offboard employee record & halt payroll',
+                      style: TextStyle(fontSize: 12, color: t.textPrimary, fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(
+                      'Unenrolls biometric and flags employee as offboarded in finance/HR',
+                      style: TextStyle(fontSize: 11, color: t.textTertiary),
+                    ),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text('Cancel', style: TextStyle(color: t.textSecondary)),
+              ),
+              ElevatedButton.icon(
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.lock_person_rounded, size: 16),
+                label: const Text('Revoke Access'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ],
+          ),
+        ),
       );
-      if (offboardResult == true && mounted) {
-        setState(() {});
-        _snack('@${data['username'] ?? 'User'} has been offboarded.');
+
+      if (confirm != true) return;
+      if (!await _checkPassword(t)) return;
+
+      final detailedReason = reasonCtrl.text.trim();
+      final finalReason = detailedReason.isNotEmpty ? '$selectedPredefinedReason: $detailedReason' : selectedPredefinedReason;
+      final nowIso = DateTime.now().toIso8601String();
+
+      if (alsoOffboardEmployee) {
+        try {
+          final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? data['employeeId'] ?? '').toString();
+          final cnic = data['cnic']?.toString();
+          final userId = (data['uid'] ?? data['id'] ?? widget.userId).toString();
+          await FinanceLocalStorage.syncBiDirectionalOffboarding(
+            employeeId: empId,
+            userId: userId,
+            cnic: cnic,
+            performedBy: widget.currentUserRole ?? 'Admin',
+            reason: selectedPredefinedReason,
+            detailedReason: detailedReason,
+          ).timeout(const Duration(seconds: 4));
+        } catch (_) {}
       }
+
+      final updates = <String, dynamic>{
+        'status': 'revoked',
+        'accountStatus': 'revoked',
+        'isActive': false,
+        'isRevoked': true,
+        'accessRevoked': true,
+        'revocationReason': finalReason,
+        'revokedAt': nowIso,
+        'revokedBy': widget.currentUserRole ?? 'HQ Manager',
+        'restoreRequested': false,
+        'restoreRequestStatus': 'revoked',
+        'updatedAt': nowIso,
+      };
+
+      await _applyUserAccessDecision(data, updates, isAllow: false, reason: finalReason);
       return;
     }
 
+    // ── RESTORE APP ACCESS ──────────────────────────────────────────────────
     final reasonCtrl = TextEditingController();
 
     final confirmCategory = await showDialog<bool>(
@@ -4252,7 +5112,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
                               ),
                             ),
                             Text(
-                              'Restore access for @${data['username'] ?? 'User'}',
+                              'Restore access for @$userName',
                               style: TextStyle(fontSize: 12, color: t.textTertiary),
                             ),
                           ],
@@ -4327,12 +5187,10 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     );
 
     if (confirmCategory != true) return;
-
     if (!await _checkPassword(t)) return;
 
     final String reason = reasonCtrl.text.trim();
-    final isLocal = widget.userId.startsWith('local-');
-
+    final nowIso = DateTime.now().toIso8601String();
     final updates = <String, dynamic>{
       'status': 'active',
       'accountStatus': 'active',
@@ -4343,75 +5201,207 @@ class _UserDetailScreenState extends State<UserDetailScreen>
       'restoreRequestStatus': 'approved',
       'revocationReason': null,
       'revokedAt': null,
-      'restoredAt': FieldValue.serverTimestamp(),
+      'restoredAt': nowIso,
       if (reason.isNotEmpty) 'restorationRemarks': reason,
+      'updatedAt': nowIso,
     };
 
+    await _applyUserAccessDecision(data, updates, isAllow: true, reason: reason);
+  }
+
+  /// Persists user access status across local Hive, linked employees, Firestore, and broadcasts LAN
+  Future<void> _applyUserAccessDecision(
+    Map<String, dynamic> data,
+    Map<String, dynamic> updates, {
+    required bool isAllow,
+    String? reason,
+  }) async {
+    final nowIso = DateTime.now().toIso8601String();
+    final uid = (data['uid'] ?? data['id'] ?? data['docId'] ?? widget.userId).toString().trim();
+    final username = (data['username'] ?? data['usernameLower'] ?? '').toString().trim();
+    final email = (data['email'] ?? '').toString().trim().toLowerCase();
+    final name = (data['name'] ?? (username.isNotEmpty ? username : 'User')).toString().trim();
+    final branch = (data['branchId'] ?? widget.branchId).toString().trim();
+    final effectiveBranch = (branch.isNotEmpty && branch != 'all' && branch != 'global') ? branch.toLowerCase().trim() : 'karachi';
+
+    final cleanUid = uid.toLowerCase();
+    final cleanUsername = username.toLowerCase();
+    final cleanEmail = email.toLowerCase();
+    final cleanName = name.toLowerCase();
+
+    // 1. Multi-key update in local_users
     try {
-      final fullUserData = {
-        ...data,
-        ...updates,
-        'uid': widget.userId,
-        'id': widget.userId,
-        'branchId': widget.branchId,
-      };
+      final box = Hive.isBoxOpen('local_users') ? Hive.box('local_users') : await Hive.openBox('local_users');
+      bool matchesUser(dynamic k, Map val) {
+        final kStr = k.toString().toLowerCase().trim();
+        final vUid = (val['uid'] ?? val['id'] ?? val['docId'] ?? '').toString().toLowerCase().trim();
+        final vEmail = (val['email'] ?? '').toString().toLowerCase().trim();
+        final vUsername = (val['usernameLower'] ?? val['username'] ?? '').toString().toLowerCase().trim();
+        final vName = (val['name'] ?? '').toString().toLowerCase().trim();
 
-      await LocalStorageService.saveUserOffline(
-        uid: widget.userId,
-        branchId: widget.branchId,
-        userData: fullUserData,
-      );
-
-      // Also unrevoke linked employee in local_employees if present
-      try {
-        if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
-          final empBox = Hive.box(LocalStorageService.employeesBox);
-          final empId = (data['linkedEmployeeId'] ?? '').toString();
-          final cnic = (data['cnic'] ?? data['identification'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
-          final email = (data['email'] ?? '').toString().toLowerCase().trim();
-          for (final k in empBox.keys) {
-            final val = empBox.get(k);
-            if (val is Map) {
-              final eId = (val['localId'] ?? val['id'] ?? '').toString();
-              final eCnic = (val['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
-              final eEmail = (val['email'] ?? '').toString().toLowerCase().trim();
-              if ((empId.isNotEmpty && eId == empId) ||
-                  (cnic.isNotEmpty && eCnic == cnic) ||
-                  (email.isNotEmpty && eEmail == email)) {
-                final updatedEmp = Map<String, dynamic>.from(val)
-                  ..['isActive'] = true
-                  ..['status'] = 'active'
-                  ..['employeeStatus'] = 'active';
-                await empBox.put(k, updatedEmp);
-              }
-            }
-          }
-        }
-      } catch (_) {}
-
-      if (widget.isOnline && !isLocal) {
-        await _firestore
-            .collection('users')
-            .doc(widget.userId)
-            .set(fullUserData, SetOptions(merge: true));
-
-        if (widget.branchId != 'all' && widget.branchId.isNotEmpty) {
-          await _firestore
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('users')
-              .doc(widget.userId)
-              .set(fullUserData, SetOptions(merge: true));
-        }
+        if (cleanUid.isNotEmpty && (vUid == cleanUid || kStr == cleanUid || kStr == 'user:$cleanUid')) return true;
+        if (cleanEmail.isNotEmpty && (vEmail == cleanEmail || kStr == cleanEmail || kStr == 'user:$cleanEmail')) return true;
+        if (cleanUsername.isNotEmpty && (vUsername == cleanUsername || kStr == cleanUsername || kStr == 'user:$cleanUsername')) return true;
+        if (cleanName.isNotEmpty && (vName == cleanName || kStr == cleanName || kStr == 'user:$cleanName')) return true;
+        return false;
       }
 
-      SyncService().triggerUpload(force: true);
+      for (final k in box.keys) {
+        final val = box.get(k);
+        if (val is Map && matchesUser(k, val)) {
+          final u = Map<String, dynamic>.from(val)..addAll(updates);
+          await box.put(k, u);
+        }
+      }
+      if (cleanEmail.isNotEmpty) {
+        final raw = box.get('user:$cleanEmail') ?? box.get(cleanEmail);
+        if (raw is Map) {
+          await box.put('user:$cleanEmail', Map<String, dynamic>.from(raw)..addAll(updates));
+          await box.put(cleanEmail, Map<String, dynamic>.from(raw)..addAll(updates));
+        }
+      }
+      if (cleanUsername.isNotEmpty) {
+        final raw = box.get('user:$cleanUsername') ?? box.get(cleanUsername);
+        if (raw is Map) {
+          await box.put('user:$cleanUsername', Map<String, dynamic>.from(raw)..addAll(updates));
+          await box.put(cleanUsername, Map<String, dynamic>.from(raw)..addAll(updates));
+        }
+      }
+      if (cleanUid.isNotEmpty) {
+        final raw = box.get('user:$cleanUid') ?? box.get(cleanUid);
+        if (raw is Map) {
+          await box.put('user:$cleanUid', Map<String, dynamic>.from(raw)..addAll(updates));
+          await box.put(cleanUid, Map<String, dynamic>.from(raw)..addAll(updates));
+        }
+      }
+      await box.flush();
+    } catch (_) {}
 
-      if (mounted) setState(() {});
-      _snack('App access restored for ${data['username'] ?? 'user'}', success: true);
-    } catch (e) {
-      _snack('Error updating access status: $e', error: true);
+    // 2. Update linked employee in local_employees
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.employeesBox)) {
+        final empBox = Hive.box(LocalStorageService.employeesBox);
+        final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? data['employeeId'] ?? '').toString().toLowerCase().trim();
+        final cnic = (data['cnic'] ?? data['identification'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+
+        bool matchesEmp(dynamic k, Map val) {
+          final kStr = k.toString().toLowerCase().trim();
+          final eId = (val['localId'] ?? val['id'] ?? val['employeeId'] ?? '').toString().toLowerCase().trim();
+          final eCnic = (val['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final eEmail = (val['email'] ?? '').toString().toLowerCase().trim();
+          final eName = (val['name'] ?? val['employeeName'] ?? '').toString().toLowerCase().trim();
+
+          if (empId.isNotEmpty && (eId == empId || kStr == empId || kStr == 'emp_$empId')) return true;
+          if (cnic.isNotEmpty && eCnic == cnic) return true;
+          if (cleanEmail.isNotEmpty && eEmail == cleanEmail) return true;
+          if (cleanName.isNotEmpty && eName == cleanName) return true;
+          return false;
+        }
+
+        for (final k in empBox.keys) {
+          final val = empBox.get(k);
+          if (val is Map && matchesEmp(k, val)) {
+            final updatedEmp = Map<String, dynamic>.from(val)
+              ..['isActive'] = isAllow ? true : (val['isActive'] ?? false)
+              ..['status'] = isAllow ? 'active' : (val['status'] ?? 'offboarded')
+              ..['employeeStatus'] = isAllow ? 'active' : (val['employeeStatus'] ?? 'offboarded')
+              ..['restoreRequested'] = false
+              ..['restoreRequestStatus'] = isAllow ? 'approved' : 'revoked'
+              ..['restoredAt'] = isAllow ? nowIso : null
+              ..['restoredBy'] = isAllow ? (widget.currentUserRole ?? 'HQ Manager') : null;
+            await empBox.put(k, updatedEmp);
+          }
+        }
+        await empBox.flush();
+      }
+    } catch (_) {}
+
+    // 3. Firestore updates across root and candidate branches
+    final candidateBranches = <String>{};
+    candidateBranches.add(effectiveBranch);
+    try {
+      final customBranches = FinanceLocalStorage.getAllBranches([]);
+      for (final b in customBranches) {
+        final id = (b['id'] ?? '').toString().toLowerCase().trim();
+        if (id.isNotEmpty && id != 'all' && id != 'global') {
+          candidateBranches.add(id);
+        }
+      }
+    } catch (_) {}
+    candidateBranches.addAll(['karachi', 'khi', 'gujrat', 'grt', 'saddar', 'main']);
+
+    final targetDocIds = <String>{};
+    if (uid.isNotEmpty) targetDocIds.add(uid);
+    if (cleanUsername.isNotEmpty) targetDocIds.add(cleanUsername);
+    if (cleanEmail.isNotEmpty) targetDocIds.add(cleanEmail);
+
+    final fsPayload = <String, dynamic>{
+      ...updates,
+      if (isAllow) 'restoredAt': FieldValue.serverTimestamp(),
+      if (!isAllow) 'revokedAt': FieldValue.serverTimestamp(),
+    };
+
+    for (final docId in targetDocIds) {
+      try {
+        await _firestore.collection('users').doc(docId).set(fsPayload, SetOptions(merge: true));
+      } catch (_) {}
     }
+
+    for (final bId in candidateBranches) {
+      for (final docId in targetDocIds) {
+        try {
+          await _firestore.collection('branches').doc(bId).collection('users').doc(docId).set(fsPayload, SetOptions(merge: true));
+        } catch (_) {}
+      }
+    }
+
+    // 4. Offline sync queue
+    await LocalStorageService.enqueueSync({
+      'type': 'save_user',
+      'branchId': effectiveBranch,
+      'uid': uid.isNotEmpty ? uid : cleanUsername,
+      'data': {
+        ...data,
+        ...updates,
+      },
+    });
+
+    // 5. Offline auth credentials management
+    final userKey = uid.isNotEmpty ? uid : (cleanEmail.isNotEmpty ? cleanEmail : cleanUsername);
+    if (!isAllow && userKey.isNotEmpty) {
+      unawaited(OfflineAuthService.clearCredentialsForUser(userKey));
+      if (cleanEmail.isNotEmpty) unawaited(OfflineAuthService.clearCredentialsForUser(cleanEmail));
+      if (cleanUsername.isNotEmpty) unawaited(OfflineAuthService.clearCredentialsForUser(cleanUsername));
+    }
+
+    // 6. Broadcast over LAN
+    try {
+      RealtimeManager().sendMessage({
+        'event_type': 'user_access_updated',
+        'branchId': effectiveBranch,
+        'userId': uid.isNotEmpty ? uid : cleanUsername,
+        'username': cleanUsername,
+        'name': name,
+        'email': cleanEmail,
+        'status': updates['status'],
+        'restoreRequested': false,
+        'restoreRequestStatus': updates['restoreRequestStatus'],
+        'isRevoked': updates['isRevoked'],
+        'accessRevoked': updates['accessRevoked'],
+        'timestamp': nowIso,
+        'reason': reason,
+      });
+    } catch (_) {}
+
+    try {
+      SyncService().triggerUpload(force: true);
+    } catch (_) {}
+
+    if (mounted) setState(() {});
+    _snack(
+      isAllow ? 'App access restored for @$name' : '🔒 App access revoked for @$name',
+      success: isAllow,
+    );
   }
 
   Widget _errorState(RoleThemeData t) => Center(
@@ -4578,6 +5568,30 @@ class _UserDetailScreenState extends State<UserDetailScreen>
           fontSize: size * 0.35,
         ),
       ),
+    );
+  }
+}
+
+/// Formats CNIC input as xxxxx-xxxxxxxx-x (13 digits with auto-dashes)
+class _CnicInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final digits = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.length > 13) {
+      return oldValue;
+    }
+    final buffer = StringBuffer();
+    for (int i = 0; i < digits.length; i++) {
+      if (i == 5 || i == 12) buffer.write('-');
+      buffer.write(digits[i]);
+    }
+    final formatted = buffer.toString();
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }

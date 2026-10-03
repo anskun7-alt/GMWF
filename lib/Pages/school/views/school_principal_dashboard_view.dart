@@ -47,8 +47,8 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
   Widget build(BuildContext context) {
     if (SchoolAuthHelper.isTeacher(widget.userRole)) {
       return const SchoolAccessDenied(
-        title: 'Principal Dashboard Restricted',
-        message: 'The Principal Dashboard is reserved for Institutional Leadership and School Administration. Teachers cannot access administrative oversight.',
+        title: 'Executive Dashboard Restricted',
+        message: 'The School Dashboard is reserved for Institutional Leadership and School Administration. Teachers cannot access administrative oversight.',
       );
     }
 
@@ -134,7 +134,7 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
                           padding: const EdgeInsets.all(24),
                           decoration: BoxDecoration(
                             gradient: const LinearGradient(
-                              colors: [Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF1E1B4B)],
+                              colors: [Color(0xFF0D2137), Color(0xFF1B4965), Color(0xFF2C6E8A)],
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
                             ),
@@ -172,7 +172,9 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
                                     ),
                                     const SizedBox(height: 4),
                                     Text(
-                                      'Principal Oversight, Faculty Supervision, and Class Homeroom In-charges',
+                                      SchoolAuthHelper.isSchoolAdmin(widget.userRole)
+                                          ? 'School Administration & Institutional Operations Oversight'
+                                          : 'Principal Oversight, Faculty Supervision, and Class Homeroom In-charges',
                                       style: TextStyle(
                                         fontSize: 13,
                                         color: Colors.white.withValues(alpha: 0.85),
@@ -227,7 +229,7 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
                                   value: '${teachers.length}',
                                   subtitle: 'Teaching Staff',
                                   icon: Icons.co_present_rounded,
-                                  accentColor: const Color(0xFF3B82F6),
+                                  accentColor: SchoolTheme.secondary,
                                 ),
                                 SchoolMetricCard(
                                   title: 'Student Attendance',
@@ -283,7 +285,7 @@ class _SchoolPrincipalDashboardViewState extends State<SchoolPrincipalDashboardV
                                     ],
                                   ),
                                   SchoolBadge(
-                                    label: 'SUPERVISION',
+                                    label: SchoolAuthHelper.isSchoolAdmin(widget.userRole) ? 'ADMINISTRATION' : 'SUPERVISION',
                                     color: t.accent,
                                   ),
                                 ],

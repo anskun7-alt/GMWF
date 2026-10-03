@@ -129,7 +129,7 @@ class _DoctorScreenState extends State<DoctorScreen>
     LocalStorageService.ensureDoctorBoxesOpen();
 
     if (!widget.isEmbedded) {
-      SyncService().start(widget.branchId);
+      SyncService().start(widget.branchId, moduleScope: 'dispensary');
     }
     _loadBranchName();
     _listenConnectivity();
@@ -241,15 +241,23 @@ class _DoctorScreenState extends State<DoctorScreen>
     }
   }
 
-  // FIX-SYNC-2: Upload first, then let triggerUpload() decide whether it is
-  // safe to download. Do NOT call downloadTodayTokens() directly here —
-  // that would pull stale Firestore data before pending items are uploaded.
   Future<void> _syncOnReconnect() async {
     if (!mounted || _reconnectSyncing) return;
     _reconnectSyncing = true;
     try {
       await RealtimeManager().forceFlushAndCatchUp();
-      await SyncService().triggerUpload();
+      unawaited(SyncService().triggerUpload().catchError((_) {}));
+      // Non-blocking download of today's tokens so Firestore network delay never freezes doctor UI
+      unawaited(
+        LocalStorageService.downloadTodayTokens(widget.branchId, null, true)
+            .timeout(const Duration(seconds: 3))
+            .then((_) {
+              if (mounted) setState(() {});
+            })
+            .catchError((e) {
+              debugPrint('[DoctorScreen] Reconnect cloud token pull notice: $e');
+            })
+      );
       if (mounted) setState(() {});
       debugPrint('[DoctorScreen] ✅ Synced on reconnect');
     } catch (e) {

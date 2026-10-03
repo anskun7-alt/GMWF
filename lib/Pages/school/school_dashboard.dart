@@ -66,15 +66,8 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
   bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.role);
   bool get _isHighestAuthority => SchoolAuthHelper.isHighestAuthority(widget.role);
   bool get _isAdminOrPrincipal => SchoolAuthHelper.isAdminOrPrincipal(widget.role);
-
-  bool get _isPrincipal {
-    final r = widget.role.toLowerCase().trim();
-    return r.contains('principal') ||
-        r == 'headmaster' ||
-        r == 'headmistress' ||
-        r.contains('headmaster') ||
-        r.contains('headmistress');
-  }
+  bool get _isPrincipal => SchoolAuthHelper.isPrincipal(widget.role);
+  bool get _isSchoolAdmin => SchoolAuthHelper.isSchoolAdmin(widget.role);
 
   String get _effectiveBranchId {
     final b = widget.branchId.trim().toLowerCase();
@@ -92,6 +85,7 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
     super.initState();
     SchoolLocalStorage.ensureBoxesOpen();
     SchoolSyncService().init();
+    SchoolSyncService().syncNow(branchId: _effectiveBranchId);
     _initNavItemsAndViews();
     _selectedIndex = widget.initialTabIndex.clamp(0, _navItems.isNotEmpty ? _navItems.length - 1 : 0);
   }
@@ -146,6 +140,65 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
         _NavItem(label: 'Principal Dashboard', icon: Icons.dashboard_rounded),
         _NavItem(label: 'Student Directory', icon: Icons.groups_rounded),
         _NavItem(label: 'Daily Attendance', icon: Icons.how_to_reg_rounded),
+        _NavItem(label: 'Faculty Attendance', icon: Icons.co_present_rounded),
+        _NavItem(label: 'Faculty Registry', icon: Icons.record_voice_over_rounded),
+        _NavItem(label: 'Fee Management', icon: Icons.payments_rounded),
+        _NavItem(label: 'School Library', icon: Icons.local_library_rounded),
+        _NavItem(label: 'Grading & Reports', icon: Icons.grade_rounded),
+        _NavItem(label: 'Audit Trail', icon: Icons.security_rounded),
+      ];
+      _views = [
+        SchoolPrincipalDashboardView(
+          branchId: _effectiveBranchId,
+          userName: widget.username,
+          userRole: widget.role,
+        ),
+        SchoolStudentManagementView(
+          branchId: _effectiveBranchId,
+          userRole: widget.role,
+          userName: widget.username,
+        ),
+        SchoolDailyAttendanceView(
+          branchId: _effectiveBranchId,
+          editorName: widget.username,
+          userRole: widget.role,
+        ),
+        SchoolTeacherAttendanceView(
+          branchId: _effectiveBranchId,
+          editorName: widget.username,
+          userRole: widget.role,
+        ),
+        SchoolTeacherManagementView(
+          branchId: _effectiveBranchId,
+          userRole: widget.role,
+          userName: widget.username,
+        ),
+        SchoolFeeManagementView(
+          branchId: _effectiveBranchId,
+          userName: widget.username,
+          userRole: widget.role,
+        ),
+        SchoolLibraryView(
+          branchId: _effectiveBranchId,
+          userName: widget.username,
+          userRole: widget.role,
+        ),
+        SchoolGradingView(
+          branchId: _effectiveBranchId,
+          userRole: widget.role,
+          userName: widget.username,
+        ),
+        SchoolAuditLogView(
+          branchId: _effectiveBranchId,
+          userRole: widget.role,
+        ),
+      ];
+    } else if (_isSchoolAdmin) {
+      // ── School Admin Operations & Management ──────────────────────────────
+      _navItems = const [
+        _NavItem(label: 'Admin Dashboard', icon: Icons.dashboard_rounded),
+        _NavItem(label: 'Student Admissions', icon: Icons.groups_rounded),
+        _NavItem(label: 'Student Attendance', icon: Icons.how_to_reg_rounded),
         _NavItem(label: 'Faculty Attendance', icon: Icons.co_present_rounded),
         _NavItem(label: 'Faculty Registry', icon: Icons.record_voice_over_rounded),
         _NavItem(label: 'Fee Management', icon: Icons.payments_rounded),

@@ -138,7 +138,7 @@ class SchoolOverviewView extends StatelessWidget {
                                         padding: const EdgeInsets.all(24),
                                         decoration: BoxDecoration(
                                           gradient: const LinearGradient(
-                                            colors: [Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF1E1B4B)],
+                                            colors: [Color(0xFF0D2137), Color(0xFF1B4965), Color(0xFF2C6E8A)],
                                             begin: Alignment.topLeft,
                                             end: Alignment.bottomRight,
                                           ),
@@ -249,7 +249,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                 value: '$activeStudents',
                                                 subtitle: 'Total Enrolled: $totalStudents',
                                                 icon: Icons.groups_rounded,
-                                                color: const Color(0xFF6366F1),
+                                                color: const Color(0xFF1B4965),
                                               ),
                                               _buildMetricCard(
                                                 t: t,
@@ -257,7 +257,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                 value: '$stdPresent Present',
                                                 subtitle: '$attendancePct% • Absent: $stdAbsent • Leave: $stdLeave',
                                                 icon: Icons.how_to_reg_rounded,
-                                                color: const Color(0xFF10B981),
+                                                color: const Color(0xFF2D9B83),
                                               ),
                                               _buildMetricCard(
                                                 t: t,
@@ -265,7 +265,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                 value: '$activeTeachers Staff',
                                                 subtitle: 'Total Registered: $totalTeachers',
                                                 icon: Icons.record_voice_over_rounded,
-                                                color: const Color(0xFF3B82F6),
+                                                color: const Color(0xFF3B7DDD),
                                               ),
                                               _buildMetricCard(
                                                 t: t,
@@ -281,7 +281,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                 value: '$availableBooks Available',
                                                 subtitle: 'Total Catalog: $totalBooks',
                                                 icon: Icons.local_library_rounded,
-                                                color: const Color(0xFFF59E0B),
+                                                color: const Color(0xFFD4940A),
                                               ),
                                               _buildMetricCard(
                                                 t: t,
@@ -297,7 +297,7 @@ class SchoolOverviewView extends StatelessWidget {
                                                 value: avgPct == 'N/A' ? 'N/A' : '$avgPct%',
                                                 subtitle: '$validCount grade archives',
                                                 icon: Icons.grade_rounded,
-                                                color: const Color(0xFF8B5CF6),
+                                                color: const Color(0xFF7C6CC4),
                                               ),
                                               _buildMetricCard(
                                                 t: t,

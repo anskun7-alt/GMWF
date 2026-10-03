@@ -234,7 +234,7 @@ class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementVie
                                             style: const TextStyle(
                                               fontSize: 11.5,
                                               fontWeight: FontWeight.bold,
-                                              color: Color(0xFFD97706),
+                                              color: SchoolTheme.statusLeave,
                                             ),
                                           ),
                                         ],
@@ -272,7 +272,7 @@ class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementVie
                               if (t.subjects.isNotEmpty) ...[
                                 ...t.subjects.map((s) => SchoolBadge(
                                       label: s,
-                                      color: const Color(0xFF0284C7),
+                                      color: SchoolTheme.statusGraduated,
                                       fontSize: 11,
                                     )),
                               ],
@@ -280,7 +280,7 @@ class _SchoolTeacherManagementViewState extends State<SchoolTeacherManagementVie
                                 SchoolBadge(
                                   label: t.degree,
                                   color: SchoolTheme.textMid,
-                                  backgroundColor: const Color(0xFFF1F5F9),
+                                  backgroundColor: SchoolTheme.primaryLight,
                                   fontSize: 11,
                                 ),
                             ],

@@ -1713,6 +1713,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     String? stockError;
 
+    bool _isAdding = false; // Guard against double-tap adding
+
     await showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1897,6 +1899,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               foregroundColor: Colors.white,
             ),
             onPressed: () {
+              if (_isAdding) return; // Debounce double-tap
               final name = nameCtrl.text.trim();
               if (name.isEmpty) {
                 setStateDialog(() => stockError = 'Enter medicine name');
@@ -1975,6 +1978,10 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                 };
               }
 
+              // ── Guard: Mark adding and pop dialog FIRST to prevent double-tap ──
+              _isAdding = true;
+              Navigator.pop(ctx);
+
               bool wasReset = false;
               setState(() {
                 widget.prescriptions.add(newMed);
@@ -1984,7 +1991,6 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                   wasReset = true;
                 }
               });
-              Navigator.pop(ctx);
               
               if (wasReset) {
                 ScaffoldMessenger.of(context)
@@ -3737,6 +3743,20 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         }
       }
 
+      final currentUid = (patientData['entryUid'] ?? widget.selectedPatientData?['entryUid'])?.toString().trim();
+      dynamic targetEntryKey;
+      if (currentUid != null && currentUid.isNotEmpty) {
+        for (final k in entriesBox.keys) {
+          final val = entriesBox.get(k);
+          if (val is Map && (val['entryUid']?.toString().trim() == currentUid)) {
+            targetEntryKey = k;
+            matchingKeys.clear();
+            matchingKeys.add(k);
+            break;
+          }
+        }
+      }
+
       if (matchingKeys.isEmpty) {
         matchingKeys.add('${widget.branchId}-${widget.serialId.trim()}');
       }
@@ -3744,6 +3764,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       final normBranch = widget.branchId.trim().toLowerCase();
       final normSerialUpper = serialClean.toUpperCase();
       final canonicalKey = '$normBranch-$normSerialUpper';
+      final putKey = targetEntryKey ?? canonicalKey;
 
       Map<String, dynamic>? updated;
       for (final k in matchingKeys) {
@@ -3773,6 +3794,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         base['session']        ??= (patientData['session'] ?? CampSessionService.getCurrentSession(null, widget.branchId));
         base['branchId']       ??= widget.branchId;
         base['serial']         ??= serialClean;
+        if (currentUid != null && currentUid.isNotEmpty) {
+          base['entryUid'] = currentUid;
+        }
         base['patientCnic']    ??= patientCnic;
         base['cnic']           ??= patientCnic;
         base['guardianCnic']   ??= patientData['guardianCnic']?.toString();
@@ -3792,11 +3816,15 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       }
 
       final finalUpdated = updated ?? Map<String, dynamic>.from(patientData);
-      await entriesBox.put(canonicalKey, finalUpdated);
+      if (currentUid != null && currentUid.isNotEmpty) {
+        finalUpdated['entryUid'] = currentUid;
+      }
+      await entriesBox.put(putKey, finalUpdated);
 
-      // Clean up redundant non-canonical keys
+      // Clean up redundant non-canonical keys (NEVER delete collision keys)
       for (final k in matchingKeys) {
-        if (k.toString() != canonicalKey && entriesBox.containsKey(k)) {
+        final kStr = k.toString();
+        if (kStr != putKey && !kStr.contains('-COLLISION-') && entriesBox.containsKey(k)) {
           await entriesBox.delete(k);
         }
       }
@@ -3981,6 +4009,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'serial': serial,
         'data': {
           'serial':          serial,
+          if (fullData['entryUid'] != null) 'entryUid': fullData['entryUid'],
           'status':          'completed',
           'completedAt':     fullData['completedAt'],
           'doctorName':      fullData['doctorName'],

@@ -138,7 +138,10 @@ String resolveUserDisplayName(Map<String, dynamic>? data, {String fallback = 'Us
         normalized == 'n/a' ||
         normalized == 'user' ||
         normalized == 'unknown' ||
-        normalized == 'unknown user';
+        normalized == 'unknown user' ||
+        normalized == 'loading' ||
+        normalized == 'loading...' ||
+        normalized.startsWith('loading');
   }
 
   if (!isPlaceholder(name)) {

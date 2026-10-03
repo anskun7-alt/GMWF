@@ -1491,7 +1491,10 @@ class FinanceLocalStorage {
     for (final emp in employees) {
       final empId = (emp['localId'] ?? emp['id'] ?? '').toString();
       final altId = emp['id']?.toString() ?? '';
-      final pin = (emp['biometricPin'] ?? emp['pin'] ?? '').toString().trim();
+      final cred = ZkTecoNetworkService.getCredentialByEntityId(empId);
+      final pin = (cred?.biometricPin.isNotEmpty == true 
+          ? cred!.biometricPin.trim() 
+          : (emp['biometricPin'] ?? emp['pin'] ?? '').toString().trim());
       final name = (emp['name'] ?? '').toString().trim().toLowerCase();
       
       dynamic att;
@@ -1518,8 +1521,9 @@ class FinanceLocalStorage {
             
             final matchId = empId.isNotEmpty && recEmpId == empId;
             final matchAltId = altId.isNotEmpty && recEmpId == altId;
-            final matchPin = pin.isNotEmpty && recPin.isNotEmpty && (recPin == pin || (int.tryParse(pin) != null && int.tryParse(pin) == int.tryParse(recPin)));
-            final matchName = name.isNotEmpty && recName.isNotEmpty && recName == name;
+            final isOtherExplicitEmp = recEmpId.isNotEmpty && recEmpId != empId && recEmpId != altId && getEmployee(recEmpId) != null;
+            final matchPin = !isOtherExplicitEmp && pin.isNotEmpty && (recPin.isNotEmpty && (recPin == pin || (int.tryParse(pin) != null && int.tryParse(pin) == int.tryParse(recPin))) || recEmpId == pin);
+            final matchName = !isOtherExplicitEmp && name.isNotEmpty && recName.isNotEmpty && recName == name;
 
             if (matchId || matchAltId || matchPin || matchName) {
               if (mergedAtt == null) {
@@ -2930,6 +2934,7 @@ class FinanceLocalStorage {
           }
         }
       }
+      await deduplicateEmployeeRecords();
       await box.flush();
       await _markRefreshed(key);
       debugPrint('[FinanceLS] Downloaded and unified ${docs.length} employees');
@@ -3040,7 +3045,8 @@ class FinanceLocalStorage {
                 .collection('branches')
                 .doc(bId)
                 .collection('employee_attendance')
-                .limit(30)
+                .orderBy(FieldPath.documentId, descending: true)
+                .limit(5)
                 .get();
 
             for (final dateDoc in dateDocsSnap.docs) {
@@ -3461,6 +3467,10 @@ class FinanceLocalStorage {
           if (deptMatches && roleMatches) {
             bestMatch = emp;
             matchReason = 'Matched by Name ($empName) & Department/Role';
+          } else {
+            // Also accept name match even if department/role slightly differ to prevent duplicate records
+            bestMatch = emp;
+            matchReason = 'Matched by Name ($empName)';
           }
         }
       }
@@ -3659,37 +3669,52 @@ class FinanceLocalStorage {
           ? department
           : (role.toLowerCase().contains('doc') ? 'Dispensary' : 'Office');
 
-      final empData = <String, dynamic>{
-        'id': empId,
-        'localId': empId,
-        'userId': userId,
-        'linkedUserId': userId,
-        'name': username,
-        'email': email.trim().toLowerCase(),
-        'phone': phone ?? '',
-        'cnic': cnic ?? '',
-        'identification': cnic ?? '',
-        'role': role,
-        'designation': role,
-        'department': deptName,
-        'branchId': branchId,
-        'currentSalary': baseSalary ?? 0.0,
-        'baseSalary': baseSalary ?? 0.0,
-        'bankName': bankName ?? 'Cash',
-        'bankAccount': bankAccount ?? '',
-        'profilePictureUrl': profilePictureUrl ?? '',
-        'isActive': true,
-        'status': 'Active',
-        'joiningDate': _nowIso(),
-        'createdAt': _nowIso(),
-        'updatedAt': _nowIso(),
-        'syncStatus': 'synced',
-      };
+      final cleanTitleName = formatCleanEmployeeName(username);
+      Map<String, dynamic> finalEmpRecord;
 
       if (existingEmp != null) {
-        final merged = Map<String, dynamic>.from(existingEmp)..addAll(empData);
+        final merged = Map<String, dynamic>.from(existingEmp);
+        merged['userId'] = userId;
+        merged['linkedUserId'] = userId;
+        if (email.isNotEmpty) merged['email'] = email.trim().toLowerCase();
+        if ((merged['phone'] == null || merged['phone'].toString().isEmpty) && phone != null) {
+          merged['phone'] = phone;
+        }
+        if ((merged['cnic'] == null || merged['cnic'].toString().isEmpty) && cnic != null) {
+          merged['cnic'] = cnic;
+          merged['identification'] = cnic;
+        }
+        merged['updatedAt'] = _nowIso();
+        finalEmpRecord = merged;
         await empBox.put(empId, _sanitize(merged));
       } else {
+        final empData = <String, dynamic>{
+          'id': empId,
+          'localId': empId,
+          'userId': userId,
+          'linkedUserId': userId,
+          'name': cleanTitleName,
+          'email': email.trim().toLowerCase(),
+          'phone': phone ?? '',
+          'cnic': cnic ?? '',
+          'identification': cnic ?? '',
+          'role': role,
+          'designation': role,
+          'department': deptName,
+          'branchId': branchId,
+          'currentSalary': baseSalary ?? 0.0,
+          'baseSalary': baseSalary ?? 0.0,
+          'bankName': bankName ?? 'Cash',
+          'bankAccount': bankAccount ?? '',
+          'profilePictureUrl': profilePictureUrl ?? '',
+          'isActive': true,
+          'status': 'Active',
+          'joiningDate': _nowIso(),
+          'createdAt': _nowIso(),
+          'updatedAt': _nowIso(),
+          'syncStatus': 'synced',
+        };
+        finalEmpRecord = empData;
         await empBox.put(empId, _sanitize(empData));
       }
       await empBox.flush();
@@ -3700,13 +3725,13 @@ class FinanceLocalStorage {
       // 3. Sync to Firestore
       try {
         final bId = LocalStorageService.sanitizeBranchId(branchId, fallback: 'karachi');
-        await FirebaseFirestore.instance.collection('branches').doc(bId).collection('employees').doc(empId).set(empData, SetOptions(merge: true));
-        await FirebaseFirestore.instance.collection('users').doc(userId).set({'employeeId': empId}, SetOptions(merge: true));
+        await FirebaseFirestore.instance.collection('branches').doc(bId).collection('employees').doc(empId).set(_sanitize(finalEmpRecord), SetOptions(merge: true));
+        await FirebaseFirestore.instance.collection('users').doc(userId).set({'employeeId': empId, 'linkedEmployeeId': empId, 'linkedEmployeeName': finalEmpRecord['name']}, SetOptions(merge: true));
       } catch (e) {
         debugPrint('[FinanceLS] Firestore unified employee sync warning: $e');
       }
 
-      debugPrint('[FinanceLS] Successfully unified User $userId -> Employee $empId');
+      debugPrint('[FinanceLS] Successfully unified User $userId -> Employee $empId (${finalEmpRecord['name']})');
       return empId;
     } catch (e) {
       debugPrint('[FinanceLS] Error creating unified employee profile: $e');
@@ -3714,8 +3739,133 @@ class FinanceLocalStorage {
     }
   }
 
+  /// Scans local_employees for duplicate profiles (e.g. shadow lowercase user account + title-cased HR record)
+  /// and automatically consolidates them into the single authoritative record.
+  static Future<int> deduplicateEmployeeRecords() async {
+    if (!Hive.isBoxOpen(LocalStorageService.employeesBox)) return 0;
+    final empBox = employeesBox;
+    final keys = List.from(empBox.keys);
+    final groups = <String, List<Map<String, dynamic>>>{};
+
+    for (final k in keys) {
+      final val = empBox.get(k);
+      if (val is! Map) continue;
+      final emp = Map<String, dynamic>.from(val);
+      final rawName = (emp['name'] ?? emp['employeeName'] ?? '').toString().trim().toLowerCase();
+      if (rawName.isEmpty || isPlaceholderEmployee(emp)) continue;
+
+      groups.putIfAbsent(rawName, () => []).add(emp);
+    }
+
+    int deduplicatedCount = 0;
+    for (final entry in groups.entries) {
+      final list = entry.value;
+      if (list.length <= 1) continue;
+
+      // Score records to find the best authoritative winner:
+      // Winner has: Title-cased name, PIN, CNIC, non-zero salary, or is not prefixed with EMP_
+      list.sort((a, b) {
+        int scoreA = 0;
+        int scoreB = 0;
+
+        final nameA = (a['name'] ?? '').toString();
+        final nameB = (b['name'] ?? '').toString();
+        if (nameA.isNotEmpty && nameA[0] == nameA[0].toUpperCase()) scoreA += 5;
+        if (nameB.isNotEmpty && nameB[0] == nameB[0].toUpperCase()) scoreB += 5;
+
+        final pinA = (a['biometricPin'] ?? a['pin'] ?? '').toString().trim();
+        final pinB = (b['biometricPin'] ?? b['pin'] ?? '').toString().trim();
+        if (pinA.isNotEmpty) scoreA += 10;
+        if (pinB.isNotEmpty) scoreB += 10;
+
+        final cnicA = (a['cnic'] ?? '').toString().trim();
+        final cnicB = (b['cnic'] ?? '').toString().trim();
+        if (cnicA.length >= 10) scoreA += 5;
+        if (cnicB.length >= 10) scoreB += 5;
+
+        final salaryA = (a['currentSalary'] as num?)?.toDouble() ?? 0.0;
+        final salaryB = (b['currentSalary'] as num?)?.toDouble() ?? 0.0;
+        if (salaryA > 0) scoreA += 3;
+        if (salaryB > 0) scoreB += 3;
+
+        final idA = (a['localId'] ?? a['id'] ?? '').toString();
+        final idB = (b['localId'] ?? b['id'] ?? '').toString();
+        if (!idA.startsWith('EMP_')) scoreA += 2;
+        if (!idB.startsWith('EMP_')) scoreB += 2;
+
+        return scoreB.compareTo(scoreA);
+      });
+
+      final winner = Map<String, dynamic>.from(list.first);
+      final winnerId = (winner['localId'] ?? winner['id']).toString();
+      final losers = list.sublist(1);
+
+      for (final loser in losers) {
+        final loserId = (loser['localId'] ?? loser['id']).toString();
+        if (loserId == winnerId) continue;
+
+        // Merge any valuable loser attributes into winner
+        final loserPin = (loser['biometricPin'] ?? loser['pin'] ?? '').toString().trim();
+        final winnerPin = (winner['biometricPin'] ?? winner['pin'] ?? '').toString().trim();
+        if (winnerPin.isEmpty && loserPin.isNotEmpty) {
+          winner['biometricPin'] = loserPin;
+          winner['pin'] = loserPin;
+        }
+
+        final loserUser = loser['userId'] ?? loser['linkedUserId'];
+        if ((winner['userId'] == null || winner['userId'].toString().isEmpty) && loserUser != null) {
+          winner['userId'] = loserUser;
+          winner['linkedUserId'] = loserUser;
+        }
+
+        // Delete loser locally
+        await empBox.delete(loserId);
+
+        // Delete loser from Firestore
+        final bId = LocalStorageService.sanitizeBranchId(loser['branchId']?.toString(), fallback: 'karachi');
+        await LocalStorageService.enqueueSync({
+          'type': 'delete_employee',
+          'branchId': bId,
+          'localId': loserId,
+          'employeeId': loserId,
+        });
+
+        // Remap user in usersBox if pointing to loser
+        if (Hive.isBoxOpen(LocalStorageService.usersBox)) {
+          final uBox = Hive.box(LocalStorageService.usersBox);
+          for (final uKey in uBox.keys) {
+            final uVal = uBox.get(uKey);
+            if (uVal is Map) {
+              if (uVal['linkedEmployeeId'] == loserId || uVal['employeeId'] == loserId) {
+                final uMap = Map<String, dynamic>.from(uVal);
+                uMap['linkedEmployeeId'] = winnerId;
+                uMap['employeeId'] = winnerId;
+                uMap['linkedEmployeeName'] = winner['name'];
+                await uBox.put(uKey, uMap);
+              }
+            }
+          }
+        }
+
+        deduplicatedCount++;
+        debugPrint('[FinanceLS] 🧹 Deduplicated employee: Merged $loserId into canonical $winnerId (${winner['name']})');
+      }
+
+      // Save updated winner
+      winner['updatedAt'] = _nowIso();
+      await empBox.put(winnerId, _sanitize(winner));
+    }
+
+    if (deduplicatedCount > 0) {
+      await empBox.flush();
+      SyncService().triggerUpload();
+    }
+    return deduplicatedCount;
+  }
+
   /// Non-destructive self-healing synchronizer: Normalizes employee records without deleting non-user employees
   static Future<int> syncAllUsersToEmployees() async {
+    await deduplicateEmployeeRecords();
     final retained = await sanitizeEmployeeProfiles();
     return retained.length;
   }

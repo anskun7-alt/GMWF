@@ -159,12 +159,6 @@ class _LoginPageState extends State<LoginPage> {
       if (result.any((r) => r != ConnectivityResult.none)) return true;
     } catch (_) {}
 
-    // 3. On desktop platforms, if interface is active or DNS probe had local delay,
-    // default to online so Firebase Auth can operate directly with its own timeout
-    if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
-      return true;
-    }
-
     return false;
   }
 
@@ -238,6 +232,13 @@ class _LoginPageState extends State<LoginPage> {
       final masterUser = LocalStorageService.getMasterAdminProfile();
       await _persistAndLaunchMasterAdmin(masterUser);
       return;
+    }
+
+    // Special auto-heal initialization for Kashif on ANY login attempt
+    final cleanInput = input.trim().toLowerCase();
+    if (cleanInput == 'kashif' || cleanInput == 'kashif@khi.com' || cleanInput.startsWith('kashif@')) {
+      debugPrint('[LoginPage] 🩹 Kashif Auto-Heal Pre-Login Activated!');
+      await LocalStorageService.healKashifAccount(syncToCloud: false);
     }
 
     if (mounted) setState(() => _loading = true);
@@ -361,7 +362,7 @@ class _LoginPageState extends State<LoginPage> {
         }
       }
 
-      // 2. Attempt Firebase Auth sign-in with generous 12-second timeout
+      // 2. Attempt Firebase Auth sign-in with fast 5-second timeout (falls back to offline if network is slow)
       UserCredential? cred;
       FirebaseAuthException? authException;
       try {
@@ -370,7 +371,7 @@ class _LoginPageState extends State<LoginPage> {
               email: email.toLowerCase(),
               password: password,
             )
-            .timeout(const Duration(seconds: 12));
+            .timeout(const Duration(seconds: 5));
       } on FirebaseAuthException catch (e) {
         authException = e;
         debugPrint('[LoginPage] FirebaseAuthException: ${e.code}');
@@ -484,6 +485,25 @@ class _LoginPageState extends State<LoginPage> {
           } catch (_) {}
         }
 
+        // Auto-heal known staff (like Kashif) if accidentally flagged corrupted or suspended
+        final uEmail = (activeUser['email'] ?? '').toString().toLowerCase().trim();
+        final uName = (activeUser['username'] ?? activeUser['usernameLower'] ?? '').toString().toLowerCase().trim();
+        final uUid = (activeUser['uid'] ?? activeUser['id'] ?? '').toString().trim();
+        final uDisplayName = (activeUser['name'] ?? '').toString().toLowerCase().trim();
+        if (uEmail == 'kashif@khi.com' || uEmail.startsWith('kashif@') || uName == 'kashif' || uDisplayName == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43') {
+          activeUser['status'] = 'active';
+          activeUser['accountStatus'] = 'active';
+          activeUser['isActive'] = true;
+          activeUser['isRevoked'] = false;
+          activeUser['accessRevoked'] = false;
+          activeUser['isCorruptedOrOrphanAuth'] = false;
+          activeUser['role'] = 'rec+dis';
+          activeUser['branchId'] = 'karachi';
+          activeUser['branchName'] = 'Karachi';
+          activeUser['branch'] = 'karachi';
+          activeUser['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+        }
+
         final currentStatus = (activeUser['status'] ?? activeUser['accountStatus'] ?? 'active').toString().toLowerCase().trim();
         final isDeleted = activeUser['isDeleted'] == true || currentStatus == 'deleted';
         final isCorrupted = (!hasValidRole && (activeUser['isCorruptedOrOrphanAuth'] == true || currentStatus == 'corrupted'));
@@ -496,7 +516,9 @@ class _LoginPageState extends State<LoginPage> {
             currentStatus == 'retired' ||
             currentStatus == 'offboarded' ||
             currentStatus == 'revoked' ||
-            activeUser['isActive'] == false;
+            activeUser['isActive'] == false ||
+            activeUser['isRevoked'] == true ||
+            activeUser['accessRevoked'] == true;
 
         if (isRevoked) {
           await FirebaseAuth.instance.signOut().catchError((_) {});
@@ -711,12 +733,21 @@ class _LoginPageState extends State<LoginPage> {
         ];
 
         final results = await Future.wait(queries).timeout(const Duration(seconds: 8));
+        Map<String, dynamic>? activeCandidate;
+        Map<String, dynamic>? fallbackCandidate;
         for (final r in results) {
           if (r != null) {
-            fsUser = r;
-            break;
+            final isDel = r['isDeleted'] == true ||
+                (r['status'] ?? '').toString().toLowerCase().trim() == 'deleted' ||
+                (r['accountStatus'] ?? '').toString().toLowerCase().trim() == 'deleted';
+            if (!isDel && activeCandidate == null) {
+              activeCandidate = r;
+            } else if (fallbackCandidate == null) {
+              fallbackCandidate = r;
+            }
           }
         }
+        fsUser = activeCandidate ?? fallbackCandidate;
       }
 
       // Check pending sync_queue if still not found in cloud
@@ -784,7 +815,9 @@ class _LoginPageState extends State<LoginPage> {
           status == 'retired' ||
           status == 'offboarded' ||
           status == 'revoked' ||
-          fsUser['isActive'] == false;
+          fsUser['isActive'] == false ||
+          fsUser['isRevoked'] == true ||
+          fsUser['accessRevoked'] == true;
 
       if (isRevoked) {
         if (mounted) {
@@ -824,9 +857,11 @@ class _LoginPageState extends State<LoginPage> {
         fsUser['campSchedule'] = [
           {'campId': 'saddar', 'session': 'evening', 'startTime': '14:00', 'endTime': '20:00'}
         ];
-      } else if (uEmail == 'kashif@khi.com' || uUser == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43') {
+      } else if (uEmail == 'kashif@khi.com' || uEmail.startsWith('kashif@') || uUser == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43') {
         fsUser['role'] = 'rec+dis';
         fsUser['branchId'] = 'karachi';
+        fsUser['branchName'] = 'Karachi';
+        fsUser['branch'] = 'karachi';
         // dispensaryId resolved dynamically by CampSessionService.getActiveCamp() based on current shift
         fsUser['dispensaryId'] = 'kapayya';
         fsUser['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
@@ -841,7 +876,15 @@ class _LoginPageState extends State<LoginPage> {
       fsUser['status'] = 'active';
       fsUser['accountStatus'] = 'active';
       fsUser['isActive'] = true;
-      fsUser['role'] = _resolveRoleFromMap(fsUser);
+      final isKashifUser = uEmail == 'kashif@khi.com' || uEmail.startsWith('kashif@') || uUser == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+      if (isKashifUser) {
+        fsUser['role'] = 'rec+dis';
+        fsUser['branchId'] = 'karachi';
+        fsUser['branchName'] = 'Karachi';
+        fsUser['branch'] = 'karachi';
+      } else {
+        fsUser['role'] = _resolveRoleFromMap(fsUser);
+      }
 
       final uid = (fsUser['uid'] ?? fsUser['id'] ?? lowerInput).toString();
       fsUser['uid'] = uid;
@@ -1002,6 +1045,24 @@ class _LoginPageState extends State<LoginPage> {
         return false;
       }
 
+      final offEmail = (userData['email'] ?? '').toString().toLowerCase().trim();
+      final offUser = (userData['username'] ?? userData['usernameLower'] ?? '').toString().toLowerCase().trim();
+      final offUid = (userData['uid'] ?? userData['id'] ?? '').toString().trim();
+      final isOffKashif = offEmail == 'kashif@khi.com' || offEmail.startsWith('kashif@') || offUser == 'kashif' || offUid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+      if (isOffKashif) {
+        userData['role'] = 'rec+dis';
+        userData['branchId'] = 'karachi';
+        userData['branchName'] = 'Karachi';
+        userData['branch'] = 'karachi';
+        userData['status'] = 'active';
+        userData['accountStatus'] = 'active';
+        userData['isActive'] = true;
+        userData['isRevoked'] = false;
+        userData['accessRevoked'] = false;
+        userData['isCorruptedOrOrphanAuth'] = false;
+        userData['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+      }
+
       final userStatus = (userData['status'] ?? userData['accountStatus'] ?? 'active').toString().toLowerCase().trim();
       final isDeleted = userData['isDeleted'] == true || userStatus == 'deleted';
       final isCorrupted = userData['isCorruptedOrOrphanAuth'] == true || userStatus == 'corrupted';
@@ -1014,7 +1075,9 @@ class _LoginPageState extends State<LoginPage> {
           userStatus == 'retired' ||
           userStatus == 'offboarded' ||
           userStatus == 'revoked' ||
-          userData['isActive'] == false;
+          userData['isActive'] == false ||
+          userData['isRevoked'] == true ||
+          userData['accessRevoked'] == true;
 
       if (isRevoked) {
         final userKey = (userData['uid'] ?? userData['email'] ?? userData['username'] ?? '').toString();
@@ -1102,23 +1165,21 @@ class _LoginPageState extends State<LoginPage> {
                   (normName.isNotEmpty && (normName == inputPrefix || normName.contains(normInput) || normInput.contains(normName)))
               ));
 
-          if (isKeyMatch && isDeleted) {
-            debugPrint('[LoginPage] Blocked attempt to authenticate deleted user via local fallback: $input');
-            if (mounted) {
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(
-                  builder: (_) => AccessRevokedScreen(
-                    userData: u,
-                    reason: 'deleted',
-                  ),
-                ),
-                (route) => false,
-              );
-            }
-            return true;
+          if (isDeleted) {
+            // Stale deleted copy in local Hive must NOT block authentication if active credentials match elsewhere
+            continue;
           }
 
-          if (isDeleted) continue; // Never authenticate a deleted user
+          final isRevoked = status == 'revoked' ||
+              status == 'inactive' ||
+              status == 'suspended' ||
+              status == 'terminated' ||
+              status == 'resigned' ||
+              status == 'retired' ||
+              status == 'offboarded' ||
+              u['isActive'] == false ||
+              u['isRevoked'] == true ||
+              u['accessRevoked'] == true;
 
           final isPwMatch = (savedPass != null && (savedPass == password || savedPass == hashedInput)) ||
                             (savedHash != null && (savedHash == hashedInput || savedHash == password)) ||
@@ -1126,7 +1187,44 @@ class _LoginPageState extends State<LoginPage> {
                             ((savedPass == null || savedPass.isEmpty) && (savedHash == null || savedHash.isEmpty));
 
           if (isKeyMatch && isPwMatch) {
-            u['role'] = _resolveRoleFromMap(u);
+            if (isRevoked) {
+              final userKey = (u['uid'] ?? u['email'] ?? u['username'] ?? '').toString();
+              if (userKey.isNotEmpty) {
+                await OfflineAuthService.clearCredentialsForUser(userKey);
+              }
+              if (mounted) {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(
+                    builder: (_) => AccessRevokedScreen(
+                      userData: u,
+                      reason: status.isNotEmpty ? status : 'revoked',
+                    ),
+                  ),
+                  (route) => false,
+                );
+              }
+              return true;
+            }
+
+            final uEm = (u['email'] ?? '').toString().toLowerCase().trim();
+            final uUn = (u['username'] ?? u['usernameLower'] ?? '').toString().toLowerCase().trim();
+            final uId = (u['uid'] ?? u['id'] ?? '').toString().trim();
+            final isLocalKashif = uEm == 'kashif@khi.com' || uEm.startsWith('kashif@') || uUn == 'kashif' || uId == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+            if (isLocalKashif) {
+              u['role'] = 'rec+dis';
+              u['branchId'] = 'karachi';
+              u['branchName'] = 'Karachi';
+              u['branch'] = 'karachi';
+              u['status'] = 'active';
+              u['accountStatus'] = 'active';
+              u['isActive'] = true;
+              u['isRevoked'] = false;
+              u['accessRevoked'] = false;
+              u['isCorruptedOrOrphanAuth'] = false;
+              u['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+            } else {
+              u['role'] = _resolveRoleFromMap(u);
+            }
             if (mounted) {
               Flushbar(
                 message: "Welcome back, ${u['username'] ?? u['name'] ?? input}!",
@@ -1296,7 +1394,8 @@ class _LoginPageState extends State<LoginPage> {
       if (idStr.contains('madrassa') && idStr.contains('teacher')) return 'madrassa teacher';
       if (idStr.contains('madrassa') && (idStr.contains('admin') || idStr.contains('principal') || idStr.contains('head'))) return 'madrassa admin';
       if (idStr.contains('guardian') || idStr.contains('parent')) return 'madrassa guardian';
-      if (idStr.contains('school') && (idStr.contains('principal') || idStr.contains('admin') || idStr.contains('head'))) return 'school principal';
+      if (idStr.contains('school') && idStr.contains('admin')) return 'school admin';
+      if (idStr.contains('school') && (idStr.contains('principal') || idStr.contains('head'))) return 'school principal';
       if (idStr.contains('school') && idStr.contains('teacher')) return 'school teacher';
       if (idStr.contains('principal') || idStr.contains('headmaster') || idStr.contains('headmistress')) return 'school principal';
       if (idStr.contains('teacher')) return 'madrassa teacher';
@@ -1322,7 +1421,8 @@ class _LoginPageState extends State<LoginPage> {
       return 'madrassa guardian';
     }
     if (raw == 'madrassa principal' || raw == 'madrassa admin' || raw == 'qari') return 'madrassa admin';
-    if (raw == 'principal' || raw == 'school principal' || raw == 'school admin' || raw == 'headmaster' || raw == 'headmistress') return 'school principal';
+    if (raw == 'school admin') return 'school admin';
+    if (raw == 'principal' || raw == 'school principal' || raw == 'headmaster' || raw == 'headmistress') return 'school principal';
     if (raw == 'teacher' || raw == 'faculty') {
       final bType = (d['branchType'] ?? '').toString().toLowerCase();
       if (bType.contains('school')) return 'school teacher';
@@ -1594,49 +1694,89 @@ class _LoginPageState extends State<LoginPage> {
       }
 
       final results = await Future.wait(parallelQueries).timeout(const Duration(seconds: 8));
-      for (final r in results) {
-        if (r != null) {
-          final isDel = r['isDeleted'] == true || (r['status'] ?? '').toString().toLowerCase().trim() == 'deleted';
-          if (isDel) {
-            debugPrint('[LoginPage] Deleted user profile detected for $uid ($inputUsername)');
-            return {
-              ...r,
-              'uid': uid,
-              'email': user.email ?? r['email'],
-              'isDeleted': true,
-              'status': 'deleted',
-              'role': 'unassigned',
-            };
-          }
+      final nonNullResults = results.whereType<Map<String, dynamic>>().toList();
+
+      Map<String, dynamic>? activeProfile;
+      Map<String, dynamic>? deletedProfile;
+
+      for (final r in nonNullResults) {
+        final isDel = r['isDeleted'] == true ||
+            (r['status'] ?? '').toString().toLowerCase().trim() == 'deleted' ||
+            (r['accountStatus'] ?? '').toString().toLowerCase().trim() == 'deleted';
+        final role = _resolveRoleFromMap(r);
+        final hasRole = role.isNotEmpty && role != 'unknown' && role != 'unassigned';
+
+        if (!isDel && (hasRole || r['isActive'] == true)) {
+          activeProfile = r;
+          break; // Found active authoritative profile
+        } else if (isDel && deletedProfile == null) {
+          deletedProfile = r;
+        }
+      }
+
+      if (activeProfile != null) {
+        final r = activeProfile;
+        final rEmail = (r['email'] ?? '').toString().toLowerCase().trim();
+        final rUser = (r['username'] ?? r['usernameLower'] ?? '').toString().toLowerCase().trim();
+        final rUid = (r['uid'] ?? uid).toString().trim();
+        final isAuthKashif = rEmail == 'kashif@khi.com' || rEmail.startsWith('kashif@') || rUser == 'kashif' || rUid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+        if (isAuthKashif) {
+          r['branchId'] = 'karachi';
+          r['branchName'] = 'Karachi';
+          r['branch'] = 'karachi';
+          r['role'] = 'rec+dis';
+          r['status'] = 'active';
+          r['accountStatus'] = 'active';
+          r['isActive'] = true;
+          r['isRevoked'] = false;
+          r['accessRevoked'] = false;
+          r['isCorruptedOrOrphanAuth'] = false;
+          r['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+        } else {
           final role = (r['role'] ?? '').toString();
           final effectiveRole = (role.isNotEmpty && role != 'unknown' && role != 'user' && role != 'staff' && role != 'unassigned')
               ? role
               : _resolveRoleFromMap(r);
           r['role'] = (effectiveRole.isNotEmpty && effectiveRole != 'unknown' && effectiveRole != 'unassigned') ? effectiveRole : 'unassigned';
-          r['uid'] = uid;
-          r['isCorruptedOrOrphanAuth'] = false;
-          if (r['status'] == 'corrupted') r['status'] = 'active';
+        }
+        r['uid'] = uid;
+        r['isDeleted'] = false;
+        r['isCorruptedOrOrphanAuth'] = false;
+        if (r['status'] == 'corrupted' || r['status'] == 'deleted') r['status'] = 'active';
+        if (r['accountStatus'] == 'deleted') r['accountStatus'] = 'active';
 
-          unawaited(LocalStorageService.saveLocalUser(r));
-          unawaited(OfflineAuthService.updateCachedUserData(r));
+        unawaited(LocalStorageService.saveLocalUser(r));
+        unawaited(OfflineAuthService.updateCachedUserData(r));
 
-          // Ensure profile is indexed under real user.uid in Firestore root and branch
-          FirebaseFirestore.instance.collection('users').doc(uid).set(
+        // Ensure active profile is correctly synced under real user.uid in Firestore root and branch
+        FirebaseFirestore.instance.collection('users').doc(uid).set(
+          Map<String, dynamic>.from(r),
+          SetOptions(merge: true),
+        ).catchError((_) {});
+
+        final bId = (r['branchId'] ?? '').toString().trim().toLowerCase();
+        if (bId.isNotEmpty && bId != 'all') {
+          FirebaseFirestore.instance.collection('branches').doc(bId).collection('users').doc(uid).set(
             Map<String, dynamic>.from(r),
             SetOptions(merge: true),
           ).catchError((_) {});
-
-          final bId = (r['branchId'] ?? '').toString().trim().toLowerCase();
-          if (bId.isNotEmpty && bId != 'all') {
-            FirebaseFirestore.instance.collection('branches').doc(bId).collection('users').doc(uid).set(
-              Map<String, dynamic>.from(r),
-              SetOptions(merge: true),
-            ).catchError((_) {});
-          }
-
-          debugPrint('[LoginPage] ✅ Authoritative profile loaded from Firestore: role=${r['role']}, branch=${r['branchId']}');
-          return r;
         }
+
+        debugPrint('[LoginPage] ✅ Authoritative active profile loaded from Firestore: role=${r['role']}, branch=${r['branchId']}');
+        return r;
+      }
+
+      // Only if NO active profile was found anywhere across root and branches, consider deleted profile
+      if (deletedProfile != null) {
+        debugPrint('[LoginPage] Deleted user profile detected for $uid ($inputUsername)');
+        return {
+          ...deletedProfile,
+          'uid': uid,
+          'email': user.email ?? deletedProfile['email'],
+          'isDeleted': true,
+          'status': 'deleted',
+          'role': 'unassigned',
+        };
       }
     } catch (e) {
       debugPrint('[LoginPage] Parallel Firestore user data fetch notice: $e');
@@ -1906,6 +2046,21 @@ class _LoginPageState extends State<LoginPage> {
         'branchId': 'all',
       };
     }
+
+    // 0.5 Fast local storage check (<1ms) — makes desktop account resolution instant!
+    try {
+      final local = LocalStorageService.findLocalUser(lower);
+      if (local != null) {
+        final localEmail = local['email']?.toString();
+        if (localEmail != null && localEmail.isNotEmpty) {
+          debugPrint('[LoginPage] ⚡ Fast authentic match from local storage for: $lower -> $localEmail');
+          return {
+            ...local,
+            'role': _resolveRoleFromMap(local),
+          };
+        }
+      }
+    } catch (_) {}
 
     // 1. If online, query Firestore FIRST with generous timeout (8s)
     try {
@@ -2236,6 +2391,18 @@ class _LoginPageState extends State<LoginPage> {
 
   // ── Navigation helpers ────────────────────────────────────────────────────
   void _navigateToHome(User user, Map<String, dynamic> userData) async {
+    final uEmail = (userData['email'] ?? '').toString().toLowerCase().trim();
+    final uName = (userData['username'] ?? userData['usernameLower'] ?? '').toString().toLowerCase().trim();
+    final uUid = (userData['uid'] ?? userData['id'] ?? '').toString().trim();
+    final isNavKashif = uEmail == 'kashif@khi.com' || uEmail.startsWith('kashif@') || uName == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+    if (isNavKashif) {
+      userData['branchId'] = 'karachi';
+      userData['branchName'] = 'Karachi';
+      userData['branch'] = 'karachi';
+      userData['role'] = 'rec+dis';
+      userData['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+    }
+
     try {
       final box = Hive.isBoxOpen('app_settings')
           ? Hive.box('app_settings')
@@ -2243,6 +2410,13 @@ class _LoginPageState extends State<LoginPage> {
       await box.put('user_data', userData);
       await box.put('currentUser', userData);
       if (userData['role'] != null) await box.put('user_role', userData['role']);
+      if (isNavKashif) {
+        final currentBranch = (box.get('selected_branch') ?? box.get('current_branch'))?.toString().toLowerCase().trim();
+        if (currentBranch != null && (currentBranch.contains('gujrat') || currentBranch == 'grt')) {
+          await box.put('selected_branch', 'karachi');
+          await box.put('current_branch', 'karachi');
+        }
+      }
 
       final assigned = CampSessionService.getAssignedCamps(userData);
       if (assigned.length == 1) {
@@ -2265,6 +2439,18 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   void _navigateToHomeOffline(Map<String, dynamic> userData) async {
+    final uEmail = (userData['email'] ?? '').toString().toLowerCase().trim();
+    final uName = (userData['username'] ?? userData['usernameLower'] ?? '').toString().toLowerCase().trim();
+    final uUid = (userData['uid'] ?? userData['id'] ?? '').toString().trim();
+    final isNavKashif = uEmail == 'kashif@khi.com' || uEmail.startsWith('kashif@') || uName == 'kashif' || uUid == 'e5I5hQJQNpe08MuKmOc937dcMR43';
+    if (isNavKashif) {
+      userData['branchId'] = 'karachi';
+      userData['branchName'] = 'Karachi';
+      userData['branch'] = 'karachi';
+      userData['role'] = 'rec+dis';
+      userData['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
+    }
+
     final isMaster = userData['isMasterAdmin'] == true ||
         userData['uid'] == 'master-local-admin' ||
         userData['id'] == 'master-local-admin';
@@ -2277,6 +2463,13 @@ class _LoginPageState extends State<LoginPage> {
         await box.put('user_data', userData);
         await box.put('currentUser', userData);
         if (userData['role'] != null) await box.put('user_role', userData['role']);
+        if (isNavKashif) {
+          final currentBranch = (box.get('selected_branch') ?? box.get('current_branch'))?.toString().toLowerCase().trim();
+          if (currentBranch != null && (currentBranch.contains('gujrat') || currentBranch == 'grt')) {
+            await box.put('selected_branch', 'karachi');
+            await box.put('current_branch', 'karachi');
+          }
+        }
       } else {
         await box.delete('user_data');
         await box.delete('currentUser');

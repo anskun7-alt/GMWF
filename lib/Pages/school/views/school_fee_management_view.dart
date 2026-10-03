@@ -188,29 +188,29 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
         label: 'Total Expected Fee',
         value: 'PKR ${totalExpected.toStringAsFixed(0)}',
         icon: Icons.account_balance_wallet_rounded,
-        color: const Color(0xFF6366F1),
-        bgColor: const Color(0xFFEEF2FF),
+        color: SchoolTheme.primary,
+        bgColor: SchoolTheme.primaryLight,
       ),
       _buildSummaryTile(
         label: 'Total Fee Collected',
         value: 'PKR ${totalCollected.toStringAsFixed(0)}',
         icon: Icons.payments_rounded,
-        color: const Color(0xFF10B981),
-        bgColor: const Color(0xFFD1FAE5),
+        color: SchoolTheme.statusPresent,
+        bgColor: SchoolTheme.statusPresentBg,
       ),
       _buildSummaryTile(
         label: 'Outstanding Dues',
         value: 'PKR ${outstandingDues.toStringAsFixed(0)}',
         icon: Icons.pending_actions_rounded,
-        color: const Color(0xFFEF4444),
-        bgColor: const Color(0xFFFEE2E2),
+        color: SchoolTheme.statusAbsent,
+        bgColor: SchoolTheme.statusAbsentBg,
       ),
       _buildSummaryTile(
         label: 'Defaulters Count',
         value: '$defaultersCount Students',
         icon: Icons.person_off_rounded,
-        color: const Color(0xFFF59E0B),
-        bgColor: const Color(0xFFFEF3C7),
+        color: SchoolTheme.statusLeave,
+        bgColor: SchoolTheme.statusLeaveBg,
       ),
     ];
 
@@ -296,7 +296,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
               onChanged: (_) => setState(() {}),
               decoration: InputDecoration(
                 hintText: 'Search student by name or roll number...',
-                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF6366F1), size: 20),
+                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF1B4965), size: 20),
                 filled: true,
                 fillColor: Colors.white,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -314,7 +314,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
                 _buildDropdown('Status:', _selectedStatus, _statuses, (v) => setState(() => _selectedStatus = v!)),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF10B981),
+                    backgroundColor: const Color(0xFF2D9B83),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -343,7 +343,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
               onChanged: (_) => setState(() {}),
               decoration: InputDecoration(
                 hintText: 'Search student by name or roll number...',
-                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF6366F1)),
+                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF1B4965)),
                 filled: true,
                 fillColor: Colors.white,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -368,7 +368,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
           // Export Defaulters Button
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF10B981),
+              backgroundColor: const Color(0xFF2D9B83),
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -406,13 +406,13 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
     String statusLabel;
 
     if (fee.status == 'paid') {
-      statusColor = const Color(0xFF10B981);
+      statusColor = const Color(0xFF2D9B83);
       statusLabel = 'Paid';
     } else if (fee.status == 'partial') {
-      statusColor = const Color(0xFFF59E0B);
+      statusColor = const Color(0xFFD4940A);
       statusLabel = 'Partial (Bal: PKR ${fee.remainingBalance.toStringAsFixed(0)})';
     } else {
-      statusColor = const Color(0xFFEF4444);
+      statusColor = const Color(0xFFDC4A4A);
       statusLabel = 'Unpaid';
     }
 
@@ -432,19 +432,19 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
               if (bytes != null && bytes.isNotEmpty) {
                 return CircleAvatar(
                   radius: 20,
-                  backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
+                  backgroundColor: const Color(0xFF1B4965).withValues(alpha: 0.1),
                   backgroundImage: MemoryImage(bytes),
                 );
               } else if (student.photoUrl.startsWith('http')) {
                 return CircleAvatar(
                   radius: 20,
-                  backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
+                  backgroundColor: const Color(0xFF1B4965).withValues(alpha: 0.1),
                   backgroundImage: NetworkImage(student.photoUrl),
                 );
               }
               return CircleAvatar(
-                backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.1),
-                child: Text(student.rollNo.isNotEmpty ? student.rollNo : '#', style: const TextStyle(color: Color(0xFF6366F1), fontWeight: FontWeight.bold)),
+                backgroundColor: const Color(0xFF1B4965).withValues(alpha: 0.1),
+                child: Text(student.rollNo.isNotEmpty ? student.rollNo : '#', style: const TextStyle(color: Color(0xFF1B4965), fontWeight: FontWeight.bold)),
               );
             },
           ),
@@ -468,7 +468,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('Total Due: PKR ${fee.totalAmount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                Text('Paid: PKR ${fee.paidAmount.toStringAsFixed(0)}', style: const TextStyle(color: Color(0xFF10B981), fontSize: 12)),
+                Text('Paid: PKR ${fee.paidAmount.toStringAsFixed(0)}', style: const TextStyle(color: Color(0xFF2D9B83), fontSize: 12)),
               ],
             ),
           ),
@@ -520,7 +520,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Row(
             children: [
-              const Icon(Icons.payments_rounded, color: Color(0xFF10B981)),
+              const Icon(Icons.payments_rounded, color: Color(0xFF2D9B83)),
               const SizedBox(width: 10),
               Expanded(
                 child: Text('Record Fee Payment — ${student.name} (${student.grade})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -533,7 +533,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Month: $_selectedMonth • Roll No: ${student.rollNo}', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF6366F1))),
+                Text('Month: $_selectedMonth • Roll No: ${student.rollNo}', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF1B4965))),
                 const SizedBox(height: 14),
 
                 TextField(
@@ -574,7 +574,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2D9B83), foregroundColor: Colors.white),
               onPressed: () async {
                 final paid = double.tryParse(paidCtrl.text.trim()) ?? 0.0;
                 final discount = double.tryParse(discountCtrl.text.trim()) ?? 0.0;
@@ -597,7 +597,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
                 if (context.mounted) {
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Payment recorded for ${student.name}!'), backgroundColor: const Color(0xFF10B981)),
+                    SnackBar(content: Text('Payment recorded for ${student.name}!'), backgroundColor: const Color(0xFF2D9B83)),
                   );
                 }
               },
@@ -613,7 +613,7 @@ class _SchoolFeeManagementViewState extends State<SchoolFeeManagementView> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Exporting School Fee Collection & Defaulters Summary Report...'),
-        backgroundColor: Color(0xFF6366F1),
+        backgroundColor: Color(0xFF1B4965),
       ),
     );
   }

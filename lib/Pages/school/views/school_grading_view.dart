@@ -342,7 +342,7 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(msg),
-            backgroundColor: const Color(0xFF10B981),
+            backgroundColor: const Color(0xFF2D9B83),
           ),
         );
       }
@@ -351,7 +351,7 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to attach document: $e'),
-            backgroundColor: const Color(0xFFEF4444),
+            backgroundColor: const Color(0xFFDC4A4A),
           ),
         );
       }

@@ -77,10 +77,26 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   String _selectedCampFilter = 'all';
   String _selectedTypeFilter = 'All';
 
+  String get _effectiveBranchId =>
+      CampSessionService.isKarachiFamily(_currentBranchId) ? 'karachi' : _currentBranchId;
+
   String _initialCampFilter() {
     if (!_hasMultiCamps) return 'all';
-    final active = CampSessionService.getActiveCamp(_currentBranchId);
+    final active = CampSessionService.getActiveCamp(_effectiveBranchId);
     return (active != null && active.isNotEmpty && active != 'all') ? active : 'all';
+  }
+
+  void _onActiveCampChanged() {
+    if (!mounted || !_hasMultiCamps) return;
+    final active = CampSessionService.getActiveCamp(_effectiveBranchId);
+    if (active != null && active.isNotEmpty && active != _selectedCampFilter) {
+      setState(() {
+        _selectedCampFilter = active;
+        _selectedMed = null;
+        _selectedDocId = null;
+      });
+      _loadAllMedicines();
+    }
   }
 
   Map<String, dynamic> _getUserData() {
@@ -136,10 +152,16 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       if (mCamp != null && mCamp.isNotEmpty && mCamp != 'all') return mCamp;
     }
     if (_selectedCampFilter != 'all') return _selectedCampFilter;
-    return CampSessionService.getActiveCamp(_currentBranchId) ?? 'saddar';
+    final active = CampSessionService.getActiveCamp(_effectiveBranchId);
+    if (active != null && active.isNotEmpty && active != 'all') return active;
+    final configuredCamps = CampSessionService.getCampsForBranch(_effectiveBranchId);
+    if (configuredCamps.isNotEmpty) {
+      return configuredCamps.first['id']?.toString() ?? '';
+    }
+    return CampSessionService.isKarachiFamily(_effectiveBranchId) ? 'saddar' : '';
   }
 
-  bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(_currentBranchId);
+  bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(_effectiveBranchId);
 
   // ── Register New Medicine state ───────────────────────────────────────────
   final _regFormKey = GlobalKey<FormState>();
@@ -262,6 +284,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     _fadeCtrl.forward();
 
     _regNameCtrl.addListener(_onRegNameChanged);
+    CampSessionService.activeCampNotifier.addListener(_onActiveCampChanged);
     _loadAllMedicines();
   }
 
@@ -277,6 +300,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
   @override
   void dispose() {
+    CampSessionService.activeCampNotifier.removeListener(_onActiveCampChanged);
     _regNameCtrl.removeListener(_onRegNameChanged);
     _tabCtrl.dispose();
     _fadeCtrl.dispose();
@@ -313,7 +337,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
     // 2. Check local stock items in active camp
     final localItems =
-        LocalStorageService.getAllLocalStockItems(branchId: widget.branchId, filterByCamp: true);
+        LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
     final localMatch = localItems.any((item) {
       final itemCode = (item['code']?.toString().trim().toLowerCase() ?? item['barcode']?.toString().trim().toLowerCase() ?? '');
       if (itemCode.isEmpty || itemCode != normalized) return false;
@@ -332,7 +356,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final profMatch = MasterProformaService.findExactBarcodeMatch(code);
     if (profMatch != null) return profMatch;
 
-    final localItems = LocalStorageService.getAllLocalStockItems(branchId: widget.branchId, filterByCamp: true);
+    final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
     for (final item in localItems) {
       final itemCode = (item['code']?.toString().trim().toLowerCase() ?? item['barcode']?.toString().trim().toLowerCase() ?? '');
       if (itemCode.isNotEmpty && itemCode == cleanCode) {
@@ -352,7 +376,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final profMatch = MasterProformaService.findExactNameDoseTypeMatch(name, type, dose);
     if (profMatch != null) return profMatch;
 
-    final localItems = LocalStorageService.getAllLocalStockItems(branchId: widget.branchId, filterByCamp: true);
+    final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
     for (final item in localItems) {
       final itemDocId = item['_docId'] ?? item['id'] ?? item['docId'];
       if (excludeDocId != null && itemDocId == excludeDocId) continue;
@@ -656,12 +680,13 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Future<void> _loadAllMedicines() async {
     setState(() => _isSearching = true);
     try {
-      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _currentBranchId, filterByCamp: false);
+      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: false);
       final Map<String, Map<String, dynamic>> consolidated = {};
       final Set<String> processedDocIds = {};
 
       void processItem(Map<String, dynamic> d) {
-        final docId = (d['_docId'] ?? d['id'] ?? d['docId'])?.toString();
+        final rawDocId = (d['_docId'] ?? d['id'] ?? d['docId'])?.toString().trim();
+        final docId = (rawDocId != null && rawDocId.startsWith('stock:')) ? rawDocId.substring(6) : rawDocId;
         if (docId != null && docId.isNotEmpty) {
           if (processedDocIds.contains(docId)) return;
           processedDocIds.add(docId);
@@ -686,12 +711,30 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           return;
         }
 
-        final key = '${d['name']}|${d['type']}|${d['dose']}|$itemCamp';
-        if (!consolidated.containsKey(key)) {
-          consolidated[key] = {...d, '_docId': docId};
+        final expiry = (d['expiryDate'] ?? '').toString().trim();
+        String monthYear = '';
+        if (expiry.length == 10 && expiry[2] == '-' && expiry[5] == '-') {
+          monthYear = expiry.substring(3);
         } else {
-          consolidated[key]!['quantity'] =
-              (consolidated[key]!['quantity'] ?? 0) + (d['quantity'] ?? 0);
+          monthYear = expiry;
+        }
+
+        final dQty = (d['quantity'] as num?)?.toInt() ?? 0;
+        final key = '${d['name']}|${d['type']}|${d['dose']}|$monthYear|$itemCamp';
+        if (!consolidated.containsKey(key)) {
+          consolidated[key] = {
+            ...d,
+            'quantity': dQty,
+            '_docId': docId,
+            '_docIds': docId != null ? [docId] : <String>[],
+          };
+        } else {
+          final existing = consolidated[key]!;
+          final existingDocIds = existing['_docIds'] as List<String>;
+          if (docId != null && !existingDocIds.contains(docId)) {
+            existingDocIds.add(docId);
+            existing['quantity'] = ((existing['quantity'] as num?)?.toInt() ?? 0) + dQty;
+          }
         }
       }
 
@@ -734,7 +777,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       final Map<String, Map<String, dynamic>> seen = {};
       final q = query.toLowerCase().trim();
 
-      void processDoc(Map<String, dynamic> d, String docId) {
+      final Set<String> processedDocIds = {};
+      void processDoc(Map<String, dynamic> d, String rawDocId) {
+        final docId = (rawDocId.startsWith('stock:')) ? rawDocId.substring(6) : rawDocId;
+        if (docId.isNotEmpty) {
+          if (processedDocIds.contains(docId)) return;
+          processedDocIds.add(docId);
+        }
+
         final itemCamp = (d['dispensaryId'] ?? d['campId'] ?? '').toString().toLowerCase().trim();
 
         if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
@@ -763,7 +813,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       }
 
       // Check local Hive stock first (works offline immediately)
-      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _currentBranchId, filterByCamp: false);
+      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: false);
       for (final item in localItems) {
         final name = (item['name'] ?? '').toString().toLowerCase();
         final barcode = (item['barcode'] ?? item['code'] ?? '').toString().toLowerCase();
@@ -835,7 +885,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'medicineName': _selectedMed!['name'],
         'medicineId': medId,
         'quantityAdded': qty,
-        'branchId': _currentBranchId,
+        'branchId': _effectiveBranchId,
         'dispensaryId': targetCamp,
         'campId': targetCamp,
         'campName': campLabel,
@@ -854,7 +904,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           'data': {
             ...updatedMed,
             '_quantityDelta':   qty,
-            'branchId':         _currentBranchId,
+            'branchId':         _effectiveBranchId,
             'campId':           targetCamp,
             'dispensaryId':     targetCamp,
             'campName':         campLabel,
@@ -869,7 +919,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       if (!RealtimeManager().isConnected) {
         await LocalStorageService.enqueueSync({
           'type': 'add_inventory_stock',
-          'branchId': _currentBranchId,
+          'branchId': _effectiveBranchId,
           'dispensaryId': targetCamp,
           'campId': targetCamp,
           'campName': campLabel,
@@ -1258,11 +1308,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 fontWeight: FontWeight.bold)),
         actions: [
           CampSelectorChip(
-            branchId: widget.branchId,
+            branchId: _effectiveBranchId,
             onCampChanged: (newCamp) {
               setState(() {
-                _loadAllMedicines();
+                _selectedCampFilter = newCamp;
+                _selectedMed = null;
+                _selectedDocId = null;
               });
+              _loadAllMedicines();
             },
           ),
           const SizedBox(width: 8),
@@ -1438,18 +1491,18 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        _campPillButton(
-                          label: 'Saddar Camp',
-                          campId: 'saddar',
-                          icon: Icons.location_on_rounded,
-                        ),
-                        const SizedBox(width: 8),
-                        _campPillButton(
-                          label: 'Haji Camp',
-                          campId: 'haji_camp',
-                          icon: Icons.location_on_rounded,
-                        ),
-                        const SizedBox(width: 8),
+                        ...CampSessionService.getCampsForBranch(_effectiveBranchId).map((c) {
+                          final cId = (c['id'] ?? '').toString();
+                          final cName = (c['name'] ?? CampSessionService.getCampLabel(cId, _effectiveBranchId)).toString();
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: _campPillButton(
+                              label: cName,
+                              campId: cId,
+                              icon: Icons.location_on_rounded,
+                            ),
+                          );
+                        }),
                         _campPillButton(
                           label: 'All Camps',
                           campId: 'all',
@@ -1517,6 +1570,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           _selectedMed = null;
           _selectedDocId = null;
         });
+        if (campId != 'all') {
+          CampSessionService.setActiveCamp(campId);
+        }
         _loadAllMedicines();
       },
       borderRadius: BorderRadius.circular(20),
@@ -1739,13 +1795,20 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final expSoon = _isExpiringSoon(med['expiryDate']?.toString());
 
     final rawCamp = (med['campId'] ?? med['dispensaryId'] ?? '').toString().toLowerCase();
-    String campTag = _hasMultiCamps ? 'Saddar Camp' : '';
-    if (rawCamp.contains('haji')) {
-      campTag = 'Haji Camp';
-    } else if (rawCamp.contains('sadd') || rawCamp.contains('kap')) {
-      campTag = 'Saddar Camp';
-    } else if (_hasMultiCamps && _selectedCampFilter != 'all') {
-      campTag = CampSessionService.getCampLabel(_selectedCampFilter);
+    String campTag = '';
+    final isKarachi = CampSessionService.isKarachiFamily(_effectiveBranchId);
+    if (isKarachi) {
+      if (rawCamp.contains('haji')) {
+        campTag = 'Haji Camp';
+      } else if (rawCamp.contains('sadd') || rawCamp.contains('kap')) {
+        campTag = 'Saddar Camp';
+      }
+    } else if (rawCamp.isNotEmpty && rawCamp != 'all') {
+      campTag = CampSessionService.getCampLabel(rawCamp, _effectiveBranchId);
+    } else if (_selectedCampFilter != 'all' && _selectedCampFilter.isNotEmpty) {
+      campTag = CampSessionService.getCampLabel(_selectedCampFilter, _effectiveBranchId);
+    } else if (_hasMultiCamps) {
+      campTag = 'General Stock';
     }
 
     return Container(
@@ -1927,15 +1990,30 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final medDose = med['dose']?.toString() ?? '';
     final curQty = _safeInt(med['quantity']);
 
+    final isKarachi = CampSessionService.isKarachiFamily(_effectiveBranchId);
     String targetCamp = (med['campId'] ?? med['dispensaryId'] ?? '').toString().toLowerCase().trim();
-    if (targetCamp.contains('haji')) {
-      targetCamp = 'haji_camp';
-    } else if (targetCamp.contains('sadd') || targetCamp.contains('kap')) {
-      targetCamp = 'saddar';
-    } else {
-      targetCamp = _effectiveTargetCamp;
-      if (targetCamp == 'all' || targetCamp.isEmpty) {
+    if (isKarachi) {
+      if (targetCamp.contains('haji')) {
+        targetCamp = 'haji_camp';
+      } else if (targetCamp.contains('sadd') || targetCamp.contains('kap')) {
         targetCamp = 'saddar';
+      } else {
+        targetCamp = _effectiveTargetCamp;
+        if (targetCamp == 'all' || targetCamp.isEmpty) {
+          targetCamp = 'saddar';
+        }
+      }
+    } else {
+      if (_hasMultiCamps) {
+        if (targetCamp.isEmpty || targetCamp == 'all') {
+          targetCamp = _effectiveTargetCamp.isNotEmpty && _effectiveTargetCamp != 'all'
+              ? _effectiveTargetCamp
+              : (CampSessionService.getCampsForBranch(_effectiveBranchId).isNotEmpty
+                  ? CampSessionService.getCampsForBranch(_effectiveBranchId).first['id']?.toString() ?? ''
+                  : '');
+        }
+      } else {
+        targetCamp = '';
       }
     }
 
@@ -1947,7 +2025,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       barrierDismissible: true,
       builder: (dialogCtx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
-          final campLabel = CampSessionService.getCampLabel(targetCamp);
+          final campLabel = targetCamp.isNotEmpty && targetCamp != 'all' && targetCamp != 'main'
+              ? CampSessionService.getCampLabel(targetCamp, _effectiveBranchId)
+              : (isKarachi ? 'Saddar Dispensary' : 'Inventory');
           return Dialog(
             backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -2065,42 +2145,49 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                     if (_hasMultiCamps) ...[
                       Text('Target Facility Camp:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? Colors.white70 : _textMid)),
                       const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: InkWell(
-                              onTap: () => setDialogState(() => targetCamp = 'saddar'),
-                              borderRadius: BorderRadius.circular(8),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(vertical: 8),
-                                decoration: BoxDecoration(
-                                  color: targetCamp == 'saddar' ? _teal : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: targetCamp == 'saddar' ? _teal : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                      Builder(
+                        builder: (_) {
+                          final branchCamps = CampSessionService.getCampsForBranch(_effectiveBranchId);
+                          final campsToShow = branchCamps.isNotEmpty
+                              ? branchCamps
+                              : (isKarachi
+                                  ? [
+                                      {'id': 'saddar', 'name': 'Saddar Camp'},
+                                      {'id': 'haji_camp', 'name': 'Haji Camp'},
+                                    ]
+                                  : <Map<String, dynamic>>[]);
+                          if (campsToShow.isEmpty) return const SizedBox.shrink();
+                          return Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: campsToShow.map((c) {
+                              final cId = (c['id'] ?? '').toString();
+                              final cName = (c['name'] ?? CampSessionService.getCampLabel(cId, _effectiveBranchId)).toString();
+                              final isSelected = targetCamp == cId || (isKarachi && cId == 'saddar' && (targetCamp.isEmpty || targetCamp == 'saddar'));
+                              final btnColor = cId.contains('haji') ? const Color(0xFF0284C7) : _teal;
+                              return InkWell(
+                                onTap: () => setDialogState(() => targetCamp = cId),
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? btnColor : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: isSelected ? btnColor : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
+                                  ),
+                                  child: Text(
+                                    cName,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: isSelected ? Colors.white : (isDark ? Colors.white70 : _textDark),
+                                    ),
+                                  ),
                                 ),
-                                alignment: Alignment.center,
-                                child: Text('Saddar Camp', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: targetCamp == 'saddar' ? Colors.white : (isDark ? Colors.white70 : _textDark))),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: InkWell(
-                              onTap: () => setDialogState(() => targetCamp = 'haji_camp'),
-                              borderRadius: BorderRadius.circular(8),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(vertical: 8),
-                                decoration: BoxDecoration(
-                                  color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? const Color(0xFF0284C7) : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? const Color(0xFF0284C7) : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1))),
-                                ),
-                                alignment: Alignment.center,
-                                child: Text('Haji Camp', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: (targetCamp == 'haji_camp' || targetCamp == 'haji') ? Colors.white : (isDark ? Colors.white70 : _textDark))),
-                              ),
-                            ),
-                          ),
-                        ],
+                              );
+                            }).toList(),
+                          );
+                        },
                       ),
                       const SizedBox(height: 14),
                     ],
@@ -2226,7 +2313,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                                 ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                                 : const Icon(Icons.add_task_rounded, color: Colors.white, size: 18),
                             label: Text(
-                              'Add Stock to $campLabel',
+                              _hasMultiCamps && campLabel.isNotEmpty && campLabel != 'Inventory'
+                                  ? 'Add Stock to $campLabel'
+                                  : 'Add Stock to Inventory',
                               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
                             ),
                             style: ElevatedButton.styleFrom(
@@ -2272,7 +2361,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'medicineName': medName,
         'medicineId': medId,
         'quantityAdded': qty,
-        'branchId': _currentBranchId,
+        'branchId': _effectiveBranchId,
         'dispensaryId': targetCamp,
         'campId': targetCamp,
         'campName': campLabel,
@@ -2291,7 +2380,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'data': {
           ...updatedMed,
           '_quantityDelta':  qty,
-          'branchId':        _currentBranchId,
+          'branchId':        _effectiveBranchId,
           'campId':          targetCamp,
           'dispensaryId':    targetCamp,
           'campName':        campLabel,
@@ -2305,7 +2394,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       if (!RealtimeManager().isConnected) {
         await LocalStorageService.enqueueSync({
           'type': 'add_inventory_stock',
-          'branchId': _currentBranchId,
+          'branchId': _effectiveBranchId,
           'dispensaryId': targetCamp,
           'campId': targetCamp,
           'campName': campLabel,

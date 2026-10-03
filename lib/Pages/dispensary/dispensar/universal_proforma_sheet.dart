@@ -16,6 +16,7 @@ import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/widgets/app_back_button.dart';
+import 'package:gmwf/widgets/blurred_dialog_observer.dart';
 
 class UniversalProformaSheetPage extends StatefulWidget {
   final String branchId;
@@ -1590,23 +1591,25 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           const SizedBox(width: 8),
         ],
       ),
-      body: Column(
-        children: [
-          // ── Top Search & Filter Bar ───────────────────────────────────────
-          _buildFilterHeader(),
+      body: BlurredUnderDialogBackground(
+        child: Column(
+          children: [
+            // ── Top Search & Filter Bar ───────────────────────────────────────
+            _buildFilterHeader(),
 
-          Expanded(
-            child: _filteredList.isEmpty
-                ? _buildEmptyState()
-                : LayoutBuilder(
-                    builder: (ctx, constraints) =>
-                        _buildExcelGridSheet(constraints.maxHeight),
-                  ),
-          ),
+            Expanded(
+              child: _filteredList.isEmpty
+                  ? _buildEmptyState()
+                  : LayoutBuilder(
+                      builder: (ctx, constraints) =>
+                          _buildExcelGridSheet(constraints.maxHeight),
+                    ),
+            ),
 
-          // ── Bottom Action Sticky Toolbar ──────────────────────────────────
-          _buildBottomToolbar(),
-        ],
+            // ── Bottom Action Sticky Toolbar ──────────────────────────────────
+            _buildBottomToolbar(),
+          ],
+        ),
       ),
     );
   }

@@ -54,8 +54,23 @@ class _RegisterState extends State<Register>
   final TextEditingController _emailController        = TextEditingController();
   final TextEditingController _passwordController     = TextEditingController();
   final TextEditingController _phoneController        = TextEditingController();
-  final TextEditingController _biometricPinController = TextEditingController();
   final TextEditingController _customDegreeController = TextEditingController();
+  final TextEditingController _cnicController         = TextEditingController();
+
+  bool _isSinglePageMode = true;
+
+  Timer? _usernameCheckTimer;
+  bool _isCheckingUsername = false;
+  String? _usernameError;
+  bool? _isUsernameAvailable;
+
+  Timer? _emailCheckTimer;
+  bool _isCheckingEmail = false;
+  String? _emailError;
+  bool? _isEmailAvailable;
+
+  String? _passwordStrengthText;
+  Color? _passwordStrengthColor;
 
   String? _selectedStudentId;
   List<Map<String, dynamic>> _branchStudents = [];
@@ -156,15 +171,23 @@ class _RegisterState extends State<Register>
     _fadeAnim = CurvedAnimation(parent: _animController, curve: Curves.easeOut);
     _animController.forward();
     _loadBranches();
+    _usernameController.addListener(_onUsernameChanged);
+    _emailController.addListener(_onEmailChanged);
+    _passwordController.addListener(_onPasswordChanged);
   }
 
   @override
   void dispose() {
+    _usernameCheckTimer?.cancel();
+    _emailCheckTimer?.cancel();
+    _usernameController.removeListener(_onUsernameChanged);
+    _emailController.removeListener(_onEmailChanged);
+    _passwordController.removeListener(_onPasswordChanged);
     _animController.dispose();
     _pageController.dispose();
     for (final c in [
       _usernameController, _emailController, _passwordController,
-      _phoneController, _biometricPinController, _customDegreeController,
+      _phoneController, _customDegreeController,
     ]) {
       c.dispose();
     }
@@ -410,6 +433,186 @@ class _RegisterState extends State<Register>
     return false;
   }
 
+  Future<bool> _emailExists(String email) async {
+    final lower = email.trim().toLowerCase();
+    if (lower.isEmpty) return false;
+
+    try {
+      if (!Hive.isBoxOpen('local_users')) {
+        await LocalStorageService.openBoxSafe('local_users');
+      }
+      final box = Hive.box('local_users');
+      for (final val in box.values) {
+        if (val is Map) {
+          final uEmail = (val['email']?.toString() ?? '').toLowerCase().trim();
+          final isDeleted = val['isDeleted'] == true || val['status'] == 'deleted' || val['accountStatus'] == 'deleted';
+          if (!isDeleted && uEmail == lower) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+
+    try {
+      final res = await FirebaseFirestore.instance
+          .collection('users')
+          .where('email', isEqualTo: lower)
+          .limit(1)
+          .get()
+          .timeout(const Duration(seconds: 4));
+      if (res.docs.isNotEmpty) {
+        final docData = res.docs.first.data();
+        final status = (docData['status'] ?? docData['accountStatus'] ?? '').toString().toLowerCase();
+        if (docData['isDeleted'] != true && status != 'deleted') {
+          return true;
+        }
+      }
+    } catch (_) {}
+
+    return false;
+  }
+
+  void _onUsernameChanged() {
+    _usernameCheckTimer?.cancel();
+    final text = _usernameController.text.trim();
+    if (text.isEmpty) {
+      if (_usernameError != null || _isUsernameAvailable != null || _isCheckingUsername) {
+        setState(() {
+          _isCheckingUsername = false;
+          _usernameError = null;
+          _isUsernameAvailable = null;
+        });
+      }
+      return;
+    }
+
+    if (text.length < 3) {
+      setState(() {
+        _isCheckingUsername = false;
+        _usernameError = 'Minimum 3 characters';
+        _isUsernameAvailable = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isCheckingUsername = true;
+      _usernameError = null;
+    });
+
+    _usernameCheckTimer = Timer(const Duration(milliseconds: 350), () async {
+      final exists = await _usernameExists(text);
+      if (!mounted) return;
+      setState(() {
+        _isCheckingUsername = false;
+        if (exists) {
+          _usernameError = 'Username "$text" is already taken';
+          _isUsernameAvailable = false;
+        } else {
+          _usernameError = null;
+          _isUsernameAvailable = true;
+        }
+      });
+    });
+  }
+
+  void _onEmailChanged() {
+    _emailCheckTimer?.cancel();
+    final text = _emailController.text.trim().toLowerCase();
+    if (text.isEmpty) {
+      if (_emailError != null || _isEmailAvailable != null || _isCheckingEmail) {
+        setState(() {
+          _isCheckingEmail = false;
+          _emailError = null;
+          _isEmailAvailable = null;
+        });
+      }
+      return;
+    }
+
+    if (!text.contains('@') || !text.contains('.')) {
+      setState(() {
+        _isCheckingEmail = false;
+        _emailError = 'Enter a valid email address';
+        _isEmailAvailable = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isCheckingEmail = true;
+      _emailError = null;
+    });
+
+    _emailCheckTimer = Timer(const Duration(milliseconds: 350), () async {
+      final exists = await _emailExists(text);
+      if (!mounted) return;
+      setState(() {
+        _isCheckingEmail = false;
+        if (exists) {
+          _emailError = 'Email "$text" is already registered';
+          _isEmailAvailable = false;
+        } else {
+          _emailError = null;
+          _isEmailAvailable = true;
+        }
+      });
+    });
+  }
+
+  void _onPasswordChanged() {
+    final text = _passwordController.text;
+    if (text.isEmpty) {
+      if (_passwordStrengthText != null) {
+        setState(() {
+          _passwordStrengthText = null;
+          _passwordStrengthColor = null;
+        });
+      }
+      return;
+    }
+
+    if (text.length < 6) {
+      setState(() {
+        _passwordStrengthText = 'Too short (${text.length}/6 characters minimum)';
+        _passwordStrengthColor = const Color(0xFFEF4444);
+      });
+    } else if (text.length < 8) {
+      final hasNum = text.contains(RegExp(r'[0-9]'));
+      final hasAlpha = text.contains(RegExp(r'[a-zA-Z]'));
+      if (hasNum && hasAlpha) {
+        setState(() {
+          _passwordStrengthText = 'Fair / Acceptable';
+          _passwordStrengthColor = const Color(0xFFF59E0B);
+        });
+      } else {
+        setState(() {
+          _passwordStrengthText = 'Basic (mix numbers & letters for better safety)';
+          _passwordStrengthColor = const Color(0xFFF97316);
+        });
+      }
+    } else {
+      final hasNum = text.contains(RegExp(r'[0-9]'));
+      final hasSpecial = text.contains(RegExp(r'[!@#$%^&*(),.?":{}|<>]'));
+      if (hasNum && hasSpecial) {
+        setState(() {
+          _passwordStrengthText = 'Very Safe & Strong ✓';
+          _passwordStrengthColor = const Color(0xFF10B981);
+        });
+      } else if (hasNum) {
+        setState(() {
+          _passwordStrengthText = 'Safe password ✓';
+          _passwordStrengthColor = const Color(0xFF10B981);
+        });
+      } else {
+        setState(() {
+          _passwordStrengthText = 'Safe (add numbers or symbols to strengthen)';
+          _passwordStrengthColor = const Color(0xFF3B82F6);
+        });
+      }
+    }
+  }
+
   bool _requiresBranch() {
     final r = _selectedRole?.toLowerCase();
     return r != 'ceo' && r != 'chairman' && r != 'admin' && r != 'hq manager';
@@ -519,10 +722,68 @@ class _RegisterState extends State<Register>
   }
 
   Future<void> _registerUser() async {
-    for (int s = 0; s < _totalSteps; s++) {
-      if (!_validateStep(s)) {
-        _goToStep(s);
+    if (_isSinglePageMode) {
+      if (_selectedDepartment == null) {
+        _snack('Please select a Department to continue', error: true);
         return;
+      }
+      if (_selectedRole == null) {
+        _snack('Please select a Role to continue', error: true);
+        return;
+      }
+      if (_isCheckingUsername || _isCheckingEmail) {
+        _snack('Checking username/email availability, please wait...', error: false);
+        return;
+      }
+      if (_usernameController.text.trim().isEmpty) {
+        _snack('Please enter a username', error: true);
+        return;
+      }
+      if (_isUsernameAvailable == false || _usernameError != null) {
+        _snack(_usernameError ?? 'Username is already taken. Please choose another.', error: true);
+        return;
+      }
+      if (_emailController.text.trim().isEmpty) {
+        _snack('Please enter an email address', error: true);
+        return;
+      }
+      if (_isEmailAvailable == false || _emailError != null) {
+        _snack(_emailError ?? 'Email is already registered. Please choose another.', error: true);
+        return;
+      }
+      if (_passwordController.text.trim().length < 6) {
+        _snack('Password must be at least 6 characters', error: true);
+        return;
+      }
+      if (_requiresBranch() && _selectedBranch == null) {
+        _snack('Please select a Branch for this role', error: true);
+        return;
+      }
+      if (_selectedRole == 'Madrassa Parent' && _selectedStudentId == null) {
+        _snack('Please select the associated student for this parent', error: true);
+        return;
+      }
+      if (_selectedRole == 'Madrassa Teacher') {
+        if (_selectedMadrassaTeachingType.isEmpty) {
+          _snack('Please select teaching specialization (Nazra / Hifz / Both)', error: true);
+          return;
+        }
+        if (_selectedMadrassaSession.isEmpty && _selectedMadrassaSessions.isEmpty) {
+          _snack('Please select a teaching shift for Madrassa Teacher', error: true);
+          return;
+        }
+      }
+      final isDoctor = (_selectedRole ?? '').toLowerCase().contains('doc');
+      if (isDoctor && _selectedDegree == null) {
+        _snack('Please select medical degree for Doctor role', error: true);
+        return;
+      }
+    } else {
+      for (int s = 0; s < _totalSteps; s++) {
+        if (!_validateStep(s)) {
+          _goToStep(s);
+          return;
+        }
       }
     }
 
@@ -537,32 +798,33 @@ class _RegisterState extends State<Register>
     final username = _usernameController.text.trim();
     if (_selectedRole == null || _selectedRole!.trim().isEmpty) {
       _snack('Please select a valid role before proceeding', error: true);
-      _goToStep(0);
+      if (!_isSinglePageMode) _goToStep(0);
       return;
     }
 
     final roleToAssign = _selectedRole!.trim();
 
+    if (roleToAssign.toLowerCase() == 'chairman' && _getCurrentUserRole() != 'chairman') {
+      _snack('Access Denied: Only the Chairman can register a Chairman account.', error: true);
+      return;
+    }
+
     try {
       if (await _usernameExists(username)) {
         _snack('Username "$username" already exists. Please choose another.', error: true);
-        _goToStep(1);
+        if (!_isSinglePageMode) _goToStep(1);
+        return;
+      }
+
+      if (await _emailExists(email)) {
+        _snack('Email "$email" already exists. Please choose another.', error: true);
+        if (!_isSinglePageMode) _goToStep(1);
         return;
       }
 
       final degree = _selectedDegree == 'Other'
           ? _customDegreeController.text.trim()
           : (_selectedDegree ?? '');
-
-      final enteredPin = _biometricPinController.text.trim();
-      if (enteredPin.isNotEmpty) {
-        final conflict = ZkTecoNetworkService.findPinConflict(enteredPin);
-        if (conflict != null) {
-          _snack('❌ PIN $enteredPin is already assigned to "${conflict.entityName}" (${conflict.branchId.toUpperCase()}). Please choose a unique PIN.', error: true);
-          _goToStep(2);
-          return;
-        }
-      }
 
       String branchId = _getBranchId();
       final curRole = _getCurrentUserRole();
@@ -587,6 +849,7 @@ class _RegisterState extends State<Register>
         }
       }
 
+      final cnicValue = _cnicController.text.trim().replaceAll('-', '');
       final registeredUid = await _authService.signUp(
         email:              email,
         password:           _passwordController.text.trim(),
@@ -596,8 +859,8 @@ class _RegisterState extends State<Register>
         branchId:           branchId,
         branchName:         branchName,
         phone:              _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
+        cnic:               cnicValue.isNotEmpty ? _cnicController.text.trim() : '',
         degree:             degree.isNotEmpty ? degree : null,
-        biometricPin:       enteredPin.isNotEmpty ? enteredPin : null,
         studentId:          _selectedStudentId,
         dispensaryId:       _selectedDispensary,
         dispensaryIds:      _selectedDispensaries.toList(),
@@ -679,19 +942,8 @@ class _RegisterState extends State<Register>
         SyncService().triggerUpload(force: true);
       } catch (_) {}
 
-      if (enteredPin.isNotEmpty && registeredUid.isNotEmpty) {
-        await ZkTecoNetworkService.assignPinToEntity(
-          entityId: registeredUid,
-          entityName: username,
-          entityType: 'user',
-          branchId: branchId,
-          customPin: enteredPin,
-        );
-      }
-
       final registeredName = _usernameController.text.trim();
       _formKey.currentState?.reset();
-      _biometricPinController.clear();
       setState(() {
         _selectedDepartment       = null;
         _selectedRole             = null;
@@ -718,7 +970,7 @@ class _RegisterState extends State<Register>
       }
       for (final c in [
         _usernameController, _emailController, _passwordController,
-        _phoneController, _customDegreeController, _biometricPinController,
+        _phoneController, _customDegreeController, _cnicController,
       ]) { c.clear(); }
 
       _snack('🎉 $registeredName registered successfully as $roleToAssign!', success: true);
@@ -832,23 +1084,38 @@ class _RegisterState extends State<Register>
                   // Top Navigation Bar
                   _buildTopBar(t),
 
-                  // Interactive Stepper (3-step wizard)
-                  _buildStepperHeader(t),
+                  // Interactive Stepper (3-step wizard) - only shown in wizard mode
+                  if (!_isSinglePageMode) _buildStepperHeader(t),
 
-                  // Main Page Flow
+                  // Main Form Body
                   Expanded(
                     child: FadeTransition(
                       opacity: _fadeAnim,
-                      child: PageView(
-                        controller: _pageController,
-                        physics: const NeverScrollableScrollPhysics(),
-                        onPageChanged: (page) => setState(() => _currentStep = page),
-                        children: [
-                          _buildStepWrapper(t, _buildStep0DepartmentAndRole(t)),
-                          _buildStepWrapper(t, _buildStep1PersonalAndAccount(t)),
-                          _buildStepWrapper(t, _buildStep2StationAndBiometrics(t)),
-                        ],
-                      ),
+                      child: _isSinglePageMode
+                          ? _buildStepWrapper(
+                              t,
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  _buildStep1PersonalAndAccount(t),
+                                  const SizedBox(height: 24),
+                                  _buildStep0DepartmentAndRole(t),
+                                  const SizedBox(height: 24),
+                                  _buildStep2StationAndBiometrics(t),
+                                  const SizedBox(height: 32),
+                                ],
+                              ),
+                            )
+                          : PageView(
+                              controller: _pageController,
+                              physics: const NeverScrollableScrollPhysics(),
+                              onPageChanged: (page) => setState(() => _currentStep = page),
+                              children: [
+                                _buildStepWrapper(t, _buildStep0DepartmentAndRole(t)),
+                                _buildStepWrapper(t, _buildStep1PersonalAndAccount(t)),
+                                _buildStepWrapper(t, _buildStep2StationAndBiometrics(t)),
+                              ],
+                            ),
                     ),
                   ),
 
@@ -902,6 +1169,55 @@ class _RegisterState extends State<Register>
     );
   }
 
+  void _confirmAndResetForm(RoleThemeData t) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: t.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Reset Form?', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold)),
+        content: Text('All entered registration fields will be cleared.', style: TextStyle(color: t.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: t.danger, foregroundColor: Colors.white),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _formKey.currentState?.reset();
+              setState(() {
+                _selectedDepartment   = null;
+                _selectedRole         = null;
+                _profileImageBytes    = null;
+                _profileImageXFile    = null;
+                _degreeFile           = null;
+                _profilePictureBase64 = null;
+                _degreeBase64         = null;
+                _selectedBranch       = null;
+                _selectedDispensary   = null;
+                _selectedDispensaries.clear();
+                _selectedDegree       = null;
+                _selectedStudentId    = null;
+                _currentStep          = 0;
+                _isUsernameAvailable  = null;
+                _isEmailAvailable     = null;
+                _usernameError        = null;
+                _emailError           = null;
+              });
+              if (_pageController.hasClients) {
+                _pageController.jumpToPage(0);
+              }
+              for (final c in [
+                _usernameController, _emailController, _passwordController,
+                _phoneController, _customDegreeController,
+              ]) { c.clear(); }
+            },
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Top Bar ────────────────────────────────────────────────────────────────
   Widget _buildTopBar(RoleThemeData t) {
     return Padding(
@@ -925,14 +1241,14 @@ class _RegisterState extends State<Register>
                         color: Colors.white.withValues(alpha: 0.22),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: const Text(
-                        'USER REGISTRATION',
-                        style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8),
+                      child: Text(
+                        _isSinglePageMode ? 'SINGLE-PAGE FORM' : 'STEP-BY-STEP WIZARD',
+                        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'Step ${_currentStep + 1} of $_totalSteps',
+                      _isSinglePageMode ? 'All sections on one screen' : 'Step ${_currentStep + 1} of $_totalSteps',
                       style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 12, fontWeight: FontWeight.w600),
                     ),
                   ],
@@ -946,51 +1262,46 @@ class _RegisterState extends State<Register>
               ],
             ),
           ),
-          IconButton(
-            tooltip: 'Clear / Reset Form',
-            icon: const Icon(Icons.refresh_rounded, color: Colors.white, size: 22),
-            onPressed: () {
-              showDialog(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: t.bgCard,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  title: Text('Reset Form?', style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold)),
-                  content: Text('All entered registration fields will be cleared.', style: TextStyle(color: t.textSecondary)),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: t.danger, foregroundColor: Colors.white),
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _formKey.currentState?.reset();
-                        setState(() {
-                          _selectedDepartment   = null;
-                          _selectedRole         = null;
-                          _profileImageBytes    = null;
-                          _profileImageXFile    = null;
-                          _degreeFile           = null;
-                          _profilePictureBase64 = null;
-                          _degreeBase64         = null;
-                          _selectedBranch       = null;
-                          _selectedDispensary   = null;
-                          _selectedDispensaries.clear();
-                          _selectedDegree       = null;
-                          _selectedStudentId    = null;
-                          _currentStep          = 0;
-                        });
-                        _pageController.jumpToPage(0);
-                        for (final c in [
-                          _usernameController, _emailController, _passwordController,
-                          _phoneController, _customDegreeController, _biometricPinController,
-                        ]) { c.clear(); }
-                      },
-                      child: const Text('Reset'),
+          // View Mode Switcher Button
+          Tooltip(
+            message: _isSinglePageMode ? 'Switch to Step-by-Step Wizard' : 'Switch to Single Screen Form',
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () {
+                setState(() {
+                  _isSinglePageMode = !_isSinglePageMode;
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _isSinglePageMode ? Icons.view_agenda_rounded : Icons.splitscreen_rounded,
+                      color: Colors.white,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _isSinglePageMode ? 'Single Screen' : 'Wizard Mode',
+                      style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
                     ),
                   ],
                 ),
-              );
-            },
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          IconButton(
+            tooltip: 'Clear / Reset Form',
+            icon: const Icon(Icons.refresh_rounded, color: Colors.white, size: 22),
+            onPressed: () => _confirmAndResetForm(t),
           ),
         ],
       ),
@@ -1002,7 +1313,7 @@ class _RegisterState extends State<Register>
     final steps = [
       {'title': 'Role & Dept', 'icon': Icons.category_rounded},
       {'title': 'Credentials', 'icon': Icons.person_rounded},
-      {'title': 'Station & Biometrics', 'icon': Icons.location_city_rounded},
+      {'title': 'Station & Privileges', 'icon': Icons.location_city_rounded},
     ];
 
     return Container(
@@ -1435,7 +1746,27 @@ class _RegisterState extends State<Register>
                   hint: 'e.g. dr_tariq or ahmad_khan',
                   icon: Icons.alternate_email_rounded,
                   required: true,
-                  validator: (v) => v?.trim().isEmpty ?? true ? 'Username is required' : null,
+                  customSuffix: _isCheckingUsername
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: Padding(
+                            padding: EdgeInsets.all(12),
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        )
+                      : _isUsernameAvailable == true
+                          ? const Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 19)
+                          : _isUsernameAvailable == false
+                              ? const Icon(Icons.cancel_rounded, color: Color(0xFFEF4444), size: 19)
+                              : null,
+                  helperText: _isUsernameAvailable == true ? '✓ Username is available' : null,
+                  customErrorText: _usernameError,
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Username is required';
+                    if (_usernameError != null) return _usernameError;
+                    return null;
+                  },
                 ),
                 _buildField(
                   t,
@@ -1445,9 +1776,26 @@ class _RegisterState extends State<Register>
                   icon: Icons.mail_outline_rounded,
                   required: true,
                   keyboardType: TextInputType.emailAddress,
+                  customSuffix: _isCheckingEmail
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: Padding(
+                            padding: EdgeInsets.all(12),
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        )
+                      : _isEmailAvailable == true
+                          ? const Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 19)
+                          : _isEmailAvailable == false
+                              ? const Icon(Icons.cancel_rounded, color: Color(0xFFEF4444), size: 19)
+                              : null,
+                  helperText: _isEmailAvailable == true ? '✓ Email address is available' : null,
+                  customErrorText: _emailError,
                   validator: (v) {
                     if (v == null || v.trim().isEmpty) return 'Email is required';
                     if (!v.contains('@') || !v.contains('.')) return 'Enter a valid email address';
+                    if (_emailError != null) return _emailError;
                     return null;
                   },
                 ),
@@ -1462,7 +1810,13 @@ class _RegisterState extends State<Register>
                   icon: Icons.lock_outline_rounded,
                   isPassword: true,
                   required: true,
-                  validator: (v) => (v?.length ?? 0) < 6 ? 'Password must be at least 6 characters' : null,
+                  helperText: _passwordStrengthText ?? 'Minimum 6 characters required',
+                  helperColor: _passwordStrengthColor ?? t.textTertiary,
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Password is required';
+                    if (v.trim().length < 6) return 'Password must be at least 6 characters';
+                    return null;
+                  },
                 ),
                 _buildField(
                   t,
@@ -1475,6 +1829,27 @@ class _RegisterState extends State<Register>
                     FilteringTextInputFormatter.digitsOnly,
                     LengthLimitingTextInputFormatter(11),
                   ],
+                ),
+              ]),
+              const SizedBox(height: 14),
+              _buildResponsiveFieldPair([
+                _buildField(
+                  t,
+                  controller: _cnicController,
+                  label: 'CNIC Number (Optional)',
+                  hint: 'xxxxx-xxxxxxxx-x',
+                  icon: Icons.credit_card_rounded,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    _CnicInputFormatter(),
+                    LengthLimitingTextInputFormatter(15),
+                  ],
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return null; // optional
+                    final digits = v.replaceAll('-', '');
+                    if (digits.length != 13) return 'CNIC must be 13 digits (xxxxx-xxxxxxxx-x)';
+                    return null;
+                  },
                 ),
               ]),
             ],
@@ -1495,8 +1870,8 @@ class _RegisterState extends State<Register>
       children: [
         _buildSectionTitle(
           t,
-          title: 'Station Assignment & Access Control',
-          subtitle: 'Assign branch location, facility shift schedule, and biometric clock-in PIN.',
+          title: 'Station Assignment & Facilities',
+          subtitle: 'Assign branch location, facility shift schedule, and access privileges.',
           icon: Icons.location_on_outlined,
         ),
         const SizedBox(height: 16),
@@ -1547,35 +1922,6 @@ class _RegisterState extends State<Register>
             child: _buildChildDropdown(t),
           ),
         ],
-
-        const SizedBox(height: 16),
-
-        // Biometric Clock-in PIN
-        _buildCard(
-          t,
-          title: 'ZKTeco Biometric Terminal Attendance',
-          icon: Icons.fingerprint_rounded,
-          accent: const Color(0xFF10B981),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Assign an optional numerical PIN for biometric terminal attendance punch-in:',
-                style: TextStyle(fontSize: 12.5, color: t.textSecondary),
-              ),
-              const SizedBox(height: 12),
-              _buildField(
-                t,
-                controller: _biometricPinController,
-                label: 'Biometric Clock-in PIN (Optional)',
-                hint: 'e.g. 1045',
-                icon: Icons.pin_outlined,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              ),
-            ],
-          ),
-        ),
 
         // Doctor Qualifications Card
         if (isDoctor) ...[
@@ -1662,8 +2008,6 @@ class _RegisterState extends State<Register>
           _summaryRow('Email:', _emailController.text.trim().isNotEmpty ? _emailController.text.trim() : 'None'),
           if (_phoneController.text.trim().isNotEmpty)
             _summaryRow('Phone:', _phoneController.text.trim()),
-          if (_biometricPinController.text.trim().isNotEmpty)
-            _summaryRow('Biometric PIN:', _biometricPinController.text.trim()),
           if (_selectedRole == 'Madrassa Teacher') ...[
             _summaryRow(
               'Teaching Focus:',
@@ -1714,6 +2058,52 @@ class _RegisterState extends State<Register>
 
   // ── Bottom Action Bar ─────────────────────────────────────────────────────
   Widget _buildBottomActionBar(RoleThemeData t) {
+    if (_isSinglePageMode) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        decoration: BoxDecoration(
+          color: t.bgCard,
+          border: Border(top: BorderSide(color: t.bgRule)),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, -3)),
+          ],
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 960),
+            child: Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _loading ? null : () => _confirmAndResetForm(t),
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('Reset Form'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: t.textSecondary,
+                    side: BorderSide(color: t.bgRule),
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const Spacer(),
+                ElevatedButton.icon(
+                  onPressed: _loading ? null : _registerUser,
+                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 20),
+                  label: const Text('Create User Account'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF10B981),
+                    foregroundColor: Colors.white,
+                    elevation: 4,
+                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 15),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final isLastStep = _currentStep == _totalSteps - 1;
 
     return Container(
@@ -2002,6 +2392,10 @@ class _RegisterState extends State<Register>
     bool isPassword = false,
     bool required   = false,
     int maxLines    = 1,
+    Widget? customSuffix,
+    String? helperText,
+    Color? helperColor,
+    String? customErrorText,
     String? Function(String?)? validator,
   }) {
     return TextFormField(
@@ -2018,7 +2412,7 @@ class _RegisterState extends State<Register>
         labelStyle: TextStyle(fontSize: 13, color: t.textTertiary),
         floatingLabelStyle: TextStyle(fontSize: 12, color: t.accent, fontWeight: FontWeight.w600),
         prefixIcon: Icon(icon, color: t.textTertiary, size: 19),
-        suffixIcon: isPassword
+        suffixIcon: customSuffix ?? (isPassword
             ? IconButton(
                 icon: Icon(
                   _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
@@ -2026,7 +2420,10 @@ class _RegisterState extends State<Register>
                 ),
                 onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
               )
-            : null,
+            : null),
+        helperText: helperText,
+        helperStyle: TextStyle(fontSize: 11.5, color: helperColor ?? const Color(0xFF10B981), fontWeight: FontWeight.w600),
+        errorText: customErrorText,
         filled: true,
         fillColor: t.bgCardAlt,
         contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: maxLines > 1 ? 14 : 12),
@@ -2747,6 +3144,30 @@ class _RegisterState extends State<Register>
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Formats CNIC input as xxxxx-xxxxxxxx-x (13 digits with auto-dashes)
+class _CnicInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final digits = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.length > 13) {
+      return oldValue;
+    }
+    final buffer = StringBuffer();
+    for (int i = 0; i < digits.length; i++) {
+      if (i == 5 || i == 12) buffer.write('-');
+      buffer.write(digits[i]);
+    }
+    final formatted = buffer.toString();
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }

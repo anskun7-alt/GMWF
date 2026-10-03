@@ -32,7 +32,7 @@ import '../../theme/role_theme_provider.dart';
 import '../../realtime/realtime_manager.dart';
 import '../../realtime/realtime_events.dart';
 import '../../services/sync_service.dart';
-import '../../services/network_health_service.dart';
+import 'food_log_screen.dart';
 
 // ─────────────────────────── Design Tokens ──────────────────────────────────
 
@@ -157,6 +157,17 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       return false;
     }
     return true;
+  }
+
+  bool get _isExecutive {
+    final r = (widget.role ?? '').toLowerCase().trim();
+    if (r.isEmpty) return false;
+    return r.contains('admin') ||
+        r.contains('chairman') ||
+        r.contains('ceo') ||
+        r.contains('manager') ||
+        r.contains('supervisor') ||
+        r.contains('principal');
   }
 
   late AnimationController _fadeCtrl;
@@ -310,8 +321,8 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
 
   Future<void> _downloadBranchData(String b) async {
     try {
-      await LocalStorageService.downloadDasterkhwaanTokens(b, days: 7);
-      await DonationsLocalStorage.downloadAllDonations(b, days: 7);
+      await LocalStorageService.downloadDasterkhwaanTokens(b, days: 7, force: true);
+      await DonationsLocalStorage.downloadAllDonations(b, days: 7, force: true);
       await DonationsLocalStorage.downloadDonors(b);
       await DonationBoxStorage.downloadBoxes(b);
       if (mounted) {
@@ -457,8 +468,9 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
     }
 
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final isExec = _isExecutive;
     final localDonations = DonationsLocalStorage.getAllDonations(_branchId!)
-        .where((d) => d.date == today && ((uid.isNotEmpty && d.collectorId == uid) || (_effectiveUserName.isNotEmpty && d.recordedBy.toLowerCase().trim() == _effectiveUserName.toLowerCase().trim()) || (d.collectorId == null || d.collectorId!.isEmpty)));
+        .where((d) => d.date == today && (isExec || (uid.isNotEmpty && d.collectorId == uid) || (_effectiveUserName.isNotEmpty && d.recordedBy.toLowerCase().trim() == _effectiveUserName.toLowerCase().trim()) || (d.collectorId == null || d.collectorId!.isEmpty)));
     double donTotal = 0.0;
     int donCount = 0;
     final Set<String> seenDonKeys = {};
@@ -1088,7 +1100,7 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
 
   @override
   Widget build(BuildContext context) {
-    final showDonations = _isOfficeBoy;
+    final showDonations = _isOfficeBoy || _isExecutive;
     final activeNav = showDonations ? _currentNav.clamp(0, 5) : _currentNav.clamp(0, 2);
 
     return ValueListenableBuilder(
@@ -1417,6 +1429,14 @@ class _HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final activeData = LocalStorageService.getActiveUserData();
+    final r = (role ?? activeData['role'] ?? '').toString().toLowerCase().trim();
+    final isExec = r.contains('admin') ||
+        r.contains('chairman') ||
+        r.contains('ceo') ||
+        r.contains('manager') ||
+        r.contains('supervisor') ||
+        r.contains('principal');
+    final canShowDonations = isOfficeBoy || isExec;
     final branchName = activeData['branchName'] as String? ?? 'Gujrat';
 
     final total  = todayStats['total'] as int? ?? 0;
@@ -1493,8 +1513,8 @@ class _HomeScreen extends StatelessWidget {
               ),
             ),
 
-            // ── 4. Today's Donation Summary (Office Boy) ────────────────────────
-            if (isOfficeBoy)
+            // ── 4. Today's Donation Summary (Office Boy / Executive) ───────────────
+            if (canShowDonations || donCount > 0)
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                 sliver: SliverToBoxAdapter(
@@ -1525,7 +1545,7 @@ class _HomeScreen extends StatelessWidget {
                       onTap:     onGoTokens,
                       isDark:    isDark,
                     ),
-                    if (isOfficeBoy) ...[
+                    if (canShowDonations) ...[
                       const SizedBox(height: 10),
                       _ActionCardWide(
                         icon:      Icons.volunteer_activism_rounded,
@@ -1557,6 +1577,29 @@ class _HomeScreen extends StatelessWidget {
                         subtitle:  'Track & open charity collection boxes',
                         urdu:      'ڈبہ جات کا ریکارڈ',
                         onTap:     onGoBoxes ?? () {},
+                        isDark:    isDark,
+                      ),
+                    ],
+                    if (LocalStorageService.canOfficeBoyLogFoodDetails(branchId ?? '')) ...[
+                      const SizedBox(height: 10),
+                      _ActionCardWide(
+                        icon:      Icons.restaurant_menu_rounded,
+                        iconColor: const Color(0xFFEA580C),
+                        iconBg:    const Color(0xFFFFEDD5),
+                        title:     'Food Details & Log',
+                        subtitle:  'Record cooked meals & hotel procurement',
+                        urdu:      'کھانے کی تفصیلات کا اندراج',
+                        onTap:     () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => DasterkhwaanFoodLogScreen(
+                                branchId: branchId ?? 'all',
+                                userName: userName,
+                              ),
+                            ),
+                          );
+                        },
                         isDark:    isDark,
                       ),
                     ],
@@ -3648,6 +3691,13 @@ class _HistoryScreenState extends State<_HistoryScreen> {
     final box = await LocalStorageService.openBoxSafe('dasterkhwaan_tokens');
     final activeUser = LocalStorageService.getActiveUserData();
     final uid = (activeUser['uid'] ?? activeUser['id'] ?? activeUser['userId'] ?? FirebaseAuth.instance.currentUser?.uid ?? '').toString().trim();
+    final userRole = (activeUser['role'] ?? '').toString().toLowerCase().trim();
+    final isExecutive = userRole.contains('admin') ||
+        userRole.contains('chairman') ||
+        userRole.contains('ceo') ||
+        userRole.contains('manager') ||
+        userRole.contains('supervisor') ||
+        userRole.contains('principal');
     final dateKey = widget.dateFmt.format(_selectedDate);
     final monthKey = '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}';
     final myUsername = widget.username.toLowerCase().trim();
@@ -3751,7 +3801,8 @@ class _HistoryScreenState extends State<_HistoryScreen> {
         if (!matchesDate) return false;
         final dCollector = (d.collectorId ?? '').trim();
         final dRecorded = d.recordedBy.toLowerCase().trim();
-        final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+        final matchesUser = isExecutive ||
+            (uid.isNotEmpty && dCollector == uid) ||
             (myUsername.isNotEmpty && dRecorded == myUsername) ||
             dCollector.isEmpty;
         return matchesUser;
@@ -3869,7 +3920,8 @@ class _HistoryScreenState extends State<_HistoryScreen> {
             final data = d.data();
             final dCollector = (data['collectorId'] ?? '').toString().trim();
             final dRecorded = (data['recordedBy'] ?? '').toString().toLowerCase().trim();
-            final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+            final matchesUser = isExecutive ||
+                (uid.isNotEmpty && dCollector == uid) ||
                 (myUsername.isNotEmpty && dRecorded == myUsername) ||
                 dCollector.isEmpty;
             if (!matchesUser) continue;
@@ -3920,7 +3972,8 @@ class _HistoryScreenState extends State<_HistoryScreen> {
             if (dtStr.startsWith(monthKey)) {
               final dCollector = (data['collectorId'] ?? '').toString().trim();
               final dRecorded = (data['recordedBy'] ?? '').toString().toLowerCase().trim();
-              final matchesUser = (uid.isNotEmpty && dCollector == uid) ||
+              final matchesUser = isExecutive ||
+                  (uid.isNotEmpty && dCollector == uid) ||
                   (myUsername.isNotEmpty && dRecorded == myUsername) ||
                   dCollector.isEmpty;
               if (!matchesUser) continue;

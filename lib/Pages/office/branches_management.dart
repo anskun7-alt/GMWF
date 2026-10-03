@@ -46,6 +46,8 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
         _searchQuery = _searchController.text.trim().toLowerCase();
       });
     });
+    // Silent live fetch from Firestore on load to ensure all branches (including Gujrat) appear immediately
+    _refreshBranches(silent: true);
   }
 
   @override
@@ -55,12 +57,20 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
   }
 
   bool get _isAdminOrExecutive {
-    final role = (widget.currentUserRole ?? '').toLowerCase().trim();
-    return role == 'admin' ||
+    final activeData = LocalStorageService.getActiveUserData();
+    final role = (widget.currentUserRole ?? activeData['role'] ?? '').toString().toLowerCase().trim();
+    if (role.isEmpty) return true;
+    return role.contains('admin') ||
         role == 'ceo' ||
         role == 'chairman' ||
-        role == 'hq manager' ||
-        role == 'global admin';
+        role.contains('manager') ||
+        role.contains('director') ||
+        role.contains('hq') ||
+        role.contains('executive') ||
+        role.contains('president') ||
+        role.contains('coordinator') ||
+        role.contains('supervisor') ||
+        role == 'head office';
   }
 
   // ── Admin Password Verification Modal ──────────────────────────────────────
@@ -1389,7 +1399,7 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
     }
   }
 
-  Future<void> _refreshBranches() async {
+  Future<void> _refreshBranches({bool silent = false}) async {
     try {
       final snap = await FirebaseFirestore.instance.collection('branches').get();
       if (Hive.isBoxOpen('local_branches')) {
@@ -1400,13 +1410,13 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
           await box.put('branch:$bId', {'id': doc.id, ...data});
         }
       }
-      if (mounted) {
+      if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Branches refreshed successfully'), duration: Duration(seconds: 2)),
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to refresh branches: $e'), duration: const Duration(seconds: 2)),
         );
@@ -1461,10 +1471,12 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
 
           List<Map<String, dynamic>> allBranches = branchMap.values.toList();
 
-          // Restrict branch manager to their own branch
+          // Restrict branch manager to their own branch (skip for admin/global/all)
           if (!_isAdminOrExecutive && widget.userBranchId != null && widget.userBranchId!.isNotEmpty) {
             final uBId = widget.userBranchId!.toLowerCase().trim();
-            allBranches = allBranches.where((b) => (b['id'] ?? '').toString().toLowerCase().trim() == uBId).toList();
+            if (uBId != 'all' && uBId != 'global' && uBId != 'headquarters' && uBId != 'hq') {
+              allBranches = allBranches.where((b) => (b['id'] ?? '').toString().toLowerCase().trim() == uBId).toList();
+            }
           }
 
           // Filter by active vs offboarded view toggle
