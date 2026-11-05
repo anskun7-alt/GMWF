@@ -166,9 +166,19 @@ class RealtimeRouter {
 
   static Future<void> routeMessage(Map<String, dynamic> message) async {
     final id = message['_messageId']?.toString();
+    // A copy of a message whose first copy is still being applied (slow desk, big catch-up):
+    // dropping it as a duplicate made the desk ACK it, so if the first copy then failed the
+    // data was lost until the 30-minute full resync. Fail this copy instead (not ACKed): the
+    // server sends it again once it is due.
+    if (id != null && _dedupKeyInFlight.containsKey(id)) {
+      throw StateError('message $id is still being applied');
+    }
     try {
       await _routeMessageInner(message);
-      if (id != null) _dedupKeyInFlight.remove(id);
+      if (id != null) {
+        _dedupKeyInFlight.remove(id);
+        _versionInFlight.remove(id);
+      }
     } catch (_) {
       // The id was marked seen (in memory and in the dedup box) before the handler ran; forget
       // it so a resend of this message is applied instead of being dropped as a duplicate,
@@ -179,10 +189,21 @@ class RealtimeRouter {
         if (dedupKey != null && Hive.isBoxOpen(_dedupBox)) {
           unawaited(Hive.box(_dedupBox).delete(dedupKey).catchError((Object _) {}));
         }
+        // Same for the version recorded before the handler ran: a resend with the same version
+        // was dropped as "stale" (and ACKed), so the failed update never arrived.
+        final v = _versionInFlight.remove(id);
+        if (v != null && Hive.isBoxOpen('realtime_entity_versions')) {
+          final box = Hive.box('realtime_entity_versions');
+          unawaited((v.previous == null ? box.delete(v.key) : box.put(v.key, v.previous))
+              .catchError((Object _) {}));
+        }
       }
       rethrow;
     }
   }
+
+  /// Version-box entry each message changed before its handler ran (restored on failure).
+  static final Map<String, ({String key, Object? previous})> _versionInFlight = {};
 
   /// Dedup-box key of each message being handled right now (removed on failure, see above).
   static final Map<String, String> _dedupKeyInFlight = {};
@@ -248,6 +269,10 @@ class RealtimeRouter {
             print('🛑 Stale update ignored for $entityId: incoming version $incomingVersion <= local $localVersion');
           }
           return;
+        }
+        final mid = message['_messageId']?.toString();
+        if (mid != null) {
+          _versionInFlight[mid] = (key: versionKey, previous: versionBox.get(versionKey));
         }
         await versionBox.put(versionKey, incomingVersion);
       } catch (e) {
@@ -651,6 +676,44 @@ Serial: ${data['serial'] ?? 'N/A'}
 
     if (kDebugMode) print('✅ ENTRY SAVED → $uniqueKey');
 
+    // [GAP-RECOVERY] Token N arrived: check if ANY prior token 1..(N-1) is missing on this desk.
+    // If so, ask the server for catch-up immediately!
+    try {
+      final upperSer = serial.toUpperCase().trim();
+      final lastDash = upperSer.lastIndexOf('-');
+      if (lastDash > 0) {
+        final prefix = upperSer.substring(0, lastDash);
+        final seqStr = upperSer.substring(lastDash + 1);
+        final seq = int.tryParse(seqStr);
+        // Replayed / catch-up copies must not trigger another catch-up (that looped forever).
+        final isReplayCopy = fullMessage['isCatchUp'] == true ||
+            fullMessage['_isReplay'] == true ||
+            data['isCatchUp'] == true ||
+            fullMessage['_serverPush'] == true;
+        if (!isReplayCopy && seq != null && seq > 1 && seq < 9999) {
+          final padWidth = seqStr.length < 3 ? 3 : seqStr.length;
+          bool hasGap = false;
+          // Only this token's own number block (shared 1..999, or a desk's offline block
+          // N*1000+1..), and only a short way back: offline token 1001 used to probe 1..1000.
+          final blockStart = (seq ~/ LocalStorageService.offlineBandSize) *
+                  LocalStorageService.offlineBandSize + 1;
+          final from = (seq - 20) > blockStart ? seq - 20 : blockStart;
+          for (int i = from; i < seq; i++) {
+            final checkSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
+            if (LocalStorageService.getLocalEntry(branchId, checkSerial) == null) {
+              hasGap = true;
+              break;
+            }
+          }
+          if (hasGap) {
+            // Not forced: coalesced with other catch-up requests (3 s), so a burst of tokens
+            // cannot fire a burst of full catch-ups.
+            RealtimeManager().requestCatchUp(branchId: branchId, reason: 'sequence_gap');
+          }
+        }
+      }
+    } catch (_) {}
+
   }
 
   static Future<void> _handleDeleteEntry(Map<String, dynamic> data) async {
@@ -699,13 +762,36 @@ Serial: ${data['serial'] ?? 'N/A'}
         final kStr = k.toString().toLowerCase().trim();
         if (kStr == '$normBranch-$normSerial' || kStr == normSerial || kStr.endsWith('-$normSerial')) {
           final entry = box.get(k);
-          if (entry is Map && !LocalStorageService.isOlderPrescription(data, entry['prescription'])) {
+          if (entry is Map && LocalStorageService.mayReplacePrescription(data, entry['prescription'])) {
             final updated = Map<String, dynamic>.from(entry);
+            final embeddedRx = LocalStorageService.prescriptionForEmbedding(data);
             updated['status']         = 'completed';
-            updated['prescription']   = LocalStorageService.prescriptionForEmbedding(data);
+            updated['prescription']   = embeddedRx;
             updated['prescriptionId'] = data['id'] ?? serial;
             updated['completedAt']    =
                 data['completedAt'] ?? DateTime.now().toIso8601String();
+            if (data['updatedAt'] != null) updated['updatedAt'] = data['updatedAt'];
+            final rxMeds = embeddedRx['medicines'] ?? embeddedRx['prescriptions'] ?? data['medicines'] ?? data['prescriptions'];
+            if (rxMeds is List && rxMeds.isNotEmpty) {
+              updated['medicines'] = rxMeds;
+              updated['prescriptions'] = rxMeds;
+            }
+            if (data['daysOfMedicine'] != null) updated['daysOfMedicine'] = data['daysOfMedicine'];
+            final docName = data['doctorName'] ?? data['prescribedBy'];
+            if (docName != null) {
+              updated['doctorName'] = docName;
+              updated['prescribedBy'] = docName;
+            }
+            if (data['doctorId'] != null) updated['doctorId'] = data['doctorId'];
+            if (data['diagnosis'] != null) updated['diagnosis'] = data['diagnosis'];
+            final comp = data['complaint'] ?? data['condition'];
+            if (comp != null) {
+              updated['complaint'] = comp;
+              updated['condition'] = comp;
+            }
+            if (data['vitals'] != null) updated['vitals'] = data['vitals'];
+            if (data['labResults'] != null) updated['labResults'] = data['labResults'];
+            if (data['extraCharge'] != null) updated['extraCharge'] = data['extraCharge'];
             updated['lanPushSig']     = LocalStorageService.lanPushSignature(updated);
 
             await box.put(k, updated);
@@ -713,6 +799,7 @@ Serial: ${data['serial'] ?? 'N/A'}
           }
         }
       }
+      if (found) LocalStorageService.invalidateLocalEntriesCache();
 
       if (kDebugMode && found) {
         print('╔════════════════════════════════════════════════════════════╗');
@@ -861,43 +948,71 @@ Serial: ${data['serial'] ?? 'N/A'}
       }
     } catch (_) {}
 
-    // Deduct stock locally on peer PCs if medicines list was provided
+    // Deduct stock locally on peer PCs if deductedBatches or medicines list was provided
+    final deductedBatches = data['deductedBatches'];
     final medicines = data['medicines'];
     final isReplay = fullMessage['_serverPush'] == true || fullMessage['isCatchUp'] == true ||
         fullMessage['_isReplay'] == true || fullMessage['_resent'] == true;
-    if (!wasAlreadyDispensed && !isReplay &&
-        medicines is List && medicines.isNotEmpty && Hive.isBoxOpen(LocalStorageService.stockBox)) {
+    if (!wasAlreadyDispensed && !isReplay && Hive.isBoxOpen(LocalStorageService.stockBox)) {
       try {
-        final stockBox = Hive.box(LocalStorageService.stockBox);
-        final days = int.tryParse(data['daysOfMedicine']?.toString() ?? '1') ?? 1;
-        for (final m in medicines) {
-          if (m is! Map) continue;
-          final medId = (m['inventoryId'] ?? m['medicineId'] ?? m['id'] ?? '').toString().trim();
-          final perDayRaw = m['quantity'] ?? m['qty'] ?? 0;
-          final perDay = perDayRaw is num ? perDayRaw.toDouble() : double.tryParse(perDayRaw.toString()) ?? 0.0;
-          if (medId.isEmpty || perDay <= 0) continue;
-          final medName = (m['name'] ?? '').toString().toLowerCase().trim();
-          final isSyrup = (m['type']?.toString().toLowerCase().contains('syrup') == true) || medName.contains('syp') || medName.contains('syrup');
-          final multiplier = isSyrup ? 1.0 : days.toDouble();
-          final qtyDeduct = isSyrup ? 1.0 : perDay * multiplier;
-
-          dynamic stockKey = 'stock:$medId';
-          var item = stockBox.get(stockKey) ?? stockBox.get(medId);
-          if (item == null && medName.isNotEmpty) {
-            for (final sk in stockBox.keys) {
-              final sv = stockBox.get(sk);
-              if (sv is Map && (sv['name']?.toString().toLowerCase().trim() == medName)) {
-                item = sv;
-                stockKey = sk;
-                break;
-              }
+        if (deductedBatches is List && deductedBatches.isNotEmpty) {
+          for (final b in deductedBatches) {
+            if (b is! Map) continue;
+            final medId = (b['medicineId'] ?? b['inventoryId'] ?? b['id'] ?? '').toString().trim();
+            final rawDelta = b['delta'];
+            final delta = rawDelta is num
+                ? rawDelta.toDouble()
+                : double.tryParse(rawDelta?.toString() ?? '') ?? 0.0;
+            if (medId.isNotEmpty && delta != 0) {
+              LocalStorageService.updateLocalStockQuantity(medId, delta);
             }
           }
-          if (item is Map) {
-            final uItem = Map<String, dynamic>.from(item);
-            final curQ = (uItem['quantity'] as num?)?.toDouble() ?? 0.0;
-            uItem['quantity'] = (curQ - qtyDeduct).clamp(0.0, double.infinity);
-            await stockBox.put(stockKey, uItem);
+        } else if (medicines is List && medicines.isNotEmpty) {
+          final stockBox = Hive.box(LocalStorageService.stockBox);
+          final days = (data['daysOfMedicine'] is num)
+              ? (data['daysOfMedicine'] as num).toInt()
+              : (int.tryParse(data['daysOfMedicine']?.toString() ?? '1') ?? 1);
+          for (final m in medicines) {
+            if (m is! Map) continue;
+            final medId = (m['inventoryId'] ?? m['medicineId'] ?? m['id'] ?? '').toString().trim();
+            final perDayRaw = m['quantity'] ?? m['qty'] ?? 0;
+            final perDay = perDayRaw is num ? perDayRaw.toDouble() : double.tryParse(perDayRaw.toString()) ?? 0.0;
+            if (medId.isEmpty || perDay <= 0) continue;
+            final medType = (m['type'] ?? '').toString().toLowerCase().trim();
+            final medName = (m['name'] ?? '').toString().toLowerCase().trim();
+            final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
+                medName.contains('syp') || medName.contains('syrup');
+            final isInj = medType.contains('inj') || medType.contains('drip') || medType.contains('infusion') ||
+                medType == 'iv' || medType == 'i.v' || medType == 'im' || medType == 'i.m' ||
+                medName.startsWith('inj');
+            final qtyDeduct = isSyrup ? 1.0 : (isInj ? perDay : perDay * days);
+
+            dynamic stockKey = 'stock:$medId';
+            var item = stockBox.get(stockKey) ?? stockBox.get(medId);
+            if (item == null && medName.isNotEmpty) {
+              for (final sk in stockBox.keys) {
+                final sv = stockBox.get(sk);
+                if (sv is Map && (sv['name']?.toString().toLowerCase().trim() == medName)) {
+                  item = sv;
+                  stockKey = sk;
+                  break;
+                }
+              }
+            }
+            if (item is Map) {
+              final uItem = Map<String, dynamic>.from(item);
+              final curQ = (uItem['quantity'] as num?)?.toDouble() ?? 0.0;
+              uItem['quantity'] = (curQ - qtyDeduct).clamp(0.0, double.infinity);
+              uItem['updatedAt'] = DateTime.now().toIso8601String();
+              await stockBox.put(stockKey, uItem);
+              final rawId = (uItem['id'] ?? uItem['medicineId'] ?? uItem['docId'] ?? medId).toString().trim();
+              if (rawId.isNotEmpty) {
+                final peerKey = stockKey.toString().startsWith('stock:') ? rawId : 'stock:$rawId';
+                if (stockBox.containsKey(peerKey)) {
+                  await stockBox.put(peerKey, uItem);
+                }
+              }
+            }
           }
         }
       } catch (_) {}
@@ -944,9 +1059,12 @@ Serial: ${data['serial'] ?? 'N/A'}
 
     if (bId != null && bId.isNotEmpty && pId.isNotEmpty) {
       LocalStorageService.saveMedicineRestriction(
-        branchId:    bId,
-        patientId:   pId,
-        daysCovered: days,
+        branchId:     bId,
+        patientId:    pId,
+        daysCovered:  days,
+        patientName:  (data['patientName'] ?? data['name'] ?? full['patientName'])?.toString(),
+        guardianCnic: (data['guardianCnic'] ?? full['guardianCnic'])?.toString(),
+        phone:        (data['phone'] ?? data['contactNumber'] ?? full['phone'])?.toString(),
       );
       if (kDebugMode) {
         print('💊 [Router] Multi-day restriction applied: $pId ($days days)');
@@ -1004,6 +1122,33 @@ Serial: ${data['serial'] ?? 'N/A'}
   //
   // In both cases we also enqueue for Firestore sync so the server can
   // upload when connectivity is restored.
+  static const String _appliedStockOpsBox = 'applied_stock_ops';
+
+  static Future<bool> stockOpAlreadyApplied(String opId) async {
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(_appliedStockOpsBox);
+      return box.containsKey(opId);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> markStockOpApplied(String opId) async {
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(_appliedStockOpsBox);
+      await box.put(opId, DateTime.now().millisecondsSinceEpoch);
+      // Keep it small: forget operations older than 14 days (checked every 500 writes).
+      if (box.length % 500 == 0) {
+        final cutoff = DateTime.now().subtract(const Duration(days: 14)).millisecondsSinceEpoch;
+        final old = box.keys.where((k) {
+          final v = box.get(k);
+          return v is int && v < cutoff;
+        }).toList();
+        if (old.isNotEmpty) await box.deleteAll(old);
+      }
+    } catch (_) {}
+  }
+
   static Future<void> _handleSaveStockItem(
     Map<String, dynamic> data,
     Map<String, dynamic> fullMessage,
@@ -1023,15 +1168,27 @@ Serial: ${data['serial'] ?? 'N/A'}
 
     // Check whether this is a quantity-only delta update or a full item save
     final rawDelta = data['_quantityDelta'];
-    final bool isDelta = rawDelta != null;
+    // A catch-up / replayed copy is a snapshot of the item (its quantity already includes the
+    // delta), never "+N again": applying it as a delta added the same restock to this desk's
+    // stock on every reconnect.
+    final isReplayCopy = fullMessage['isCatchUp'] == true ||
+        fullMessage['_isReplay'] == true ||
+        fullMessage['_serverPush'] == true ||
+        fullMessage['_resent'] == true;
+    final bool isDelta = rawDelta != null && !isReplayCopy;
 
-    final enrichedData = Map<String, dynamic>.from(data);
+    final enrichedData = Map<String, dynamic>.from(data)..remove('_quantityDelta');
     if (branchId.isNotEmpty) {
       enrichedData['branchId'] ??= branchId;
     }
 
     if (isDelta) {
-      // ── Case (b): add-stock delta ──
+      // ── Case (b): add-stock delta ── applied once per operation, also across restarts
+      final opId = (data['_opId'] ?? fullMessage['_messageId'] ?? '').toString();
+      if (opId.isNotEmpty && await stockOpAlreadyApplied(opId)) {
+        if (kDebugMode) print('↩️ Stock delta $opId already applied — skipped');
+        return;
+      }
       final delta = rawDelta is num
           ? rawDelta.toDouble()
           : double.tryParse(rawDelta.toString()) ?? 0.0;
@@ -1041,9 +1198,11 @@ Serial: ${data['serial'] ?? 'N/A'}
         if (delta != 0) {
           await LocalStorageService.updateLocalStockQuantity(medicineId, delta);
         }
+        if (opId.isNotEmpty) await markStockOpApplied(opId);
       } else {
         // If this machine does not have the medicine yet, save full record with new quantity!
         LocalStorageService.saveLocalInventoryItem(enrichedData);
+        if (opId.isNotEmpty) await markStockOpApplied(opId);
       }
       if (kDebugMode) {
         print('✅ STOCK DELTA applied via LAN → $medicineId +$delta');

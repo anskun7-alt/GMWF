@@ -87,6 +87,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   String _sessionFilter = 'all';
   String _genderFilter = 'all';
   String _programFilter = 'all'; // 'all', 'hifz', 'nazra'
+  String _branchFilter = 'all'; // 'all', 'karachi', 'gujrat', etc.
   final Map<String, PhotoUploadStatus> _uploadStates = {};
   final Set<String> _expandedStudentIds = {};
   bool _showFilters = false;
@@ -924,6 +925,21 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   ),
                 ),
               ],
+              if ((_effectiveBranch == 'all' || _effectiveIsAdmin) && (d['branchId'] ?? d['branch'] ?? '').toString().trim().isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.3)),
+                  ),
+                  child: Text(
+                    (d['branchId'] ?? d['branch'] ?? '').toString().toUpperCase().trim(),
+                    style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.teal550)),
+                  ),
+                ),
+              ],
             ],
           ),
           subtitle: Padding(
@@ -1206,6 +1222,17 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                     final isKarachiFam = (sBranch.contains('karachi') || sBranch.contains('saddar') || sBranch.contains('haji')) &&
                         (_effectiveBranch.contains('karachi') || _effectiveBranch.contains('saddar') || _effectiveBranch.contains('haji'));
                     if (!isKarachiFam && sBranch != _effectiveBranch) {
+                      return false;
+                    }
+                  }
+
+                  // Optional branch filter for admin / HQ viewing consolidated roster
+                  if (_branchFilter != 'all') {
+                    final normStd = MadrassaLocalStorage.normalizeBranch(sBranch);
+                    final normTarget = MadrassaLocalStorage.normalizeBranch(_branchFilter);
+                    final isKarachiFam = (normStd.contains('karachi') || normStd.contains('saddar') || normStd.contains('haji')) &&
+                        (normTarget.contains('karachi') || normTarget.contains('saddar') || normTarget.contains('haji'));
+                    if (!isKarachiFam && normStd != normTarget) {
                       return false;
                     }
                   }
@@ -2134,9 +2161,52 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   },
                 );
 
+                final showBranchDropdown = _effectiveIsAdmin || _effectiveBranch == 'all';
+                final branchFilterDropdown = showBranchDropdown
+                    ? DropdownButtonFormField<String>(
+                        value: _branchFilter,
+                        decoration: InputDecoration(
+                          labelText: context.isUrdu ? 'برانچ فلٹر' : 'Branch Filter',
+                          labelStyle: context.urduStyle(style: TextStyle(fontSize: 12, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550)),
+                          filled: true,
+                          fillColor: cardBg,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                        ),
+                        dropdownColor: cardBg,
+                        style: context.urduStyle(style: TextStyle(color: textPrimary, fontSize: 13)),
+                        items: [
+                          DropdownMenuItem(value: 'all', child: Text(context.isUrdu ? 'تمام برانچیں (All Branches)' : 'All Branches')),
+                          ...MadrassaLocalStorage.getAvailableBranchesForSelection().map((b) =>
+                              DropdownMenuItem(value: b['id']!, child: Text(b['name']!))),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) {
+                            setState(() {
+                              _branchFilter = val;
+                            });
+                            if (val != 'all') {
+                              MadrassaLocalStorage.downloadStudents(val);
+                            }
+                          }
+                        },
+                      )
+                    : null;
+
                 return isSmallScreen
                     ? Column(
                         children: [
+                          if (branchFilterDropdown != null) ...[
+                            branchFilterDropdown,
+                            const SizedBox(height: 12),
+                          ],
                           statusFilterDropdown,
                           const SizedBox(height: 12),
                           sortByDropdown,
@@ -2148,6 +2218,14 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                       )
                     : Column(
                         children: [
+                          if (branchFilterDropdown != null) ...[
+                            Row(
+                              children: [
+                                Expanded(child: branchFilterDropdown),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           Row(
                             children: [
                               Expanded(child: statusFilterDropdown),

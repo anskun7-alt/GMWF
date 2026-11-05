@@ -225,8 +225,13 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
     _selectedGender = data['gender'];
     _selectedBloodGroup = data['bloodGroup'] ?? 'N/A';
     _selectedStatus = data['status'] ?? 'Zakat';
-    final dobTs = data['dob'] as Timestamp?;
-    _dobController.text = dobTs != null ? DateFormat('dd-MM-yyyy').format(dobTs.toDate()) : '';
+    final rawDob = data['dob'];
+    final DateTime? dobDt = rawDob is Timestamp
+        ? rawDob.toDate()
+        : (rawDob is DateTime
+            ? rawDob
+            : (rawDob != null ? parseDobDateTime(rawDob.toString()) ?? DateTime.tryParse(rawDob.toString()) : null));
+    _dobController.text = dobDt != null ? DateFormat('dd-MM-yyyy').format(dobDt) : '';
 
     showDialog(
       context: context,
@@ -363,7 +368,7 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
     if (_dobController.text.isNotEmpty) {
       final parsedDob = parseDobDateTime(_dobController.text);
       if (parsedDob != null) {
-        updates['dob'] = Timestamp.fromDate(parsedDob);
+        updates['dob'] = parsedDob.toIso8601String();
       }
     }
     updates['branchId'] = widget.branchId.toLowerCase();
@@ -395,18 +400,22 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
     final note = _noteController.text.trim();
     final medicine = _medicineController.text.trim();
     if (note.isEmpty && medicine.isEmpty) { _snack('Enter note or medicine', error: true); return; }
-    final data = {
-      'timestamp': FieldValue.serverTimestamp(), 'doctorId': widget.doctorId,
-      'note': note, 'medicines': medicine.isNotEmpty ? [{'name': medicine, 'quantity': 1}] : [],
-    };
     try {
       if (widget.isOnline) {
+        final data = {
+          'timestamp': FieldValue.serverTimestamp(), 'doctorId': widget.doctorId,
+          'note': note, 'medicines': medicine.isNotEmpty ? [{'name': medicine, 'quantity': 1}] : [],
+        };
         await _firestore.collection('branches').doc(widget.branchId.toLowerCase())
             .collection('prescriptions').doc(widget.patientId).collection('prescriptions').add(data);
         _snack('Prescription added', success: true);
       } else {
+        final offlineData = {
+          'timestamp': DateTime.now().toIso8601String(), 'doctorId': widget.doctorId,
+          'note': note, 'medicines': medicine.isNotEmpty ? [{'name': medicine, 'quantity': 1}] : [],
+        };
         final pending = widget.localBox.get('pendingPrescriptions', defaultValue: []) as List;
-        pending.add({'branchId': widget.branchId.toLowerCase(), 'patientId': widget.patientId, 'data': data});
+        pending.add({'branchId': widget.branchId.toLowerCase(), 'patientId': widget.patientId, 'data': offlineData});
         await widget.localBox.put('pendingPrescriptions', pending);
         _snack('Saved offline');
       }
@@ -898,8 +907,14 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
 
   List<Widget> _buildInfoWidgets(Map<String, dynamic> data, RoleThemeData t) {
     final isAdult = data['isAdult'] == true;
-    final dobString = data['dob'] is Timestamp
-        ? DateFormat('dd MMM yyyy').format((data['dob'] as Timestamp).toDate())
+    final rawDob = data['dob'];
+    final DateTime? dobDt = rawDob is Timestamp
+        ? rawDob.toDate()
+        : (rawDob is DateTime
+            ? rawDob
+            : (rawDob != null ? parseDobDateTime(rawDob.toString()) ?? DateTime.tryParse(rawDob.toString()) : null));
+    final dobString = dobDt != null
+        ? DateFormat('dd MMM yyyy').format(dobDt)
         : 'N/A';
     final joined = _parseDate(data['createdAt']);
 

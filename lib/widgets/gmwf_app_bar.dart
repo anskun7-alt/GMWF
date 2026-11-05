@@ -390,18 +390,35 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     Color dotColor = SoftPalette.emerald350;
     String statusLabel = 'Connected';
 
+    // Desk health: is anything written here not yet confirmed by the server, and is this
+    // desk missing tokens the server already has? Staff see at a glance if a screen is behind.
+    final unsent = rm.unsentCount;
+    final missing = RealtimeManager.unconfirmedTokensNotifier.value;
     if (isConnected) {
-      badgeBg = isDark ? SoftPalette.emerald700 : SoftPalette.emerald100;
-      dotColor = SoftPalette.emerald350;
-      statusLabel = 'Connected';
+      if (rm.isBehindServer && missing > 0) {
+        badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
+        dotColor = SoftPalette.orange350;
+        statusLabel = 'Catching up ($missing)';
+      } else if (unsent > 0) {
+        badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
+        dotColor = SoftPalette.orange350;
+        statusLabel = 'Sending ($unsent)';
+      } else {
+        badgeBg = isDark ? SoftPalette.emerald700 : SoftPalette.emerald100;
+        dotColor = SoftPalette.emerald350;
+        statusLabel = 'Live';
+      }
     } else if (isSearching) {
       badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
       dotColor = SoftPalette.orange350;
       statusLabel = status.isConnecting ? 'Connecting…' : 'Searching…';
+      if (unsent > 0) statusLabel = '$statusLabel $unsent unsent';
     } else {
       badgeBg = isDark ? SoftPalette.red700 : SoftPalette.red150m;
       dotColor = SoftPalette.red400;
-      statusLabel = 'Disconnected';
+      statusLabel = RealtimeManager.versionRejectedNotifier.value != null
+          ? 'Update required'
+          : (unsent > 0 ? 'Offline – $unsent unsent' : 'Offline');
     }
 
     final displayIp = status.ip ?? rm.serverIp;

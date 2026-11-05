@@ -460,8 +460,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       return;
     }
 
-    // Individual-based check: uses patientId (CNIC for adults, CNIC_child_Name for kids)
-    final restriction = LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId);
+    // Individual-based check: uses patientId (CNIC for adults, CNIC_child_Name for kids, cross-linked with guardian/phone)
+    final restriction = LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId, patient);
 
     setState(() {
       _medicineRestriction = restriction;
@@ -569,16 +569,25 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         continue;
       }
 
+      bool isDummy(String c) =>
+          c.isEmpty ||
+          c == '0000000000000' ||
+          c == '1234567890123' ||
+          RegExp(r'^0+$').hasMatch(c) ||
+          RegExp(r'^1+$').hasMatch(c) ||
+          c == 'na' ||
+          c == 'none';
+
       bool isMatch = false;
 
-      // Rule 1: Canonical resolved individual patientId match (e.g. '0000000000000_child_02' == '0000000000000_child_02')
-      if (cleanResolvedPId.isNotEmpty && (cleanResolvedPId == cleanResolvedEId || cleanResolvedPId == cleanEId)) {
+      // Rule 1: Canonical resolved individual patientId match (non-dummy)
+      if (cleanResolvedPId.isNotEmpty && !isDummy(cleanResolvedPId) && (cleanResolvedPId == cleanResolvedEId || cleanResolvedPId == cleanEId)) {
         isMatch = true;
-      } else if (cleanId.isNotEmpty && cleanId.contains('_child_') && (cleanId == cleanEId || cleanId == cleanResolvedEId)) {
+      } else if (cleanId.isNotEmpty && !isDummy(cleanId) && cleanId.contains('_child_') && (cleanId == cleanEId || cleanId == cleanResolvedEId)) {
         isMatch = true;
       } else if (!isChild && !eIsChild) {
-        // Rule 2: Adult match by adult CNIC + exact name match
-        if (pCnicNorm.isNotEmpty && eCnicNorm.isNotEmpty && pCnicNorm == eCnicNorm) {
+        // Rule 2: Adult match by adult CNIC (non-dummy) + exact name match
+        if (pCnicNorm.isNotEmpty && !isDummy(pCnicNorm) && eCnicNorm.isNotEmpty && pCnicNorm == eCnicNorm) {
           if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty) {
             if (pNameNorm == eNameNorm) isMatch = true;
           } else {
@@ -586,18 +595,18 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           }
         }
       } else if (isChild && eIsChild) {
-        // Rule 3: Child match under same guardian CNIC (requires EXACT name match)
+        // Rule 3: Child match under same guardian CNIC (requires non-dummy CNIC AND EXACT name match)
         final pGuard = pGuardNorm.isNotEmpty ? pGuardNorm : pCnicNorm;
         final eGuard = eGuardNorm.isNotEmpty ? eGuardNorm : eCnicNorm;
-        if (pGuard.isNotEmpty && eGuard.isNotEmpty && pGuard == eGuard) {
+        if (pGuard.isNotEmpty && !isDummy(pGuard) && eGuard.isNotEmpty && pGuard == eGuard) {
           if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty && pNameNorm == eNameNorm) {
             isMatch = true;
           }
         }
       }
 
-      // Rule 4: Phone matching + EXACT name match
-      if (!isMatch && pPhoneNorm.length >= 7 && pPhoneNorm == ePhoneNorm) {
+      // Rule 4: Phone matching (non-dummy) + EXACT name match
+      if (!isMatch && pPhoneNorm.length >= 7 && !isDummy(pPhoneNorm) && pPhoneNorm == ePhoneNorm) {
         if (pNameNorm.isNotEmpty && eNameNorm.isNotEmpty && pNameNorm == eNameNorm) {
           isMatch = true;
         }
@@ -708,6 +717,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       dispensaryId: activeCamp,
       session: session,
       increment: false,
+      // Without the server this desk issues from its own offline block; show that number.
+      offlineSlot: RealtimeManager().hasServerLink ? 0 : LocalStorageService.offlineDeskSlot,
     );
     final sessionLetter = CampSessionService.getSessionLetter(session);
     final dispTag = CampSessionService.getDispensaryKeyword(activeCamp, branchId: widget.branchId);
@@ -930,10 +941,13 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     if (input.isEmpty) return;
     final digitsOnly = input.replaceAll(RegExp(r'[^0-9]'), '');
     final looksLikeCnic  = RegExp(r'^\d{5}-\d{7}-\d{1}$').hasMatch(input) || digitsOnly.length == 13;
-    final looksLikePhone = RegExp(r'^03\d{9}$').hasMatch(digitsOnly);
-    if (!looksLikeCnic && !looksLikePhone) {
+    final looksLikePhone = digitsOnly.length >= 7 && digitsOnly.length <= 13;
+    final looksLikeName  = input.length >= 3 && !RegExp(r'^\d+$').hasMatch(input);
+    final looksLikeId    = input.contains('_child_') || input.length >= 4;
+
+    if (!looksLikeCnic && !looksLikePhone && !looksLikeName && !looksLikeId) {
       AppToast.showSnackBar(context, const SnackBar(
-        content: Text('Enter valid CNIC (XXXXX-XXXXXXX-X) or phone (03xxxxxxxxx)'),
+        content: Text('Enter CNIC (13 digits), Phone, Name, or Patient ID'),
         backgroundColor: SoftPalette.amber300,
       ));
       return;
@@ -962,54 +976,79 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
             unformattedCnic, branchId: widget.branchId);
       }
+      if (localResults.isEmpty && digitsOnly.isNotEmpty) {
+        localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
+            digitsOnly, branchId: widget.branchId);
+      }
 
       if (localResults.isEmpty) {
-        // Fast targeted lookup for the specific patient without downloading entire branch database
+        // Fast targeted lookup with Karachi family / sub-branch cross-search
         try {
-          final branchRef = FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('patients');
+          final branchCandidates = <String>{
+            widget.branchId,
+            if (CampSessionService.isKarachiFamily(widget.branchId))
+              ...const ['karachi', 'karachi_saddar', 'saddar', 'karachi_haji']
+          };
 
-            final cnicQueryFormatted = branchRef.where('cnic', isEqualTo: formattedCnic).limit(10).get().timeout(const Duration(seconds: 3));
-            final cnicQueryRaw = (formattedCnic != unformattedCnic)
-                ? branchRef.where('cnic', isEqualTo: unformattedCnic).limit(10).get().timeout(const Duration(seconds: 3))
-                : Future.value(null);
-            final guardianQueryFormatted = branchRef.where('guardianCnic', isEqualTo: formattedCnic).limit(20).get().timeout(const Duration(seconds: 3));
-            final guardianQueryRaw = (formattedCnic != unformattedCnic)
-                ? branchRef.where('guardianCnic', isEqualTo: unformattedCnic).limit(20).get().timeout(const Duration(seconds: 3))
-                : Future.value(null);
-            final phoneQuery = digitsOnly.length >= 6
-                ? branchRef.where('phone', isEqualTo: digitsOnly).limit(5).get().timeout(const Duration(seconds: 3))
-                : Future.value(null);
+          final found = <Map<String, dynamic>>[];
+          final seenIds = <String>{};
 
-            final results = await Future.wait([cnicQueryFormatted, cnicQueryRaw, guardianQueryFormatted, guardianQueryRaw, phoneQuery], eagerError: false);
-            final found = <Map<String, dynamic>>[];
-            final seenIds = <String>{};
+          for (final bId in branchCandidates) {
+            final branchRef = FirebaseFirestore.instance
+                .collection('branches')
+                .doc(bId)
+                .collection('patients');
+
+            final queries = <Future<QuerySnapshot?>>[];
+            if (looksLikeCnic) {
+              queries.add(branchRef.where('cnic', isEqualTo: formattedCnic).limit(10).get().timeout(const Duration(seconds: 3)));
+              if (formattedCnic != unformattedCnic) {
+                queries.add(branchRef.where('cnic', isEqualTo: unformattedCnic).limit(10).get().timeout(const Duration(seconds: 3)));
+              }
+              queries.add(branchRef.where('guardianCnic', isEqualTo: formattedCnic).limit(20).get().timeout(const Duration(seconds: 3)));
+              if (formattedCnic != unformattedCnic) {
+                queries.add(branchRef.where('guardianCnic', isEqualTo: unformattedCnic).limit(20).get().timeout(const Duration(seconds: 3)));
+              }
+            }
+            if (looksLikePhone) {
+              queries.add(branchRef.where('phone', isEqualTo: digitsOnly).limit(5).get().timeout(const Duration(seconds: 3)));
+              if (digitsOnly.startsWith('92') && digitsOnly.length == 12) {
+                queries.add(branchRef.where('phone', isEqualTo: '0${digitsOnly.substring(2)}').limit(5).get().timeout(const Duration(seconds: 3)));
+              } else if (digitsOnly.startsWith('03') && digitsOnly.length == 11) {
+                queries.add(branchRef.where('phone', isEqualTo: digitsOnly.substring(1)).limit(5).get().timeout(const Duration(seconds: 3)));
+              }
+            }
+            if (looksLikeName) {
+              queries.add(branchRef.where('name', isGreaterThanOrEqualTo: input).where('name', isLessThanOrEqualTo: '$input\uf8ff').limit(10).get().timeout(const Duration(seconds: 3)));
+            }
+
+            final results = await Future.wait(queries, eagerError: false);
             for (final snapshot in results) {
               if (snapshot == null) continue;
               for (final doc in snapshot.docs) {
                 if (!seenIds.add(doc.id)) continue;
                 final data = Map<String, dynamic>.from(doc.data() as Map);
                 data['patientId'] = doc.id;
-                data['branchId'] = widget.branchId;
+                data['branchId'] = bId;
                 found.add(data);
               }
             }
-
-            if (found.isNotEmpty) {
-              await LocalStorageService.saveAllLocalPatients(found);
-              localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
-                  formattedCnic, branchId: widget.branchId);
-              if (localResults.isEmpty) {
-                localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
-                    input, branchId: widget.branchId);
-              }
-            }
-          } catch (e) {
-            debugPrint('[TokenScreen] Direct branch patient query failed: $e');
+            if (found.isNotEmpty) break;
           }
+
+          if (found.isNotEmpty) {
+            await LocalStorageService.saveAllLocalPatients(found);
+            localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
+                formattedCnic, branchId: widget.branchId);
+            if (localResults.isEmpty) {
+              localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
+                  input, branchId: widget.branchId);
+            }
+          }
+        } catch (e) {
+          debugPrint('[TokenScreen] Direct branch patient query failed: $e');
         }
+      }
         localResults = localResults.map(_healPatient).toList();
         if (mounted) {
         setState(() => _patientsList = localResults);
@@ -1338,18 +1377,36 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         session: session,
       );
       final sessionLetter = CampSessionService.getSessionLetter(session);
-      // The LAN server numbers tokens for every desk (no two patients on one number); this
-      // desk's own count is used only when the server cannot be reached.
+      // The LAN server numbers tokens for every desk from one shared sequence (no two
+      // patients on one number). Without it, this desk numbers from its own offline block
+      // (slot N -> N*1000+1 ...), which the server gave this PC, so desks that are offline at
+      // the same time cannot issue the same number.
       final serverSeq = await RealtimeManager().reserveSerial('$dateKey$sessionLetter-$normDispTag', localSeq);
-      final nextSeq = (serverSeq != null && serverSeq > localSeq) ? serverSeq : localSeq;
-      await LocalStorageService.getNextLocalSerialSequence(
-        widget.branchId,
-        dateKey,
-        dispensaryId: effectiveCampId,
-        session: session,
-        increment: true,
-        atLeast: nextSeq,
-      );
+      final int nextSeq;
+      if (serverSeq != null) {
+        nextSeq = serverSeq;
+        await LocalStorageService.getNextLocalSerialSequence(
+          widget.branchId,
+          dateKey,
+          dispensaryId: effectiveCampId,
+          session: session,
+          increment: true,
+          atLeast: nextSeq,
+        );
+      } else {
+        final slot = LocalStorageService.offlineDeskSlot;
+        // slot 0: this PC has never reached the server, so it has no block yet; fall back to
+        // the shared count (the old behaviour, collision-prone if another desk is also offline).
+        nextSeq = await LocalStorageService.getNextLocalSerialSequence(
+          widget.branchId,
+          dateKey,
+          dispensaryId: effectiveCampId,
+          session: session,
+          increment: true,
+          atLeast: slot > 0 ? 0 : localSeq,
+          offlineSlot: slot,
+        );
+      }
       final seqPadded = nextSeq.toString().padLeft(3, '0');
       final serial = '$dateKey$sessionLetter-$normDispTag-$seqPadded';
       final entryData = <String, dynamic>{
@@ -1364,6 +1421,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         'campName': effectiveCampName,
         'dispensaryName': effectiveCampName,
         'pendingSync': true,
+        // Fair queue order: online tokens are in server order by number; a token numbered
+        // offline is placed among them by this (server-corrected) issue time.
+        'issuedAtMs': CampSessionService.getAuthoritativeTime().millisecondsSinceEpoch,
+        if (serverSeq == null) 'issuedOffline': true,
         if (hasException) ...{
           'isExceptionToken': true,
           'exceptionAuthorized': true,
@@ -1401,9 +1462,26 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         } catch (_) {}
       }
 
-      // STEP 2 — LAN broadcast
+      // STEP 2 — LAN broadcast (unbreakable sequence order)
+      String? tokenMessageId;
       try {
-        RealtimeManager().sendMessage({
+        if (nextSeq > 1) {
+          final prefix = '$dateKey$sessionLetter-$normDispTag';
+          // Own number block only, last 50 numbers (an offline token 1001 checked 1000 here).
+          final blockStart = (nextSeq ~/ LocalStorageService.offlineBandSize) *
+                  LocalStorageService.offlineBandSize + 1;
+          final from = (nextSeq - 50) > blockStart ? nextSeq - 50 : blockStart;
+          for (int i = from; i < nextSeq; i++) {
+            final priorSer = '$prefix-${i.toString().padLeft(3, '0')}';
+            final priorLogical = 'save_entry|$priorSer';
+            if (RealtimeManager().isRecordPendingOrUnacked(priorLogical)) {
+              unawaited(RealtimeManager().flushOutboxNow());
+              break;
+            }
+          }
+        }
+
+        tokenMessageId = RealtimeManager().sendMessageTracked({
           ...RealtimeEvents.payload(
             type: RealtimeEvents.saveEntry,
             branchId: widget.branchId,
@@ -1415,6 +1493,17 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         });
       } catch (e) {
         debugPrint('[TokenScreen] LAN broadcast failed: $e');
+      }
+
+      // The patient is told their number only once the server has saved the token and sent
+      // it to the doctor/dispenser desks (normally a few ms on a wired LAN). Before, the number
+      // was shown first and delivered afterwards, so a patient could sit down while the
+      // doctor's screen did not have them yet. The token stays in the outbox and is re-sent
+      // until the server confirms, so a timeout here never loses it.
+      bool serverConfirmed = false;
+      if (serverSeq != null) {
+        serverConfirmed = await RealtimeManager()
+            .waitForServerAck(tokenMessageId, timeout: const Duration(seconds: 5));
       }
 
       _estimateNextSerial();
@@ -1444,12 +1533,28 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           }
         });
 
-        AppToast.showSnackBar(context, SnackBar(
-          content: Text(
-              '✅ Token $serial issued to $patientName! [$queueType]'),
-          backgroundColor: SoftPalette.green400,
-          duration: const Duration(seconds: 3),
-        ));
+        if (serverSeq == null) {
+          AppToast.showSnackBar(context, SnackBar(
+            content: Text('📴 OFFLINE: Token $serial issued to $patientName on this desk only. '
+                'It will be sent to the doctor/dispenser screens as soon as the server is reachable.'),
+            backgroundColor: SoftPalette.orange400,
+            duration: const Duration(seconds: 6),
+          ));
+        } else if (!serverConfirmed) {
+          AppToast.showSnackBar(context, SnackBar(
+            content: Text('⚠️ Token $serial issued to $patientName, but the server has not confirmed it yet. '
+                'It is being re-sent automatically — check the doctor screen shows it.'),
+            backgroundColor: SoftPalette.orange400,
+            duration: const Duration(seconds: 6),
+          ));
+        } else {
+          AppToast.showSnackBar(context, SnackBar(
+            content: Text(
+                '✅ Token $serial issued to $patientName! [$queueType]'),
+            backgroundColor: SoftPalette.green400,
+            duration: const Duration(seconds: 3),
+          ));
+        }
       }
 
       // STEP 3 — Firestore in background (never for a collided serial: it would merge
@@ -1757,7 +1862,17 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                 try {
                                   final dt = DateTime(int.parse(parts[2]),
                                       int.parse(parts[1]), int.parse(parts[0]));
-                                  updated['dob'] = Timestamp.fromDate(dt);
+                                  updated['dob'] = dt.toIso8601String();
+                                  final nowDt = DateTime.now();
+                                  int calcAge = nowDt.year - dt.year;
+                                  if (nowDt.month < dt.month ||
+                                      (nowDt.month == dt.month && nowDt.day < dt.day)) {
+                                    calcAge--;
+                                  }
+                                  if (calcAge >= 0) {
+                                    updated['age'] = calcAge;
+                                    updated['isAdult'] = calcAge >= 18;
+                                  }
                                 } catch (_) {}
                               }
 
@@ -1903,8 +2018,11 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       final rId = _getRestrictionId(_patientData!);
       final pId = _patientData!['patientId']?.toString() ?? '';
 
-      final matchedId = (LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId) != null)
-          ? rId : pId;
+      // Pass the patient so the same lookup as the block itself runs, and use the id of the
+      // record that actually blocks: approving the exception clears that record.
+      final blocking = LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId, _patientData);
+      final blockingId = blocking?['patientId']?.toString() ?? '';
+      final matchedId = blocking == null ? pId : (blockingId.isNotEmpty ? blockingId : rId);
 
       final patientName = _patientData!['name']?.toString() ?? 'Unknown';
 
@@ -2165,10 +2283,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     }
 
                     final isFullCnic = d.length == 13;
-                    final isFullPhone = d.startsWith('03') && d.length == 11;
+                    final isFullPhone = (d.length >= 10 && d.length <= 12);
+                    final isNameSearch = v.trim().length >= 3 && !RegExp(r'^\d+$').hasMatch(v.trim());
+                    final isIdSearch = v.contains('_child_');
 
-                    if (isFullCnic || isFullPhone) {
-                      _searchDebounceTimer = Timer(const Duration(milliseconds: 200), () {
+                    if (isFullCnic || isFullPhone || isNameSearch || isIdSearch) {
+                      _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () {
                         if (mounted) _searchPatient();
                       });
                     } else {
@@ -2255,7 +2375,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     final vitalsToken = _getPatientTodayToken(p, isVitalsOnly: true);
                     final regularToken = _getPatientTodayToken(p, isVitalsOnly: false);
                     final rId = _getRestrictionId(p);
-                    final restriction = LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId);
+                    final restriction = LocalStorageService.isPatientBlockedByMedicine(widget.branchId, rId, p);
 
                     final hasBoth = _isVitalsTokenAllowed ? (vitalsToken != null && regularToken != null) : (regularToken != null);
                     final hasAny = _isVitalsTokenAllowed ? (vitalsToken != null || regularToken != null) : (regularToken != null);

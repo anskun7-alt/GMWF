@@ -44,7 +44,12 @@ class AutoUpdateService {
   /// Alias for [currentVersion] for backward compatibility.
   static String get resolvedVersion => currentVersion;
 
-  static const int protocolVersion = 2;
+  /// LAN protocol. 3 = server-issued token numbers with per-PC offline blocks, idempotent
+  /// number requests, token confirmation before the number is shown, unconfirmed-token count
+  /// in pongs. Desks below [minProtocolVersion] are refused by the server: a mix of old and
+  /// new numbering on one network gives two patients the same token number.
+  static const int protocolVersion = 3;
+  static const int minProtocolVersion = 3;
   static const String minSupportedVersion = '1.4.8';
 
   /// Default GitHub repository configuration for auto-updates.

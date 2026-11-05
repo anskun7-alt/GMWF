@@ -54,6 +54,20 @@ int parseSequenceFromSerial(String serial) {
     if (numVal != null && lastPart.isNotEmpty && lastPart.length <= 4) return numVal;
   }
 
+  // 5. Unhyphenated or pure numeric serials (e.g. "1", "001", "#1", "T001")
+  final cleanAll = s.replaceAll(RegExp(r'[^\d]'), '');
+  if (cleanAll.isNotEmpty && cleanAll.length <= 4) {
+    final numVal = int.tryParse(cleanAll);
+    if (numVal != null) return numVal;
+  }
+
+  // 6. Any trailing numeric sequence (e.g. "TOKEN_003" or "BRANCH_1")
+  final trailingMatch = RegExp(r'(\d{1,4})$').firstMatch(s);
+  if (trailingMatch != null) {
+    final numVal = int.tryParse(trailingMatch.group(1)!);
+    if (numVal != null) return numVal;
+  }
+
   return 999999;
 }
 

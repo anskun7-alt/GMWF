@@ -1177,6 +1177,9 @@ class CampSessionService {
   /// Shared formatter: resolveShiftAndDateKey runs for many tokens on every queue refresh.
   static final DateFormat _ddMMyy = DateFormat('ddMMyy');
 
+  /// Formats a DateTime into canonical 'ddMMyy' dateKey string.
+  static String formatDateKey(DateTime dt) => _ddMMyy.format(dt);
+
   /// Canonical single source of truth resolver for Shift and DateKey, factoring in branch-specific session windows.
   static ({String session, String dateKey}) resolveShiftAndDateKey([DateTime? time, String? branchId, String? department, String? facilityId]) {
     final dt = (time != null ? time.toLocal() : getAuthoritativeTime());
@@ -1777,6 +1780,63 @@ class CampSessionService {
   /// Whether a token belongs to the shift date [dateKey] (see [tokenDateKey]).
   static bool isTokenOnDate(Map e, String dateKey, [String? branchId]) =>
       tokenDateKey(e, branchId) == dateKey;
+
+  /// How long after its issue a token from yesterday stays visible past midnight.
+  static const Duration lateNightCarryOver = Duration(hours: 8);
+
+  /// A session that runs past midnight: between 00:00 and 06:00, a token dated YESTERDAY that
+  /// was issued within the last [lateNightCarryOver] still belongs on the queues (it vanished at
+  /// 00:00 from the doctor/reception screens). Tokens issued earlier — abandoned morning
+  /// tokens, or yesterday's token replayed from an outbox — stay off, so nothing old resurfaces.
+  /// The caller decides whether finished tokens are shown.
+  static bool isLateNightCarryOver(Map e, [String? branchId, DateTime? now]) {
+    final n = now ?? getAuthoritativeTime();
+    if (n.hour >= 6) return false;
+    final yesterdayKey = _ddMMyy.format(n.subtract(const Duration(days: 1)));
+    if (tokenDateKey(e, branchId) != yesterdayKey) return false;
+    final issued = _issuedAt(e);
+    if (issued == null) return false;
+    final age = n.difference(issued);
+    return !age.isNegative && age <= lateNightCarryOver;
+  }
+
+  static DateTime? _issuedAt(Map e) {
+    final ms = e['issuedAtMs'];
+    if (ms is num && ms > 0) return DateTime.fromMillisecondsSinceEpoch(ms.toInt());
+    final raw = e['createdAt'] ?? e['timestamp'];
+    if (raw is Timestamp) return raw.toDate();
+    if (raw is DateTime) return raw;
+    return DateTime.tryParse(raw?.toString() ?? '');
+  }
+
+  /// Returns all date keys active for the current camp session window (including the previous
+  /// dateKey if camp operations cross midnight or a shift started within the last 16 hours).
+  static List<String> getActiveCampDateKeys([String? branchId]) {
+    final now = getAuthoritativeTime();
+    final currentInfo = resolveShiftAndDateKey(now, branchId);
+    final keys = <String>{currentInfo.dateKey};
+
+    // If early morning (before 06:00), the active night/evening camp started yesterday.
+    if (now.hour < 6) {
+      final yesterdayKey = _ddMMyy.format(now.subtract(const Duration(days: 1)));
+      keys.add(yesterdayKey);
+    }
+
+    // Check if an active camp session started on the previous day within last 16 hours
+    if (Hive.isBoxOpen('app_settings')) {
+      final box = Hive.box('app_settings');
+      final manualTime = box.get('active_camp_manual_time') as int?;
+      if (manualTime != null) {
+        final startDt = DateTime.fromMillisecondsSinceEpoch(manualTime);
+        if (now.difference(startDt).inHours < 16) {
+          final startDateKey = resolveShiftAndDateKey(startDt, branchId).dateKey;
+          keys.add(startDateKey);
+        }
+      }
+    }
+
+    return keys.toList();
+  }
 
   /// Returns a clean short keyword tag for token serial prefixes (e.g. 'SKT', 'LHR', 'RWP', 'GRT', 'JLJ', 'SADD', 'HAJI', 'KAP')
   static String getDispensaryKeyword(String? id, {String? branchId}) {

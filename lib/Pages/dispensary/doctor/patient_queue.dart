@@ -1,7 +1,9 @@
 // lib/pages/dispensary/doctor/patient_queue.dart
 
 import 'package:gmwf/services/cloud/cloud_db.dart';
+import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/utils/token_order.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'dart:async';
@@ -162,8 +164,11 @@ class _PatientQueueState extends State<PatientQueue> {
   // A token shows only on the date in its serial. There is no "recent" carry-over: a token
   // replayed from a desk's outbox the next day (e.g. after a server crash) used to land in the
   // waiting list next to today's tokens, sorted by number, and got prescribed on by mistake.
+  // Exception: a session running past midnight — a token issued in the last hours of
+  // yesterday stays until 06:00 (it vanished at 00:00 while the patient was still waiting).
   bool _isEffectivelyToday(Map<String, dynamic> e, String currentTodayKey, String todayIso) =>
-      CampSessionService.isTokenOnDate(e, currentTodayKey, widget.branchId);
+      CampSessionService.isTokenOnDate(e, currentTodayKey, widget.branchId) ||
+      CampSessionService.isLateNightCarryOver(e, widget.branchId);
 
   // ─── Strict two-group sort ─────────────────────────────────────────────────
   List<Map<String, dynamic>> _getSortedQueue() {
@@ -338,20 +343,13 @@ class _PatientQueueState extends State<PatientQueue> {
       }
     }
 
-    int compareTokens(Map<String, dynamic> a, Map<String, dynamic> b) {
-      final numA = _extractSerialNumber(a);
-      final numB = _extractSerialNumber(b);
-      if (numA != numB) return numA.compareTo(numB);
-      final dtA = a['createdAt']?.toString() ?? '';
-      final dtB = b['createdAt']?.toString() ?? '';
-      return dtA.compareTo(dtB);
-    }
-
-    waiting.sort(compareTokens);
-    skipped.sort(compareTokens);
-    others.sort(compareTokens);
-
-    return [...waiting, ...skipped, ...others];
+    // Fair order: server-numbered tokens by number, offline-issued ones slotted in by issue
+    // time (see TokenOrder). "Next patient" takes the first waiting one from this order.
+    return [
+      ...TokenOrder.sortFairly(waiting),
+      ...TokenOrder.sortFairly(skipped),
+      ...TokenOrder.sortFairly(others),
+    ];
   }
 
   List<Map<String, dynamic>> _getPreviousDaysCarryoverQueue() {
@@ -614,6 +612,7 @@ class _PatientQueueState extends State<PatientQueue> {
 
   @override
   void dispose() {
+    _autoSelectRetry?.cancel();
     _debounceRebuildTimer?.cancel();
     _queueCatchUpTimer?.cancel();
     _realtimeSub.cancel();
@@ -923,21 +922,38 @@ class _PatientQueueState extends State<PatientQueue> {
     }
   }
 
-  // ─── Serial number extraction ──────────────────────────────────────────────
-  int _extractSerialNumber(Map<String, dynamic> p) {
-    final s = (p['serial'] ?? p['id'] ?? '').toString();
-    return parseSequenceFromSerial(s);
-  }
-
   // ─── Auto-select smallest waiting ─────────────────────────────────────────
+  Timer? _autoSelectRetry;
+  DateTime? _behindSince;
+
   void _tryAutoSelectSmallestWaiting() {
     if (!mounted) return;
 
     // If a patient is currently selected, do NOT switch or re-select behind the doctor's back!
     if (widget.selectedPatient != null) {
+      _behindSince = null;
       return;
     }
-    
+
+    // Never pick "next" while this desk is missing tokens the server already has: that is
+    // how #2 got called before #1 (whose token had not reached this screen yet). Ask for the
+    // missing tokens and try again shortly; after 4 s go ahead anyway so the doctor is never
+    // blocked by a token this desk cannot apply. Offline, the local queue is all there is.
+    final rm = RealtimeManager();
+    if (rm.hasServerLink && rm.isBehindServer) {
+      _behindSince ??= DateTime.now();
+      if (DateTime.now().difference(_behindSince!) < const Duration(seconds: 4)) {
+        rm.requestCatchUp(branchId: widget.branchId, reason: 'before_next_patient');
+        _autoSelectRetry?.cancel();
+        _autoSelectRetry = Timer(const Duration(milliseconds: 800), () {
+          _cachedQueue = null; // re-read: the missing tokens may have arrived
+          _tryAutoSelectSmallestWaiting();
+        });
+        return;
+      }
+    }
+    _behindSince = null;
+
     // ← HANG FIX: Use cached queue if fresh, avoid recalculation
     final now = DateTime.now();
     final isCacheValid = _cachedQueue != null && 
@@ -3229,8 +3245,12 @@ class _PatientQueueState extends State<PatientQueue> {
 
         final medQty = med['quantity'];
         final perDayQty = (medQty is num ? medQty.toInt() : int.tryParse(medQty?.toString() ?? '') ?? 0);
+        final medType = (med['type'] ?? '').toString().toLowerCase();
+        final medName = (med['name'] ?? '').toString().toLowerCase();
+        final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
+            medName.contains('syp') || medName.contains('syrup');
         final isInj = _isInjectionOrDrip(med);
-        final required = isInj ? perDayQty : perDayQty * daysOfMedicine;
+        final required = isSyrup ? 1 : (isInj ? perDayQty : perDayQty * daysOfMedicine);
 
         if (required > availableClamped) {
           if (mounted) {
@@ -3266,6 +3286,7 @@ class _PatientQueueState extends State<PatientQueue> {
       'medicines':       medicines,
       'labResults':      labTests,
       'daysOfMedicine':  daysOfMedicine,
+      'extraCharge':     extraCharge,
       'updatedAt':       now,
       'updatedBy':       RealtimeManager().role ?? 'Doctor',
     };
@@ -3278,8 +3299,8 @@ class _PatientQueueState extends State<PatientQueue> {
     final entryBox = await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
     final normBranch = branchId.toLowerCase().trim();
     final normSerial = serial.toLowerCase().trim();
-    final canonicalKey = '$branchId-${serial.toUpperCase()}';
-    final keysToUpdate = <dynamic>{canonicalKey};
+    final canonicalKey = '$normBranch-${serial.trim().toUpperCase()}';
+    final keysToUpdate = <dynamic>{};
 
     for (final k in entryBox.keys) {
       final ks = k.toString().toLowerCase().trim();
@@ -3287,10 +3308,14 @@ class _PatientQueueState extends State<PatientQueue> {
         keysToUpdate.add(k);
       }
     }
+    if (keysToUpdate.isEmpty) {
+      keysToUpdate.add(canonicalKey);
+    }
 
     for (final k in keysToUpdate) {
-      final existing = entryBox.get(k);
-      final updated = existing is Map ? Map<String, dynamic>.from(existing) : <String, dynamic>{};
+      final existing = entryBox.get(k) ?? entryBox.get(canonicalKey);
+      if (existing is! Map) continue;
+      final updated = Map<String, dynamic>.from(existing);
       updated['prescription']   = updatedPresc;
       updated['prescriptionId'] = serial;
       updated['prescriptions']  = medicines;
@@ -3298,6 +3323,7 @@ class _PatientQueueState extends State<PatientQueue> {
       updated['status']         = 'completed';
       updated['completedAt']    = updatedPresc['completedAt'] ?? now;
       updated['daysOfMedicine'] = daysOfMedicine;
+      updated['extraCharge']    = extraCharge;
       await entryBox.put(k, updated);
       debugPrint('[PrescEdit] ✅ Updated entry in Hive: $k');
     }
@@ -3310,8 +3336,8 @@ class _PatientQueueState extends State<PatientQueue> {
     ));
     debugPrint('[PrescEdit] ✅ Broadcasted save_prescription (days=$daysOfMedicine)');
 
-    // 4. Firestore fire-and-forget or enqueue to sync if offline (ONLY when not connected to LAN server)
-    if (!RealtimeManager().isConnected) {
+    // 4. Firestore fire-and-forget or enqueue to sync if not a LAN client desk
+    if (!LanFirestoreGate.isLanDesk) {
       if (_isOnline) {
         _updateFirestore(
           serial:         serial,
@@ -4219,6 +4245,7 @@ class _PatientQueueState extends State<PatientQueue> {
               ? () => setState(() {
                     _selectedSession = value;
                     _selectedSessionFilter = value;
+                    _cachedQueue = null;
                   })
               : null,
           borderRadius: BorderRadius.circular(12),
@@ -4257,7 +4284,12 @@ class _PatientQueueState extends State<PatientQueue> {
       child: Tooltip(
         message: isAllowed ? label : 'Not scheduled for this camp during active shift',
         child: InkWell(
-          onTap: isAllowed ? () => setState(() => _selectedCampFilter = value) : null,
+          onTap: isAllowed
+              ? () => setState(() {
+                    _selectedCampFilter = value;
+                    _cachedQueue = null;
+                  })
+              : null,
           borderRadius: BorderRadius.circular(12),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

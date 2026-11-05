@@ -86,6 +86,119 @@ class LanServer {
   // ── [FIX 5] In-memory & disk persisted record version arbiter map ──────────
   final Map<String, int> _recordVersionMap = {};
 
+  // ── Persistent event log (non-token events) ──────────────────────────────────
+  // Tokens and stock have their own catch-ups. Everything else a desk can miss while it is
+  // off or reconnecting — patient edits, deletes, restrictions lifted, requests approved,
+  // users, attendance — used to reach it only through the 10-minute in-memory replay or the
+  // 30-minute full resync. Each such event now gets a sequence number and is kept on disk for
+  // 7 days; a desk reports the last number it applied when it connects and receives exactly
+  // what it missed (also after a server restart). '_logEpoch' identifies this log, so a desk
+  // that knew another (reinstalled) server's log starts over instead of skipping events.
+  static const String eventLogBox = 'lan_event_log';
+  static const Duration _eventLogKeep = Duration(days: 7);
+  static const int _maxReplay = 3000;
+  Box? _eventLog;
+  int _eventSeq = 0;
+  String _logEpoch = '';
+
+  static bool isLoggedEventType(String? t) {
+    if (t == null || t.isEmpty) return false;
+    const tokenOrStock = {
+      'save_entry', 'token_created', 'save_prescription', 'prescription_created',
+      'dispense_completed', 'update_serial_status', 'save_stock_item', 'delete_stock_item',
+      'medicine_registered', 'add_stock', 'add_proforma_stock', 'save_dispensary_charge',
+      'save_dispensary_record',
+    };
+    if (tokenOrStock.contains(t) || t.startsWith('stress_')) return false;
+    return t.startsWith('save_') || t.startsWith('delete_') || t.startsWith('request_') ||
+        t.startsWith('token_exception') || t.startsWith('token_reversal') ||
+        t.startsWith('approve_') || t.startsWith('reject_') || t.startsWith('migrate_') ||
+        t.startsWith('restriction') || t.startsWith('workflow_') || t.startsWith('offboard_');
+  }
+
+  Future<void> _openEventLog() async {
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(eventLogBox);
+      _eventLog = box;
+      var epoch = box.get('_epoch')?.toString() ?? '';
+      if (epoch.isEmpty) {
+        epoch = '${DateTime.now().microsecondsSinceEpoch}';
+        await box.put('_epoch', epoch);
+      }
+      _logEpoch = epoch;
+      final cutoff = DateTime.now().subtract(_eventLogKeep).millisecondsSinceEpoch;
+      final old = <dynamic>[];
+      var maxSeq = 0;
+      for (final k in box.keys) {
+        if (k is! int) continue;
+        if (k > maxSeq) maxSeq = k;
+        final v = box.get(k);
+        if (v is Map && (v['at'] as num? ?? 0) < cutoff) old.add(k);
+      }
+      if (old.isNotEmpty) await box.deleteAll(old);
+      _eventSeq = maxSeq;
+    } catch (e) {
+      print('[LanServer] Event log unavailable: $e');
+    }
+  }
+
+  /// Records [enhanced] in the log and stamps it with its sequence number (before forwarding).
+  void _logEvent(Map<String, dynamic> enhanced, String? eventType, String branch) {
+    final box = _eventLog;
+    if (box == null || !box.isOpen || !isLoggedEventType(eventType)) return;
+    final seq = ++_eventSeq;
+    enhanced['_logSeq'] = seq;
+    enhanced['_logEpoch'] = _logEpoch;
+    final copy = Map<String, dynamic>.from(enhanced)..remove('_socketId');
+    try {
+      box.put(seq, {
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'branch': branch,
+        'from': enhanced['_clientId']?.toString() ?? '',
+        'msg': jsonEncode(copy),
+      });
+    } catch (_) {}
+  }
+
+  /// Sends a (re)connecting desk every logged event after [lastSeq] for its branch.
+  Future<void> _replayEventLog(WebSocket socket, int lastSeq, String lastEpoch) async {
+    final box = _eventLog;
+    if (box == null || !box.isOpen) return;
+    final info = _clientInfo[socket];
+    if (info == null) return;
+    final from = lastEpoch == _logEpoch ? lastSeq : 0;
+    if (from >= _eventSeq) return;
+    final myBranch = LocalStorageService.sanitizeBranchId((info['branchId'] ?? '').toString(), fallback: '');
+    final me = (info['clientId'] ?? '').toString();
+    final keys = box.keys.whereType<int>().where((k) => k > from).toList()..sort();
+    final start = keys.length > _maxReplay ? keys.length - _maxReplay : 0;
+    var sent = 0;
+    for (var i = start; i < keys.length; i++) {
+      if (socket.readyState != WebSocket.open) return;
+      final v = box.get(keys[i]);
+      if (v is! Map) continue;
+      final b = LocalStorageService.sanitizeBranchId((v['branch'] ?? '').toString(), fallback: '');
+      if (b.isNotEmpty && b != 'all' && myBranch.isNotEmpty && b != myBranch) continue;
+      if (me.isNotEmpty && v['from'] == me) continue; // its own event
+      try {
+        final m = jsonDecode(v['msg'].toString());
+        if (m is Map<String, dynamic>) {
+          m['isCatchUp'] = true;
+          m['_eventLogReplay'] = true;
+          socket.add(jsonEncode(m));
+          countTraffic('out event-log replay');
+          sent++;
+        }
+      } catch (_) {}
+      if (sent % 100 == 0) await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    // Tell the desk where the log stands, so it can record it even if nothing was for it.
+    try {
+      socket.add(jsonEncode({'event_type': 'event_log_position', '_logSeq': _eventSeq, '_logEpoch': _logEpoch}));
+    } catch (_) {}
+    if (sent > 0) print('[LanServer] 📜 Replayed $sent missed event(s) to ${info['username']} (after #$from)');
+  }
+
   /// Client -> server control messages that no other device needs (see _handleMessage).
   static const Set<String> _serverOnlyEventTypes = {
     'ack_serials', 'ack_stock_items', 'message_ack', 'request_catch_up', 'request_full_lan_sync',
@@ -100,6 +213,21 @@ class LanServer {
   /// Highest sequence issued per serial prefix ('301026M-HAJI').
   final Map<String, int> _lastIssuedSeq = {};
 
+  /// This server's branch, added to the UDP beacon ("…I_AM:<ip>:<port>:<branch>"; older
+  /// desks read only ip:port), so a desk never joins another branch's server on a shared LAN.
+  String? branchId;
+  /// requestId → number already given, so a desk's retry gets the same number (insertion
+  /// ordered; oldest dropped past 2000).
+  final Map<String, int> _reservedByRequest = {};
+
+  /// socketId → today's tokens that desk has not confirmed (set by the server's catch-up pass
+  /// every few seconds, sent back with each pong).
+  final Map<String, int> _unconfirmedBySocket = {};
+  void reportUnconfirmedTokens(String socketId, int count) {
+    _unconfirmedBySocket[socketId] = count;
+    if (_unconfirmedBySocket.length > 200) _unconfirmedBySocket.remove(_unconfirmedBySocket.keys.first);
+  }
+
   static final RegExp _serialParts = RegExp(r'^(\d{6}[A-Z]?-[A-Z0-9_]+)-(\d{1,4})$');
 
   void _noteIssuedSerial(String? serial) {
@@ -107,7 +235,52 @@ class LanServer {
     if (m == null) return;
     final prefix = m.group(1)!;
     final seq = int.parse(m.group(2)!);
+    // A desk's offline-block number (1001+) is not part of the shared sequence; counting it
+    // would make every desk jump to 1002, 1003 ... and into that desk's offline block.
+    if (LocalStorageService.isOfflineBandSeq(seq)) return;
     if (seq > (_lastIssuedSeq[prefix] ?? 0)) _lastIssuedSeq[prefix] = seq;
+  }
+
+  /// Gives each desk PC its own offline token block (1..9), remembered on this server PC so a
+  /// desk keeps its slot across restarts. When all 9 are taken, the slot of the desk not seen
+  /// for the longest time is reused.
+  int _deskSlotFor(String deviceKey) {
+    if (deviceKey.isEmpty || !Hive.isBoxOpen('app_settings')) return 0;
+    try {
+      final box = Hive.box('app_settings');
+      final raw = box.get('lan_offline_desk_slots');
+      final slots = <String, Map<String, dynamic>>{};
+      if (raw is Map) {
+        raw.forEach((k, v) {
+          if (v is Map) slots[k.toString()] = Map<String, dynamic>.from(v);
+        });
+      }
+      final now = DateTime.now().millisecondsSinceEpoch;
+      var mine = slots[deviceKey];
+      if (mine == null) {
+        final used = slots.values.map((v) => (v['slot'] as num?)?.toInt() ?? 0).toSet();
+        int slot = 0;
+        for (var s = 1; s <= LocalStorageService.maxOfflineDeskSlot; s++) {
+          if (!used.contains(s)) { slot = s; break; }
+        }
+        if (slot == 0) {
+          // All taken: take over the slot of the desk seen longest ago.
+          final oldest = slots.entries.reduce((a, b) =>
+              ((a.value['seen'] as num?) ?? 0) <= ((b.value['seen'] as num?) ?? 0) ? a : b);
+          slot = (oldest.value['slot'] as num?)?.toInt() ?? 0;
+          slots.remove(oldest.key);
+        }
+        mine = {'slot': slot};
+      }
+      final lastSeen = (mine['seen'] as num?)?.toInt() ?? 0;
+      mine['seen'] = now;
+      slots[deviceKey] = mine;
+      // Write at most every 10 min per desk (a new desk is written at once).
+      if (now - lastSeen > 600000) box.put('lan_offline_desk_slots', slots);
+      return (mine['slot'] as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// First request for a prefix since this server started: also count the tokens already
@@ -128,16 +301,99 @@ class LanServer {
     final requestId = data['requestId']?.toString();
     if (prefix.isEmpty || requestId == null || requestId.isEmpty) return;
     _seedIssuedSeq(prefix);
-    final proposed = (data['proposed'] as num?)?.toInt() ?? 0;
-    final last = _lastIssuedSeq[prefix] ?? 0;
-    final seq = proposed > last ? proposed : last + 1;
-    _lastIssuedSeq[prefix] = seq;
+    // A desk re-sends the same request while it waits; answer it with the same number.
+    final int seq;
+    final repeated = _reservedByRequest[requestId];
+    if (repeated != null) {
+      seq = repeated;
+    } else {
+      var proposed = (data['proposed'] as num?)?.toInt() ?? 0;
+      // An older desk build may propose an offset number (e.g. 501) or an offline-block one;
+      // only a shared-sequence proposal may move the shared counter forward.
+      if (LocalStorageService.isOfflineBandSeq(proposed)) proposed = 0;
+      final last = _lastIssuedSeq[prefix] ?? 0;
+      seq = proposed > last ? proposed : last + 1;
+      _lastIssuedSeq[prefix] = seq;
+      _reservedByRequest[requestId] = seq;
+      if (_reservedByRequest.length > 2000) {
+        _reservedByRequest.remove(_reservedByRequest.keys.first);
+      }
+    }
+    final deskSlot = _deskSlotFor((data['deviceKey'] ?? '').toString());
     try {
       socket.add(jsonEncode({
         'event_type': 'serial_reserved',
         'requestId':  requestId,
         'prefix':     prefix,
         'seq':        seq,
+        if (deskSlot > 0) 'deskSlot': deskSlot,
+      }));
+    } catch (_) {}
+  }
+
+  // ── Dispense approval: one counter per token ──────────────────────────────
+  // Two counters clicking "Dispense" within a second both passed their own local check (each
+  // PC reads its own copy) and both dispensed and deducted stock. Now the dispensing desk asks
+  // this server first; the server is the single place that decides. A lock lasts until the
+  // dispense_completed arrives (the token is then dispensed and every later request is refused)
+  // or 90 s pass (the desk gave up or crashed).
+  final Map<String, ({String holder, String holderName, DateTime at})> _dispenseLocks = {};
+  static const Duration _dispenseLockTtl = Duration(seconds: 90);
+
+  static String _dispenseKey(String serial) {
+    var s = serial.trim().toUpperCase();
+    final m = RegExp(r'(\d{6}[A-Z]?-[A-Z0-9_]+-\d{1,4})$').firstMatch(s);
+    if (m != null) s = m.group(1)!;
+    return s;
+  }
+
+  bool _isDispensedHere(String branch, String serial) {
+    try {
+      if (!Hive.isBoxOpen(LocalStorageService.entriesBox)) return false;
+      final box = Hive.box(LocalStorageService.entriesBox);
+      final b = branch.toLowerCase().trim();
+      for (final k in ['$b-$serial', '${LocalStorageService.sanitizeBranchId(b)}-$serial', serial]) {
+        final v = box.get(k);
+        if (v is Map && (v['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed') return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  void _beginDispense(WebSocket socket, String socketId, Map<String, dynamic> data) {
+    final requestId = data['requestId']?.toString();
+    final serialRaw = (data['serial'] ?? '').toString();
+    if (requestId == null || requestId.isEmpty || serialRaw.trim().isEmpty) return;
+    final key = _dispenseKey(serialRaw);
+    final branch = (data['branchId'] ?? _clientInfo[socket]?['branchId'] ?? '').toString();
+    final me = (_clientInfo[socket]?['clientId'] ?? data['_clientId'] ?? socketId).toString();
+    final myName = (_clientInfo[socket]?['username'] ?? '').toString();
+    final now = DateTime.now();
+
+    String result;
+    String? holderName;
+    if (_isDispensedHere(branch, key)) {
+      result = 'already_dispensed';
+    } else {
+      final held = _dispenseLocks[key];
+      if (held == null || held.holder == me || now.difference(held.at) > _dispenseLockTtl) {
+        _dispenseLocks[key] = (holder: me, holderName: myName, at: now);
+        result = 'granted';
+      } else {
+        result = 'held';
+        holderName = held.holderName;
+      }
+    }
+    if (_dispenseLocks.length > 500) {
+      _dispenseLocks.removeWhere((_, v) => now.difference(v.at) > _dispenseLockTtl);
+    }
+    try {
+      socket.add(jsonEncode({
+        'event_type': 'dispense_lock',
+        'requestId': requestId,
+        'serial': key,
+        'result': result,
+        if (holderName != null && holderName.isNotEmpty) 'holder': holderName,
       }));
     } catch (_) {}
   }
@@ -165,6 +421,7 @@ class LanServer {
   // ── Start ──────────────────────────────────────────────────────────────────
   Future<void> start(String? forcedIp) async {
     try {
+      await _openEventLog();
       _server = await HttpServer.bind(
           InternetAddress.anyIPv4, port, shared: true);
       _isRunning = true;
@@ -272,11 +529,11 @@ class LanServer {
   void _startHeartbeatChecker() {
     _heartbeatTimer?.cancel();
     var lastTick = DateTime.now();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       final now = DateTime.now();
       // A late tick means this server's UI thread was frozen: the desks' pings from that time
       // are still queued, so silence is not evidence of a dead desk. Evict on the next tick.
-      final lateTick = now.difference(lastTick) > const Duration(seconds: 40);
+      final lateTick = now.difference(lastTick) > const Duration(seconds: 20);
       lastTick = now;
       final deadSockets = <WebSocket>[];
       for (final client in List<WebSocket>.from(_clients)) {
@@ -286,7 +543,7 @@ class LanServer {
         }
         final lastActive = _lastActiveTimes[client];
         if (lastActive != null) {
-          if (now.difference(lastActive) > const Duration(seconds: 30)) {
+          if (now.difference(lastActive) > const Duration(seconds: 15)) {
             try {
               client.add(jsonEncode({
                 'type': 'ping',
@@ -297,10 +554,11 @@ class LanServer {
               deadSockets.add(client);
             }
           }
-          // Desks ping every 10 s. A socket silent for 60 s is dead (Wi-Fi drop leaves it
-          // half-open); at 120 s every broadcast in between went into it and was lost. Not
-          // lower: a server busy for a while (big scans) must not evict every desk at once.
-          if (!lateTick && now.difference(lastActive) > const Duration(seconds: 60)) {
+          // Desks ping every 5 s. A socket silent for 35 s is dead (cable re-plugged, desk asleep,
+          // Wi-Fi drop leave it half-open) and everything forwarded into it is lost until the
+          // desk reconnects and catches up — so evict it sooner than the old 60 s. A frozen
+          // server tick (lateTick) still never evicts anyone.
+          if (!lateTick && now.difference(lastActive) > const Duration(seconds: 35)) {
             deadSockets.add(client);
           }
         }
@@ -323,7 +581,8 @@ class LanServer {
         socket.broadcastEnabled = true;
         _udpSocket = socket;
         
-        final payload = utf8.encode('${AppNetwork.udpMessagePrefix}$ipShown:$port');
+        final b = LocalStorageService.sanitizeBranchId(branchId, fallback: '');
+        final payload = utf8.encode('${AppNetwork.udpMessagePrefix}$ipShown:$port${b.isNotEmpty ? ':$b' : ''}');
         final broadcastAddr = InternetAddress('255.255.255.255');
         
         // 5 s is plenty for discovery (was 2 s, plus a duplicate beacon from the server page).
@@ -451,6 +710,9 @@ class LanServer {
           'type': 'pong',
           'event_type': 'pong',
           'serverEpoch': DateTime.now().millisecondsSinceEpoch,
+          // Today's tokens this desk has not confirmed yet (see reportUnconfirmedTokens).
+          if (_unconfirmedBySocket.containsKey(socketId))
+            'unconfirmedTokens': _unconfirmedBySocket[socketId],
         }));
         return;
       }
@@ -468,6 +730,10 @@ class LanServer {
         socket.add(jsonEncode({'type': 'auth_ack', 'status': 'authenticated'}));
         return;
       }
+
+      // Traffic breakdown (see takeTrafficSummary): which desk sends what, how often.
+      final who = (_clientInfo[socket]?['username'] ?? data['_clientId'] ?? socketId).toString();
+      countTraffic('in ${eventType ?? '?'} from $who');
 
       // ── Stress-test replies (probe / token / cleanup acks) ───────────────────
       // Handled by StressTestEngine only: never saved, routed to other devices, or queued.
@@ -497,13 +763,14 @@ class LanServer {
       // ── Identify handshake ────────────────────────────────────────────────
       if (eventType == 'identify') {
         final clientProtocol = (data['protocolVersion'] as num?)?.toInt() ?? 1;
-        if (clientProtocol < 2) {
-          print('[LanServer] ❌ Protocol version mismatch for client $socketId (protocol v$clientProtocol < 2). Rejecting connection.');
+        if (clientProtocol < AutoUpdateService.minProtocolVersion) {
+          print('[LanServer] ❌ Protocol version mismatch for client $socketId (protocol v$clientProtocol < ${AutoUpdateService.minProtocolVersion}). Rejecting connection.');
           socket.add(jsonEncode({
             'type': 'error',
             'event_type': 'version_mismatch',
             'code': 'VERSION_MISMATCH_REJECTED',
-            'message': 'Protocol version mismatch. Please update app to v1.3.7 or higher.'
+            'message': 'This PC runs an older GMWF version than the server '
+                '(server ${AutoUpdateService.currentVersion}). Update GMWF on this PC to connect.',
           }));
           socket.close(4008, 'VERSION_MISMATCH_REJECTED'); // dart:io allows 1000 or 3000-4999 only
           return;
@@ -589,6 +856,14 @@ class LanServer {
           if (!reIdentify) onClientConnected?.call(socketId, info);
           _broadcastClientCount();
           if (!reIdentify) _forwardMissedTo(socket);
+          // Every logged (non-token) event this desk missed since its last applied number.
+          if (!reIdentify) {
+            unawaited(_replayEventLog(
+              socket,
+              (data['lastEventSeq'] as num?)?.toInt() ?? 0,
+              (data['lastEventEpoch'] ?? '').toString(),
+            ));
+          }
 
           // Safely drain any messages the client sent before identify was acknowledged
           final pending = _stagedPreHandshakeMessages.remove(socket);
@@ -621,6 +896,18 @@ class LanServer {
         _reserveSerial(socket, data);
         return;
       }
+      if (eventType == 'begin_dispense') {
+        _beginDispense(socket, socketId, data);
+        return;
+      }
+      if (eventType == 'end_dispense') {
+        final k = _dispenseKey((data['serial'] ?? '').toString());
+        final me = (_clientInfo[socket]?['clientId'] ?? data['_clientId'] ?? socketId).toString();
+        if (_dispenseLocks[k]?.holder == me) _dispenseLocks.remove(k);
+        return;
+      }
+      // (dispense_completed does not release the lock: until this server has saved the dispense,
+      // a released lock would let a second counter in; it simply expires.)
       if (eventType == 'save_entry' || eventType == 'token_created') {
         final inner = data['data'] is Map ? data['data'] as Map : data;
         _noteIssuedSerial((inner['serial'] ?? data['serial'])?.toString());
@@ -713,6 +1000,15 @@ class LanServer {
       if (!_serverOnlyEventTypes.contains(eventType)) {
         final tracked = messageId != null && messageId.isNotEmpty;
         final previous = tracked ? _routed[messageId] : null;
+        // First time this message is forwarded: give it its event-log number (non-token events).
+        if (previous == null) {
+          final logBranch = (enhanced['branchId'] ??
+                  (enhanced['data'] is Map ? (enhanced['data'] as Map)['branchId'] : null) ??
+                  _clientInfo[socket]?['branchId'] ??
+                  '')
+              .toString();
+          _logEvent(enhanced, eventType, logBranch);
+        }
         if (previous != null) {
           previous.reached.addAll(_routeMessage(socket, previous.message, skip: previous.reached));
         } else {
@@ -833,10 +1129,30 @@ class LanServer {
 
   /// Forwards [message] to the identified desks of its branch except [sender] and the desks in
   /// [skip]. Returns the desks it was written to.
+  // ── Traffic breakdown ───────────────────────────────────────────────────────
+  // Counts per "direction type from/to desk" since the last summary, so a flood names its
+  // source in the server log instead of only showing a total msg/min.
+  final Map<String, int> _traffic = {};
+  void countTraffic(String what, [int n = 1]) {
+    _traffic[what] = (_traffic[what] ?? 0) + n;
+    if (_traffic.length > 500) _traffic.remove(_traffic.keys.first);
+  }
+
+  /// The [top] busiest entries since the last call (then resets), e.g.
+  /// "in save_entry from Kashif ×120 · out save_entry (catch-up) ×300".
+  String? takeTrafficSummary({int top = 6}) {
+    if (_traffic.isEmpty) return null;
+    final total = _traffic.values.fold<int>(0, (a, b) => a + b);
+    final sorted = _traffic.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    _traffic.clear();
+    return '$total msgs: ' + sorted.take(top).map((e) => '${e.key} ×${e.value}').join(' · ');
+  }
+
   Set<String> _routeMessage(WebSocket sender, Map<String, dynamic> message, {Set<String>? skip}) {
     final reached = <String>{};
     final senderInfo = _clientInfo[sender];
     if (senderInfo == null) return reached;
+    countTraffic('fwd ${message['event_type'] ?? '?'}');
 
     final senderBranch = senderInfo['branchId'] as String;
     final messageBranch =

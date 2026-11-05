@@ -521,7 +521,12 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
         updated['prescriptionId'] = data['id'] ?? cleanSerial;
         // From the unwrapped copy: `prescriptions ?? medicines` took an empty list over a
         // filled one, and a replay wrapper keeps the medicines nested.
-        final pMeds = updated['prescription']['medicines'];
+        final pMeds = [
+          updated['prescription']['medicines'],
+          updated['prescription']['prescriptions'],
+          data['medicines'],
+          data['prescriptions'],
+        ].firstWhere((v) => v is List && v.isNotEmpty, orElse: () => null);
         if (pMeds is List && pMeds.isNotEmpty) {
           updated['prescriptions'] = pMeds;
           updated['medicines'] = pMeds;

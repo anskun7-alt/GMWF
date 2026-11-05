@@ -613,6 +613,7 @@ class _HomeRouterState extends State<HomeRouter> {
                 m['dispensaryIds'] = ['kapayya', 'haji_camp', 'saddar'];
               }
               debugPrint("HomeRouter: ⚡ Fast authentic role resolution from app_settings (role=${m['role']}, branch=${m['branchId']})");
+              await LocalStorageService.activateRole(m['role'].toString());
               _syncFreshUserProfileInBackground(m);
               return m;
             }

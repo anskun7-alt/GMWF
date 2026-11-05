@@ -12,11 +12,17 @@ class Token {
   });
 
   factory Token.fromMap(Map<String, dynamic> map) {
+    final rawCreated = map['createdAt'];
+    final createdDt = rawCreated is DateTime
+        ? rawCreated
+        : (DateTime.tryParse(rawCreated?.toString() ?? '') ?? DateTime.now());
+    final rawNum = map['number'] ?? map['tokenNumber'];
+    final numVal = rawNum is num ? rawNum.toInt() : (int.tryParse(rawNum?.toString() ?? '') ?? 0);
     return Token(
-      id: map['id'],
-      patientId: map['patientId'],
-      createdAt: DateTime.parse(map['createdAt']),
-      number: map['number'],
+      id: (map['id'] ?? map['serial'] ?? '').toString(),
+      patientId: (map['patientId'] ?? '').toString(),
+      createdAt: createdDt,
+      number: numVal,
     );
   }
 

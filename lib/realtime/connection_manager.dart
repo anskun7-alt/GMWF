@@ -418,6 +418,7 @@ class ConnectionManager {
 
     final found = await LanDiscovery.findServer(
       timeout: const Duration(seconds: 12),
+      branchId: _branchId,
       onStatus: (s) => _emit(ConnectionStatus(
         state: LanConnectionState.searching,
         message: s,

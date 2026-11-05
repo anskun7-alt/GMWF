@@ -134,14 +134,20 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     setState(() => _isLoading = true);
 
     final key = _cacheKey();
+    final nowDt = DateTime.now();
+    final isCurrentMonth = _selectedMonth.year == nowDt.year && _selectedMonth.month == nowDt.month;
     if (!forceRecalculate) {
       final cached = Hive.box(LocalStorageService.reportsCacheBox).get(key);
-      if (cached != null) {
-        setState(() {
-          _reportData = Map<String, dynamic>.from(cached as Map);
-          _isLoading = false;
-        });
-        return;
+      if (cached is Map) {
+        final genAt = DateTime.tryParse(cached['generatedAt']?.toString() ?? '');
+        final isFresh = !isCurrentMonth || (genAt != null && nowDt.difference(genAt).inMinutes < 2);
+        if (isFresh) {
+          setState(() {
+            _reportData = Map<String, dynamic>.from(cached);
+            _isLoading = false;
+          });
+          return;
+        }
       }
     }
 
@@ -294,7 +300,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
             }
           }
 
-          final q = d['quantityAdded'] ?? d['quantity'];
+          final q = d['quantityAdded'];
           final qty = (q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0);
           final rawTs = d['createdAt'] ?? d['timestamp'];
           final ts = rawTs is DateTime ? rawTs : (DateTime.tryParse(rawTs?.toString() ?? '') ?? DateTime.now());
@@ -304,6 +310,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
           if (ts.year == selectedYear && ts.month == selectedMonthVal) {
             final isProforma = action == 'add_proforma_stock' || action == 'add_from_proforma' || action == 'proforma_add' || action == 'proforma_import';
             final isReg = action == 'medicine_registered_directly' || action == 'medicine_registered';
+            final isEdit = action == 'edit_stock' || action == 'medicine_edited';
             final actionLabel = isProforma ? 'Universal Proforma Import' : (isReg ? 'Initial Registration' : 'Restock');
             final performer = d['performedByName'] ?? d['performedBy'] ?? 'Unknown';
             final performerRole = d['performedByRole'] != null ? ' (${d['performedByRole']})' : '';
@@ -311,22 +318,42 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
             final alreadyPresent = logs.any((l) =>
                 l['medicineName'] == medName &&
-                (l['qty'] as num?)?.toDouble() == qty &&
+                (l['qty'] as num?)?.toDouble() == qty.abs() &&
                 (DateTime.parse(l['date']).difference(ts).inMinutes.abs() < 5));
 
             if (!alreadyPresent) {
-              totalAdded += qty;
-              logs.add({
-                'type': 'added',
-                'qty': qty,
-                'date': ts.toIso8601String(),
-                'user': '$performer$performerRole',
-                'msg': '$actionLabel ($medName)',
-                'medicineName': medName,
-                'details': d['details'] ?? '',
-                'isProforma': isProforma,
-                'campTag': campTag,
-              });
+              if (isEdit) {
+                if (q != null) {
+                  totalAdjusted += qty;
+                  logs.add({
+                    'type': qty >= 0 ? 'added' : 'removed',
+                    'qty': qty.abs(),
+                    'date': ts.toIso8601String(),
+                    'user': '$performer$performerRole',
+                    'msg': '${action == 'medicine_edited' ? 'Medicine Edited' : 'Manual Adjustment'} ($medName)',
+                    'medicineName': medName,
+                    'campTag': campTag,
+                  });
+                }
+              } else {
+                final addQty = q != null
+                    ? qty
+                    : ((d['quantity'] is num)
+                        ? (d['quantity'] as num).toDouble()
+                        : (double.tryParse(d['quantity']?.toString() ?? '') ?? 0.0));
+                totalAdded += addQty;
+                logs.add({
+                  'type': 'added',
+                  'qty': addQty,
+                  'date': ts.toIso8601String(),
+                  'user': '$performer$performerRole',
+                  'msg': '$actionLabel ($medName)',
+                  'medicineName': medName,
+                  'details': d['details'] ?? '',
+                  'isProforma': isProforma,
+                  'campTag': campTag,
+                });
+              }
             }
           }
         }
@@ -345,6 +372,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
       double totalRemoved = 0;
 
+      final normBranchPrefix = '${widget.branchId.toLowerCase().trim()}_';
       final fetchFutures = daysToFetch.map((curr) async {
         final dateKey = DateFormat('ddMMyy').format(curr);
         double dayTotalRemoved = 0;
@@ -354,8 +382,9 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
         final localRecords = <Map<String, dynamic>>[];
         if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
           final box = Hive.box(LocalStorageService.dispensaryBox);
+          final targetPrefix = '$normBranchPrefix$dateKey';
           for (final k in box.keys) {
-            if (k.toString().startsWith('${widget.branchId}_$dateKey')) {
+            if (k.toString().toLowerCase().startsWith(targetPrefix)) {
               final v = box.get(k);
               if (v is Map) localRecords.add(Map<String, dynamic>.from(v));
             }
@@ -463,9 +492,11 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               final days = (dQty is num ? dQty.toDouble() : double.tryParse(dQty?.toString() ?? '') ?? 1.0);
               final perDayRaw = rx['quantity'] ?? rx['qty'] ?? 0;
               final perDay = perDayRaw is num ? perDayRaw.toDouble() : double.tryParse(perDayRaw.toString()) ?? 0.0;
-              final isInj = (rx['type']?.toString().toLowerCase().contains('injection') ?? false) ||
-                            (rx['type']?.toString().toLowerCase().contains('drip') ?? false);
-              final qty = isInj ? perDay : (perDay * days);
+              final rxTypeLower = (rx['type'] ?? '').toString().toLowerCase();
+              final rxNameLower = rxName.toString().toLowerCase();
+              final isInj = rxTypeLower.contains('injection') || rxTypeLower.contains('drip');
+              final isSyrup = rxTypeLower.contains('syrup') || rxNameLower.contains('syp') || rxNameLower.contains('syrup');
+              final qty = isSyrup ? 1.0 : (isInj ? perDay : (perDay * days));
               dayTotalRemoved += qty;
 
               final patientName = d['patientName'] ?? d['name'] ?? 'Unknown Patient';

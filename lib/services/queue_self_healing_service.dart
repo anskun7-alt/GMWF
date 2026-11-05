@@ -53,7 +53,7 @@ class QueueSelfHealingService {
     final duplicatesPurged = await LocalStorageService.purgeBloatedSyncQueue();
 
     // 3. Heal all items in sync_queue
-    for (final boxName in [LocalStorageService.syncBox, 'server_sync_queue']) {
+    for (final boxName in [LocalStorageService.syncBox]) {
       try {
         if (!Hive.isBoxOpen(boxName)) {
           await LocalStorageService.openBoxSafe(boxName);
@@ -251,11 +251,11 @@ class QueueSelfHealingService {
     }
 
     // ── 4. STALE BACKOFF REPAIR ────────────────────────────────────────────────
-    // If an item has been sitting with nextRetryAt far in the future or corrupted, clear it
+    // If an item has been sitting with nextRetryAt corrupted (> 48h in the future), clear it
     final nextRetryAtStr = action['nextRetryAt'] as String?;
     if (nextRetryAtStr != null) {
       final nextRetry = DateTime.tryParse(nextRetryAtStr);
-      if (nextRetry != null && nextRetry.difference(DateTime.now()).inMinutes > 15) {
+      if (nextRetry != null && nextRetry.difference(DateTime.now()).inHours > 48) {
         action.remove('nextRetryAt');
         modified = true;
       }

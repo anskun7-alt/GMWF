@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 
 import '../config/constants.dart';
+import '../services/local_storage_service.dart';
 import '../utils/network_utils.dart';
 
 class DiscoveredServer {
@@ -26,13 +27,14 @@ class LanDiscovery {
   static Future<DiscoveredServer?> findServer({
     Duration timeout = const Duration(seconds: 12),
     void Function(String)? onStatus,
+    String? branchId,
   }) async {
     onStatus?.call('Searching for server...');
     debugPrint('LanDiscovery: Starting multi-strategy discovery');
 
     final completer = Completer<DiscoveredServer?>();
 
-    _tryUdp(completer, onStatus);
+    _tryUdp(completer, onStatus, branchId: branchId);
     _tryScan(completer, onStatus);
     _tryMdns(completer, onStatus);
 
@@ -82,7 +84,9 @@ class LanDiscovery {
     }
   }
 
-  static Future<void> _tryUdp(Completer<DiscoveredServer?> c, void Function(String)? s) async {
+  static Future<void> _tryUdp(Completer<DiscoveredServer?> c, void Function(String)? s,
+      {String? branchId}) async {
+    final myBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: '');
     try {
       final sock = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -102,6 +106,13 @@ class LanDiscovery {
               final parts = payload.split(':');
               final ip = parts[0];
               final port = parts.length > 1 ? (int.tryParse(parts[1]) ?? AppNetwork.websocketPort) : AppNetwork.websocketPort;
+              // Another branch's server on the same network: not ours, keep listening. (A
+              // beacon without a branch — older server — is accepted as before.)
+              final serverBranch = parts.length > 2 ? LocalStorageService.sanitizeBranchId(parts[2], fallback: '') : '';
+              if (myBranch.isNotEmpty && serverBranch.isNotEmpty && serverBranch != myBranch) {
+                debugPrint('UDP: ignoring $ip:$port (branch $serverBranch, this desk is $myBranch)');
+                return;
+              }
               if (ip.isNotEmpty) {
                 debugPrint('UDP found: $ip:$port');
                 s?.call('Found server at $ip');

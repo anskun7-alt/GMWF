@@ -46,7 +46,7 @@ PrivilegesRequired=admin
 
 ; ── Premium Modern UI ────────────────────────────────────────
 WizardStyle=modern
-WizardSizePercent=130,125
+WizardSizePercent=150,135
 
 WizardImageStretch=no
 WizardImageFile=Installer\gmwf_wizard_large.bmp
@@ -306,8 +306,8 @@ begin
     ContentW := WizardForm.ClientWidth - SidebarW;
 
     WizardForm.OuterNotebook.SetBounds(SidebarW, 0, ContentW, GBottomSep.Top);
-    WizardForm.MainPanel.SetBounds(SidebarW, 0, ContentW, ScaleY(68));
-    WizardForm.InnerNotebook.SetBounds(0, ScaleY(68), ContentW, WizardForm.OuterNotebook.Height - ScaleY(68));
+    WizardForm.MainPanel.SetBounds(SidebarW, 0, ContentW, ScaleY(74));
+    WizardForm.InnerNotebook.SetBounds(0, ScaleY(74), ContentW, WizardForm.OuterNotebook.Height - ScaleY(74));
   end;
 
   if CurPageID = wpWelcome then
@@ -317,6 +317,11 @@ begin
     WizardForm.NextButton.Caption := 'Finish'
   else
     WizardForm.NextButton.Caption := 'Next →';
+
+  // Responsive button alignment
+  WizardForm.CancelButton.Left := WizardForm.ClientWidth - WizardForm.CancelButton.Width - ScaleX(24);
+  WizardForm.NextButton.Left := WizardForm.CancelButton.Left - WizardForm.NextButton.Width - ScaleX(10);
+  WizardForm.BackButton.Left := WizardForm.NextButton.Left - WizardForm.BackButton.Width - ScaleX(8);
 
   // Dynamically update sidebar stepper and framing
   UpdateGMWFSidebar(CurPageID);

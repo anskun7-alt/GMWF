@@ -1406,13 +1406,13 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
             'performedByRole': performedByRole,
             'performedByEmail': performedByEmail,
             'details': 'Restocked +$qty units of $name ($type $dose, New Total: $newTotalQty) from Universal Proforma Catalog by $addedBy ($performedByRole)',
-            'timestamp': FieldValue.serverTimestamp(),
+            'timestamp': DateTime.now().toIso8601String(),
             'createdAt': DateTime.now().toIso8601String(),
           };
 
           await LocalStorageService.saveLocalInventoryLog(logData);
 
-                   RealtimeManager().sendMessage({
+          RealtimeManager().sendMessage({
             'event_type': RealtimeEvents.saveStockItem,
             'branchId': activeBranch,
             'data': {
@@ -1422,20 +1422,18 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
             'logData': logData,
           });
 
-          // LAN Server First routing: the server syncs to Firestore.
-          // If offline or LAN disconnected, enqueue locally for background sync without blocking UI.
-          if (!RealtimeManager().isConnected) {
-            await LocalStorageService.enqueueSync({
-              'type': 'add_inventory_stock',
-              'branchId': activeBranch,
-              'medicineId': existingDocId,
-              'quantity': qty,
-              'campId': activeCamp,
-              'dispensaryId': activeCamp,
-              'data': updatedStock,
-              'logData': logData,
-            });
-          }
+          // LAN Server First routing: a LAN client desk delegates to the LAN server;
+          // the LAN Server PC itself (or any offline/standalone PC) enqueues for Firestore sync.
+          await LocalStorageService.enqueueSync({
+            'type': 'add_inventory_stock',
+            'branchId': activeBranch,
+            'medicineId': existingDocId,
+            'quantity': qty,
+            'campId': activeCamp,
+            'dispensaryId': activeCamp,
+            'data': updatedStock,
+            'logData': logData,
+          });
           continue;
         }
 
@@ -1502,7 +1500,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           'performedByRole': performedByRole,
           'performedByEmail': performedByEmail,
           'details': 'Added $qty units of $name ($type $dose, Expiry: $exp, Price: PKR $price) from Universal Proforma Catalog by $addedBy ($performedByRole)',
-          'timestamp': FieldValue.serverTimestamp(),
+          'timestamp': DateTime.now().toIso8601String(),
           'createdAt': DateTime.now().toIso8601String(),
         };
 
@@ -1517,15 +1515,13 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           'logData': logData,
         });
 
-        // Offline resilience: if LAN disconnected, enqueue locally without blocking UI
-        if (!RealtimeManager().isConnected) {
-          await LocalStorageService.enqueueSync({
-            'type': 'add_proforma_stock',
-            'branchId': activeBranch,
-            'data': stockData,
-            'logData': logData,
-          });
-        }
+        // Offline & LAN Server resilience: enqueue locally (enqueueSync delegates when a LAN client is linked to a LAN server)
+        await LocalStorageService.enqueueSync({
+          'type': 'add_proforma_stock',
+          'branchId': activeBranch,
+          'data': stockData,
+          'logData': logData,
+        });
       }
 
       if (!mounted) return;

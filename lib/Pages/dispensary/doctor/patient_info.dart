@@ -685,17 +685,12 @@ class PatientInfo extends StatelessWidget {
               patient['vitals'] = vitals;
 
               // Save to Hive
-              final serial = patient['serial']?.toString() ?? '';
-              final bId    = branchId ?? patient['branchId']?.toString() ?? '';
+              final serial = patient['serial']?.toString().trim() ?? '';
+              final bId    = (branchId ?? patient['branchId']?.toString() ?? '').trim();
               if (serial.isNotEmpty && bId.isNotEmpty) {
-                final entryKey = '$bId-$serial';
-                final box = await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
-                final existing = box.get(entryKey);
-                if (existing != null) {
-                  final updatedEntry = Map<String, dynamic>.from(existing);
-                  updatedEntry['vitals'] = vitals;
-                  await box.put(entryKey, updatedEntry);
-
+                await LocalStorageService.updateLocalEntryField(bId, serial, {'vitals': vitals});
+                final updatedEntry = LocalStorageService.getLocalEntry(bId, serial);
+                if (updatedEntry != null) {
                   try {
                     RealtimeManager().sendMessage({
                       ...RealtimeEvents.payload(

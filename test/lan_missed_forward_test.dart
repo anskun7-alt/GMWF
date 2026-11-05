@@ -44,7 +44,7 @@ void main() {
       'event_type': 'identify',
       'role': role,
       'branchId': 'karachi',
-      'protocolVersion': 2,
+      'protocolVersion': 3,
       '_clientId': clientId,
       'username': role,
     }));
@@ -80,7 +80,7 @@ void main() {
       'event_type': 'identify',
       'role': 'doctor',
       'branchId': 'karachi',
-      'protocolVersion': 2,
+      'protocolVersion': 3,
       '_clientId': 'doc-1',
       'username': 'doctor',
     }));
@@ -111,7 +111,7 @@ void main() {
       'event_type': 'identify',
       'role': 'doctor',
       'branchId': 'karachi',
-      'protocolVersion': 2,
+      'protocolVersion': 3,
       '_clientId': 'doc-1',
       'username': 'doctor',
     }));

@@ -818,7 +818,8 @@ class _DoctorScreenState extends State<DoctorScreen>
       ).where((e) {
         final st = (e['status'] ?? '').toString().toLowerCase().trim();
         if (st != 'waiting') return false;
-        return CampSessionService.isTokenOnDate(e, todayKey, widget.branchId);
+        return CampSessionService.isTokenOnDate(e, todayKey, widget.branchId) ||
+            CampSessionService.isLateNightCarryOver(e, widget.branchId);
       }).toList();
 
       if (waiting.isNotEmpty) {

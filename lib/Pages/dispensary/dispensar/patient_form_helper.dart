@@ -9,6 +9,35 @@ import 'package:arabic_reshaper/arabic_reshaper.dart';
 import 'package:intl/intl.dart';
 
 class PatientFormHelper {
+  static bool _isSyrup(String t, String n) =>
+      t.contains('syrup') || t.contains('syp') || n.contains('syrup') || n.contains('syp');
+
+  /// "IV" / "I.V." as a word, not inside Multivitamin, Ivermectin, Rivotril, Ativan …
+  static final RegExp ivWord = RegExp(r'(^|[^a-z])i\.?v\.?([^a-z]|$)');
+
+  /// A prescribed item that needs a syringe/needle (injection, drip, infusion, IV).
+  static bool isInjectablePrescription(String type, String name) {
+    final t = type.toLowerCase();
+    final n = name.toLowerCase();
+    if (_isSyrup(t, n) || t.contains('tablet') || t.contains('capsule')) return false;
+    return t.contains('injection') || t.contains('inj') || t.contains('infusion') ||
+        t.contains('drip') || ivWord.hasMatch(t) ||
+        n.startsWith('inj') || n.contains(' inj') || n.contains('inj.') || ivWord.hasMatch(n);
+  }
+
+  /// A stock item that is a syringe. 'syr.' is this app's own TYPE abbreviation for syringe
+  /// (see _getMedAbbrev in patient_form), but in a NAME "Syr." usually means syrup
+  /// ("Syr. Brufen 120ml"), so a name alone never makes a syrup a syringe.
+  static bool isSyringeStockItem(String type, String name, String category) {
+    final t = type.toLowerCase().trim();
+    final n = name.toLowerCase();
+    final c = category.toLowerCase();
+    if (_isSyrup(t, n) || t.contains('susp') || n.contains('suspension')) return false;
+    if (t.contains('syringe') || t == 'syr' || t == 'syr.') return true;
+    if (n.contains('syringe') || n.contains('disp. syr') || n.contains('disposable syr')) return true;
+    return (c.contains('consumable') || c.contains('disposable')) && (n.contains('syr') || t.contains('syr'));
+  }
+
   static final Map<String, Uint8List> _assetCache = {};
   static pw.Font? _cachedUrduFont;
   static pw.Font? _cachedEnglishFont;

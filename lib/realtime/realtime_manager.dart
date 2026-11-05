@@ -66,6 +66,7 @@ import 'package:web_socket_channel/status.dart' as ws_status;
 
 import '../services/auto_update_service.dart';
 import '../services/camp_session_service.dart';
+import '../services/serials_service.dart';
 import 'realtime_events.dart';
 import 'realtime_router.dart';
 import '../services/local_storage_service.dart';
@@ -94,6 +95,32 @@ class RealtimeManager {
 
   // ── LAN Health State (3-up / 2-down Hysteresis) ───────────────────────────
   static final ValueNotifier<bool> isLanHealthyNotifier = ValueNotifier<bool>(false);
+
+  /// Today's tokens the server has but this desk has not confirmed yet (from each pong;
+  /// -1 = unknown, e.g. older server build). 0 means this desk's queue is complete.
+  static final ValueNotifier<int> unconfirmedTokensNotifier = ValueNotifier<int>(-1);
+
+  /// Set when the server refused this PC because its app version is too old.
+  static final ValueNotifier<String?> versionRejectedNotifier = ValueNotifier<String?>(null);
+  DateTime? _unconfirmedAt;
+
+  /// True when this desk may be missing tokens: no server link, or the server reported
+  /// unconfirmed tokens recently. Used to hold "next patient" for a moment.
+  bool get isBehindServer {
+    if (!hasServerLink) return true;
+    final n = unconfirmedTokensNotifier.value;
+    if (n <= 0) return false;
+    final at = _unconfirmedAt;
+    return at != null && DateTime.now().difference(at).inSeconds < 15;
+  }
+
+  /// Number of messages written on this desk that the server has not acknowledged yet.
+  int get unsentCount {
+    try {
+      if (Hive.isBoxOpen(_outboxBox)) return Hive.box(_outboxBox).length;
+    } catch (_) {}
+    return _pendingMessages.length;
+  }
   int _consecutivePingSuccesses = 0;
   int _consecutivePingFailures  = 0;
 
@@ -136,13 +163,20 @@ class RealtimeManager {
     'save_prescription',
     'prescription_created',
     'dispense_completed',
+    'save_patient',
+    'migrate_patient_key',
     'save_stock_item',
+    'delete_stock_item',
     'token_reversal_approved',
     'save_proforma_item',
     'proforma_item_updated',
     'request_created',
     'request_approved',
     'request_rejected',
+    'token_exception_request',
+    'token_exception_approved',
+    'restriction_removed',
+    'update_serial_status',
   };
 
   // ── Back-off schedule (seconds). After the last value, stays at 5 s. ──────
@@ -305,6 +339,7 @@ class RealtimeManager {
       final today = '${now.day.toString().padLeft(2, '0')}${now.month.toString().padLeft(2, '0')}'
           '${(now.year % 100).toString().padLeft(2, '0')}';
       final cutoff = now.subtract(const Duration(hours: 12));
+      final isCloudSyncQueue = name == LocalStorageService.syncBox;
 
       final latest = <String, ({dynamic key, String ts})>{};
       for (final key in src.keys) {
@@ -312,7 +347,7 @@ class RealtimeManager {
         if (raw is! Map) continue;
         final lk = _logicalKey(raw);
         if (lk == null) continue;
-        final ts = (raw['_outboxTimestamp'] ?? raw['createdAt'] ?? '').toString();
+        final ts = (raw['enqueuedAt'] ?? raw['_outboxTimestamp'] ?? raw['createdAt'] ?? '').toString();
         final cur = latest[lk];
         if (cur == null || ts.compareTo(cur.ts) >= 0) latest[lk] = (key: key, ts: ts);
       }
@@ -324,7 +359,7 @@ class RealtimeManager {
         final lk = _logicalKey(raw);
         if (lk != null && latest[lk]?.key != key) continue; // an older copy of the same record
         final item = Map<String, dynamic>.from(raw.map((k, v) => MapEntry(k.toString(), v)));
-        if (!_isCriticalOutboxItem(item)) {
+        if (!isCloudSyncQueue && !_isCriticalOutboxItem(item)) {
           final dk = (item['dateKey'] ?? (item['data'] is Map ? item['data']['dateKey'] : null))?.toString().trim();
           final ts = DateTime.tryParse((item['_outboxTimestamp'] ?? item['createdAt'] ?? item['_failedAt'] ?? '').toString());
           final stale = (dk != null && dk.isNotEmpty && dk != today) ||
@@ -397,10 +432,11 @@ class RealtimeManager {
   static const Duration _catchUpCoalesceWindow = Duration(seconds: 3);
 
   /// Returns true if a request was actually sent.
-  bool requestCatchUp({String? branchId}) {
+  bool requestCatchUp({String? branchId, bool force = false, String? reason}) {
     if (!_isConnected || !_serverIdentified) return false;
     final now = DateTime.now();
-    if (_lastCatchUpRequestAt != null &&
+    if (!force &&
+        _lastCatchUpRequestAt != null &&
         now.difference(_lastCatchUpRequestAt!) < _catchUpCoalesceWindow) {
       return false;
     }
@@ -408,6 +444,8 @@ class RealtimeManager {
     sendMessage({
       'event_type': 'request_catch_up',
       'branchId': branchId ?? _branchId,
+      if (force) 'force': true,
+      if (reason != null && reason.isNotEmpty) 'reason': reason,
     });
     return true;
   }
@@ -443,6 +481,8 @@ class RealtimeManager {
           'protocolVersion': AutoUpdateService.protocolVersion,
           'appVersion':      AutoUpdateService.currentVersion,
           '_clientId':       _clientId,
+          'lastEventSeq':    _lastLogSeq,
+          'lastEventEpoch':  _lastLogEpoch,
           '_timestamp':      DateTime.now().millisecondsSinceEpoch,
         };
         _channel?.sink.add(jsonEncode(identifyMsg));
@@ -461,7 +501,19 @@ class RealtimeManager {
     _flushedOnConnect = false;
 
     if (_clientId == null || _clientId!.isEmpty) {
-      _clientId = 'client_${const Uuid().v4()}';
+      try {
+        if (Hive.isBoxOpen('app_settings')) {
+          _clientId = Hive.box('app_settings').get('permanent_client_id') as String?;
+        }
+      } catch (_) {}
+      if (_clientId == null || _clientId!.isEmpty) {
+        _clientId = 'client_${const Uuid().v4()}';
+        try {
+          if (Hive.isBoxOpen('app_settings')) {
+            Hive.box('app_settings').put('permanent_client_id', _clientId);
+          }
+        } catch (_) {}
+      }
     }
 
     if (kDebugMode) {
@@ -576,6 +628,8 @@ class RealtimeManager {
         'protocolVersion': AutoUpdateService.protocolVersion,
         'appVersion':      AutoUpdateService.currentVersion,
         '_clientId':       _clientId,
+        'lastEventSeq':    _lastLogSeq,
+        'lastEventEpoch':  _lastLogEpoch,
         '_timestamp':      DateTime.now().millisecondsSinceEpoch,
       };
       _channel!.sink.add(jsonEncode(identifyMsg));
@@ -721,7 +775,18 @@ class RealtimeManager {
         return;
       }
 
+      if (decoded['event_type'] == 'version_mismatch') {
+        versionRejectedNotifier.value =
+            decoded['message']?.toString() ?? 'Update GMWF on this PC to connect to the server.';
+        return;
+      }
+
       if (decoded['event_type'] == 'pong' || decoded['type'] == 'pong') {
+        final n = decoded['unconfirmedTokens'];
+        if (n is num) {
+          unconfirmedTokensNotifier.value = n.toInt();
+          _unconfirmedAt = DateTime.now();
+        }
         return;
       }
 
@@ -733,9 +798,31 @@ class RealtimeManager {
         _onServerIdentified();
       }
 
+      if (decoded['event_type'] == 'event_log_position') {
+        // Sent after the server replayed what this desk missed: all of it up to here is done
+        // (events for other branches or sent by this desk are not replayed but count as seen).
+        final pos = decoded['_logSeq'], ep = decoded['_logEpoch'];
+        _routeChain.whenComplete(() => _noteLogPosition(pos, ep, jumpTo: true));
+        return;
+      }
+
+      if (decoded['event_type'] == 'dispense_lock') {
+        final waiting = _dispenseLockRequests.remove(decoded['requestId']?.toString());
+        if (waiting != null && !waiting.isCompleted) {
+          waiting.complete({
+            'result': decoded['result']?.toString() ?? 'granted',
+            if (decoded['holder'] != null) 'holder': decoded['holder'].toString(),
+          });
+        }
+        return;
+      }
+
       if (decoded['event_type'] == 'serial_reserved') {
         final waiting = _serialRequests.remove(decoded['requestId']?.toString());
         final seq = (decoded['seq'] as num?)?.toInt();
+        // The server's offline token block for this PC (used when the server is unreachable).
+        final deskSlot = (decoded['deskSlot'] as num?)?.toInt();
+        if (deskSlot != null) LocalStorageService.setOfflineDeskSlot(deskSlot).ignore();
         if (waiting != null && !waiting.isCompleted && seq != null) waiting.complete(seq);
         return;
       }
@@ -745,6 +832,45 @@ class RealtimeManager {
         final ackedId = decoded['messageId']?.toString();
         if (ackedId != null && ackedId.isNotEmpty) {
           _removeFromOutboxByMessageId(ackedId);
+          final waiter = _ackWaiters.remove(ackedId);
+          if (waiter != null && !waiter.isCompleted) waiter.complete(true);
+        }
+        return;
+      }
+
+      // [GAP-RECOVERY] Server detected a sequence gap (e.g. Token #2 or #5 arrived while earlier tokens were missing)
+      // and asked this desk to immediately push all missing prior serials in exact numerical order.
+      if (decoded['event_type'] == 'request_missing_serial' || decoded['event_type'] == 'request_missing_serials') {
+        final missingList = <String>[];
+        if (decoded['serials'] is List) {
+          missingList.addAll((decoded['serials'] as List).map((e) => e.toString().trim()).where((s) => s.isNotEmpty));
+        }
+        final singleSerial = decoded['serial']?.toString().trim();
+        if (singleSerial != null && singleSerial.isNotEmpty && !missingList.contains(singleSerial)) {
+          missingList.add(singleSerial);
+        }
+        final reqBranch = (decoded['branchId'] ?? _branchId ?? '').toString().trim().toLowerCase();
+        if (missingList.isNotEmpty && reqBranch.isNotEmpty) {
+          // Sort in ascending numerical order so tokens 1, 2, 3... are re-transmitted in exact order
+          missingList.sort((a, b) {
+            final seqA = parseSequenceFromSerial(a);
+            final seqB = parseSequenceFromSerial(b);
+            return seqA.compareTo(seqB);
+          });
+          for (final missingSerial in missingList) {
+            final localEntry = LocalStorageService.getLocalEntry(reqBranch, missingSerial);
+            if (localEntry != null && localEntry.isNotEmpty) {
+              sendMessage({
+                'event_type': 'save_entry',
+                'branchId': reqBranch,
+                'serial': missingSerial,
+                'dateKey': localEntry['dateKey'] ?? LocalStorageService.getTodayDateKey(),
+                'queueType': localEntry['queueType'] ?? 'zakat',
+                'data': localEntry,
+              });
+            }
+          }
+          unawaited(_flushOutbox());
         }
         return;
       }
@@ -767,11 +893,29 @@ class RealtimeManager {
     final type = (m['event_type'] ?? m['type'])?.toString() ?? '';
     if (type.isEmpty) return null;
     final data = m['data'] is Map ? m['data'] as Map : const {};
+    // A stock change "+N" is an operation, not a record state: two restocks of the same
+    // medicine must both be sent. Keeping only the newest one lost the earlier restock.
+    if (data['_quantityDelta'] != null || m['_quantityDelta'] != null) return null;
     final id = (m['serial'] ?? data['serial'] ?? data['id'] ?? data['patientId'] ?? m['entityId'] ?? data['localId'] ?? '')
         .toString()
         .trim();
     return id.isEmpty ? null : '$type|$id';
   }
+
+  /// Checks whether a business record (e.g. "save_entry|031126M-SADD-001") is currently pending in outbox or in-memory queue.
+  bool isRecordPendingOrUnacked(String logicalKey) {
+    if (_outboxLogical.containsKey(logicalKey)) {
+      final boxKey = _outboxLogical[logicalKey];
+      if (boxKey != null && Hive.isBoxOpen(_outboxBox) && Hive.box(_outboxBox).containsKey(boxKey)) {
+        return true;
+      }
+    }
+    if (_pendingMessages.any((m) => _logicalKey(m) == logicalKey)) return true;
+    return false;
+  }
+
+  /// Triggers an immediate outbox flush so all queued messages are sent in order.
+  Future<void> flushOutboxNow() => _flushOutbox();
 
   // ── Remove outbox entry by messageId (called on server ACK) ──────────────
   void _removeFromOutboxByMessageId(String messageId) {
@@ -837,6 +981,7 @@ class RealtimeManager {
   /// used to set the flag only, skipping the outbox sweep and catch-up, and the real frame
   /// arriving later was then ignored).
   void _onServerIdentified() {
+    versionRejectedNotifier.value = null; // accepted by this server
     _serverIdentified = true;
     // Safety net: remove any stress-test tokens left by a test this device missed. Once per
     // run: both sweeps scan the whole entries box on the UI thread, and on flapping Wi-Fi this
@@ -903,21 +1048,24 @@ class RealtimeManager {
   void _startPingTimer() {
     _pingTimer?.cancel();
     _lastPingTick = DateTime.now();
-    _pingTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    // Ping every 5 s (was 10 s), dead after 20 s without a pong (was 30 s): a desk whose cable
+    // was re-plugged or that woke from sleep reconnects and catches up in ~20-25 s instead of
+    // ~40 s. Not lower yet: the server still handles messages on its UI thread, and a too-short
+    // limit made every desk drop at once when the server was busy for a moment (see below).
+    _pingTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_isConnected || _channel == null) return;
       final now = DateTime.now();
       // This tick came late: the UI thread was frozen (Haji Camp logs: 12–64 s while the
       // receptionist list rebuilt or boxes opened). The server's pongs from that time are still
-      // queued behind this timer, so "no pong for 30 s" would drop a healthy link and start a
+      // queued behind this timer, so "no pong" would drop a healthy link and start a
       // reconnect plus a full catch-up, which froze the desk again. Judge it on the next tick.
-      final lateTick = now.difference(_lastPingTick ?? now).inSeconds > 20;
+      final lateTick = now.difference(_lastPingTick ?? now).inSeconds > 12;
       _lastPingTick = now;
-      // No pong for 30 s → treat the socket as dead. (It was 14 s: whenever the server's UI
+      // No pong for 20 s → treat the socket as dead. (It was 14 s once: whenever the server's UI
       // thread was busy for a moment, every client dropped and reconnected at once, and each
-      // reconnect asked for a full catch-up, which made the server even busier. 45 s then left
-      // a dead link looking alive for most of a minute; the server's long scans now yield.)
-      if (!lateTick && _lastPong != null && now.difference(_lastPong!).inSeconds > 30) {
-        debugPrint('[RealtimeManager] ⚠️ Pong timeout (>30s) → tearing down half-dead socket');
+      // reconnect asked for a full catch-up, which made the server even busier.)
+      if (!lateTick && _lastPong != null && now.difference(_lastPong!).inSeconds > 20) {
+        debugPrint('[RealtimeManager] ⚠️ Pong timeout (>20s) → tearing down half-dead socket');
         _recordHealthFailure();
         _handleDisconnect();
         return;
@@ -937,22 +1085,22 @@ class RealtimeManager {
     });
   }
 
-  // [FIX-P3] Periodic ACK flush every 5 seconds (safety net).
+  // [FIX-P3] Periodic ACK flush every 1 second (fast confirmation to LAN server).
   void _startAckFlushTimer() {
     _ackFlushTimer?.cancel();
-    _ackFlushTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _ackFlushTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_isConnected || !_serverIdentified) return;
       _sendPendingAcks();
     });
   }
 
-  // [FIX-SWEEP] Periodic outbox sweep — catches tokens/prescriptions stuck in
-  // Hive outbox that were written but never delivered (silent WS drops,
+  // [FIX-SWEEP] Periodic outbox sweep every 5 seconds — catches tokens/prescriptions
+  // stuck in Hive outbox that were written but never delivered (silent WS drops,
   // buffering issues, or send appeared to succeed but server never ACK'd).
   // Also retries the failed outbox periodically instead of only on reconnect.
   void _startOutboxSweepTimer() {
     _outboxSweepTimer?.cancel();
-    _outboxSweepTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _outboxSweepTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!_isConnected || !_serverIdentified) return;
       try {
         final box = Hive.box(_outboxBox);
@@ -1092,25 +1240,196 @@ class RealtimeManager {
   /// link or no answer in [timeout] (older server build): the caller uses its own count.
   /// Sent straight to the socket, never through the outbox: a request replayed later would
   /// only use up a number.
+  ///
+  /// A slow server is not an absent one: it used to give up after 1.5 s, so whenever the
+  /// server PC was busy the desk numbered the token itself (an offline-block or out-of-order
+  /// number while the server was actually there). Now the same request is re-sent every
+  /// [attempt] for up to [timeout] while the link is up; the server answers a repeated
+  /// requestId with the same number, so a retry never uses up a second one.
   Future<int?> reserveSerial(String prefix, int proposed,
-      {Duration timeout = const Duration(milliseconds: 1500)}) async {
+      {Duration timeout = const Duration(seconds: 6),
+      Duration attempt = const Duration(seconds: 2)}) async {
     if (!hasServerLink || _channel == null) return null;
     final requestId = const Uuid().v4();
     final waiting = Completer<int>();
     _serialRequests[requestId] = waiting;
+    final deadline = DateTime.now().add(timeout);
+    try {
+      while (DateTime.now().isBefore(deadline)) {
+        if (!hasServerLink || _channel == null) return null; // link really went down
+        _sendRaw({
+          'event_type': 'reserve_serial',
+          'requestId':  requestId,
+          'prefix':     prefix,
+          'proposed':   proposed,
+          'deviceKey':  LocalStorageService.deskDeviceKey,
+        });
+        final left = deadline.difference(DateTime.now());
+        final wait = left < attempt ? left : attempt;
+        if (wait <= Duration.zero) break;
+        try {
+          return await waiting.future.timeout(wait);
+        } on TimeoutException {
+          // re-send the same request
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    } finally {
+      _serialRequests.remove(requestId);
+    }
+  }
+
+  final Map<String, Completer<bool>> _ackWaiters = {};
+
+  // ── Event-log position (see LanServer event log) ──────────────────────────
+  // The last log number applied IN ORDER; events applied out of order wait in [_logAhead]
+  // until the gap closes. Sent with identify, so the server replays exactly what is missing.
+  int _lastLogSeqValue = 0;
+  String _lastLogEpochValue = '';
+  bool _logLoaded = false;
+  final Set<int> _logAhead = {};
+
+  // Loaded on first use (app_settings may not be open yet when this singleton is created).
+  void _ensureLogLoaded() {
+    if (_logLoaded || !Hive.isBoxOpen('app_settings')) return;
+    _logLoaded = true;
+    _lastLogSeqValue = _readLogSeq();
+    _lastLogEpochValue = _readLogEpoch();
+  }
+
+  int get _lastLogSeq {
+    _ensureLogLoaded();
+    return _lastLogSeqValue;
+  }
+
+  set _lastLogSeq(int v) => _lastLogSeqValue = v;
+
+  String get _lastLogEpoch {
+    _ensureLogLoaded();
+    return _lastLogEpochValue;
+  }
+
+  set _lastLogEpoch(String v) => _lastLogEpochValue = v;
+
+  static int _readLogSeq() {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final v = Hive.box('app_settings').get('lan_event_log_seq');
+        if (v is num) return v.toInt();
+      }
+    } catch (_) {}
+    return 0;
+  }
+
+  static String _readLogEpoch() {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        return Hive.box('app_settings').get('lan_event_log_epoch')?.toString() ?? '';
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  void _noteLogPosition(Object? seqRaw, Object? epochRaw, {bool jumpTo = false}) {
+    final seq = seqRaw is num ? seqRaw.toInt() : int.tryParse(seqRaw?.toString() ?? '');
+    final epoch = epochRaw?.toString() ?? '';
+    if (seq == null || epoch.isEmpty) return;
+    if (epoch != _lastLogEpoch) {
+      // A different server log (reinstalled server): start counting from it.
+      _lastLogEpoch = epoch;
+      _lastLogSeq = 0;
+      _logAhead.clear();
+    }
+    if (jumpTo) {
+      // The server's position after a replay: everything up to it was sent to this desk.
+      if (seq > _lastLogSeq) _lastLogSeq = seq;
+      _logAhead.removeWhere((s) => s <= _lastLogSeq);
+    } else if (seq == _lastLogSeq + 1) {
+      _lastLogSeq = seq;
+      while (_logAhead.remove(_lastLogSeq + 1)) {
+        _lastLogSeq++;
+      }
+    } else if (seq > _lastLogSeq + 1) {
+      _logAhead.add(seq);
+      if (_logAhead.length > 1000) _logAhead.remove(_logAhead.reduce((a, b) => a < b ? a : b));
+    }
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        box.put('lan_event_log_seq', _lastLogSeq);
+        if (box.get('lan_event_log_epoch') != _lastLogEpoch) box.put('lan_event_log_epoch', _lastLogEpoch);
+      }
+    } catch (_) {}
+  }
+  final Map<String, Completer<Map<String, String>>> _dispenseLockRequests = {};
+
+  /// Asks the LAN server for permission to dispense [serial] (one counter per token).
+  /// Returns {'result': 'granted' | 'held' | 'already_dispensed', 'holder': name?}, or null
+  /// when there is no server link or no answer (older server build) — the caller then relies
+  /// on its local check.
+  Future<Map<String, String>?> requestDispenseLock(String serial, String branchId,
+      {Duration timeout = const Duration(seconds: 4)}) async {
+    if (!hasServerLink || _channel == null) return null;
+    final requestId = const Uuid().v4();
+    final waiting = Completer<Map<String, String>>();
+    _dispenseLockRequests[requestId] = waiting;
     _sendRaw({
-      'event_type': 'reserve_serial',
-      'requestId':  requestId,
-      'prefix':     prefix,
-      'proposed':   proposed,
+      'event_type': 'begin_dispense',
+      'requestId': requestId,
+      'serial': serial,
+      'branchId': branchId,
+      '_clientId': _clientId,
     });
     try {
       return await waiting.future.timeout(timeout);
     } catch (_) {
       return null;
     } finally {
-      _serialRequests.remove(requestId);
+      _dispenseLockRequests.remove(requestId);
     }
+  }
+
+  /// Gives the dispense permission back (the dispenser cancelled).
+  void releaseDispenseLock(String serial) {
+    if (!hasServerLink || _channel == null) return;
+    _sendRaw({'event_type': 'end_dispense', 'serial': serial, '_clientId': _clientId});
+  }
+
+  /// Waits until the server has acknowledged (saved and forwarded) the message [messageId]
+  /// returned by [sendMessage]. True once acknowledged, false on timeout or without an id.
+  /// The message stays in the outbox either way and is re-sent until acknowledged.
+  Future<bool> waitForServerAck(String? messageId,
+      {Duration timeout = const Duration(seconds: 5)}) async {
+    if (messageId == null || messageId.isEmpty) return false;
+    // Acknowledged already (the outbox entry is removed on ACK)?
+    try {
+      if (Hive.isBoxOpen(_outboxBox) &&
+          !Hive.box(_outboxBox).containsKey(messageId) &&
+          !_deferredOutbox.containsKey(messageId) &&
+          !_pendingMessages.any((m) => m['_messageId'] == messageId)) {
+        return true;
+      }
+    } catch (_) {}
+    final c = _ackWaiters.putIfAbsent(messageId, () => Completer<bool>());
+    try {
+      return await c.future.timeout(timeout);
+    } catch (_) {
+      return false;
+    } finally {
+      if (_ackWaiters[messageId] == c) _ackWaiters.remove(messageId);
+    }
+  }
+
+  /// [sendMessage] that returns the message id, for [waitForServerAck].
+  String sendMessageTracked(Map<String, dynamic> payload) {
+    final p = Map<String, dynamic>.from(payload);
+    final existing = p['_messageId']?.toString() ?? '';
+    final id = existing.isNotEmpty ? existing : _generateMessageId();
+    p['_messageId'] = id;
+    sendMessage(p);
+    return id;
   }
 
   // ── Send ───────────────────────────────────────────────────────────────────
@@ -1189,9 +1508,55 @@ class RealtimeManager {
       return;
     }
 
+    // [UNBREAKABLE SEQUENCE] If sending Token N (e.g. 002 or 005), make sure any prior tokens
+    // 1..(N-1) for this session/camp prefix that are still pending or un-ACKed are flushed FIRST
+    // so Token 1..(N-1) hit the TCP socket before Token N!
+    if (normalized['event_type'] == 'save_entry') {
+      final ser = (normalized['serial'] ?? (normalized['data'] is Map ? normalized['data']['serial'] : null))?.toString().trim() ?? '';
+      final lastDash = ser.lastIndexOf('-');
+      if (lastDash > 0) {
+        final prefix = ser.substring(0, lastDash);
+        final seqStr = ser.substring(lastDash + 1);
+        final seq = int.tryParse(seqStr);
+        if (seq != null && seq > 1 && seq < 9999) {
+          final padWidth = seqStr.length < 3 ? 3 : seqStr.length;
+          bool hasPriorPending = false;
+          // Own number block only (shared 1..999 or offline N*1000+1..), last 50 numbers:
+          // an offline token 1001 used to check 1000 serials here on every send.
+          final blockStart = (seq ~/ LocalStorageService.offlineBandSize) *
+                  LocalStorageService.offlineBandSize + 1;
+          final from = (seq - 50) > blockStart ? seq - 50 : blockStart;
+          for (int i = from; i < seq; i++) {
+            final priorSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
+            if (isRecordPendingOrUnacked('save_entry|$priorSerial')) {
+              hasPriorPending = true;
+              break;
+            }
+          }
+          if (hasPriorPending) {
+            unawaited(_flushOutbox());
+            return;
+          }
+        }
+      }
+    }
+
     try {
       _channel!.sink.add(encoded);
       if (kDebugMode) print('[RealtimeManager] → ${normalized['event_type']} (msgId=${normalized['_messageId']})');
+      // Fast 2.5s un-ACKed check for critical dispensary messages: if a LAN micro-drop
+      // swallowed this frame without throwing on sink.add, re-flush in 2.5s instead of waiting!
+      if (outboxKey != null && _isCriticalOutboxItem(normalized)) {
+        final trackedKey = outboxKey;
+        Timer(const Duration(milliseconds: 2500), () {
+          if (!_isConnected || !_serverIdentified) return;
+          try {
+            if (Hive.isBoxOpen(_outboxBox) && Hive.box(_outboxBox).containsKey(trackedKey)) {
+              _flushOutbox();
+            }
+          } catch (_) {}
+        });
+      }
     } catch (e) {
       if (kDebugMode) print('[RealtimeManager] Socket transmission exception: $e → queuing to pending and reconnecting');
       _pendingMessages.add(normalized);
@@ -1261,10 +1626,50 @@ class RealtimeManager {
       var sentThisPass = 0;
       const maxPerPass = 250; // never push thousands of frames at once; the rest follows shortly
 
-      // Oldest first. Hive returns keys sorted, and the keys are random message ids, so after a
-      // restart a dispense or status update could reach the server before its token.
+      // Oldest and strictly in-order first:
+      // 1. Tokens sharing the same session/camp prefix are sorted strictly by token sequence (001 before 002 before 005).
+      // 2. Lifecycle ordering: token creation before prescription before dispense.
+      // 3. Fallback: queued timestamp.
       final orderedKeys = box.keys.toList()
-        ..sort((a, b) => (queuedAt[a] ?? '').compareTo(queuedAt[b] ?? ''));
+        ..sort((a, b) {
+          final rawA = box.get(a);
+          final rawB = box.get(b);
+          if (rawA is Map && rawB is Map) {
+            final typeA = (rawA['event_type'] ?? rawA['type'])?.toString() ?? '';
+            final typeB = (rawB['event_type'] ?? rawB['type'])?.toString() ?? '';
+            final serA = (rawA['serial'] ?? (rawA['data'] is Map ? rawA['data']['serial'] : null) ?? '').toString().trim().toUpperCase();
+            final serB = (rawB['serial'] ?? (rawB['data'] is Map ? rawB['data']['serial'] : null) ?? '').toString().trim().toUpperCase();
+
+            // Strict sequence sort for token creation
+            if (typeA == 'save_entry' && typeB == 'save_entry' && serA.isNotEmpty && serB.isNotEmpty) {
+              final lastDashA = serA.lastIndexOf('-');
+              final lastDashB = serB.lastIndexOf('-');
+              if (lastDashA > 0 && lastDashB > 0) {
+                final prefixA = serA.substring(0, lastDashA);
+                final prefixB = serB.substring(0, lastDashB);
+                if (prefixA == prefixB) {
+                  final seqA = int.tryParse(serA.substring(lastDashA + 1)) ?? 0;
+                  final seqB = int.tryParse(serB.substring(lastDashB + 1)) ?? 0;
+                  if (seqA != seqB) return seqA.compareTo(seqB);
+                }
+              }
+            }
+
+            // Lifecycle sort for the same serial: token -> prescription -> dispense
+            if (serA.isNotEmpty && serA == serB) {
+              int priority(String t) {
+                if (t == 'save_entry' || t == 'token_created') return 1;
+                if (t == 'save_prescription' || t == 'prescription_created') return 2;
+                if (t == 'dispense_completed') return 3;
+                return 4;
+              }
+              final pA = priority(typeA);
+              final pB = priority(typeB);
+              if (pA != pB) return pA.compareTo(pB);
+            }
+          }
+          return (queuedAt[a] ?? '').compareTo(queuedAt[b] ?? '');
+        });
 
       for (final key in orderedKeys) {
         final raw = box.get(key);
@@ -1328,7 +1733,12 @@ class RealtimeManager {
             toDelete.add(key);
           } else {
             final sends = _outboxCounter('s', key, item['_outboxSends']) + 1;
-            if (sends >= _maxUnackedSends) {
+            // Tokens, prescriptions, dispenses and the like are never set aside: the failed
+            // box was retried only every 5 minutes, so such a message reached the other desks
+            // many minutes late. They keep being re-sent with every sweep until the server
+            // ACKs them (the server parks a message that keeps failing and ACKs it, so this
+            // ends). Only non-critical messages are set aside.
+            if (sends >= _maxUnackedSends && !_isCriticalOutboxItem(item)) {
               _moveToFailedOutbox(key, item, reason: 'no server acknowledgement after $sends sends');
               toDelete.add(key);
             } else {
@@ -1341,7 +1751,9 @@ class RealtimeManager {
 
           // [FAIL-BOX] Track consecutive failures; move to failed box after max.
           final newRetryCount = retryCount + 1;
-          if (newRetryCount >= _maxOutboxRetries) {
+          // The channel broke: a critical message stays in the outbox and goes out with the
+          // first flush after the reconnect (not the 5-minute failed-box retry).
+          if (newRetryCount >= _maxOutboxRetries && !_isCriticalOutboxItem(item)) {
             _moveToFailedOutbox(key, item, reason: e.toString());
             toDelete.add(key);
           } else {
@@ -1381,13 +1793,28 @@ class RealtimeManager {
         eventType == RealtimeEvents.savePrescription ||
         eventType == RealtimeEvents.dispenseCompleted ||
         eventType == RealtimeEvents.savePatient ||
+        eventType == 'migrate_patient_key' ||
         eventType == 'save_donation' ||
         eventType == RealtimeEvents.saveEmployee ||
         eventType == 'save_dispensary_charge' ||
         eventType == 'save_dispensary_record' ||
         eventType == 'update_serial_status' ||
         eventType == 'token_created' ||
-        eventType == 'prescription_created';
+        eventType == 'prescription_created' ||
+        eventType == 'save_stock_item' ||
+        eventType == 'delete_stock_item' ||
+        eventType == 'token_reversal_approved' ||
+        eventType == 'request_created' ||
+        eventType == 'request_approved' ||
+        eventType == 'request_rejected' ||
+        eventType == 'token_exception_request' ||
+        eventType == 'token_exception_approved' ||
+        eventType == 'restriction_removed' ||
+        // Deletes too: dropping one after 12 h or at day change left the record alive on
+        // the other desks.
+        eventType == RealtimeEvents.deleteEntry ||
+        eventType == RealtimeEvents.deletePrescription ||
+        eventType == RealtimeEvents.deletePatient;
   }
 
   // ── [FAIL-BOX] Move an entry to the failed outbox ─────────────────────────
@@ -1605,6 +2032,15 @@ class RealtimeManager {
       return false;
     });
     _routeChain = routed;
+
+    // Event-log position: advanced only once the event was applied.
+    final logSeq = decoded['_logSeq'];
+    if (logSeq != null) {
+      final logEpoch = decoded['_logEpoch'];
+      unawaited(routed.then((ok) {
+        if (ok) _noteLogPosition(logSeq, logEpoch);
+      }));
+    }
 
     if (type == 'save_stock_item') {
       final isCatchUp = decoded['isCatchUp'] == true || decoded['_isReplay'] == true;

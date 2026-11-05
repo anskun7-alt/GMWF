@@ -53,10 +53,16 @@ class SystemMetricsService {
 
   Timer? _timer;
   bool _isQuerying = false;
+  DateTime? _lastMachineQuery;
 
-  /// Every 3 min (was 30 s): each query starts powershell.exe with 3 CIM queries, which
-  /// costs 1–2 s of a full core and a 60–80 MB RAM spike on the i3 clinic PCs.
-  void startMonitoring({Duration interval = const Duration(minutes: 3)}) {
+  /// The whole-machine reading (CPU / RAM / disk) starts powershell.exe with 3 CIM queries,
+  /// which costs 1–2 s of a full core and a 60–80 MB RAM spike on the i3 clinic PCs — and on
+  /// the server PC that is the same machine that has to answer token requests at once. So it
+  /// now runs once at start and then only every [machineInterval] (30 min); between those,
+  /// only this app's own memory is refreshed (free, no process started) every [interval].
+  static const Duration machineInterval = Duration(minutes: 30);
+
+  void startMonitoring({Duration interval = const Duration(minutes: 1)}) {
     _timer?.cancel();
     _queryMetrics();
     _timer = Timer.periodic(interval, (_) => _queryMetrics());
@@ -76,11 +82,21 @@ class SystemMetricsService {
         appRamMb = io.ProcessInfo.currentRss / (1024 * 1024);
       } catch (_) {}
 
-      var cpuKnown = false, ramKnown = false, diskKnown = false;
-      double cpu = 0, ramPct = 0, usedRam = 0, totalRam = 0, diskPct = 0, usedDisk = 0, totalDisk = 0;
-      var drive = '';
+      // Between machine queries keep the last machine reading and only refresh app memory.
+      final prev = _currentSnapshot;
+      var cpuKnown = prev.cpuKnown, ramKnown = prev.ramKnown, diskKnown = prev.diskKnown;
+      double cpu = prev.cpuPercent, ramPct = prev.ramPercent, usedRam = prev.usedRamGb,
+          totalRam = prev.totalRamGb, diskPct = prev.diskPercent, usedDisk = prev.usedDiskGb,
+          totalDisk = prev.totalDiskGb;
+      var drive = prev.diskDrive;
+      final machineDue = _lastMachineQuery == null ||
+          DateTime.now().difference(_lastMachineQuery!) >= machineInterval;
 
-      if (io.Platform.isWindows) {
+      if (io.Platform.isWindows && machineDue) {
+        _lastMachineQuery = DateTime.now();
+        cpuKnown = false;
+        ramKnown = false;
+        diskKnown = false;
         // One short PowerShell query (async, off the UI thread) every 30 s. Measures the whole
         // machine: CPU load, physical memory, and the drive the app is installed on.
         drive = io.Platform.resolvedExecutable.isNotEmpty ? io.Platform.resolvedExecutable.substring(0, 2) : 'C:';

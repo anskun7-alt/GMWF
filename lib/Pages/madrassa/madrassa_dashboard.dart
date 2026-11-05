@@ -1339,7 +1339,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
             MadrassaLocalStorage.downloadStudents(widget.branchId, force: true),
             MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month),
             MadrassaLocalStorage.downloadHolidays(widget.branchId),
-            uploadFuture.timeout(const Duration(seconds: 15), onTimeout: () => null),
+            uploadFuture.timeout(const Duration(seconds: 30), onTimeout: () => null),
           ]);
           final downloaded = (downloadResults[0] as bool?) ?? false;
           final pending = MadrassaLocalStorage.pendingStudentUploads();

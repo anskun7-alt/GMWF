@@ -525,11 +525,24 @@ class DispensaryNotifier
           LocalStorageService.getBranchDayCache(branchId, dayKey, 'dispensary');
       if (cached != null && cached.isNotEmpty) return cached;
       final docs = await _fetchDispensaryDocsForDay(dayKey);
-      if (docs.isNotEmpty) {
-        await LocalStorageService.putBranchDayCache(
-            branchId, dayKey, 'dispensary', docs);
+      if (docs.isEmpty) return docs;
+      List<Map<String, dynamic>> enriched;
+      try {
+        enriched = await LocalStorageService.enrichRawDocs(branchId, docs);
+      } catch (_) {
+        enriched = _fallbackEnrich(docs);
       }
-      return docs;
+      final displayFormat = DateFormat('dd MMM yyyy');
+      for (final d in enriched) {
+        d['dispenseDate'] =
+            displayFormat.format(_parseDispensedAt(d['dispensedAt'], dayKey));
+        d['type'] = _resolveType(d);
+      }
+      if (enriched.isNotEmpty) {
+        await LocalStorageService.putBranchDayCache(
+            branchId, dayKey, 'dispensary', enriched);
+      }
+      return enriched;
     } catch (e) {
       debugPrint('[DispensaryNotifier] _fetchDispensaryDocsCached note for $dayKey: $e');
       return const <Map<String, dynamic>>[];
@@ -1007,16 +1020,6 @@ class DispensaryNotifier
               }
             } catch (_) {}
           }
-        }
-
-        // Cache the full day's results locally in Hive so repeat queries hit 0 quota
-        if (newlyDownloaded) {
-          await LocalStorageService.putBranchDayCache(
-            targetBranchId,
-            dayKey,
-            'dispensary',
-            combined.values.toList(),
-          );
         }
       }
     } catch (e) {

@@ -754,10 +754,19 @@ class ServerSyncManager {
     }
 
     if (existing != null) {
+      if (!LocalStorageService.mayReplacePrescription(prescWithBranch, existing['prescription'])) {
+        return;
+      }
       final upd = Map<String, dynamic>.from(existing);
       upd['status']      = 'completed';
       upd['completedAt'] = data['completedAt'] ?? DateTime.now().toIso8601String();
-      upd['prescription'] = prescWithBranch;
+      final embeddedRx   = LocalStorageService.prescriptionForEmbedding(prescWithBranch);
+      upd['prescription'] = embeddedRx;
+      final rxMeds = embeddedRx['medicines'] ?? embeddedRx['prescriptions'] ?? data['medicines'] ?? data['prescriptions'];
+      if (rxMeds is List && rxMeds.isNotEmpty) {
+        upd['medicines'] = rxMeds;
+        upd['prescriptions'] = rxMeds;
+      }
       if (data['doctorName'] != null) upd['doctorName'] = data['doctorName'];
       if (data['doctorId'] != null) upd['doctorId'] = data['doctorId'];
       if (data['daysOfMedicine'] != null) upd['daysOfMedicine'] = data['daysOfMedicine'];
@@ -1784,20 +1793,41 @@ class ServerSyncManager {
             .collection(queueType).doc(upperSerial)
             .set(updateMap, SetOptions(merge: true));
 
-        // Direct write to prescriptions collections
+        // Direct write to prescriptions collections (patientId scoped to strictly separate child and adult records)
         final cnic = (op['cnic'] ?? _cleanCnic(cleanData['patientCnic']?.toString() ?? '')).toString();
-        if (cnic.isNotEmpty) {
+        final rawPid = (cleanData['patientId'] ?? op['patientId'])?.toString().trim();
+        final patientKey = (rawPid != null && rawPid.isNotEmpty && rawPid != 'unknown')
+            ? rawPid
+            : LocalStorageService.resolveIndividualPatientId(cleanData);
+        final prescriptionPayload = Map<String, dynamic>.from(cleanData)..addAll(updateMap);
+
+        if (patientKey.isNotEmpty) {
+          try {
+            await _db.collection('branches').doc(branchId)
+                .collection('prescriptions').doc(patientKey)
+                .collection('prescriptions').doc(upperSerial)
+                .set(prescriptionPayload, SetOptions(merge: true));
+          } catch (_) {}
+          try {
+            await _db.collection('branches').doc(branchId)
+                .collection('patients').doc(patientKey)
+                .collection('prescriptions').doc(upperSerial)
+                .set(prescriptionPayload, SetOptions(merge: true));
+          } catch (_) {}
+        }
+
+        if (cnic.isNotEmpty && cnic != patientKey) {
           try {
             await _db.collection('branches').doc(branchId)
                 .collection('prescriptions').doc(cnic)
                 .collection('prescriptions').doc(upperSerial)
-                .set(Map<String, dynamic>.from(cleanData)..addAll(updateMap), SetOptions(merge: true));
+                .set(prescriptionPayload, SetOptions(merge: true));
           } catch (_) {}
           try {
             await _db.collection('branches').doc(branchId)
                 .collection('patients').doc(cnic)
                 .collection('prescriptions').doc(upperSerial)
-                .set(Map<String, dynamic>.from(cleanData)..addAll(updateMap), SetOptions(merge: true));
+                .set(prescriptionPayload, SetOptions(merge: true));
           } catch (_) {}
         }
 
@@ -2633,9 +2663,12 @@ class ServerSyncManager {
 
     if (bId != null && pId.isNotEmpty) {
       LocalStorageService.saveMedicineRestriction(
-        branchId: bId,
-        patientId: pId,
-        daysCovered: days,
+        branchId:     bId,
+        patientId:    pId,
+        daysCovered:  days,
+        patientName:  (data['patientName'] ?? data['name'] ?? full['patientName'])?.toString(),
+        guardianCnic: (data['guardianCnic'] ?? full['guardianCnic'])?.toString(),
+        phone:        (data['phone'] ?? data['contactNumber'] ?? full['phone'])?.toString(),
       );
       debugPrint('[SSM] 💊 Multi-day restriction applied: $pId ($days days)');
     }

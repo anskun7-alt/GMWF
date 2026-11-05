@@ -72,6 +72,13 @@ class SyncService {
   bool _isUploading = false;
   bool get isUploading => _isUploading;
   DateTime? _uploadStartedAt;
+  /// A pass is treated as hung only after this long without progress. Must exceed the
+  /// per-item limit (120 s): at 90 s a legitimately slow item let a second pass start, and
+  /// both uploaded the same items (stock increments counted twice).
+  static const int _hungPassSeconds = 150;
+  /// Generation of the running pass; an abandoned (hung) pass must not clear the flag of the
+  /// pass that replaced it when it finally ends.
+  int _uploadGen = 0;
   String? _currentBranchId;
   List<String> _authorizedBranches = [];
   String? _currentUserRole;
@@ -1884,8 +1891,8 @@ class SyncService {
     // _uploadStartedAt is refreshed per item, so this only fires when a pass made no progress
     // for 90 s. (It used to fire 25 s after a pass *started*, and forced syncs reset it outright,
     // so two passes ran at once and uploaded the same items twice.)
-    if (_isUploading && _uploadStartedAt != null && DateTime.now().difference(_uploadStartedAt!).inSeconds > 90) {
-      debugPrint('[SyncService] ⚠️ Resetting hung _isUploading watchdog after 90s without progress');
+    if (_isUploading && _uploadStartedAt != null && DateTime.now().difference(_uploadStartedAt!).inSeconds > _hungPassSeconds) {
+      debugPrint('[SyncService] ⚠️ Resetting hung _isUploading watchdog after ${_hungPassSeconds}s without progress');
       _isUploading = false;
     }
 
@@ -2169,8 +2176,8 @@ class SyncService {
       return;
     }
     if (_isUploading) {
-      if (_uploadStartedAt != null && DateTime.now().difference(_uploadStartedAt!).inSeconds > 90) {
-        debugPrint('[SyncService] ⚠️ Resetting hung _isUploading watchdog after 90s in _uploadPending');
+      if (_uploadStartedAt != null && DateTime.now().difference(_uploadStartedAt!).inSeconds > _hungPassSeconds) {
+        debugPrint('[SyncService] ⚠️ Resetting hung _isUploading watchdog after ${_hungPassSeconds}s in _uploadPending');
         _isUploading = false;
       } else {
         // Never run two passes at once (they upload the same items twice). A forced sync
@@ -2184,6 +2191,7 @@ class SyncService {
       }
     }
     _isUploading = true;
+    final myUploadGen = ++_uploadGen;
     UiStallMonitor.mark('sync: upload pass');
     _uploadStartedAt = DateTime.now();
     ServerSyncCoordinator.markStarted(isServer: false);
@@ -2355,7 +2363,10 @@ class SyncService {
             return true;
           } else {
             final nextRetry = DateTime.tryParse(nextRetryAtStr);
-            if (nextRetry == null || !DateTime.now().isBefore(nextRetry) || nextRetry.difference(DateTime.now()).inSeconds > 30) {
+            // Only bypass future nextRetryAt if clock skew pushed it > 48 hours ahead.
+            if (nextRetry == null ||
+                !DateTime.now().isBefore(nextRetry) ||
+                nextRetry.difference(DateTime.now()) > const Duration(hours: 48)) {
               return true;
             } else {
               if (earliestBackoff == null || nextRetry.isBefore(earliestBackoff!)) {
@@ -2372,8 +2383,11 @@ class SyncService {
         }
 
         final readyBacklogKeys = <dynamic>[];
-        for (final k in rawBacklogKeys) {
-          if (isKeyReady(k)) readyBacklogKeys.add(k);
+        final canRunBacklog = force || (QuotaService.backlogBudgetAvailable && !QuotaService.isPausedForDailyReset);
+        if (canRunBacklog) {
+          for (final k in rawBacklogKeys) {
+            if (isKeyReady(k)) readyBacklogKeys.add(k);
+          }
         }
 
         // Dependency Promotion: If a live action references a patient, token, or student that is pending in backlog,
@@ -2393,9 +2407,10 @@ class SyncService {
           }
         }
 
+        final promotedFromBacklog = <dynamic>{};
         if (livePatientIds.isNotEmpty || liveSerials.isNotEmpty || liveStudentIds.isNotEmpty) {
           final promoted = <dynamic>[];
-          for (final bk in readyBacklogKeys) {
+          for (final bk in rawBacklogKeys) {
             final raw = candidateData[bk];
             if (raw != null) {
               final type = (raw['type'] ?? '').toString();
@@ -2413,7 +2428,8 @@ class SyncService {
           }
           for (final pk in promoted) {
             readyBacklogKeys.remove(pk);
-            readyLiveKeys.add(pk);
+            if (!readyLiveKeys.contains(pk)) readyLiveKeys.add(pk);
+            promotedFromBacklog.add(pk);
           }
         }
 
@@ -2489,17 +2505,28 @@ class SyncService {
           }
 
         final action   = Map<String, dynamic>.from(raw);
+        // Revision of the queued item when this upload started. enqueueSync merges a newer edit
+        // into the same key (and stamps a new enqueuedAt) while the upload is in flight; the
+        // item must then stay queued (success) and must not be overwritten with this older
+        // copy (failure) — both lost the newer edit, e.g. a dispense merged into a token upload.
+        final startRevision = raw['enqueuedAt']?.toString();
+        bool changedSinceStart() {
+          final cur = queueBox.get(key);
+          return cur is Map && cur['enqueuedAt']?.toString() != startRevision;
+        }
         // Self-heal action payload on the fly (repairs missing camp, invalid branch, corrupt date)
         QueueSelfHealingService.healAction(action, fallbackBranch: _currentBranchId);
         final type     = action['type'] as String? ?? 'unknown';
         final attempts = (action['attempts'] as int?) ?? 0;
 
-        // Exponential backoff check - only skip if backoff is active and <= 30 seconds away
+        // Exponential backoff check - skip if backoff is active (unless clock-skewed > 48h)
         final nextRetryAtStr = action['nextRetryAt'] as String?;
-        if (!force && nextRetryAtStr != null) {
+        if (!force && nextRetryAtStr != null && !promotedFromBacklog.contains(key)) {
           final nextRetry = DateTime.tryParse(nextRetryAtStr);
-          if (nextRetry != null && DateTime.now().isBefore(nextRetry) && nextRetry.difference(DateTime.now()).inSeconds <= 30) {
-            continue; // Skip key until short backoff window expires
+          if (nextRetry != null &&
+              DateTime.now().isBefore(nextRetry) &&
+              nextRetry.difference(DateTime.now()) <= const Duration(hours: 48)) {
+            continue; // Skip key until backoff window expires
           }
         }
 
@@ -2516,17 +2543,25 @@ class SyncService {
           continue;
         }
 
-        // Defer backlog item if the per-PC daily backlog budget is exhausted
-        if (!force && _isBacklogItem(action)) {
+        // Defer backlog item if the per-PC daily backlog budget is exhausted (unless promoted as parent of a live item)
+        if (!force && _isBacklogItem(action) && !promotedFromBacklog.contains(key)) {
           if (!QuotaService.backlogBudgetAvailable) {
-            action['nextRetryAt'] = QuotaService.nextDailyReset().toLocal().toIso8601String();
-            await queueBox.put(key, action);
+            final targetReset = QuotaService.nextDailyReset().toLocal();
+            final existingRetry = nextRetryAtStr != null ? DateTime.tryParse(nextRetryAtStr) : null;
+            if (existingRetry == null || existingRetry.isBefore(targetReset.subtract(const Duration(minutes: 1)))) {
+              action['nextRetryAt'] = targetReset.toIso8601String();
+              await queueBox.put(key, action);
+            }
             backlogDeferred++;
             continue;
           }
           if (QuotaService.isPausedForDailyReset) {
-            action['nextRetryAt'] = DateTime.now().add(const Duration(seconds: 30)).toIso8601String();
-            await queueBox.put(key, action);
+            final targetPause = DateTime.now().add(const Duration(seconds: 30));
+            final existingRetry = nextRetryAtStr != null ? DateTime.tryParse(nextRetryAtStr) : null;
+            if (existingRetry == null || !DateTime.now().isBefore(existingRetry)) {
+              action['nextRetryAt'] = targetPause.toIso8601String();
+              await queueBox.put(key, action);
+            }
             backlogDeferred++;
             continue;
           }
@@ -2839,16 +2874,16 @@ class SyncService {
                 fsData.remove('status');
               }
               await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(upperSerial).set(fsData, SetOptions(merge: true));
-              try {
-                await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial).set(fsData, SetOptions(merge: true));
-              } catch (_) {}
+              // The dispense and prescription copies are part of this item: a failure here used
+              // to be swallowed and the item deleted as uploaded, so the cloud kept the token but
+              // lost its prescription/dispense for good. Failing the item retries it; all writes
+              // are merges on fixed document ids, so a retry is safe.
+              await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial).set(fsData, SetOptions(merge: true));
 
               // Direct write embedded prescription to patient timeline so historical data is easily found
               final pCnic = (fsData['patientCnic'] ?? fsData['cnic'] ?? '').toString().trim();
               if (pCnic.isNotEmpty && (fsData['prescription'] != null || fsData['medicines'] != null || fsData['doctorName'] != null)) {
-                try {
-                  await _db.collection('branches').doc(branchId).collection('prescriptions').doc(pCnic).collection('prescriptions').doc(upperSerial).set(fsData, SetOptions(merge: true));
-                } catch (_) {}
+                await _db.collection('branches').doc(branchId).collection('prescriptions').doc(pCnic).collection('prescriptions').doc(upperSerial).set(fsData, SetOptions(merge: true));
                 // (No unread copy under patients/{cnic}/prescriptions.)
               }
 
@@ -3029,12 +3064,10 @@ class SyncService {
                 if (data['dispensedBy'] != null) 'dispensedBy': data['dispensedBy'],
                 if (data['completedAt'] != null) 'completedAt': data['completedAt'],
               };
-              try {
-                await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(upperSerial).set(statusPatch, SetOptions(merge: true));
-              } catch (_) {}
-              try {
-                await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial).set(Map<String, dynamic>.from(data)..addAll(statusPatch), SetOptions(merge: true));
-              } catch (_) {}
+              // These are this item's only writes: swallowing their errors deleted a dispense
+              // record that never reached the cloud. Merges on fixed ids — safe to retry.
+              await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(upperSerial).set(statusPatch, SetOptions(merge: true));
+              await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial).set(Map<String, dynamic>.from(data)..addAll(statusPatch), SetOptions(merge: true));
             }
           }
           else if (type == 'save_dispensary_charge') {
@@ -3073,13 +3106,14 @@ class SyncService {
                 serial: serialHint,
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
-              // Zero-read atomic update using FieldValue.increment. 'updatedAt' is what the
-              // inventory delta download filters on; without it stock changes never came back.
-              await docRef.set({
-                'quantity': FieldValue.increment(delta),
-                'lastUpdated': FieldValue.serverTimestamp(),
-                'updatedAt': FieldValue.serverTimestamp(),
-              }, SetOptions(merge: true));
+              // Applied once per txId ('updatedAt' is what the inventory delta download filters on).
+              await _incrementStockOnce(
+                branchId: branchId,
+                docRef: docRef,
+                txId: (action['txId'] ?? key).toString(),
+                amount: delta,
+                isRetry: attempts > 0 || action['lastAttempt'] != null || action['lastError'] != null,
+              );
             }
           }
           else if (type == 'add_inventory_stock') {
@@ -3100,13 +3134,14 @@ class SyncService {
                 serial: serialHint,
               );
               final docRef = _db.collection('branches').doc(branchId).collection(invCol).doc(medicineId);
-              // Zero-read atomic update using FieldValue.increment. 'updatedAt' is what the
-              // other PCs' inventory delta pull filters on.
-              await docRef.set({
-                'quantity': FieldValue.increment(qty),
-                'lastUpdated': FieldValue.serverTimestamp(),
-                'updatedAt': FieldValue.serverTimestamp(),
-              }, SetOptions(merge: true));
+              // Applied once per txId ('updatedAt' is what the other PCs' inventory pull filters on).
+              await _incrementStockOnce(
+                branchId: branchId,
+                docRef: docRef,
+                txId: txId,
+                amount: qty,
+                isRetry: attempts > 0 || action['lastAttempt'] != null || action['lastError'] != null,
+              );
 
               // Add to audit log using txId as document ID to prevent duplicate log items on retry
               await _db
@@ -4624,17 +4659,18 @@ class SyncService {
               return;
             }
             var bId = (action['branchId']?.toString() ?? branchId).toLowerCase().trim();
-            if (bId.isEmpty || bId == 'all' || bId == 'global') {
+            var normBId = MadrassaLocalStorage.normalizeBranch(bId);
+            if (normBId == 'all' || normBId == 'global' || normBId.isEmpty) {
               final studentBranch = (data['branchId'] ?? data['branch'] ?? '').toString().toLowerCase().trim();
-              if (studentBranch.isNotEmpty && studentBranch != 'all' && studentBranch != 'global') {
-                bId = studentBranch;
+              final normStdBranch = MadrassaLocalStorage.normalizeBranch(studentBranch);
+              if (normStdBranch != 'all' && normStdBranch != 'global' && normStdBranch.isNotEmpty) {
+                bId = normStdBranch;
               } else {
                 bId = 'gujrat';
               }
+            } else {
+              bId = normBId;
             }
-            // Same folding as the LAN server and the daily-log uploader ('grt' → 'gujrat');
-            // the raw id put a PC's students in a folder no other screen read.
-            bId = MadrassaLocalStorage.normalizeBranch(bId);
             data['branchId'] = bId;
             if (studentId.contains('__std__')) {
               studentId = studentId.split('__std__').last.trim();
@@ -5028,8 +5064,13 @@ class SyncService {
             await _db.collection('branches').doc(branchId).collection('sync_records').doc(recId).set(fsData, SetOptions(merge: true));
           }
 
-          await _markLocalRecordSynced(action);
-          await queueBox.delete(key);
+          if (changedSinceStart()) {
+            // A newer edit was merged in while this one uploaded: keep it for the next pass.
+            debugPrint('[SyncService] ↪️ $key changed during upload — newer version stays queued');
+          } else {
+            await _markLocalRecordSynced(action);
+            await queueBox.delete(key);
+          }
           debugPrint('[SyncService] ✅ Uploaded [$type] key: $key successfully! (${queueBox.length} remaining in queue)');
           if (['update_inventory', 'add_inventory_stock', 'register_medicine', 'save_token_exception_request', 'approve_token_exception'].contains(type)) {
             await _resolveInventorySyncFailure(key, branchId);
@@ -5052,11 +5093,14 @@ class SyncService {
             _lanDeferredUntil[key] = DateTime.now().add(_lanDeferral);
             continue;
           }
+          // A newer edit merged in during the upload replaces this one: never write the older
+          // copy back over it (it is uploaded on the next pass with fresh retry state).
+          final keepNewer = changedSinceStart();
           if (QuotaService.isQuotaError(e) && QuotaService.isPausedForDailyReset) {
             action['lastAttempt'] = DateTime.now().toIso8601String();
             action['lastError'] = e.toString();
             action['nextRetryAt'] = DateTime.now().add(const Duration(seconds: 30)).toIso8601String();
-            await queueBox.put(key, action);
+            if (!keepNewer) await queueBox.put(key, action);
             quotaStop = true;
             break;
           }
@@ -5067,7 +5111,7 @@ class SyncService {
             action['lastAttempt'] = DateTime.now().toIso8601String();
             action['lastError'] = e.toString();
             action['nextRetryAt'] = DateTime.now().add(const Duration(seconds: 15)).toIso8601String();
-            await queueBox.put(key, action);
+            if (!keepNewer) await queueBox.put(key, action);
             _noteUploadFailure(type, key.toString(), attempts, e, stackTrace);
             if (++consecutiveNetworkFailures >= 5) {
               _stalledUntil = DateTime.now().add(const Duration(seconds: 30));
@@ -5094,7 +5138,9 @@ class SyncService {
           final backoffSeconds = min(30, pow(2, min(nextAttempts + 1, 5)).toInt());
           action['nextRetryAt'] = DateTime.now().add(Duration(seconds: backoffSeconds)).toIso8601String();
 
-          if (!isNetworkError && nextAttempts >= 15) {
+          if (keepNewer) {
+            // newer version queued — leave it alone
+          } else if (!isNetworkError && nextAttempts >= 15) {
             await LocalStorageService.moveToDeadLetterQueue(
               LocalStorageService.syncBox,
               key,
@@ -5163,7 +5209,8 @@ class SyncService {
       Logger().d("FATAL sync: $fatal");
     } finally {
       uploadStatus?.end();
-      _isUploading = false;
+      // Only the current pass releases the flag (a hung pass the watchdog replaced does not).
+      if (myUploadGen == _uploadGen) _isUploading = false;
       ServerSyncCoordinator.markFinished(isServer: false);
       if (_forceRequested) {
         _forceRequested = false;
@@ -5177,6 +5224,47 @@ class SyncService {
 
   bool _forceRequested = false;
   bool _urgentRequested = false;
+
+  /// Adds [amount] to a cloud stock quantity exactly once per [txId]. The increment and a
+  /// marker document `inventory_applied_tx/{txId}` are committed in ONE batch (atomic), so a
+  /// retry after a write that did reach Firestore (timeout, lost response, a later write in
+  /// the same item failing) finds the marker and does nothing — before, it added the stock
+  /// again (one restock of 100 showed +200; one dispense deducted twice). The marker is only
+  /// read on retries, so a normal first upload costs no extra read.
+  Future<void> _incrementStockOnce({
+    required String branchId,
+    required CloudDoc docRef,
+    required String txId,
+    required num amount,
+    required bool isRetry,
+  }) async {
+    // Same writer as the rest of the upload pass (REST commit = atomic, quota-accounted).
+    final cloud = CloudDb.instance;
+    final markerRef = cloud
+        .collection('branches')
+        .doc(branchId)
+        .collection('inventory_applied_tx')
+        .doc(txId.replaceAll('/', '_'));
+    if (isRetry) {
+      final snap = await markerRef.get();
+      if (snap.exists) {
+        debugPrint('[SyncService] Stock tx $txId already applied in the cloud — not counted again');
+        return;
+      }
+    }
+    final batch = cloud.batch();
+    batch.set(docRef, {
+      'quantity': FieldValue.increment(amount),
+      'lastUpdated': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    batch.set(markerRef, {
+      'medicineId': docRef.id,
+      'amount': amount,
+      'appliedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+  }
 
   /// Marks the local record a queued action came from as synced, when the action names it
   /// ('localBox'/'localKey'); otherwise the backfill sweep would queue it again forever.

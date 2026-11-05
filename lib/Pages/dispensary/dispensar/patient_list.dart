@@ -161,7 +161,13 @@ class _PatientListState extends State<PatientList> {
               updated['status'] = 'completed';
               // Not an older or medicine-less copy over the stored prescription.
               if (existing is! Map || LocalStorageService.mayReplacePrescription(data, existing['prescription'])) {
-                updated['prescription'] = LocalStorageService.prescriptionForEmbedding(data);
+                final embeddedRx = LocalStorageService.prescriptionForEmbedding(data);
+                updated['prescription'] = embeddedRx;
+                final rxMeds = embeddedRx['medicines'] ?? embeddedRx['prescriptions'] ?? data['medicines'] ?? data['prescriptions'];
+                if (rxMeds is List && rxMeds.isNotEmpty) {
+                  updated['medicines'] = rxMeds;
+                  updated['prescriptions'] = rxMeds;
+                }
               }
               updated['prescriptionId'] = data['id'] ?? serial;
               updated['completedAt'] ??= data['completedAt'] ?? DateTime.now().toIso8601String();
@@ -460,7 +466,7 @@ class _PatientListState extends State<PatientList> {
 
   List<Map<String, dynamic>> _getSortedQueue({String? filterOverride}) {
     final src = LocalStorageService.getLocalEntries(widget.branchId);
-    final key = '${filterOverride ?? ''}|$_selectedSessionFilter|$_selectedCampFilter|$_sortNewestFirst|$_todayKey|${widget.branchId}';
+    final key = '${filterOverride ?? ''}|$_selectedSessionFilter|$_selectedCampFilter|$_searchQuery|$_sortNewestFirst|$_todayKey|${widget.branchId}';
     final now = DateTime.now();
     if (_queueMemo != null &&
         identical(src, _queueMemoSrc) &&
@@ -909,14 +915,6 @@ class _PatientListState extends State<PatientList> {
       color: Colors.transparent,
       child: InkWell(
         onTap: () {
-          // STRICT ENFORCEMENT: Only the smallest pending token can be selected.
-          final activePending = DispenseQueue.pendingInTokenOrder(_cachedAllPatients);
-          final smallestSerial = activePending.isNotEmpty
-              ? (activePending.first['serial'] ?? activePending.first['id'] ?? '').toString()
-              : null;
-          if (smallestSerial != null && !DispenseQueue.sameSerial(serial, smallestSerial)) {
-            return;
-          }
           widget.onPatientSelected(e);
         },
         borderRadius: BorderRadius.circular(10),

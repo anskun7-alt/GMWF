@@ -1495,32 +1495,39 @@ class _InventoryPageState extends State<InventoryPage>
       final targetBatchName = (batchData['name'] ?? '').toString().toLowerCase().trim();
       final targetBatchType = (batchData['type'] ?? '').toString().toLowerCase().trim();
       final targetBatchDose = (batchData['dose'] ?? '').toString().toLowerCase().trim();
+      final targetBatchExpiry = (batchData['expiryDate'] ?? batchData['expiry'] ?? '').toString().toLowerCase().trim();
+      final validDocIds = docIds.where((id) => id.isNotEmpty && id != 'unknown').toSet();
 
       final keysToRemove = <dynamic>{};
 
-      for (final id in docIds) {
-        if (id.isNotEmpty && id != 'unknown') {
-          keysToRemove.add('stock:$id');
-          keysToRemove.add(id);
-        }
+      for (final id in validDocIds) {
+        keysToRemove.add('stock:$id');
+        keysToRemove.add(id);
       }
 
       for (final k in box.keys) {
         final kStr = k.toString().toLowerCase();
-        for (final id in docIds) {
-          if (id.isNotEmpty && id != 'unknown') {
-            if (kStr == id.toLowerCase() || kStr == 'stock:${id.toLowerCase()}' || kStr.endsWith(':${id.toLowerCase()}')) {
-              keysToRemove.add(k);
-            }
+        for (final id in validDocIds) {
+          if (kStr == id.toLowerCase() || kStr == 'stock:${id.toLowerCase()}' || kStr.endsWith(':${id.toLowerCase()}')) {
+            keysToRemove.add(k);
           }
         }
-        final val = box.get(k);
-        if (val is Map) {
-          final vName = (val['name'] ?? '').toString().toLowerCase().trim();
-          final vType = (val['type'] ?? '').toString().toLowerCase().trim();
-          final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
-          if (vName == targetBatchName && vType == targetBatchType && (targetBatchDose.isEmpty || vDose == targetBatchDose)) {
-            keysToRemove.add(k);
+        if (validDocIds.isEmpty) {
+          final val = box.get(k);
+          if (val is Map) {
+            final vName = (val['name'] ?? '').toString().toLowerCase().trim();
+            final vType = (val['type'] ?? '').toString().toLowerCase().trim();
+            final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
+            final vExpiry = (val['expiryDate'] ?? val['expiry'] ?? '').toString().toLowerCase().trim();
+            final vCamp = (val['campId'] ?? val['dispensaryId'] ?? '').toString().toLowerCase().trim();
+            final campMatch = activeCamp == 'all' || activeCamp.isEmpty || vCamp.isEmpty || vCamp == activeCamp.toLowerCase().trim();
+            if (campMatch &&
+                vName == targetBatchName &&
+                vType == targetBatchType &&
+                (targetBatchDose.isEmpty || vDose == targetBatchDose) &&
+                (targetBatchExpiry.isEmpty || vExpiry == targetBatchExpiry)) {
+              keysToRemove.add(k);
+            }
           }
         }
       }
@@ -1744,12 +1751,16 @@ class _InventoryPageState extends State<InventoryPage>
 
       for (final batch in selectedBatches) {
         final docIds = List<String>.from(batch['_docIds'] as List? ?? []);
-        allDocIds.addAll(docIds.where((id) => id.isNotEmpty && id != 'unknown'));
-        batchTargetFilters.add({
-          'name': (batch['name'] ?? '').toString().toLowerCase().trim(),
-          'type': (batch['type'] ?? '').toString().toLowerCase().trim(),
-          'dose': (batch['dose'] ?? '').toString().toLowerCase().trim(),
-        });
+        final validIds = docIds.where((id) => id.isNotEmpty && id != 'unknown').toList();
+        allDocIds.addAll(validIds);
+        if (validIds.isEmpty) {
+          batchTargetFilters.add({
+            'name': (batch['name'] ?? '').toString().toLowerCase().trim(),
+            'type': (batch['type'] ?? '').toString().toLowerCase().trim(),
+            'dose': (batch['dose'] ?? '').toString().toLowerCase().trim(),
+            'expiryDate': (batch['expiryDate'] ?? batch['expiry'] ?? '').toString().toLowerCase().trim(),
+          });
+        }
       }
 
       // 1. Delete from local Hive cache FIRST (instant 0ms response)
@@ -1769,15 +1780,26 @@ class _InventoryPageState extends State<InventoryPage>
             keysToRemove.add(k);
           }
         }
-        final val = box.get(k);
-        if (val is Map) {
-          final vName = (val['name'] ?? '').toString().toLowerCase().trim();
-          final vType = (val['type'] ?? '').toString().toLowerCase().trim();
-          final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
-          for (final filter in batchTargetFilters) {
-            if (vName == filter['name'] && vType == filter['type'] && (filter['dose']!.isEmpty || vDose == filter['dose'])) {
-              keysToRemove.add(k);
-              break;
+        if (batchTargetFilters.isNotEmpty) {
+          final val = box.get(k);
+          if (val is Map) {
+            final vName = (val['name'] ?? '').toString().toLowerCase().trim();
+            final vType = (val['type'] ?? '').toString().toLowerCase().trim();
+            final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
+            final vExpiry = (val['expiryDate'] ?? val['expiry'] ?? '').toString().toLowerCase().trim();
+            final vCamp = (val['campId'] ?? val['dispensaryId'] ?? '').toString().toLowerCase().trim();
+            final campMatch = activeCamp == 'all' || activeCamp.isEmpty || vCamp.isEmpty || vCamp == activeCamp.toLowerCase().trim();
+            if (campMatch) {
+              for (final filter in batchTargetFilters) {
+                final fExp = filter['expiryDate'] ?? '';
+                if (vName == filter['name'] &&
+                    vType == filter['type'] &&
+                    (filter['dose']!.isEmpty || vDose == filter['dose']) &&
+                    (fExp.isEmpty || vExpiry == fExp)) {
+                  keysToRemove.add(k);
+                  break;
+                }
+              }
             }
           }
         }
@@ -3593,7 +3615,7 @@ class _InventoryPageState extends State<InventoryPage>
       'requestedBy': doctorName,
       'notes': noteCtrl.text.trim(),
       'status': 'pending',
-      'createdAt': FieldValue.serverTimestamp(),
+      'createdAt': DateTime.now().toIso8601String(),
       'timestamp': DateTime.now().toIso8601String(),
       'branchId': widget.branchId,
     };
@@ -5068,9 +5090,14 @@ class _InventoryPageState extends State<InventoryPage>
 
       final finalMedId =
           (targetDocId.isNotEmpty && targetDocId == newId) ? targetDocId : newId;
+      final nowIso = DateTime.now().toIso8601String();
       final hiveData = Map<String, dynamic>.from(updateData);
       hiveData['id'] = finalMedId;
       hiveData['branchId'] = widget.branchId;
+      hiveData['updatedAt'] = nowIso;
+      if (hiveData.containsKey('addedAt')) {
+        hiveData['addedAt'] = nowIso;
+      }
       LocalStorageService.saveLocalInventoryItem(hiveData);
 
       RealtimeManager().sendMessage({
@@ -5754,8 +5781,10 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
       for (int i = 0; i < widget.docIds.length; i++) {
         final id = widget.docIds[i];
         final ref = col.doc(id);
+        final nowIso = DateTime.now().toIso8601String();
+        final existingFormula = (widget.initial['formula'] ?? '').toString();
         final uData = {
-          'formula': '',
+          'formula': existingFormula,
           'name': _nameCtrl.text.trim(),
           'name_lower': _nameCtrl.text.trim().toLowerCase(),
           'type': _selectedType,
@@ -5765,16 +5794,19 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
           'barcode': barcode,
           'code': barcode,
           'expiryDate': _expiryCtrl.text.trim(),
-          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedAt': nowIso,
         };
 
         // Populate Firestore batch
-        batch.set(ref, uData, SetOptions(merge: true));
+        batch.set(ref, {...uData, 'updatedAt': FieldValue.serverTimestamp()}, SetOptions(merge: true));
 
         try {
           final stockBox = Hive.box(LocalStorageService.stockBox);
           final existing = stockBox.get('stock:$id') ?? stockBox.get(id);
           final base = (existing is Map) ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': id, 'docId': id};
+          if (existingFormula.isEmpty && base['formula'] != null) {
+            uData['formula'] = base['formula'].toString();
+          }
           final updated = base..addAll(uData);
           LocalStorageService.saveLocalInventoryItem(updated);
 

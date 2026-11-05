@@ -149,10 +149,15 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
     _advance();
   }
 
-  /// Strictly automated: only the smallest token waiting to dispense is selected.
+  /// Allows selecting a waiting patient directly, with auto-selection defaulting to FIFO smallest token.
   void _onDispenseRequested(Map<String, dynamic> entry) {
-    // Manual queue jumping is disabled: FIFO smallest token is automatically selected.
-    return;
+    if (!mounted || entry.isEmpty) return;
+    final serial = (entry['serial'] ?? entry['id'])?.toString();
+    if (serial != null && serial.isNotEmpty) {
+      setState(() {
+        _dispensing = entry;
+      });
+    }
   }
 
   void _onSessionFilterChanged(String filter) {
@@ -162,11 +167,12 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
   }
 
   /// From the headless dispenser engine: the open patient got a new prescription
-  /// (refresh it) or was dispensed on another desk (null → load the next one).
+  /// (refresh it) or was cleared/dispensed elsewhere (null -> load the next one).
   void _onEngineSelectedChanged(Map<String, dynamic>? updated) {
     if (!mounted) return;
     if (updated == null) {
-      _onDispensed();
+      setState(() => _dispensing = null);
+      _advance();
     } else {
       setState(() => _dispensing = updated);
     }

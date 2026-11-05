@@ -35,7 +35,6 @@ import 'services/camp_session_service.dart';
 import 'services/offline_auth_service.dart' as offline_auth;
 import 'services/zkteco_network_service.dart';
 import 'services/python_runner_service.dart';
-import 'realtime/server_sync_manager.dart';
 import 'realtime/realtime_router.dart';
 import 'services/cloud_messaging_service.dart';
 import 'services/user_theme_service.dart';
@@ -196,6 +195,9 @@ void _installGlobalErrorHandlers() {
 
 Future<void> main() async {
   WidgetsBinding widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+  // Clamp image cache memory limits to avoid holding massive uncompressed bitmaps in RAM
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 35 * 1024 * 1024; // 35 MB max decoded image cache
+  PaintingBinding.instance.imageCache.maximumSize = 100; // max 100 images
   // Release builds have no console to read: the ~1,600 debugPrint calls only fed Flutter's
   // throttled print queue (timers and string work on the UI thread). What matters at a
   // clinic is written to gmwf_sync.log / gmwf_perf.log / gmwf_crash.log instead.
@@ -276,7 +278,6 @@ Future<void> main() async {
         await Future.wait<dynamic>([
           LocalStorageService.init(),
           DonationsLocalStorage.init(),
-          ServerSyncManager.initHive(),
           RealtimeRouter.init(),
         ]).timeout(const Duration(seconds: 2), onTimeout: () {
           debugPrint('[Main] Core storage init reached 2s safety limit — proceeding to launch UI');
@@ -869,7 +870,11 @@ class _AuthHomeWrapperState extends State<AuthHomeWrapper> {
           final uUid = (m['uid'] ?? m['id'] ?? '').toString();
           final uEmail = (m['email'] ?? '').toString().toLowerCase().trim();
           if (r.isNotEmpty && r != 'unknown') {
-            if (uUid == user.uid || uEmail == (user.email ?? '').toLowerCase() || uUid.isEmpty || uEmail.isEmpty) {
+            final targetEmail = (user.email ?? '').trim().toLowerCase();
+            final uidMatch = uUid.isNotEmpty && uUid == user.uid;
+            final emailMatch = uEmail.isNotEmpty && targetEmail.isNotEmpty && uEmail == targetEmail;
+            final legacyUnbound = uUid.isEmpty && uEmail.isEmpty;
+            if (uidMatch || emailMatch || legacyUnbound) {
               return m;
             }
           }

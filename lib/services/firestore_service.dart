@@ -144,34 +144,7 @@ class FirestoreService {
     });
     Logger().d('[FirestoreService] 📥 Enqueued for sync: $patientId');
 
-    // STEP 4 — Fast background push to Firestore (un-awaited, never blocks UI thread)
-    unawaited(() async {
-      try {
-        final fsData = Map<String, dynamic>.from(data);
-        if (fsData['dob'] is String) {
-          try {
-            fsData['dob'] = Timestamp.fromDate(DateTime.parse(fsData['dob'] as String));
-          } catch (_) {}
-        }
-        fsData.remove('syncStatus');
-        fsData.remove('hiveKey');
-
-        await _db
-            .collection('branches')
-            .doc(cleanBranch)
-            .collection('patients')
-            .doc(patientId)
-            .set(fsData, SetOptions(merge: true))
-            .timeout(const Duration(seconds: 8));
-
-        await Hive.box('app_flags').put('patient_synced_$patientId', true);
-        Logger().d('[FirestoreService] ✅ Direct Firestore write complete: $patientId');
-      } catch (e) {
-        Logger().d('[FirestoreService] Direct write deferred to queue ($e)');
-      }
-    }());
-
-    // STEP 5 — Flush queue in background (no-op if offline)
+    // STEP 4 — Flush queue in background via CloudDb REST API (no-op if offline)
     SyncService().triggerUpload();
     Logger().d('[FirestoreService] triggerUpload called after savePatient');
   }
@@ -405,58 +378,10 @@ class FirestoreService {
 
     await LocalStorageService.saveLocalPrescription(sanitized);
 
-    try {
-      final patientCnic = (sanitized['patientCnic'] ?? sanitized['cnic'] ?? sanitized['patientCNIC'] ?? 'unknown_$id').toString().trim().replaceAll('-', '').replaceAll(' ', '');
-      final serial = id.trim().toUpperCase();
-      final queueType = (sanitized['queueType'] ?? 'zakat').toString();
-      final dateKey = (sanitized['dateKey'] ?? LocalStorageService.getTodayDateKey()).toString();
-      final campDocKey = CampSessionService.getCampDateDocId(
-        branchId: branchId,
-        dateKey: dateKey,
-        campId: sanitized['campId']?.toString() ?? sanitized['dispensaryId']?.toString(),
-        dispensaryTag: sanitized['dispensaryTag']?.toString(),
-        serial: serial,
-      );
-
-      final serialPayload = <String, dynamic>{
-        'status': 'completed',
-        'completedAt': sanitized['completedAt'] ?? DateTime.now().toUtc().toIso8601String(),
-        'prescription': sanitized,
-        if (sanitized['prescriptions'] != null || sanitized['medicines'] != null)
-          'medicines': sanitized['prescriptions'] ?? sanitized['medicines'],
-        if (sanitized['doctorName'] != null || sanitized['prescribedBy'] != null)
-          'doctorName': sanitized['doctorName'] ?? sanitized['prescribedBy'],
-        if (sanitized['doctorId'] != null) 'doctorId': sanitized['doctorId'],
-        if (sanitized['diagnosis'] != null) 'diagnosis': sanitized['diagnosis'],
-        if (sanitized['complaint'] != null || sanitized['condition'] != null)
-          'complaint': sanitized['complaint'] ?? sanitized['condition'],
-        if (sanitized['daysOfMedicine'] != null) 'daysOfMedicine': sanitized['daysOfMedicine'],
-        if (sanitized['vitals'] != null) 'vitals': sanitized['vitals'],
-        if (sanitized['extraCharge'] != null) 'extraCharge': sanitized['extraCharge'],
-        'dispenseStatus': 'pending',
-      };
-
-      await _db
-          .collection('branches')
-          .doc(branchId)
-          .collection('serials')
-          .doc(campDocKey)
-          .collection(queueType)
-          .doc(serial)
-          .set(serialPayload, SetOptions(merge: true));
-
-      // Clean up legacy standalone doc if present
-      _db
-          .collection('branches')
-          .doc(branchId)
-          .collection('prescriptions')
-          .doc(patientCnic)
-          .collection('prescriptions')
-          .doc(serial)
-          .delete()
-          .catchError((_) {});
-    } catch (e) {
-      Logger().d('Direct prescription write failed ($e) → queue fallback');
+    final serial = id.trim().toUpperCase();
+    final existingEntry = LocalStorageService.getLocalEntry(branchId, serial);
+    if (existingEntry != null && existingEntry['dispenseStatus'] != null && sanitized['dispenseStatus'] == null) {
+      sanitized['dispenseStatus'] = existingEntry['dispenseStatus'];
     }
 
     RealtimeManager().sendMessage(
@@ -469,6 +394,8 @@ class FirestoreService {
         },
       ),
     );
+
+    if (LanFirestoreGate.isLanDesk) return;
 
     await LocalStorageService.enqueueSync({
       'type':     'save_prescription',

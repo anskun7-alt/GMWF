@@ -1,6 +1,7 @@
 // lib/pages/dispensary/dispensar/patient_form.dart
 
 import 'package:gmwf/services/cloud/cloud_db.dart';
+import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -60,6 +61,8 @@ class _PatientFormState extends State<PatientForm> {
   String? _selectedSyringeHiveKey;
   int? _selectedNeedleCount;
   Timer? _claimRenewal;
+  bool _doctorUpdatedLive = false;
+  String? _doctorLiveUpdateSummary;
 
   bool get _isKarachi {
     final b = widget.branchId.toLowerCase().trim();
@@ -111,6 +114,41 @@ class _PatientFormState extends State<PatientForm> {
     final fromData = _data['queueType']?.toString();
     if (fromData != null && fromData.isNotEmpty) return _normaliseQueueType(fromData);
     return 'zakat';
+  }
+
+  /// Everything about a medicine list that changes what is handed over. Used to notice a
+  /// doctor's edit (live, via sync or reload) and to refuse a dispense whose list changed
+  /// between the stock check / confirm dialogs and the actual save.
+  static String _rxFingerprint(List<dynamic> list) {
+    const fields = [
+      'name', 'medicineName', 'inventoryId', 'medicineId', 'quantity', 'qty', 'timing',
+      'dose', 'dosage', 'type', 'form', 'route', 'daysOfMedicine', 'days', 'duration',
+    ];
+    final b = StringBuffer('${list.length}#');
+    for (final m in list) {
+      if (m is! Map) {
+        b.write('?|');
+        continue;
+      }
+      for (final f in fields) {
+        b
+          ..write(m[f]?.toString().trim().toLowerCase() ?? '')
+          ..write(',');
+      }
+      b.write('|');
+    }
+    return b.toString();
+  }
+
+  /// Flags the banner/acknowledge step when an already-shown prescription was replaced by a
+  /// different one (any path: LAN event, Firestore sync, queue refresh).
+  void _flagIfPrescriptionChanged(String? beforeFingerprint) {
+    if (beforeFingerprint == null || _isDispensed) return;
+    final list = _getPrescriptionsList();
+    if (_rxFingerprint(list) != beforeFingerprint) {
+      _doctorUpdatedLive = true;
+      _doctorLiveUpdateSummary = 'Doctor updated prescription (${list.length} items)';
+    }
   }
 
   List<dynamic> _getPrescriptionsList() {
@@ -227,15 +265,22 @@ class _PatientFormState extends State<PatientForm> {
       // When prescription arrives from doctor for this active patient, apply immediately!
       if (type == RealtimeEvents.savePrescription || type == 'prescription_created') {
         if (LocalStorageService.isOlderPrescription(data, _data)) return;
-        final rxList = data['prescriptions'] ?? data['medicines'];
+        final embedded = LocalStorageService.prescriptionForEmbedding(data);
+        if (!LocalStorageService.mayReplacePrescription(embedded, _data)) return;
+        final rxList = embedded['prescriptions'] ?? embedded['medicines'];
         if (rxList is List && rxList.isNotEmpty) {
+          final before = _data.isNotEmpty ? _rxFingerprint(_getPrescriptionsList()) : null;
           if (mounted) {
             setState(() {
-              _data = Map<String, dynamic>.from(data);
+              _data = embedded;
               _gender = _resolveGender();
               _age = _resolveAge();
-              _isDispensed = (data['dispenseStatus'] ?? widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+              // Never flip a dispensed form back to dispensable because a later edit arrived
+              // carrying the stale queue entry's status.
+              _isDispensed = _isDispensed ||
+                  (data['dispenseStatus'] ?? widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
               _isLoadingPrescription = false;
+              _flagIfPrescriptionChanged(before);
             });
           }
           return;
@@ -308,10 +353,18 @@ class _PatientFormState extends State<PatientForm> {
       final oldSerial = (oldWidget.queueEntry['serial'] ?? oldWidget.queueEntry['id'])?.toString();
       final newSerial = (widget.queueEntry['serial'] ?? widget.queueEntry['id'])?.toString();
       if (oldWidget.branchId != widget.branchId || !DispenseQueue.sameSerial(oldSerial, newSerial)) {
+        if (oldSerial != null && oldSerial.isNotEmpty) {
+          DispenseQueue.release(oldSerial, oldWidget.branchId);
+        }
         _data = {};
+        _doctorUpdatedLive = false;
+        _doctorLiveUpdateSummary = null;
         _selectedSyringeCount = null;
         _selectedSyringeHiveKey = null;
         _selectedNeedleCount = null;
+        _isDispensed = (widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+        _isDispensing = false;
+        _claimForThisDesk();
       }
       _loadPrescription();
     }
@@ -322,6 +375,7 @@ class _PatientFormState extends State<PatientForm> {
     if (!mounted) return;
     // A refresh keeps what is on screen; the spinner is only for the first load.
     if (_data.isEmpty) setState(() => _isLoadingPrescription = true);
+    final beforeFingerprint = _data.isNotEmpty ? _rxFingerprint(_getPrescriptionsList()) : null;
     try {
       // 1. Direct embedded check from widget.queueEntry (fastest and most accurate)
       final directEmbedded = widget.queueEntry['prescription'];
@@ -334,15 +388,17 @@ class _PatientFormState extends State<PatientForm> {
           directEmbedded['completedAt'] != null;
 
       if (directEmbedded is Map && directEmbedded.isNotEmpty &&
-          !LocalStorageService.isOlderPrescription(directEmbedded, _data) &&
+          LocalStorageService.mayReplacePrescription(directEmbedded, _data) &&
           (directHasMeds || directIsVitals)) {
         if (mounted) {
           setState(() {
-            _data = Map<String, dynamic>.from(directEmbedded);
+            _data = LocalStorageService.prescriptionForEmbedding(directEmbedded);
             _gender = _resolveGender();
             _age = _resolveAge();
-            _isDispensed = (widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+            _isDispensed = _isDispensed ||
+                (widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
             _isLoadingPrescription = false;
+            _flagIfPrescriptionChanged(beforeFingerprint);
           });
           return;
         }
@@ -435,13 +491,14 @@ class _PatientFormState extends State<PatientForm> {
           // Nothing found on a refresh (or only an older copy): keep the prescription shown.
           // Nor a copy without medicines over one that has them (mayReplacePrescription).
           if (found.isNotEmpty && LocalStorageService.mayReplacePrescription(found, _data)) {
-            _data = found;
+            _data = LocalStorageService.prescriptionForEmbedding(found);
           } else if (directEmbedded is Map && _data.isEmpty) {
-            _data = Map<String, dynamic>.from(directEmbedded);
+            _data = LocalStorageService.prescriptionForEmbedding(directEmbedded);
           }
           _gender = _resolveGender();
           _age = _resolveAge();
-          _isDispensed = dispenseStatus == 'dispensed';
+          _isDispensed = _isDispensed || dispenseStatus == 'dispensed';
+          _flagIfPrescriptionChanged(beforeFingerprint);
         });
       }
     } catch (e) {
@@ -629,6 +686,12 @@ class _PatientFormState extends State<PatientForm> {
     return t.contains('syrup') || t.contains('syp') || n.contains('syrup') || n.contains('syp');
   }
 
+  static RegExp get _ivWord => PatientFormHelper.ivWord;
+  static bool isInjectablePrescription(String type, String name) =>
+      PatientFormHelper.isInjectablePrescription(type, name);
+  static bool isSyringeStockItem(String type, String name, String category) =>
+      PatientFormHelper.isSyringeStockItem(type, name, category);
+
   int _getAutoSyringeCount(List<dynamic> allPrescriptions) {
     int totalInj = 0;
     for (final med in allPrescriptions) {
@@ -636,10 +699,7 @@ class _PatientFormState extends State<PatientForm> {
       final medMap = Map<String, dynamic>.from(med);
       final type = (medMap['type']?.toString() ?? '').toLowerCase();
       final name = (medMap['name']?.toString() ?? '').toLowerCase();
-      final isInjOrDripOrIV = type.contains('injection') || type.contains('inj') ||
-                              type.contains('infusion') || type.contains('inf') ||
-                              type.contains('drip') || type.contains('iv') || type.contains('i.v') ||
-                              name.contains('inj') || name.contains('iv') || name.contains('i.v.');
+      final isInjOrDripOrIV = isInjectablePrescription(type, name);
       final isSyringe = type.contains('syringe') || name.contains('syringe');
       if (isInjOrDripOrIV && !isSyringe) {
         final qtyRaw = medMap['quantity'] ?? medMap['qty'] ?? 1;
@@ -917,20 +977,18 @@ class _PatientFormState extends State<PatientForm> {
           allDeductedBatches.add(dedInfo);
         }
 
-        // Enqueue offline sync for each affected batch if LAN is not connected
-        if (!RealtimeManager().isConnected) {
-          for (final ded in medDeductions) {
-            LocalStorageService.enqueueSync({
-              'type': 'update_inventory',
-              'branchId': branchId,
-              'medicineId': ded['medicineId'],
-              'inventoryId': ded['medicineId'],
-              'delta': ded['delta'],
-              'campId': patientCampId,
-              'dispensaryId': patientCampId,
-              'serial': patientSerial,
-            });
-          }
+        // Enqueue offline/server sync for each affected batch (enqueueSync delegates when a LAN client is linked to a LAN server)
+        for (final ded in medDeductions) {
+          await LocalStorageService.enqueueSync({
+            'type': 'update_inventory',
+            'branchId': branchId,
+            'medicineId': ded['medicineId'],
+            'inventoryId': ded['medicineId'],
+            'delta': ded['delta'],
+            'campId': patientCampId,
+            'dispensaryId': patientCampId,
+            'serial': patientSerial,
+          });
         }
       } catch (e) {
         debugPrint('[PatientForm] Hive stock decrement failed $rawMedicineId: $e');
@@ -1005,7 +1063,8 @@ class _PatientFormState extends State<PatientForm> {
 
         final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase();
         final name = (m['name'] ?? '').toString().toLowerCase();
-        final isSyringe = type.contains('syringe') || type == 'syr' || type == 'syr.' || name.contains('syringe');
+        final category = (m['category'] ?? m['group'] ?? '').toString().toLowerCase();
+        final isSyringe = isSyringeStockItem(type, name, category);
         if (isSyringe) {
           final q = m['quantity'] ?? m['stock'] ?? 0;
           final stockQty = q is num ? q.toDouble() : double.tryParse(q.toString()) ?? 0.0;
@@ -1051,16 +1110,12 @@ class _PatientFormState extends State<PatientForm> {
     return clean.isNotEmpty ? clean : name;
   }
 
-  Future<void> _deductSyringeIfNeeded(
+  Future<List<Map<String, dynamic>>> _deductSyringeIfNeeded(
       String branchId, String serial, List<dynamic> allPrescriptions) async {
     final totalSyringesToDeduct = _getEffectiveSyringeCount(allPrescriptions).toDouble();
     final patientSerial = widget.queueEntry['serial']?.toString() ?? widget.queueEntry['id']?.toString();
     final patientCampId = widget.queueEntry['campId']?.toString() ?? widget.queueEntry['dispensaryId']?.toString() ?? CampSessionService.getActiveCamp();
-    final invCol = CampSessionService.getCampInventoryPath(
-      branchId: branchId,
-      campId: patientCampId,
-      serial: patientSerial,
-    );
+    final List<Map<String, dynamic>> deducted = [];
 
     if (totalSyringesToDeduct > 0.0) {
       try {
@@ -1080,14 +1135,19 @@ class _PatientFormState extends State<PatientForm> {
           final available = _getAvailableSyringeStockItems();
           if (available.isNotEmpty) {
             syringeKey = available.first['hiveKey'];
-            syringeMap = available.first;
+            syringeMap = Map<String, dynamic>.from(available.first);
           } else {
             for (final key in stockBox.keys) {
               final val = stockBox.get(key);
               if (val is Map) {
-                final type = (val['type'] ?? '').toString().toLowerCase();
+                final type = (val['type'] ?? val['dosageForm'] ?? '').toString().toLowerCase();
                 final name = (val['name'] ?? '').toString().toLowerCase();
-                if (type.contains('syringe') || name.contains('syringe')) {
+                final category = (val['category'] ?? val['group'] ?? '').toString().toLowerCase();
+                final q = val['quantity'] ?? val['stock'] ?? 0;
+                final inStock = (q is num ? q.toDouble() : double.tryParse(q.toString()) ?? 0.0) > 0;
+                // Same rule as the picker, and never an out-of-stock item (it was picked here
+                // and its stock clamped at 0, so the dispensed syringe was never counted).
+                if (inStock && isSyringeStockItem(type, name, category)) {
                   syringeKey = key.toString();
                   syringeMap = Map<String, dynamic>.from(val);
                   break;
@@ -1098,36 +1158,57 @@ class _PatientFormState extends State<PatientForm> {
         }
 
         if (syringeKey != null && syringeMap != null) {
+          syringeMap.remove('hiveKey');
           final q = syringeMap['quantity'] ?? syringeMap['stock'] ?? 0;
           final current = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
           syringeMap['quantity'] = (current - totalSyringesToDeduct).clamp(0.0, double.infinity);
           syringeMap['stock'] = syringeMap['quantity'];
           await stockBox.put(syringeKey, syringeMap);
-          debugPrint('[PatientForm] Auto-deducted $totalSyringesToDeduct Syringe ($syringeKey) from Hive: $current → ${syringeMap['quantity']}');
-
-          final rawSyringeId = (syringeMap['id'] ?? syringeMap['medicineId'] ?? syringeKey.replaceFirst('stock:', '')).toString();
-          Future<void> updateSyringeFirestore() async {
-            // If connected to LAN, the server handles atomic inventory deduction.
-            // If not connected to LAN, enqueue to sync queue for zero-read FieldValue.increment.
-            if (!RealtimeManager().isConnected) {
-              await LocalStorageService.enqueueSync({
-                'type': 'update_inventory',
-                'branchId': branchId,
-                'inventoryId': rawSyringeId,
-                'delta': -totalSyringesToDeduct,
-                'campId': patientCampId,
-                'serial': patientSerial,
-              });
+          final rawSyringeId = (syringeMap['id'] ?? syringeMap['medicineId'] ?? syringeKey.replaceFirst('stock:', '')).toString().trim();
+          if (rawSyringeId.isNotEmpty) {
+            final peerKey = syringeKey.startsWith('stock:') ? rawSyringeId : 'stock:$rawSyringeId';
+            if (stockBox.containsKey(peerKey)) {
+              await stockBox.put(peerKey, syringeMap);
             }
           }
-          updateSyringeFirestore();
+          debugPrint('[PatientForm] Auto-deducted $totalSyringesToDeduct Syringe ($syringeKey) from Hive: $current → ${syringeMap['quantity']}');
+
+          final dedInfo = {
+            'medicineId': rawSyringeId,
+            'name': syringeMap['name'] ?? 'Syringe',
+            'delta': -totalSyringesToDeduct,
+            'campId': patientCampId,
+          };
+          deducted.add(dedInfo);
+
+          await LocalStorageService.enqueueSync({
+            'type': 'update_inventory',
+            'branchId': branchId,
+            'medicineId': rawSyringeId,
+            'inventoryId': rawSyringeId,
+            'delta': -totalSyringesToDeduct,
+            'campId': patientCampId,
+            'dispensaryId': patientCampId,
+            'serial': patientSerial,
+          });
         } else {
           debugPrint('[PatientForm] ⚠️ Auto syringe deduction skipped: No syringe item found in stock_items');
+          if (mounted) {
+            AppToast.showSnackBar(
+              context,
+              const SnackBar(
+                content: Text('⚠️ Injectable prescribed but no syringe stock item found in inventory.'),
+                backgroundColor: SoftPalette.amber300,
+                duration: Duration(seconds: 4),
+              ),
+            );
+          }
         }
       } catch (e) {
         debugPrint('[PatientForm] Error during auto syringe deduction: $e');
       }
     }
+    return deducted;
   }
 
   int _getAutoNeedleCount(List<dynamic> allPrescriptions) {
@@ -1137,9 +1218,9 @@ class _PatientFormState extends State<PatientForm> {
       final medMap = Map<String, dynamic>.from(med);
       final type = (medMap['type']?.toString() ?? '').toLowerCase();
       final name = (medMap['name']?.toString() ?? '').toLowerCase();
-      final isInjOrIV = type.contains('injection') || type.contains('inj') ||
-                        type.contains('iv') || type.contains('i.v') ||
-                        name.contains('inj') || name.contains('iv') || name.contains('i.v.');
+      // Needles: injections and IV only (drips/infusions were never counted here).
+      final isInjOrIV = isInjectablePrescription(type, name) &&
+          (type.contains('inj') || name.contains('inj') || _ivWord.hasMatch(type) || _ivWord.hasMatch(name));
       final isNeedleOrSyringe = type.contains('needle') || name.contains('needle') ||
                                 type.contains('syringe') || name.contains('syringe');
       if (isInjOrIV && !isNeedleOrSyringe) {
@@ -1160,59 +1241,101 @@ class _PatientFormState extends State<PatientForm> {
     return autoCount;
   }
 
-  Future<void> _deductNeedleIfNeeded(
+  Future<List<Map<String, dynamic>>> _deductNeedleIfNeeded(
       String branchId, String serial, List<dynamic> allPrescriptions) async {
     final totalNeedlesToDeduct = _getEffectiveNeedleCount(allPrescriptions).toDouble();
     final patientSerial = widget.queueEntry['serial']?.toString() ?? widget.queueEntry['id']?.toString();
     final patientCampId = widget.queueEntry['campId']?.toString() ?? widget.queueEntry['dispensaryId']?.toString() ?? CampSessionService.getActiveCamp();
-    final invCol = CampSessionService.getCampInventoryPath(
-      branchId: branchId,
-      campId: patientCampId,
-      serial: patientSerial,
-    );
+    final List<Map<String, dynamic>> deducted = [];
 
     if (totalNeedlesToDeduct > 0.0) {
       try {
         final stockBox = Hive.box(LocalStorageService.stockBox);
-        String? needleKey;
-        Map<String, dynamic>? needleMap;
-        
+        final normBranch = branchId.toLowerCase().trim();
+        final hasCamps = CampSessionService.hasCampsForBranch(branchId);
+        final activeCamp = (patientCampId ?? '').trim();
+
+        final List<Map<String, dynamic>> candidates = [];
         for (final key in stockBox.keys) {
           final val = stockBox.get(key);
-          if (val is Map) {
-            final type = (val['type'] ?? '').toString().toLowerCase();
-            final name = (val['name'] ?? '').toString().toLowerCase();
-            if (type.contains('needle') || name.contains('needle')) {
-              needleKey = key.toString();
-              needleMap = Map<String, dynamic>.from(val);
-              break;
-            }
+          if (val is! Map) continue;
+          final m = Map<String, dynamic>.from(val);
+          final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase();
+          final name = (m['name'] ?? '').toString().toLowerCase();
+          if (!type.contains('needle') && !name.contains('needle')) continue;
+
+          final b = (m['branchId'] ?? '').toString().toLowerCase().trim();
+          final matchesBranch = b.isEmpty || normBranch.isEmpty || normBranch == 'all' ||
+              CampSessionService.areBranchesMatching(normBranch, b) ||
+              (CampSessionService.isKarachiFamily(normBranch) && CampSessionService.isKarachiFamily(b)) ||
+              b == normBranch || b.contains(normBranch) || normBranch.contains(b);
+          if (!matchesBranch) continue;
+
+          if (hasCamps && activeCamp.isNotEmpty && activeCamp != 'all') {
+            final campMatch = CampSessionService.matchesCamp(
+              selectedCamp: activeCamp,
+              dispensaryId: m['dispensaryId']?.toString(),
+              campId: m['campId']?.toString(),
+              dispensaryTag: m['dispensaryTag']?.toString(),
+              serial: (m['barcode'] ?? m['code'] ?? m['id'] ?? key)?.toString(),
+            );
+            if (!campMatch) continue;
           }
+
+          m['_hiveKey'] = key.toString();
+          candidates.add(m);
         }
-        
+
+        // Sort positive-stock candidates first by FEFO expiry
+        candidates.sort((a, b) {
+          final qa = (a['quantity'] is num) ? (a['quantity'] as num).toDouble() : (double.tryParse(a['quantity']?.toString() ?? '0') ?? 0.0);
+          final qb = (b['quantity'] is num) ? (b['quantity'] as num).toDouble() : (double.tryParse(b['quantity']?.toString() ?? '0') ?? 0.0);
+          if ((qa > 0) != (qb > 0)) return qa > 0 ? -1 : 1;
+          final expA = MasterProformaService.parseExpiryDate(a['expiryDate'] ?? a['expiry'], (a['id'] ?? a['medicineId'])?.toString());
+          final expB = MasterProformaService.parseExpiryDate(b['expiryDate'] ?? b['expiry'], (b['id'] ?? b['medicineId'])?.toString());
+          return expA.compareTo(expB);
+        });
+
+        String? needleKey;
+        Map<String, dynamic>? needleMap;
+        if (candidates.isNotEmpty) {
+          needleKey = candidates.first['_hiveKey']?.toString();
+          needleMap = Map<String, dynamic>.from(candidates.first)..remove('_hiveKey');
+        }
+
         if (needleKey != null && needleMap != null) {
           final q = needleMap['quantity'];
           final current = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
           needleMap['quantity'] = (current - totalNeedlesToDeduct).clamp(0.0, double.infinity);
+          needleMap['stock'] = needleMap['quantity'];
           await stockBox.put(needleKey, needleMap);
-          debugPrint('[PatientForm] Auto-deducted $totalNeedlesToDeduct Needle ($needleKey) from Hive: $current → ${needleMap['quantity']}');
-          
-          final rawNeedleId = needleKey.replaceFirst('stock:', '');
-          Future<void> updateNeedleFirestore() async {
-            // If connected to LAN, the server handles atomic inventory deduction.
-            // If not connected to LAN, enqueue to sync queue for zero-read FieldValue.increment.
-            if (!RealtimeManager().isConnected) {
-              await LocalStorageService.enqueueSync({
-                'type': 'update_inventory',
-                'branchId': branchId,
-                'inventoryId': rawNeedleId,
-                'delta': -totalNeedlesToDeduct,
-                'campId': patientCampId,
-                'serial': patientSerial,
-              });
+          final rawNeedleId = (needleMap['id'] ?? needleMap['medicineId'] ?? needleKey.replaceFirst('stock:', '')).toString().trim();
+          if (rawNeedleId.isNotEmpty) {
+            final peerKey = needleKey.startsWith('stock:') ? rawNeedleId : 'stock:$rawNeedleId';
+            if (stockBox.containsKey(peerKey)) {
+              await stockBox.put(peerKey, needleMap);
             }
           }
-          updateNeedleFirestore();
+          debugPrint('[PatientForm] Auto-deducted $totalNeedlesToDeduct Needle ($needleKey) from Hive: $current → ${needleMap['quantity']}');
+
+          final dedInfo = {
+            'medicineId': rawNeedleId,
+            'name': needleMap['name'] ?? 'Needle',
+            'delta': -totalNeedlesToDeduct,
+            'campId': patientCampId,
+          };
+          deducted.add(dedInfo);
+
+          await LocalStorageService.enqueueSync({
+            'type': 'update_inventory',
+            'branchId': branchId,
+            'medicineId': rawNeedleId,
+            'inventoryId': rawNeedleId,
+            'delta': -totalNeedlesToDeduct,
+            'campId': patientCampId,
+            'dispensaryId': patientCampId,
+            'serial': patientSerial,
+          });
         } else {
           debugPrint('[PatientForm] ⚠️ Auto needle deduction skipped: No needle item found in stock_items');
         }
@@ -1220,12 +1343,18 @@ class _PatientFormState extends State<PatientForm> {
         debugPrint('[PatientForm] Error during auto needle deduction: $e');
       }
     }
+    return deducted;
   }
 
   // ─── Dispense ─────────────────────────────────────────────────────────────
   Future<void> _dispenseOnly() async {
     if (_isDispensed || _isDispensing) return;
     final days = _daysOfMedicine;
+
+    // The list the stock check and the dispenser's confirmation are based on. If the doctor's
+    // edit lands while the dialogs below are open, we stop instead of dispensing a list the
+    // dispenser never reviewed (or deducting stock for a different list than was checked).
+    final checkedFingerprint = _rxFingerprint(_getPrescriptionsList());
 
     final allPrescriptions = _getPrescriptionsList();
     final medicines = allPrescriptions
@@ -1537,6 +1666,37 @@ class _PatientFormState extends State<PatientForm> {
       ),
     );
     if (confirm != true || !mounted) return;
+    if (_doctorUpdatedLive) {
+      final reviewed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: SoftPalette.orange400, size: 28),
+              SizedBox(width: 10),
+              Expanded(child: Text('Prescription Was Modified')),
+            ],
+          ),
+          content: const Text(
+            'The doctor updated this prescription while this form was open.\n\nHave you verified that the physical medicines packed match the doctor\'s latest changes?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Review Prescription First'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: SoftPalette.green400, foregroundColor: SoftPalette.gray50),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Yes, Dispense Updated'),
+            ),
+          ],
+        ),
+      );
+      if (reviewed != true || !mounted) return;
+      setState(() => _doctorUpdatedLive = false);
+    }
     setState(() => _isDispensing = true);
     try {
       final rawSerial = _resolvedSerial;
@@ -1549,6 +1709,36 @@ class _PatientFormState extends State<PatientForm> {
       }
       final normSerial = cleanSerial.toUpperCase();
       final canonicalKey = '$normBranch-$normSerial';
+
+      // Claims are keyed by the serial as the claiming desk held it (_resolvedSerial, which may
+      // carry the branch prefix), so check both spellings.
+      final claimedKey = DispenseQueue.isClaimedByOtherDesk(normSerial)
+          ? normSerial
+          : (DispenseQueue.isClaimedByOtherDesk(rawSerial.trim()) ? rawSerial.trim() : null);
+      if (claimedKey != null) {
+        final otherDesk = DispenseQueue.claimingDeskName(claimedKey) ?? 'Another Counter';
+        final proceed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Text('Parallel Counter Warning'),
+            content: Text('Patient #$normSerial is currently open on $otherDesk.\n\nDo you want to take over and complete this dispense?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: SoftPalette.orange400, foregroundColor: SoftPalette.gray50),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Take Over & Dispense'),
+              ),
+            ],
+          ),
+        );
+        if (proceed != true || !mounted) {
+          setState(() => _isDispensing = false);
+          return;
+        }
+      }
+
       final serial = normSerial;
 
       final queueType = _resolvedQueueType;
@@ -1584,6 +1774,81 @@ class _PatientFormState extends State<PatientForm> {
           }
         }
       }
+
+      // Concurrency check: if another counter already dispensed this patient, stop. Only the
+      // dispense markers count: status 'completed' is the normal "doctor prescribed, waiting
+      // for dispense" state (realtime_router sets it on every save_prescription), so treating
+      // it as dispensed blocked every ordinary patient.
+      if ((existingEntry?['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed' ||
+          (existingEntry?['status'] ?? '').toString().toLowerCase() == 'dispensed' ||
+          (existingEntry?['dispensedAt'] ?? '').toString().trim().isNotEmpty) {
+        if (mounted) {
+          setState(() {
+            _isDispensed = true;
+            _isDispensing = false;
+          });
+          AppToast.showSnackBar(
+            context,
+            const SnackBar(
+              content: Text('⚠️ Patient was already dispensed by another desk! Stock was not deducted twice.'),
+              backgroundColor: SoftPalette.orange400,
+            ),
+          );
+        }
+        return;
+      }
+
+      // The doctor's edit can arrive while the confirm / take-over dialogs were open (or via a
+      // sync reload). The stock check and the dispenser's review were for the old list, so stop
+      // and make them review the new one. Freeze the list from here on: every await below could
+      // otherwise let another edit swap _data between the save and the stock deduction.
+      final frozenPrescriptions = List<dynamic>.from(_getPrescriptionsList());
+      if (_rxFingerprint(frozenPrescriptions) != checkedFingerprint) {
+        if (mounted) {
+          setState(() {
+            _isDispensing = false;
+            _doctorUpdatedLive = true;
+            _doctorLiveUpdateSummary =
+                'Doctor updated prescription (${frozenPrescriptions.length} items)';
+          });
+          AppToast.showSnackBar(
+            context,
+            const SnackBar(
+              content: Text('The doctor changed this prescription while you were confirming. '
+                  'Nothing was dispensed - review the updated list and dispense again.'),
+              backgroundColor: SoftPalette.orange400,
+            ),
+          );
+        }
+        return;
+      }
+
+      // One counter per token: the LAN server approves this dispense. Each PC's own check
+      // above reads only its own copy, so two counters clicking within a second both passed it
+      // and both dispensed. Without a server link (or an older server) the local check stands.
+      final lock = await RealtimeManager().requestDispenseLock(normSerial, widget.branchId);
+      if (lock != null && lock['result'] != 'granted') {
+        if (mounted) {
+          final already = lock['result'] == 'already_dispensed';
+          setState(() {
+            _isDispensing = false;
+            if (already) _isDispensed = true;
+          });
+          AppToast.showSnackBar(
+            context,
+            SnackBar(
+              content: Text(already
+                  ? 'Patient #$normSerial was already dispensed at another counter. Nothing was deducted.'
+                  : 'Patient #$normSerial is being dispensed right now at ${lock['holder'] ?? 'another counter'}. '
+                      'Nothing was dispensed here.'),
+              backgroundColor: SoftPalette.orange400,
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
 
       final doctorName = _firstNonEmpty([
         existingEntry?['doctorName'], existingEntry?['prescribedBy'],
@@ -1650,18 +1915,29 @@ class _PatientFormState extends State<PatientForm> {
 
       await entriesBox.put(canonicalKey, fullEntry);
 
-      final allPrescriptions = (_data['prescriptions'] as List?) ??
-          (_data['medicines'] as List?) ??
-          _getPrescriptionsList();
+      final allPrescriptions = frozenPrescriptions;
       final medicines = allPrescriptions
           .where((m) => m is Map && PatientFormHelper.isInventoryMed(m))
           .toList();
+
+      // Deduct stock locally (FEFO batches + syringes + needles) before sending dispense_completed
+      // so the LAN Server and peer desks receive the exact deductedBatches.
+      final deductedBatches = <Map<String, dynamic>>[];
+      try {
+        if (medicines.isNotEmpty) {
+          deductedBatches.addAll(await _deductInventoryLocally(widget.branchId, normSerial, medicines, days));
+        }
+        deductedBatches.addAll(await _deductSyringeIfNeeded(widget.branchId, normSerial, allPrescriptions));
+        deductedBatches.addAll(await _deductNeedleIfNeeded(widget.branchId, normSerial, allPrescriptions));
+      } catch (e) {
+        debugPrint('[PatientForm] Local stock deduction warning: $e');
+      }
 
       // Tell the other desks now, right after the local save. It used to go out only after the
       // stock deduction, in the background: a PC closed in between never sent it, and the
       // other desks kept the patient as waiting (open to a second dispense). sendMessage saves
       // it to the outbox first, so it survives a restart. Peers deduct their stock from
-      // 'medicines' once per token, so this is the only dispense message.
+      // 'deductedBatches' / 'medicines' once per token, so this is the only dispense message.
       try {
         RealtimeManager().sendMessage(RealtimeEvents.payload(
           type: 'dispense_completed',
@@ -1669,6 +1945,7 @@ class _PatientFormState extends State<PatientForm> {
             'branchId': widget.branchId,
             'serial': normSerial,
             'dateKey': dateKey,
+            'daysOfMedicine': days,
             if ((fullEntry['entryUid'] ?? widget.queueEntry['entryUid'] ?? _data['entryUid']) != null)
               'entryUid': (fullEntry['entryUid'] ?? widget.queueEntry['entryUid'] ?? _data['entryUid']),
             ...minimalUpdate,
@@ -1688,6 +1965,7 @@ class _PatientFormState extends State<PatientForm> {
             if (fullEntry['dispensaryTag'] != null) 'dispensaryTag': fullEntry['dispensaryTag'],
             if (fullEntry['session'] != null) 'session': fullEntry['session'],
             if (medicines.isNotEmpty) 'medicines': medicines,
+            if (deductedBatches.isNotEmpty) 'deductedBatches': deductedBatches,
           },
         ));
       } catch (_) {}
@@ -1745,15 +2023,9 @@ class _PatientFormState extends State<PatientForm> {
       }
       widget.onDispensed?.call();
 
-      // 4. Run inventory deduction & Firestore sync asynchronously in background
+      // 4. Run Firestore sync asynchronously in background
       unawaited(() async {
         try {
-          if (medicines.isNotEmpty) {
-            await _deductInventoryLocally(widget.branchId, normSerial, medicines, days);
-          }
-          await _deductSyringeIfNeeded(widget.branchId, normSerial, allPrescriptions);
-          await _deductNeedleIfNeeded(widget.branchId, normSerial, allPrescriptions);
-
           final upperSerial = serial.trim().toUpperCase();
           final campDocKey = CampSessionService.getCampDateDocId(
             branchId: widget.branchId,
@@ -1763,9 +2035,9 @@ class _PatientFormState extends State<PatientForm> {
             serial: upperSerial,
           );
 
-          // Single-Writer Gateway: Only write directly to Firestore if NOT connected to LAN server.
-          // When connected, the LAN server handles cloud sync from the dispense_completed event.
-          if (!RealtimeManager().isConnected) {
+          // Single-Writer Gateway: Only write directly to Firestore if NOT a LAN client desk.
+          // When a LAN client is connected to the LAN server, the server handles cloud sync.
+          if (!LanFirestoreGate.isLanDesk) {
             try {
               // Same folded branch id as the uploaders ('grt' → 'gujrat'); the raw id put the
               // dispense in a branch document the dashboard never reads.
@@ -2659,6 +2931,53 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   // ─── Header / footer ──────────────────────────────────────────────────────
+  Widget _buildDoctorUpdatedBanner({required bool isMobile}) {
+    return Container(
+      width: double.infinity,
+      margin: EdgeInsets.all(isMobile ? 8 : 12),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: SoftPalette.orange400.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: SoftPalette.orange400, width: 1.5),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.notification_important_rounded, color: SoftPalette.orange400, size: 26),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Prescription Modified by Doctor',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: SoftPalette.orange400, fontSize: 13),
+                ),
+                Text(
+                  _doctorLiveUpdateSummary ?? 'Doctor updated medicines while this desk was viewing. Please review before dispensing.',
+                  style: TextStyle(color: _isDark ? SoftPalette.slate200 : SoftPalette.gray700, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            onPressed: () => setState(() => _doctorUpdatedLive = false),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: SoftPalette.orange400,
+              foregroundColor: SoftPalette.gray50,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              visualDensity: VisualDensity.compact,
+              elevation: 0,
+            ),
+            child: const Text('Review Done', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader(RoleThemeData t, {required bool isMobile}) => ClipRRect(
     borderRadius: BorderRadius.vertical(top: Radius.circular(isMobile ? 12 : 16)),
     child: Container(
@@ -3657,6 +3976,7 @@ class _PatientFormState extends State<PatientForm> {
             ),
             clipBehavior: Clip.antiAlias,
             child: Column(children: [
+              if (_doctorUpdatedLive) _buildDoctorUpdatedBanner(isMobile: isMobile),
               _buildHeader(t, isMobile: isMobile),
               _buildContent(t, isMobile: isMobile),
               _buildFooter(t, isMobile: isMobile),
@@ -3695,6 +4015,7 @@ class _PatientFormState extends State<PatientForm> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (_doctorUpdatedLive) _buildDoctorUpdatedBanner(isMobile: true),
                 _buildCompactPatientAndVitalsHeader(vitals, t, isDark, isVitalsOnly),
                 _buildCompactDurationAndDiagnosis(labTests, diagnosis, t, isDark),
                 if (inventoryMeds.isNotEmpty) ...[

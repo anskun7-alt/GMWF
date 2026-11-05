@@ -74,7 +74,7 @@ void main() {
       'event_type': 'identify',
       'role': 'receptionist',
       'branchId': 'main_test',
-      'protocolVersion': 2,
+      'protocolVersion': 3,
       '_clientId': 'client_rec_uuid_1',
       'username': 'receptionist_pc',
     }));
@@ -91,7 +91,7 @@ void main() {
       'event_type': 'identify',
       'role': 'doctor',
       'branchId': 'main_test',
-      'protocolVersion': 2,
+      'protocolVersion': 3,
       '_clientId': 'client_doc_uuid_1',
       'username': 'doctor_pc',
     }));

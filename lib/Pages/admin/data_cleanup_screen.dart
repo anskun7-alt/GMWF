@@ -314,6 +314,35 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
     }
   }
 
+  Future<void> _deepRepairAllPatientHistories() async {
+    setState(() {
+      _isProcessing = true;
+      _log("🩹 Starting deep repair of patient identities and medical histories...");
+    });
+    try {
+      final stats = await LocalStorageService.repairPatientIdentityCorruption(
+        branchId: _currentBranch.isNotEmpty ? _currentBranch : null,
+      );
+      final pCount = stats['patients'] ?? 0;
+      final eCount = stats['entries'] ?? 0;
+      final prCount = stats['prescriptions'] ?? 0;
+
+      await _scanChildParentConflicts();
+
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        AppToast.showSnackBar(context, SnackBar(
+          content: Text("✅ Deep repair complete: $pCount patients, $eCount visits, $prCount prescriptions updated."),
+          backgroundColor: SoftPalette.teal500,
+        ));
+      }
+      _log("🎉 Deep repair complete: Patients=$pCount, Visits=$eCount, Prescriptions=$prCount.");
+    } catch (e) {
+      if (mounted) setState(() => _isProcessing = false);
+      _log("❌ Failed to deep repair patient histories: $e");
+    }
+  }
+
   // ─── Logging ────────────────────────────────────────────────────────────────
 
   void _log(String msg) {
@@ -3208,6 +3237,19 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
                     icon: const Icon(Icons.refresh_rounded, size: 16),
                     label: const Text("Re-scan"),
                     style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _deepRepairAllPatientHistories,
+                    icon: const Icon(Icons.healing_rounded, size: 16),
+                    label: const Text("Deep Repair Histories"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: SoftPalette.teal500,
+                      foregroundColor: SoftPalette.gray50,
+                      elevation: 0,
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),

@@ -29,19 +29,40 @@ class Prescription {
   });
 
   factory Prescription.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>? ?? {};
+    final rawData = doc.data();
+    final d = rawData is Map ? Map<String, dynamic>.from(rawData) : <String, dynamic>{};
+    final rawItems = d['items'] ?? d['medicines'] ?? [];
+    final itemsList = <Map<String, dynamic>>[];
+    if (rawItems is Iterable) {
+      for (final item in rawItems) {
+        if (item is Map) itemsList.add(Map<String, dynamic>.from(item));
+      }
+    }
+    Timestamp? parseTs(dynamic v) {
+      if (v is Timestamp) return v;
+      if (v is DateTime) return Timestamp.fromDate(v);
+      if (v is String) {
+        final dt = DateTime.tryParse(v);
+        if (dt != null) return Timestamp.fromDate(dt);
+      }
+      return null;
+    }
     return Prescription(
       id: doc.id,
-      patientId: d['patientId'] ?? '',
-      branchId: d['branchId'] ?? '',
-      doctorId: d['doctorId'] ?? '',
-      items: List<Map<String, dynamic>>.from(d['items'] ?? []),
-      total: d['total'] ?? 0,
-      status: d['status'] ?? 'pending',
-      daysOfMedicine: (d['daysOfMedicine'] as int?) ?? 1,
-      extraCharge: (d['extraCharge'] as num?) ?? 0,
-      createdAt: d['createdAt'],
-      updatedAt: d['updatedAt'],
+      patientId: (d['patientId'] ?? '').toString(),
+      branchId: (d['branchId'] ?? '').toString(),
+      doctorId: (d['doctorId'] ?? '').toString(),
+      items: itemsList,
+      total: (d['total'] is num) ? (d['total'] as num) : (num.tryParse(d['total']?.toString() ?? '') ?? 0),
+      status: (d['status'] ?? 'pending').toString(),
+      daysOfMedicine: (d['daysOfMedicine'] is num)
+          ? (d['daysOfMedicine'] as num).toInt()
+          : (int.tryParse(d['daysOfMedicine']?.toString() ?? '') ?? 1),
+      extraCharge: (d['extraCharge'] is num)
+          ? (d['extraCharge'] as num)
+          : (num.tryParse(d['extraCharge']?.toString() ?? '') ?? 0),
+      createdAt: parseTs(d['createdAt']),
+      updatedAt: parseTs(d['updatedAt']),
     );
   }
 

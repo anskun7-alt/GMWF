@@ -13,6 +13,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 
 import 'package:gmwf/realtime/realtime_events.dart';
+import 'package:gmwf/utils/token_order.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/local_storage_service.dart';
@@ -38,8 +39,16 @@ class DispenseQueue {
     String currentTodayKey,
     String todayIso,
     String branchId,
-  ) =>
-      CampSessionService.isTokenOnDate(e, currentTodayKey, branchId);
+  ) {
+    if (CampSessionService.isTokenOnDate(e, currentTodayKey, branchId)) {
+      return true;
+    }
+    // A session running past midnight: tokens issued in the last hours of yesterday stay on
+    // (prescribed ones to dispense, and recently dispensed ones for reference). The old rule
+    // brought back ALL of yesterday's unfinished tokens every night until 06:00, including
+    // abandoned morning tokens.
+    return CampSessionService.isLateNightCarryOver(e, branchId);
+  }
 
   static Map<String, dynamic> _userData() {
     try {
@@ -79,8 +88,16 @@ class DispenseQueue {
                 : CampSessionService.getActiveCamp(branchId)))
         : null;
 
-    final allList = List<Map<String, dynamic>>.from(LocalStorageService.getLocalEntries(branchId));
+    final allList = LocalStorageService.getLocalEntries(branchId);
     final todayIso = DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+    // getLocalEntries hands out the shared index maps (read by the doctor/reception screens and
+    // the server's catch-up). Names/CNICs filled in here — including the "Token #…" placeholder —
+    // used to be written into those shared maps, so the placeholder leaked to every screen and
+    // was even pushed to other desks. They are kept on the side and applied to this screen's
+    // own copies below.
+    final overrides = Map<Map, Map<String, dynamic>>.identity();
+    Map<String, dynamic> ov(Map e) => overrides.putIfAbsent(e, () => <String, dynamic>{});
 
     var all = allList.where((e) {
       final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
@@ -92,12 +109,12 @@ class DispenseQueue {
       if (!isEffectivelyToday(e, todayKey, todayIso, branchId)) return false;
 
       final presc = (e['prescription'] is Map && (e['prescription'] as Map).isNotEmpty)
-          ? Map<String, dynamic>.from(e['prescription'] as Map)
+          ? (e['prescription'] as Map)
           : (serial.isNotEmpty && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)
               ? (() {
                   final pBox = Hive.box(LocalStorageService.prescriptionsBox);
                   final raw = pBox.get(serial) ?? pBox.get(serial.toLowerCase()) ?? pBox.get(serial.toUpperCase());
-                  return raw is Map ? Map<String, dynamic>.from(raw) : null;
+                  return raw is Map ? raw : null;
                 })()
               : null);
       final status = (e['status'] ?? '').toString().toLowerCase();
@@ -116,12 +133,12 @@ class DispenseQueue {
         final prName = (presc['patientName'] ?? presc['name'])?.toString().trim();
         if (prName != null && prName.isNotEmpty && prName.toLowerCase() != 'unknown' && prName.toLowerCase() != 'unknown patient') {
           name = prName.toLowerCase();
-          e['patientName'] = prName;
+          ov(e)['patientName'] = prName;
         }
         final prCnic = (presc['patientCnic'] ?? presc['cnic'] ?? presc['guardianCnic'])?.toString().trim();
         if (prCnic != null && prCnic.isNotEmpty) {
           cnic = prCnic;
-          e['cnic'] = prCnic;
+          ov(e)['cnic'] = prCnic;
         }
       }
 
@@ -134,11 +151,11 @@ class DispenseQueue {
             final rCnic = (raw['patientCnic'] ?? raw['cnic'] ?? raw['guardianCnic'] ?? '').toString().trim();
             if (rName.isNotEmpty && rName.toLowerCase() != 'unknown' && rName.toLowerCase() != 'unknown patient') {
               name = rName.toLowerCase();
-              e['patientName'] = rName;
+              ov(e)['patientName'] = rName;
             }
             if (rCnic.isNotEmpty) {
               cnic = rCnic;
-              e['cnic'] = rCnic;
+              ov(e)['cnic'] = rCnic;
             }
           }
         }
@@ -146,7 +163,7 @@ class DispenseQueue {
           // If token has prescription or completed status, NEVER hide it from dispenser!
           if (hasPresc || status == 'completed' || status == 'dispensed' || isDisp) {
             name = 'token #$serial';
-            e['patientName'] = 'Token #$serial';
+            ov(e)['patientName'] = 'Token #$serial';
           } else {
             return false;
           }
@@ -170,7 +187,9 @@ class DispenseQueue {
 
     // Deduplicate by normalized serial (stripping branch prefix so 'branch-001' and '001' never appear as two patients)
     final Map<String, Map<String, dynamic>> uniqueBySerial = {};
-    for (final e in all) {
+    for (final shared in all) {
+      final o = overrides[shared];
+      final Map<String, dynamic> e = o == null ? shared : {...shared, ...o};
       String s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
       final branchPrefix = '${branchId.trim().toUpperCase()}-';
       if (s.startsWith(branchPrefix)) {
@@ -317,9 +336,10 @@ class DispenseQueue {
       }
     }
 
-    pending.sort((a, b) => compareTokens(a, b, newestFirst: newestFirst));
-    onHold.sort((a, b) => compareTokens(a, b, newestFirst: newestFirst));
-    dispensed.sort((a, b) => compareTokens(a, b, newestFirst: newestFirst));
+    // Fair order (server-numbered by number, offline-issued slotted in by issue time).
+    _replaceSorted(pending, newestFirst);
+    _replaceSorted(onHold, newestFirst);
+    _replaceSorted(dispensed, newestFirst);
 
     if (filter == 'pending') {
       return [...pending, ...onHold];
@@ -364,8 +384,15 @@ class DispenseQueue {
   /// list sorted newest first they took the largest token and locked everything below it.
   /// A token another desk is dispensing right now is left out (see [claim]).
   static List<Map<String, dynamic>> pendingInTokenOrder(List<Map<String, dynamic>> queue) =>
-      activePending(queue).where((p) => !isClaimedByOtherDesk(p['serial'])).toList()
-        ..sort(compareTokens);
+      TokenOrder.sortFairly(
+          activePending(queue).where((p) => !isClaimedByOtherDesk(p['serial'])));
+
+  static void _replaceSorted(List<Map<String, dynamic>> list, bool newestFirst) {
+    final sorted = TokenOrder.sortFairly(list, newestFirst: newestFirst);
+    list
+      ..clear()
+      ..addAll(sorted);
+  }
 
   // ── Dispense claims ──────────────────────────────────────────────────────
   // Every desk loads the smallest waiting token by itself, so two desks could open the same
@@ -375,10 +402,10 @@ class DispenseQueue {
   // desk id), so they agree on the winner and the other moves to the next patient.
   // Claims are live only: a desk that closes stops renewing and its claim lapses.
 
-  static const _claimTtl = Duration(seconds: 90);
+  static const _claimTtl = Duration(seconds: 40);
 
   /// How often the open form renews its claim (well inside [_claimTtl]).
-  static const claimRenewal = Duration(seconds: 30);
+  static const claimRenewal = Duration(seconds: 15);
 
   static final Map<String, _Claim> _claims = {};
 
@@ -405,8 +432,21 @@ class DispenseQueue {
 
   /// Whether another desk is dispensing this token now.
   static bool isClaimedByOtherDesk(Object? serial) {
+    final me = _myDesk;
+    if (me == null || me.isEmpty) return false;
     final c = _claims[(serial ?? '').toString().trim().toUpperCase()];
-    return c != null && !c.lapsed && c.desk != _myDesk;
+    return c != null && !c.lapsed && c.desk != me;
+  }
+
+  /// Returns the name of the other desk that has claimed this token, or null.
+  static String? claimingDeskName(Object? serial) {
+    final me = _myDesk;
+    if (me == null || me.isEmpty) return null;
+    final c = _claims[(serial ?? '').toString().trim().toUpperCase()];
+    if (c != null && !c.lapsed && c.desk != me) {
+      return c.deskName ?? 'Another Counter';
+    }
+    return null;
   }
 
   /// This desk has opened [serial] to dispense: tell the other desks (also used to renew).
@@ -417,7 +457,7 @@ class DispenseQueue {
     final held = _claims[s];
     if (held != null && !held.lapsed && held.desk != me) return; // another desk was first
     final at = held?.desk == me ? held!.at : DateTime.now().millisecondsSinceEpoch;
-    _claims[s] = _Claim(me, at);
+    _claims[s] = _Claim(me, at, deskName: deskName ?? held?.deskName);
     RealtimeManager().sendLive(RealtimeEvents.payload(
       type: 'dispense_claim',
       branchId: branchId,
@@ -460,10 +500,16 @@ class DispenseQueue {
       }
       return;
     }
-    final incoming = _Claim(desk, (data['at'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch);
+    final incoming = _Claim(
+      desk,
+      (data['at'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+      deskName: data['deskName']?.toString(),
+    );
     if (held == null || held.lapsed || held.desk == desk || incoming.isBefore(held)) {
       final changedHands = held == null || held.lapsed || held.desk != desk;
-      _claims[s] = held?.desk == desk ? _Claim(desk, held!.at) : incoming;
+      _claims[s] = held?.desk == desk
+          ? _Claim(desk, held!.at, deskName: data['deskName']?.toString() ?? held.deskName)
+          : incoming;
       if (changedHands) claimsChanged.value++;
     }
   }
@@ -500,10 +546,13 @@ class DispenseQueue {
 }
 
 class _Claim {
-  _Claim(this.desk, this.at) : seenAt = DateTime.now();
+  _Claim(this.desk, this.at, {this.deskName}) : seenAt = DateTime.now();
 
   /// The claiming desk's LAN client id.
   final String desk;
+
+  /// Optional readable name of the desk.
+  final String? deskName;
 
   /// When that desk opened the patient (its clock); the earlier claim wins.
   final int at;

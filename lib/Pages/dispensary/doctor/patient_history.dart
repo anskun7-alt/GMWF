@@ -154,17 +154,9 @@ class _PatientIdentity {
   bool docBelongsToThisPatient(Map<String, dynamic> doc) {
     final docPid = (doc['patientId'] ?? doc['id'] ?? '').toString().trim();
     final docResolvedPid = LocalStorageService.resolveIndividualPatientId(doc).trim();
-    final docGuardian = (doc['guardianCnic'] ?? '').toString().trim();
+    final docGuardian = (doc['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
     final docAge = (doc['age'] is num) ? (doc['age'] as num).toInt() : (int.tryParse(doc['age']?.toString() ?? '') ?? 0);
     final docCnic = (doc['cnic'] ?? doc['patientCnic'] ?? '').toString().replaceAll(RegExp(r'[-\s]'), '').trim();
-
-    // If both are adults and CNIC matches, this is definitively their record
-    if (isAdult && cnic.isNotEmpty && docCnic.isNotEmpty && cnic == docCnic) {
-      // Ensure it's not explicitly flagged as a child's record under this guardian
-      if (!docPid.contains('_child_') && !docResolvedPid.contains('_child_')) {
-        return true;
-      }
-    }
 
     final docIsAdult = doc['isAdult'] is bool
         ? doc['isAdult'] as bool
@@ -188,18 +180,44 @@ class _PatientIdentity {
         .replaceAll(RegExp(r'[^a-z0-9]'), '');
     final myName = name.replaceAll(RegExp(r'[^a-z0-9]'), '');
 
-    if (name.isNotEmpty && docName.isNotEmpty) {
-      if (docName == myName || docName.contains(myName) || myName.contains(docName)) {
-        return true;
-      }
-      // Tokenized word matching (e.g. "Muhammad Usman" vs "Usman", "M Ali" vs "Muhammad Ali")
-      final myWords = name.split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
-      final docWords = (doc['patientName'] ?? doc['name'] ?? '').toString().toLowerCase().split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
-      if (myWords.isNotEmpty && docWords.isNotEmpty && myWords.intersection(docWords).isNotEmpty) {
+    // For adults: if CNIC matches, ensure names match if both present
+    if (isAdult) {
+      if (cnic.isNotEmpty && docCnic.isNotEmpty && cnic == docCnic) {
+        if (name.isNotEmpty && docName.isNotEmpty) {
+          if (docName == myName || docName.contains(myName) || myName.contains(docName)) {
+            return true;
+          }
+          final myWords = name.split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
+          final docWords = (doc['patientName'] ?? doc['name'] ?? '').toString().toLowerCase().split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
+          if (myWords.isNotEmpty && docWords.isNotEmpty && myWords.intersection(docWords).isNotEmpty) {
+            return true;
+          }
+          return false;
+        }
         return true;
       }
     }
-    return true;
+
+    // For children: under same guardian CNIC, MUST match child name
+    if (!isAdult) {
+      final myGuard = guardianCnic.isNotEmpty ? guardianCnic : cnic;
+      final docGuard = docGuardian.isNotEmpty ? docGuardian : docCnic;
+      if (myGuard.isNotEmpty && docGuard.isNotEmpty && myGuard == docGuard) {
+        if (name.isNotEmpty && docName.isNotEmpty) {
+          if (docName == myName || docName.contains(myName) || myName.contains(docName)) {
+            return true;
+          }
+          final myWords = name.split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
+          final docWords = (doc['patientName'] ?? doc['name'] ?? '').toString().toLowerCase().split(RegExp(r'[\s_]+')).where((w) => w.length > 2).toSet();
+          if (myWords.isNotEmpty && docWords.isNotEmpty && myWords.intersection(docWords).isNotEmpty) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    return false;
   }
 
   /// Backward-compatible alias
@@ -384,6 +402,67 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
         for (final key in box.keys) {
           final raw = box.get(key);
           if (raw is! Map) continue;
+
+          // Fast shallow filtering: skip non-matching records with ZERO allocations
+          bool maybeBelongs = false;
+          for (final field in const [
+            'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+            'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+          ]) {
+            final v = raw[field]?.toString().trim() ?? '';
+            if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+              maybeBelongs = true;
+              break;
+            }
+          }
+          if (!maybeBelongs && raw['prescription'] is Map) {
+            final p = raw['prescription'] as Map;
+            for (final field in const [
+              'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+              'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+            ]) {
+              final v = p[field]?.toString().trim() ?? '';
+              if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs && raw['data'] is Map) {
+            final d = raw['data'] as Map;
+            for (final field in const [
+              'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+              'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+            ]) {
+              final v = d[field]?.toString().trim() ?? '';
+              if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs && identity.name.isNotEmpty && identity.name.length >= 3) {
+            final docName = (raw['patientName'] ?? raw['name'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase()
+                .replaceAll(RegExp(r'[^a-z0-9]'), '');
+            final myName = identity.name.replaceAll(RegExp(r'[^a-z0-9]'), '');
+            if (docName.isNotEmpty && (docName == myName || docName.contains(myName) || myName.contains(docName))) {
+              maybeBelongs = true;
+            }
+          }
+          if (!maybeBelongs) {
+            final kStr = key.toString().toLowerCase();
+            for (final sid in searchIds) {
+              if (sid.length >= 4 && kStr.contains(sid.toLowerCase())) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs) continue;
+
           final data = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(raw));
 
           // Must have clinical, prescription, or vitals content
@@ -401,7 +480,7 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
           if (!hasData) continue;
 
           bool belongs = false;
-          for (final field in [
+          for (final field in const [
             'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
             'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
           ]) {
@@ -834,6 +913,67 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
         for (final key in box.keys) {
           final raw = box.get(key);
           if (raw is! Map) continue;
+
+          // Fast shallow filtering: skip non-matching records with ZERO allocations
+          bool maybeBelongs = false;
+          for (final field in const [
+            'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+            'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+          ]) {
+            final v = raw[field]?.toString().trim() ?? '';
+            if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+              maybeBelongs = true;
+              break;
+            }
+          }
+          if (!maybeBelongs && raw['prescription'] is Map) {
+            final p = raw['prescription'] as Map;
+            for (final field in const [
+              'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+              'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+            ]) {
+              final v = p[field]?.toString().trim() ?? '';
+              if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs && raw['data'] is Map) {
+            final d = raw['data'] as Map;
+            for (final field in const [
+              'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
+              'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
+            ]) {
+              final v = d[field]?.toString().trim() ?? '';
+              if (v.isNotEmpty && _IdHelper.matches(v, searchIds)) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs && enriched.name.isNotEmpty && enriched.name.length >= 3) {
+            final docName = (raw['patientName'] ?? raw['name'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase()
+                .replaceAll(RegExp(r'[^a-z0-9]'), '');
+            final myName = enriched.name.replaceAll(RegExp(r'[^a-z0-9]'), '');
+            if (docName.isNotEmpty && (docName == myName || docName.contains(myName) || myName.contains(docName))) {
+              maybeBelongs = true;
+            }
+          }
+          if (!maybeBelongs) {
+            final kStr = key.toString().toLowerCase();
+            for (final sid in searchIds) {
+              if (sid.length >= 4 && kStr.contains(sid.toLowerCase())) {
+                maybeBelongs = true;
+                break;
+              }
+            }
+          }
+          if (!maybeBelongs) continue;
+
           final data = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(raw));
 
           final hasData = data['medicines'] != null ||
@@ -850,7 +990,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
           if (!hasData) continue;
 
           bool belongs = false;
-          for (final field in [
+          for (final field in const [
             'patientCnic', 'cnic', 'guardianCnic', 'patientId', 'id',
             'tokenCnic', 'patient_cnic', 'guardian_cnic', 'patient_id'
           ]) {
@@ -2157,17 +2297,29 @@ class _HistoryEntry {
           if (extractedDoctor.isEmpty) extractedDoctor = (ulp['doctorName'] ?? ulp['prescribedBy'] ?? '').toString().trim();
         }
 
-        if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
-          final dBox = Hive.box(LocalStorageService.dispensaryBox);
-          var dRaw = dBox.get(serial) ?? dBox.get(serial.toLowerCase()) ?? dBox.get(serial.toUpperCase());
-          if (dRaw == null) {
-            for (final k in dBox.keys) {
-              if (k.toString().toLowerCase().contains(serial.toLowerCase())) {
-                dRaw = dBox.get(k);
-                break;
+        dynamic lookupSerialInBox(Box box, String s) {
+          final sLow = s.toLowerCase();
+          final sUp = s.toUpperCase();
+          dynamic raw = box.get(s) ??
+              box.get(sLow) ??
+              box.get(sUp) ??
+              box.get('karachi-$sLow') ??
+              box.get('karachi-$sUp') ??
+              box.get('legacy_$sLow');
+          if (raw != null) return raw;
+          if (box.length <= 500) {
+            for (final k in box.keys) {
+              if (k.toString().toLowerCase().contains(sLow)) {
+                return box.get(k);
               }
             }
           }
+          return null;
+        }
+
+        if (Hive.isBoxOpen(LocalStorageService.dispensaryBox)) {
+          final dBox = Hive.box(LocalStorageService.dispensaryBox);
+          final dRaw = lookupSerialInBox(dBox, serial);
           if (dRaw is Map) {
             final udRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(dRaw));
             addMedList(udRaw['medicines']);
@@ -2183,15 +2335,7 @@ class _HistoryEntry {
         }
         if ((meds.isEmpty || extractedDiagnosis.isEmpty) && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
           final prBox = Hive.box(LocalStorageService.prescriptionsBox);
-          var prRaw = prBox.get(serial) ?? prBox.get(serial.toLowerCase()) ?? prBox.get(serial.toUpperCase());
-          if (prRaw == null) {
-            for (final k in prBox.keys) {
-              if (k.toString().toLowerCase().contains(serial.toLowerCase())) {
-                prRaw = prBox.get(k);
-                break;
-              }
-            }
-          }
+          final prRaw = lookupSerialInBox(prBox, serial);
           if (prRaw is Map) {
             final uprRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(prRaw));
             addMedList(uprRaw['medicines']);
@@ -2207,44 +2351,34 @@ class _HistoryEntry {
         }
         if ((meds.isEmpty || extractedDiagnosis.isEmpty) && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
           final eBox = Hive.box(LocalStorageService.entriesBox);
-          for (final k in eBox.keys) {
-            if (k.toString().toLowerCase().contains(serial.toLowerCase())) {
-              final eRaw = eBox.get(k);
-              if (eRaw is Map) {
-                final ueRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(eRaw));
-                addMedList(ueRaw['medicines']);
-                addMedList(ueRaw['prescriptions']);
-                addMedList(ueRaw['oralMedicines']);
-                addMedList(ueRaw['injectables']);
-                addMedList(ueRaw['items']);
-                addMedList(ueRaw['dispensedMedicines']);
-                if (extractedDiagnosis.isEmpty) extractedDiagnosis = (ueRaw['diagnosis'] ?? ueRaw['finalDiagnosis'] ?? ueRaw['patientDiagnosis'] ?? '').toString().trim();
-                if (extractedComplaint.isEmpty) extractedComplaint = (ueRaw['complaint'] ?? ueRaw['condition'] ?? ueRaw['patientCondition'] ?? '').toString().trim();
-                if (extractedDoctor.isEmpty) extractedDoctor = (ueRaw['doctorName'] ?? ueRaw['prescribedBy'] ?? '').toString().trim();
-                break;
-              }
-            }
+          final eRaw = lookupSerialInBox(eBox, serial);
+          if (eRaw is Map) {
+            final ueRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(eRaw));
+            addMedList(ueRaw['medicines']);
+            addMedList(ueRaw['prescriptions']);
+            addMedList(ueRaw['oralMedicines']);
+            addMedList(ueRaw['injectables']);
+            addMedList(ueRaw['items']);
+            addMedList(ueRaw['dispensedMedicines']);
+            if (extractedDiagnosis.isEmpty) extractedDiagnosis = (ueRaw['diagnosis'] ?? ueRaw['finalDiagnosis'] ?? ueRaw['patientDiagnosis'] ?? '').toString().trim();
+            if (extractedComplaint.isEmpty) extractedComplaint = (ueRaw['complaint'] ?? ueRaw['condition'] ?? ueRaw['patientCondition'] ?? '').toString().trim();
+            if (extractedDoctor.isEmpty) extractedDoctor = (ueRaw['doctorName'] ?? ueRaw['prescribedBy'] ?? '').toString().trim();
           }
         }
         if ((meds.isEmpty || extractedDiagnosis.isEmpty) && Hive.isBoxOpen(LocalStorageService.reportsCacheBox)) {
           final rcBox = Hive.box(LocalStorageService.reportsCacheBox);
-          for (final k in rcBox.keys) {
-            if (k.toString().toLowerCase().contains(serial.toLowerCase())) {
-              final rcRaw = rcBox.get(k);
-              if (rcRaw is Map) {
-                final urcRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(rcRaw));
-                addMedList(urcRaw['medicines']);
-                addMedList(urcRaw['prescriptions']);
-                addMedList(urcRaw['oralMedicines']);
-                addMedList(urcRaw['injectables']);
-                addMedList(urcRaw['items']);
-                addMedList(urcRaw['dispensedMedicines']);
-                if (extractedDiagnosis.isEmpty) extractedDiagnosis = (urcRaw['diagnosis'] ?? urcRaw['finalDiagnosis'] ?? '').toString().trim();
-                if (extractedComplaint.isEmpty) extractedComplaint = (urcRaw['complaint'] ?? urcRaw['condition'] ?? '').toString().trim();
-                if (extractedDoctor.isEmpty) extractedDoctor = (urcRaw['doctorName'] ?? urcRaw['prescribedBy'] ?? '').toString().trim();
-                break;
-              }
-            }
+          final rcRaw = lookupSerialInBox(rcBox, serial);
+          if (rcRaw is Map) {
+            final urcRaw = PatientHistoryPanel.unwrapPrescriptionData(Map<String, dynamic>.from(rcRaw));
+            addMedList(urcRaw['medicines']);
+            addMedList(urcRaw['prescriptions']);
+            addMedList(urcRaw['oralMedicines']);
+            addMedList(urcRaw['injectables']);
+            addMedList(urcRaw['items']);
+            addMedList(urcRaw['dispensedMedicines']);
+            if (extractedDiagnosis.isEmpty) extractedDiagnosis = (urcRaw['diagnosis'] ?? urcRaw['finalDiagnosis'] ?? '').toString().trim();
+            if (extractedComplaint.isEmpty) extractedComplaint = (urcRaw['complaint'] ?? urcRaw['condition'] ?? '').toString().trim();
+            if (extractedDoctor.isEmpty) extractedDoctor = (urcRaw['doctorName'] ?? urcRaw['prescribedBy'] ?? '').toString().trim();
           }
         }
       } catch (_) {}

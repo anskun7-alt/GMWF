@@ -795,12 +795,16 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
           final medQty = med['quantity'];
           final qty = (medQty is num ? medQty.toInt() : int.tryParse(medQty?.toString() ?? '') ?? 0);
-          final days = (presc['daysOfMedicine'] as int?) ?? 1;
+          final rawDays = presc['daysOfMedicine'];
+          final days = (rawDays is num ? rawDays.toInt() : int.tryParse(rawDays?.toString() ?? '1') ?? 1);
           final type = (med['type'] ?? '').toString().toLowerCase();
+          final name = (med['name'] ?? '').toString().toLowerCase();
+          final isSyrup = type.contains('syrup') || type.contains('syp') || type.contains('susp') ||
+              name.contains('syp') || name.contains('syrup');
           final isInj = type.contains('injection') || type.contains('inj') ||
               type.contains('drip') || type.contains('syringe') ||
               type.contains('nebulization');
-          final effectiveQty = isInj ? qty : qty * days;
+          final effectiveQty = isSyrup ? 1 : (isInj ? qty : qty * days);
 
           reserved[inventoryId] = (reserved[inventoryId] ?? 0) + effectiveQty;
         }
@@ -2575,8 +2579,10 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               if (sum == 0 && digits.length == 1) {
                 sum = int.tryParse(digits) ?? 1;
               }
-              final qty = (mealTiming == 'Before Sleep' && sum == 0) ? 1 : (sum > 0 ? sum : 1);
-              final totalRequired = qty * _daysOfMedicine;
+              final qty = isSyrup
+                  ? 1
+                  : ((mealTiming == 'Before Sleep' && sum == 0) ? 1 : (sum > 0 ? sum : 1));
+              final totalRequired = isSyrup ? 1 : qty * _daysOfMedicine;
               totalNeeded = totalRequired;
               exceedsStock = inv != null && totalRequired > avail;
               if (exceedsStock) {
@@ -3941,7 +3947,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                               icon: Icon(Icons.delete_outline, color: context.adapt(SoftPalette.red400), size: 18),
                               tooltip: 'Delete Template',
                               onPressed: () async {
-                                await PrescriptionTemplateService.deleteTemplate(widget.branchId, tpl['id']);
+                                await PrescriptionTemplateService.deleteTemplate(
+                                  widget.branchId,
+                                  tpl['id'],
+                                  doctorId: widget.doctorId,
+                                );
                                 await _loadPrescriptionTemplates();
                                 setDlgState(() {});
                               },
@@ -4702,12 +4712,12 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     }
 
     // ── FIX: Final stock check at save time to catch any race conditions
+    // Refresh reserved quantities once before checking all medicines
+    await _buildReservedQuantities();
+
     for (final med in widget.prescriptions) {
       final inventoryId = med['inventoryId']?.toString() ?? '';
       if (inventoryId.isEmpty) continue;
-
-      // Refresh reserved quantities one more time before saving
-      await _buildReservedQuantities();
 
       final inventoryMed = _allInventory.firstWhere(
         (m) => m['id']?.toString() == inventoryId ||
@@ -4719,14 +4729,18 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       final available = _getAvailableStock(inventoryMed);
       // At save time we include THIS session's qty in available (since
       // _getAvailableStock subtracts session qty already), so compare
-      // against the raw per-day qty.
+      // against the required quantity.
       final medQty = med['quantity'];
       final perDayQty = (medQty is num ? medQty.toInt() : int.tryParse(medQty?.toString() ?? '') ?? 0);
       // Re-add session qty to get "others only" available
       final othersOnly = available + perDayQty;
 
+      final medType = (med['type'] ?? '').toString().toLowerCase();
+      final medName = (med['name'] ?? '').toString().toLowerCase();
+      final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
+          medName.contains('syp') || medName.contains('syrup');
       final isInj = _isInjectionOrDrip(med);
-      final required = isInj ? perDayQty : perDayQty * _daysOfMedicine;
+      final required = isSyrup ? 1 : (isInj ? perDayQty : perDayQty * _daysOfMedicine);
 
       if (required > othersOnly) {
         final rawStock = (inventoryMed['quantity'] as num?)?.toInt() ?? 0;
@@ -4825,6 +4839,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'condition':       complaint,
         'diagnosis':       diagnosis,
         'prescriptions':   medicineList,
+        'medicines':       medicineList,
         'labResults':      labList,
         'patientName':     resolvedPatientName,
         'name':            resolvedPatientName,
@@ -4847,6 +4862,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'cnic':            patientCnic,
         'patientId':       LocalStorageService.resolveIndividualPatientId(patientData),
         'guardianCnic':    patientData['guardianCnic']?.toString(),
+        // Lets peers link a no-CNIC patient's multi-day restriction to the family phone.
+        'phone':           (patientData['phone'] ?? patientData['contactNumber'] ?? patientData['mobile'])?.toString(),
         'patientName':     resolvedPatientName,
         'name':            resolvedPatientName,
         'patientAge':      patientData['age']?.toString() ?? 'N/A',
@@ -4855,6 +4872,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'condition':       complaint,
         'diagnosis':       diagnosis,
         'prescriptions':   medicineList,
+        'medicines':       medicineList,
         'labResults':      labList,
         'vitals':          vitalsMap,
         'daysOfMedicine':  days,
@@ -4893,6 +4911,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
             branchId:    widget.branchId,
             patientId:   pId,
             daysCovered: days,
+            // Same fields the LAN receivers store, so this desk's record (the one synced to
+            // Firestore) matches theirs and the no-CNIC fallback can use it.
+            patientName: resolvedPatientName,
+            guardianCnic: patientData['guardianCnic']?.toString(),
+            phone: (patientData['phone'] ?? patientData['contactNumber'] ?? patientData['mobile'])?.toString(),
           );
           debugPrint('[DoctorPanel] ✅ Individual restriction saved for: $pId ($days days)');
         } else {
@@ -4944,6 +4967,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         base['doctorName']     = doctorName;
         base['doctorId']       = doctorId;
         base['daysOfMedicine'] = days;
+        base['medicines']      = medicineList;
+        base['prescriptions']  = medicineList;
         base['extraCharge']    = extraCharge;
         base['vitals']         = vitalsMap;
         base['dispenseStatus'] ??= 'pending';

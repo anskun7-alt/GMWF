@@ -45,6 +45,11 @@ set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
 
+# Visual Studio 2026 (MSVC 14.5x) turns the deprecated <experimental/coroutine> (/await) into a
+# hard error (STL1011). The local_auth_windows plugin still uses it; this keeps it compiling
+# until the plugin moves to C++20 <coroutine>. Harmless on older toolsets.
+add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # Compilation settings that should be applied to most targets.
 #
 # Be cautious about adding new options here, as plugins use this function by
@@ -52,7 +57,7 @@ add_definitions(-DUNICODE -D_UNICODE)
 # of modifying this function.
 function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_17)
-  target_compile_options(${TARGET} PRIVATE /W4 /WX /wd"4100")
+  target_compile_options(${TARGET} PRIVATE /W4 /WX /wd"4100" /wd"4238")
   target_compile_options(${TARGET} PRIVATE /EHsc)
   target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
@@ -69,7 +74,7 @@ add_subdirectory("runner")
 # Ensure extracted firebase_cpp_sdk_windows has CMakeLists.txt before plugins are loaded
 set(FIREBASE_SDK_EXTRACTED "${CMAKE_BINARY_DIR}/extracted/firebase_cpp_sdk_windows")
 if(EXISTS "${FIREBASE_SDK_EXTRACTED}")
-  file(WRITE "${FIREBASE_SDK_EXTRACTED}/CMakeLists.txt" "cmake_minimum_required(VERSION 3.14)\nproject(firebase_cpp_sdk CXX)\nset(FIREBASE_SDK_DIR \"\${CMAKE_CURRENT_SOURCE_DIR}\")\ninclude_directories(\"\${FIREBASE_SDK_DIR}/include\")\nforeach(lib firebase_app firebase_auth firebase_remote_config firebase_storage firebase_firestore firebase_database firebase_app_check)\n  if(NOT TARGET \${lib})\n    add_library(\${lib} STATIC IMPORTED GLOBAL)\n    set_target_properties(\${lib} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"\${FIREBASE_SDK_DIR}/include\" IMPORTED_LOCATION_DEBUG \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Debug/\${lib}.lib\" IMPORTED_LOCATION_RELEASE \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Release/\${lib}.lib\" IMPORTED_LOCATION_PROFILE \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Release/\${lib}.lib\")\n  endif()\nendforeach()\n")
+  file(WRITE "${FIREBASE_SDK_EXTRACTED}/CMakeLists.txt" "cmake_minimum_required(VERSION 3.14)\nproject(firebase_cpp_sdk CXX)\nset(FIREBASE_SDK_DIR \"\${CMAKE_CURRENT_SOURCE_DIR}\")\ninclude_directories(\"\${FIREBASE_SDK_DIR}/include\")\nforeach(lib firebase_app firebase_auth firebase_remote_config firebase_storage firebase_firestore firebase_database firebase_app_check)\n  if(NOT TARGET \${lib})\n    add_library(\${lib} STATIC IMPORTED GLOBAL)\n    set_target_properties(\${lib} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"\${FIREBASE_SDK_DIR}/include\" IMPORTED_LOCATION \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Release/\${lib}.lib\" IMPORTED_LOCATION_DEBUG \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Debug/\${lib}.lib\" IMPORTED_LOCATION_RELEASE \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Release/\${lib}.lib\" IMPORTED_LOCATION_PROFILE \"\${FIREBASE_SDK_DIR}/libs/windows/VS2019/MD/x64/Release/\${lib}.lib\")\n  endif()\nendforeach()\n")
 endif()
 
 # Generated plugin build rules, which manage building the plugins and adding

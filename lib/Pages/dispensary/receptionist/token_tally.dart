@@ -28,11 +28,19 @@ class TokenTally {
   /// Days of medicine on a token (1–99), top level first, then the prescription.
   static int daysOfMedicine(Map<String, dynamic> entry) {
     final topLevel = entry['daysOfMedicine'];
-    if (topLevel is int) return topLevel.clamp(1, 99);
+    if (topLevel is num) return topLevel.toInt().clamp(1, 99);
+    if (topLevel != null) {
+      final parsedTop = int.tryParse(topLevel.toString());
+      if (parsedTop != null) return parsedTop.clamp(1, 99);
+    }
     final presc = entry['prescription'];
     if (presc is Map) {
       final nested = presc['daysOfMedicine'];
-      if (nested is int) return nested.clamp(1, 99);
+      if (nested is num) return nested.toInt().clamp(1, 99);
+      if (nested != null) {
+        final parsedNested = int.tryParse(nested.toString());
+        if (parsedNested != null) return parsedNested.clamp(1, 99);
+      }
     }
     return 1;
   }

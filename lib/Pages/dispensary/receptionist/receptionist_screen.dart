@@ -3,6 +3,7 @@
 import 'package:gmwf/utils/perf_trace.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/utils/token_order.dart';
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
@@ -960,9 +961,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     return true;
   }
 
-  // A token shows only on the date in its serial (no "recent" carry-over).
+  // A token shows only on the date in its serial (no "recent" carry-over) — except a session
+  // running past midnight, same rule as the doctor/dispenser queues (issued in the last 8 h).
   bool _isEffectivelyToday(Map<String, dynamic> e, String currentTodayKey, String todayIso) =>
-      CampSessionService.isTokenOnDate(e, currentTodayKey, widget.branchId);
+      CampSessionService.isTokenOnDate(e, currentTodayKey, widget.branchId) ||
+      CampSessionService.isLateNightCarryOver(e, widget.branchId);
 
   Timer? _debounceRebuildTimer;
   void _debouncedRebuild() {
@@ -982,10 +985,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   List<Map<String, dynamic>> _getFilteredTodayTokens() {
     if (!Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) return [];
     final now = DateTime.now();
+    final filterKey = '$_selectedSessionFilter|$_selectedCampFilter|${Hive.box(lss.LocalStorageService.entriesBox).length}';
     if (_cachedFilteredTokens != null &&
         _cachedTokensTime != null &&
         now.difference(_cachedTokensTime!).inMilliseconds < 1200 &&
-        _cachedTokensFilter == _selectedSessionFilter) {
+        _cachedTokensFilter == filterKey) {
       return _cachedFilteredTokens!;
     }
     try {
@@ -1108,7 +1112,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     final result = uniqueBySerial.values.toList();
     _cachedFilteredTokens = result;
     _cachedTokensTime = now;
-    _cachedTokensFilter = _selectedSessionFilter;
+    _cachedTokensFilter = filterKey;
     return result;
     } catch (e) {
       debugPrint('[ReceptionistScreen] _getFilteredTodayTokens error: $e');
@@ -1452,15 +1456,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildTokenLog([bool isMobile = false, List<Map<String, dynamic>>? precomputedEntries]) {
-    final rawList = List<Map<String, dynamic>>.from(precomputedEntries ?? _getFilteredTodayTokens());
-
-    rawList.sort((a, b) {
-      final sa = (a['serial'] as String? ?? '000000-000').split('-').last;
-      final sb = (b['serial'] as String? ?? '000000-000').split('-').last;
-      final na = int.tryParse(sa) ?? 0;
-      final nb = int.tryParse(sb) ?? 0;
-      return _sortNewestFirst ? nb.compareTo(na) : na.compareTo(nb);
-    });
+    // Same fair order as the doctor/dispenser queues (offline-issued tokens by issue time).
+    final rawList = TokenOrder.sortFairly(
+        precomputedEntries ?? _getFilteredTodayTokens(),
+        newestFirst: _sortNewestFirst);
 
     if (rawList.isEmpty) {
       return Center(

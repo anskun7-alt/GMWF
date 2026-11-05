@@ -72,7 +72,19 @@ class MadrassaLocalStorage {
   // HQ and the other PCs saw the logs but never the students.
   static String normalizeBranch(String branchId) {
     final clean = branchId.toLowerCase().trim();
-    if (clean.isEmpty || clean == 'unknown') return 'all';
+    if (clean.isEmpty ||
+        clean == 'unknown' ||
+        clean == 'all' ||
+        clean == 'global' ||
+        clean == 'main' ||
+        clean == 'hq' ||
+        clean == 'headquarters' ||
+        clean == 'central' ||
+        clean == 'headoffice' ||
+        clean == 'head_office' ||
+        clean.contains('head office')) {
+      return 'all';
+    }
     if (clean.contains('karachi') || clean.contains('saddar') || clean.contains('haji') || clean.contains('kapaya') || clean == 'khi') {
       return 'karachi';
     }
@@ -384,8 +396,9 @@ class MadrassaLocalStorage {
             .doc(effectiveBranchId)
             .collection('madrassa_students')
             .doc(effectiveStudentId);
-        final fsData = LocalStorageService.sanitizeForCloudUpload(cleanData);
-        await docRef.set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 5));
+        final compacted = compactMediaForCloud(cleanData);
+        final fsData = LocalStorageService.sanitizeForCloudUpload(compacted);
+        await docRef.set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 15));
 
         cloudUploaded = true;
         cleanData['syncStatus'] = 'synced';
@@ -847,8 +860,8 @@ class MadrassaLocalStorage {
   static List<Map<String, dynamic>> getAllStudentsCached(String branchId) {
     if (!Hive.isBoxOpen(studentsBox)) return const [];
     final rawBranch = branchId.toLowerCase().trim();
-    final isGlobal = rawBranch.isEmpty || rawBranch == 'all' || rawBranch == 'main' || rawBranch == 'global';
-    final cleanBranch = isGlobal ? rawBranch : normalizeBranch(rawBranch);
+    final cleanBranch = normalizeBranch(rawBranch);
+    final isGlobal = cleanBranch == 'all' || cleanBranch == 'global' || rawBranch.isEmpty || rawBranch == 'all' || rawBranch == 'main' || rawBranch == 'global';
     final prefix = '${cleanBranch}__std__';
     final box = _getStudentsBox();
     final list = box.keys
@@ -1210,14 +1223,13 @@ class MadrassaLocalStorage {
   }
 
   static List<String> _getAllBranchIds() {
+    const defaultCoreBranches = ['gujrat', 'karachi', 'saddar', 'haji', 'sialkot', 'rawalpindi', 'jalalpurjattan'];
     final list = LocalStorageService.getLocalBranchesList();
     final ids = list
-        .map((b) => b['id'].toString().toLowerCase().trim())
+        .map((b) => normalizeBranch(b['id']?.toString() ?? ''))
         .where((s) => s.isNotEmpty && s != 'all' && s != 'global' && s != 'unknown')
         .toSet();
-    if (ids.isEmpty) {
-      return const ['gujrat', 'karachi', 'saddar', 'haji'];
-    }
+    ids.addAll(defaultCoreBranches);
     return ids.toList();
   }
 
@@ -1358,7 +1370,7 @@ class MadrassaLocalStorage {
 
       // 4 s was too short for a cold Windows Firestore client or a slow mobile link; the
       // download silently gave up and the screen still said "Sync completed".
-      final timeout = Duration(seconds: force ? 20 : 8);
+      final timeout = Duration(seconds: force ? 30 : 15);
       Future<QuerySnapshot<Map<String, dynamic>>?> fetch(String b) async {
         try {
           return await FirebaseFirestore.instance
@@ -2401,8 +2413,9 @@ class MadrassaLocalStorage {
 
   static List<Map<String, dynamic>> getAllTeachersCached(String branchId) {
     if (!Hive.isBoxOpen(LocalStorageService.usersBox)) return const [];
-    final cleanBranch = branchId.toLowerCase().trim();
-    final isGlobal = cleanBranch.isEmpty || cleanBranch == 'all' || cleanBranch == 'main' || cleanBranch == 'global';
+    final rawBranch = branchId.toLowerCase().trim();
+    final cleanBranch = normalizeBranch(rawBranch);
+    final isGlobal = cleanBranch == 'all' || cleanBranch == 'global' || rawBranch.isEmpty || rawBranch == 'all' || rawBranch == 'main' || rawBranch == 'global';
     final box = Hive.box(LocalStorageService.usersBox);
 
     final List<Map<String, dynamic>> teachers = [];
@@ -2847,7 +2860,7 @@ class MadrassaLocalStorage {
   /// Downloads all related Madrassa data for the specified branch (students, teachers,
   /// attendance, logs, fees, holidays, config) into local storage.
   static Future<void> downloadAllMadrassaData(String branchId, {bool force = false}) async {
-    final cleanBranch = branchId.toLowerCase().trim();
+    final cleanBranch = normalizeBranch(branchId);
     if (cleanBranch.isEmpty || cleanBranch == 'unknown') return;
 
     if (cleanBranch == 'all' || cleanBranch == 'global') {

@@ -118,9 +118,16 @@ class CloudDb {
 
   // ── Sending ───────────────────────────────────────────────────────────────
 
+  /// Set after a short Firestore rate limit: writes wait until then (retried as transient).
+  static DateTime? _rateLimitedUntil;
+
   Future<void> _send(List<_Write> writes, {bool fingerprint = false}) async {
     if (writes.isEmpty) return;
     final ctx = _ctx;
+    final rl = _rateLimitedUntil;
+    if (rl != null && DateTime.now().isBefore(rl) && !ctx.force) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable', message: 'rate limited — retrying shortly');
+    }
     if (QuotaService.isPausedForDailyReset && !ctx.force) {
       throw FirebaseException(
         plugin: 'cloud_firestore',
@@ -228,6 +235,16 @@ class CloudDb {
       if (status == 401 && attempt == 0 && headers.isNotEmpty) continue; // stale token: refresh once
 
       lastError.value = '${err.code}: ${err.message}';
+      // Only a real daily-quota refusal pauses uploads until the next reset. A short rate limit
+      // or contention ("too many requests", "too much contention") is also 429 /
+      // RESOURCE_EXHAUSTED, and used to stop ALL uploads for hours; it is now retried shortly.
+      final msgLower = err.message.toLowerCase();
+      final isDailyQuota = msgLower.contains('quota');
+      if ((status == 429 || err.code == 'resource-exhausted') && !isDailyQuota) {
+        _rateLimitedUntil = DateTime.now().add(const Duration(seconds: 20));
+        SyncLog.write('⏳ Firestore rate-limited this PC (HTTP $status: ${err.message}) — retrying shortly');
+        throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable', message: 'rate limited: ${err.message}');
+      }
       if (status == 429 || err.code == 'resource-exhausted') {
         QuotaService.pauseUntilDailyReset(reason: err.message);
         SyncLog.write('⛔ Firestore refused writes: daily quota used up (HTTP $status: ${err.message}). '
