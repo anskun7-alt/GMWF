@@ -875,6 +875,10 @@ class LanServer {
           final info = {
             'role':        normRole,
             'branchId':    effectiveClientBranch,
+            // The branch the desk itself is logged in to (branchId above is the server's).
+            // The catch-up must look up THIS branch's tokens: with a server whose branch was
+            // set wrong it searched the server's branch and never re-sent the desk's tokens.
+            'deskBranch':  normBranch,
             'username':    username,
             'clientId':    clientId,
             'platform':    platform,
@@ -1349,6 +1353,7 @@ class LanServer {
         'socketId':  socketId,
         'role':      e.value['role'],
         'branchId':  e.value['branchId'],
+        'deskBranch': e.value['deskBranch'],
         'username':  e.value['username'],
         'clientId':  e.value['clientId'],
         'ipAddress': e.value['ipAddress'] ?? _clientIps[e.key] ?? '127.0.0.1',

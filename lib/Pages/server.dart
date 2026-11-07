@@ -1798,6 +1798,7 @@ exit 0
                       adminName: 'Server Control Panel',
                       branchDisplay: _resolveBranchAndCampDisplay(),
                       onLocationTap: _showServerLocationDialog,
+                      onLogout: () => _showLogoutDialog(context),
                       locationWarning: _locationMismatch
                           ? 'Desks on this network are from ' + LocalStorageService.getBranchName(_desksBranchFamily() ?? '') + ' — click to set this server\'s location'
                           : (!_hasSiteLocation ? 'Location taken from the logged-in account — click to confirm' : null),
@@ -6860,9 +6861,14 @@ class ServerSyncManager {
     List<Map<String, dynamic>> entries;
     try {
       final clientBranch = (info['branchId'] ?? info['branch'] ?? '').toString().toLowerCase().trim();
+      // The desk's own login branch (identify), not the server's: a server whose branch was
+      // set wrong (Karachi camp server logged in as Sialkot) searched only Sialkot tokens and
+      // never re-sent a Karachi desk anything it had missed.
+      final deskBranch = (info['deskBranch'] ?? '').toString().toLowerCase().trim();
       final branchesToQuery = <String>{branchId};
       if (clientBranch.isNotEmpty && clientBranch != 'all') branchesToQuery.add(clientBranch);
-      if (CampSessionService.isKarachiFamily(branchId)) {
+      if (deskBranch.isNotEmpty && deskBranch != 'all') branchesToQuery.add(deskBranch);
+      if (branchesToQuery.any(CampSessionService.isKarachiFamily)) {
         branchesToQuery.addAll(['karachi', 'saddar', 'haji_camp', 'haji', 'hajicamp']);
       }
       entries = _todayEntriesFor(branchesToQuery, today);
@@ -6976,9 +6982,15 @@ class ServerSyncManager {
         }
       }
 
+      // Each copy carries the token's OWN branch. Stamped with the server's branch, a desk of
+      // another spelling/branch dropped it as "cross-branch" yet still ACKed it, so the server
+      // counted it delivered and never sent it again.
+      final entryBranch = (entryCopy['branchId'] ?? '').toString().trim().isNotEmpty
+          ? entryCopy['branchId'].toString().trim().toLowerCase()
+          : branchId;
       final entrySent = _sendToSocket(socketId, {
         'event_type': 'save_entry',
-        'branchId': branchId,
+        'branchId': entryBranch,
         'data': entryCopy,
         '_serverPush': true,
         'isCatchUp': true,
@@ -6989,7 +7001,7 @@ class ServerSyncManager {
       if (presc != null && presc.isNotEmpty) {
         final prescSent = _sendToSocket(socketId, {
           'event_type': 'save_prescription',
-          'branchId': branchId,
+          'branchId': entryBranch,
           'data': presc,
           '_serverPush': true,
           'isCatchUp': true,
@@ -7000,7 +7012,7 @@ class ServerSyncManager {
       if ((entryCopy['dispenseStatus'] ?? '') == 'dispensed') {
         final dispSent = _sendToSocket(socketId, {
           'event_type': 'dispense_completed',
-          'branchId': branchId,
+          'branchId': entryBranch,
           'data': entryCopy,
           '_serverPush': true,
           'isCatchUp': true,

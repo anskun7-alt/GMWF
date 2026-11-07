@@ -88,6 +88,7 @@ class LanDiscovery {
   static Future<void> _tryUdp(Completer<DiscoveredServer?> c, void Function(String)? s,
       {String? branchId}) async {
     final myBranch = LocalStorageService.sanitizeBranchId(branchId, fallback: '');
+    ({String ip, int port})? mismatchFallback;
     try {
       final sock = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -113,7 +114,24 @@ class LanDiscovery {
               if (myBranch.isNotEmpty &&
                   serverBranch.isNotEmpty &&
                   !CampSessionService.areBranchesMatching(myBranch, serverBranch)) {
-                debugPrint('UDP: ignoring $ip:$port (branch $serverBranch does not match desk $myBranch)');
+                debugPrint('UDP: $ip:$port announces branch $serverBranch (desk is $myBranch) — '
+                    'kept as fallback if no server of our branch answers');
+                // A server whose location is set wrong (e.g. a Karachi camp server logged in with
+                // a Sialkot account) is often the ONLY server on the network. Ignoring it left
+                // desks on the slow subnet scan, so every reconnect took much longer. Use it after
+                // 4 s if no server of our own branch announces itself by then.
+                if (mismatchFallback == null && ip.isNotEmpty) {
+                  mismatchFallback = (ip: ip, port: port);
+                  Future.delayed(const Duration(seconds: 4), () async {
+                    final fb = mismatchFallback;
+                    if (c.isCompleted || fb == null) return;
+                    if (await isReachable(fb.ip, fb.port) && !c.isCompleted) {
+                      debugPrint('UDP: no $myBranch server announced — using $serverBranch server ${fb.ip}:${fb.port}');
+                      s?.call('Found server at ${fb.ip}');
+                      c.complete(DiscoveredServer(ip: fb.ip, port: fb.port, method: 'udp'));
+                    }
+                  });
+                }
                 return;
               }
               if (ip.isNotEmpty) {

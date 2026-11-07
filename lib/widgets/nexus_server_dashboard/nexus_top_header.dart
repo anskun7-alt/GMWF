@@ -21,8 +21,11 @@ class NexusTopHeader extends StatelessWidget {
   final VoidCallback? onLocationTap;
   /// Shown (amber) when the location looks wrong, e.g. desks are from another branch.
   final String? locationWarning;
+  /// Log out of the server PC (asks for confirmation; stops the server first).
+  final VoidCallback? onLogout;
 
   const NexusTopHeader({
+    this.onLogout,
     this.onLocationTap,
     this.locationWarning,
     super.key,
@@ -318,6 +321,25 @@ class NexusTopHeader extends StatelessWidget {
                   ),
                 ),
               ),
+              if (onLogout != null) ...[
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Log out (stops the server)',
+                  child: OutlinedButton.icon(
+                    onPressed: onLogout,
+                    icon: Icon(Icons.logout_rounded, size: 15, color: NexusColors.error),
+                    label: Text(
+                      'Logout',
+                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: NexusColors.error),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: NexusColors.errorBorder),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ],
