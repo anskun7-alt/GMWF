@@ -280,7 +280,12 @@ class ConnectionManager {
           _reconnectTimer?.cancel();
           _reconnectTimer = null;
           _reconnectAttempts = 0;
-          _saveServer(ip, port);
+          // Only adopt the announcing server as "ours" when we have none yet or it IS ours.
+          // Saving every heard beacon let a second server on the LAN (an old PC still running
+          // GMWF as server) take desks over one by one: reception on one server, doctor on the
+          // other. _tryConnect tries the saved server first and switches only if it is gone.
+          final saved = _getSavedServer();
+          if (saved == null || saved.$1 == ip) _saveServer(ip, port);
           unawaited(_tryConnect());
         }));
       }, onError: (_) {
@@ -523,6 +528,13 @@ class ConnectionManager {
     }
 
     debugPrint('[ConnectionManager] Discovered server via ${found.method}: ${found.ip}:${found.port}');
+    // Found a DIFFERENT server than the one this desk works with: only switch if the saved one
+    // is really gone, not just slow to answer one probe (see _savedServerStillAlive).
+    if (saved != null && found.ip != saved.$1 && await _savedServerStillAlive(saved)) {
+      debugPrint('[ConnectionManager] ⚠️ Ignoring other server ${found.ip}: saved server ${saved.$1} is still up');
+      final okSaved = await _connectTo(saved.$1, saved.$2);
+      if (okSaved) return;
+    }
     final ok = await _connectTo(found.ip, found.port);
     if (!ok) _scheduleReconnect();
   }
@@ -740,6 +752,18 @@ class ConnectionManager {
   }
 
   // ── Persistence ────────────────────────────────────────────────────────────
+  /// The saved server answers within ~10 s (3 probes, 2 s apart). A single 1.2 s probe failing
+  /// (server busy for a moment, Wi-Fi blip) used to send the desk to whatever other server it
+  /// found, splitting the desks between two servers.
+  Future<bool> _savedServerStillAlive((String, int) saved) async {
+    for (var i = 0; i < 3; i++) {
+      if (!_running || _disposed) return false;
+      if (await LanDiscovery.isReachable(saved.$1, saved.$2)) return true;
+      if (i < 2) await Future.delayed(const Duration(seconds: 2));
+    }
+    return false;
+  }
+
   (String, int)? _getSavedServer() {
     // Don't use saved server when dedicated mode is on — always use the fixed IP.
     if (AppNetwork.useDedicatedServer) return null;

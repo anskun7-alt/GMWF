@@ -404,6 +404,45 @@ class _ServerDashboardWithSyncState
     }
   }
 
+  /// Red bar shown on every tab while another GMWF server is heard on the network.
+  Widget _buildOtherServerAlert() {
+    return ValueListenableBuilder<Map<String, ({String branch, DateTime at})>>(
+      valueListenable: LanServer.otherServers,
+      builder: (context, _, __) {
+        if (!_isRunning) return const SizedBox.shrink();
+        final others = LanServer.activeOtherServers;
+        if (others.isEmpty) return const SizedBox.shrink();
+        final list = others.entries
+            .map((e) => e.value.branch.isEmpty
+                ? e.key
+                : '${e.key} (${LocalStorageService.getBranchName(e.value.branch)})')
+            .join(', ');
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+          decoration: BoxDecoration(
+            color: NexusColors.errorMuted,
+            border: Border(bottom: BorderSide(color: NexusColors.errorBorder)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.dns_rounded, color: NexusColors.error, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Another GMWF server is running on this network: $list. '
+                  'Desks will split between the two servers and tokens will go missing. '
+                  'Keep only ONE server — close GMWF (or stop the server) on the other PC.',
+                  style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600, color: NexusColors.textMain),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   String _resolveEffectiveBranchId() {
     // An explicit server location always wins.
     final site = _readSetting(_siteBranchKey);
@@ -1763,6 +1802,9 @@ exit 0
                           ? 'Desks on this network are from ' + LocalStorageService.getBranchName(_desksBranchFamily() ?? '') + ' — click to set this server\'s location'
                           : (!_hasSiteLocation ? 'Location taken from the logged-in account — click to confirm' : null),
                     ),
+
+                    // Another GMWF server on this network splits the desks between two servers.
+                    _buildOtherServerAlert(),
 
                     // Content View for Selected Navigation Tab (Truly Lazy Initialized)
                     Expanded(

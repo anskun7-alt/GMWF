@@ -537,8 +537,61 @@ class LanServer {
     }
   }
 
+  // ── Second-server detection ────────────────────────────────────────────────
+  // Two PCs running GMWF as server on one network split the desks between them (reception on
+  // one, doctor on the other): tokens "never arrived", then came in a burst — including ones
+  // already prescribed or dispensed on the other server — and both servers issued the same
+  // token numbers. Every server now listens for other servers' beacons so the dashboard can
+  // say which PC to stop.
+  RawDatagramSocket? _peerWatchSocket;
+
+  /// Other GMWF servers heard on this network: IP -> (branch they announce, last heard).
+  static final ValueNotifier<Map<String, ({String branch, DateTime at})>> otherServers =
+      ValueNotifier(const {});
+
+  /// Other servers heard in the last 30 s.
+  static Map<String, ({String branch, DateTime at})> get activeOtherServers {
+    final cutoff = DateTime.now().subtract(const Duration(seconds: 30));
+    return Map.fromEntries(otherServers.value.entries.where((e) => e.value.at.isAfter(cutoff)));
+  }
+
+  Future<void> _startPeerServerWatch() async {
+    if (_peerWatchSocket != null) return;
+    try {
+      final sock = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        AppNetwork.udpBroadcastPort,
+        reuseAddress: true,
+        reusePort: !Platform.isWindows,
+      );
+      _peerWatchSocket = sock;
+      sock.listen((ev) {
+        if (ev != RawSocketEvent.read) return;
+        final dg = sock.receive();
+        if (dg == null) return;
+        final msg = utf8.decode(dg.data, allowMalformed: true).trim();
+        if (!msg.startsWith(AppNetwork.udpMessagePrefix)) return;
+        final parts = msg.substring(AppNetwork.udpMessagePrefix.length).split(':');
+        final ip = parts.isNotEmpty ? parts[0].trim() : '';
+        if (ip.isEmpty || ip == _serverIp || ip == '127.0.0.1') return;
+        // A beacon sent from this same PC (another adapter) is not another server.
+        if (dg.address.address == _serverIp) return;
+        final br = parts.length > 2 ? parts[2].trim() : '';
+        final isNew = !otherServers.value.containsKey(ip);
+        otherServers.value = {...otherServers.value, ip: (branch: br, at: DateTime.now())};
+        if (isNew) {
+          print('[LanServer] ⚠️ ANOTHER GMWF SERVER is running on this network at $ip '
+              '(branch "${br.isEmpty ? '?' : br}"). Desks will split between the two servers — stop one of them.');
+        }
+      });
+    } catch (e) {
+      print('[LanServer] Could not watch for other servers: $e');
+    }
+  }
+
   // ── UDP Broadcast ──────────────────────────────────────────────────────────
   void _startUdpBroadcast(String ipShown) {
+    unawaited(_startPeerServerWatch());
     try {
       RawDatagramSocket.bind(InternetAddress.anyIPv4, 0).then((socket) {
         socket.broadcastEnabled = true;
@@ -1323,6 +1376,8 @@ class LanServer {
 
   Future<void> stop() async {
     print('[LanServer] Shutting down (${_clients.length} clients)...');
+    try { _peerWatchSocket?.close(); } catch (_) {}
+    _peerWatchSocket = null;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _lastActiveTimes.clear();
