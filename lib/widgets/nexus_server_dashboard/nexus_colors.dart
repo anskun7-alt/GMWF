@@ -36,6 +36,10 @@ class NexusColors {
   static Color get textMain => current.textMain;
   static Color get textSecondary => current.textSecondary;
   static Color get textMuted => current.textMuted;
+  /// Text / icons on a primary-filled button or chip (dark text on light lavender in dark Plum).
+  static Color get onPrimary => current.onPrimary;
+  /// Text / icons on a warning-filled button.
+  static Color get onWarning => current.onWarning;
 
   // Semantic
   static Color get success => current.success;

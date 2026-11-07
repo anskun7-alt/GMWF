@@ -406,7 +406,7 @@ class NexusNetworkView extends StatelessWidget {
                     label: Text('Open Ports Automatically', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: NexusColors.warning,
-                      foregroundColor: Colors.white,
+                      foregroundColor: NexusColors.onWarning,
                       elevation: 0,
                     ),
                   ),
@@ -581,7 +581,7 @@ class _NexusSettingsViewState extends State<NexusSettingsView> {
                           style: GoogleFonts.inter(
                             fontSize: 12.5,
                             fontWeight: isSel ? FontWeight.w600 : FontWeight.w500,
-                            color: isSel ? Colors.white : NexusColors.textSecondary,
+                            color: isSel ? NexusColors.onPrimary : NexusColors.textSecondary,
                           ),
                         ),
                       ),

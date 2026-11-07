@@ -17,8 +17,14 @@ class NexusTopHeader extends StatelessWidget {
   final VoidCallback? onCloudSync;
   final String adminName;
   final String branchDisplay;
+  /// Opens the "Server location" dialog (branch + camp this server serves).
+  final VoidCallback? onLocationTap;
+  /// Shown (amber) when the location looks wrong, e.g. desks are from another branch.
+  final String? locationWarning;
 
   const NexusTopHeader({
+    this.onLocationTap,
+    this.locationWarning,
     super.key,
     required this.breadcrumbSection,
     required this.breadcrumbPage,
@@ -253,51 +259,64 @@ class NexusTopHeader extends StatelessWidget {
               ),
               const SizedBox(width: 12),
 
-              // Admin Avatar & Info
-              Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: NexusColors.primaryMuted,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: NexusColors.primary.withValues(alpha: 0.3)),
-                    ),
-                    child: Center(
-                      child: Text(
-                        adminName.isNotEmpty ? adminName[0].toUpperCase() : 'A',
-                        style: GoogleFonts.inter(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: NexusColors.primary,
+              // Server identity & location (click to change the location)
+              Tooltip(
+                message: locationWarning ?? 'Server location — click to change',
+                child: InkWell(
+                  onTap: onLocationTap,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: locationWarning != null ? NexusColors.warningMuted : NexusColors.primaryMuted,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: (locationWarning != null ? NexusColors.warning : NexusColors.primary)
+                                  .withValues(alpha: 0.35),
+                            ),
+                          ),
+                          child: Icon(
+                            locationWarning != null ? Icons.warning_amber_rounded : Icons.dns_rounded,
+                            size: 16,
+                            color: locationWarning != null ? NexusColors.warning : NexusColors.primary,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              adminName.isNotEmpty ? adminName : 'Server Control Panel',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: NexusColors.textMain,
+                              ),
+                            ),
+                            Text(
+                              branchDisplay.isNotEmpty ? branchDisplay : 'Location not set',
+                              style: GoogleFonts.inter(
+                                fontSize: 10.5,
+                                fontWeight: locationWarning != null ? FontWeight.w600 : FontWeight.w400,
+                                color: locationWarning != null ? NexusColors.warning : NexusColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (onLocationTap != null) ...[
+                          const SizedBox(width: 4),
+                          Icon(Icons.expand_more_rounded, size: 16, color: NexusColors.textMuted),
+                        ],
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        adminName.isNotEmpty ? adminName : 'Administrator',
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: NexusColors.textMain,
-                        ),
-                      ),
-                      Text(
-                        branchDisplay.isNotEmpty ? branchDisplay : 'Haji Camp Node',
-                        style: GoogleFonts.inter(
-                          fontSize: 10.5,
-                          color: NexusColors.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
               ),
             ],
           ),

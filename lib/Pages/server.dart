@@ -244,12 +244,173 @@ class _ServerDashboardWithSyncState
   LanServer? _server;
   SyncQueueStats _queueHealthStats = const SyncQueueStats();
   Timer? _queueStatsTimer;
+  Timer? _firewallTimer;
   final ScrollController _runningScrollController = ScrollController();
 
+  // ── Server location (branch + camp) ────────────────────────────────────────
+  // The branch this server PC serves. Saved once on this PC ("Server location") and used
+  // instead of the logged-in account's branch: a Karachi / Haji Camp server logged in with
+  // an account whose record said "sialkot" announced itself as Sialkot to every desk,
+  // registered itself under Sialkot in the cloud, and showed "Sialkot" in the header.
+  static const String _siteBranchKey = 'server_site_branch';
+  static const String _siteCampKey = 'server_site_camp';
+
+  String? _readSetting(String key) {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final v = Hive.box('app_settings').get(key)?.toString().trim().toLowerCase();
+        if (v != null && v.isNotEmpty && v != 'null') return v;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  bool get _hasSiteLocation => _readSetting(_siteBranchKey) != null;
+  String get _serverBranch => _readSetting(_siteBranchKey) ?? widget.branchId;
+  String? get _serverCamp => _readSetting(_siteCampKey);
+
+  /// Branch the connected desks actually belong to, when they all agree (null otherwise).
+  String? _desksBranchFamily() {
+    final fams = <String>{};
+    for (final c in _connectedClients.values) {
+      final cb = c.branchId.trim().toLowerCase();
+      if (cb.isEmpty || cb == 'all' || cb == 'unknown' || cb == 'default' || cb == 'global') continue;
+      fams.add(CampSessionService.isKarachiFamily(cb) ? 'karachi' : cb);
+    }
+    return fams.length == 1 ? fams.first : null;
+  }
+
+  /// True when the desks on this LAN belong to another branch than this server says it serves.
+  bool get _locationMismatch {
+    final desks = _desksBranchFamily();
+    if (desks == null) return false;
+    final mine = CampSessionService.isKarachiFamily(_serverBranch) ? 'karachi' : _serverBranch.toLowerCase().trim();
+    return mine.isNotEmpty && mine != 'all' && !CampSessionService.areBranchesMatching(desks, mine);
+  }
+
+  List<String> _knownBranchIds() {
+    final ids = <String>{'karachi', 'gujrat', 'sialkot', 'rawalpindi', 'jalalpurjattan'};
+    try {
+      if (Hive.isBoxOpen('local_branches')) {
+        for (final k in Hive.box('local_branches').keys) {
+          final id = k.toString().replaceAll('branch:', '').trim().toLowerCase();
+          if (id.isNotEmpty && id != 'all' && !CampSessionService.isKarachiFamily(id)) ids.add(id);
+        }
+      }
+    } catch (_) {}
+    final list = ids.toList()..sort();
+    return list;
+  }
+
+  /// Lets the admin set which branch / camp this server PC serves. Applied by restarting the
+  /// LAN server (desks reconnect on their own within a few seconds).
+  Future<void> _showServerLocationDialog() async {
+    String branch = CampSessionService.isKarachiFamily(_serverBranch) ? 'karachi' : _serverBranch.toLowerCase().trim();
+    final suggested = _desksBranchFamily();
+    if (!_hasSiteLocation && suggested != null) branch = suggested;
+    String? camp = _serverCamp;
+    final branches = _knownBranchIds();
+    if (!branches.contains(branch) && branch.isNotEmpty) branches.insert(0, branch);
+
+    final result = await showDialog<({String branch, String? camp})>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+        final camps = CampSessionService.getCampsForBranch(branch, includeClosed: false);
+        final campIds = camps
+            .map((c) => (c['id'] ?? '').toString().trim().toLowerCase())
+            .where((id) => id.isNotEmpty)
+            .toList();
+        if (camp != null && !campIds.contains(camp)) camp = null;
+        return AlertDialog(
+          backgroundColor: NexusColors.cardBg,
+          title: Text('Server location', style: TextStyle(color: NexusColors.textMain, fontWeight: FontWeight.w700)),
+          content: SizedBox(
+            width: 380,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Which branch and camp does this server PC serve? Desks on this network connect to it as that branch.',
+                  style: TextStyle(color: NexusColors.textSecondary, fontSize: 12.5),
+                ),
+                if (suggested != null && suggested != branch) ...[
+                  const SizedBox(height: 8),
+                  Text('Connected desks are from ${LocalStorageService.getBranchName(suggested)}.',
+                      style: TextStyle(color: NexusColors.warning, fontSize: 12, fontWeight: FontWeight.w600)),
+                ],
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: branch,
+                  dropdownColor: NexusColors.cardBg,
+                  style: TextStyle(color: NexusColors.textMain),
+                  decoration: const InputDecoration(labelText: 'Branch', border: OutlineInputBorder()),
+                  items: branches
+                      .map((b) => DropdownMenuItem(value: b, child: Text(LocalStorageService.getBranchName(b))))
+                      .toList(),
+                  onChanged: (v) => setD(() {
+                    branch = v ?? branch;
+                    camp = null;
+                  }),
+                ),
+                if (campIds.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String?>(
+                    initialValue: camp,
+                    dropdownColor: NexusColors.cardBg,
+                    style: TextStyle(color: NexusColors.textMain),
+                    decoration: const InputDecoration(labelText: 'Camp', border: OutlineInputBorder()),
+                    items: [
+                      const DropdownMenuItem<String?>(value: null, child: Text('All camps')),
+                      ...campIds.map((id) => DropdownMenuItem<String?>(
+                            value: id,
+                            child: Text(CampSessionService.getCampLabel(id, branch)),
+                          )),
+                    ],
+                    onChanged: (v) => setD(() => camp = v),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, (branch: branch, camp: camp)),
+              child: const Text('Save & restart server'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (result == null || !mounted) return;
+
+    final box = Hive.box('app_settings');
+    await box.put(_siteBranchKey, result.branch);
+    if (result.camp == null) {
+      await box.delete(_siteCampKey);
+    } else {
+      await box.put(_siteCampKey, result.camp);
+    }
+    _addLog('📍 Server location set to ${_resolveBranchAndCampDisplay()}');
+    if (_isRunning) {
+      _addLog('🔄 Restarting the LAN server with the new location…');
+      await _stopServer();
+      if (mounted) await _startServer();
+    }
+    if (mounted) {
+      setState(() {});
+      _showSuccess('Server location saved: ${_resolveBranchAndCampDisplay()}');
+    }
+  }
+
   String _resolveEffectiveBranchId() {
-    String candidate = widget.branchId.trim().toLowerCase();
+    // An explicit server location always wins.
+    final site = _readSetting(_siteBranchKey);
+    if (site != null) return CampSessionService.isKarachiFamily(site) ? 'karachi' : site;
+    String candidate = _serverBranch.trim().toLowerCase();
     // 1. If connected clients on the LAN all belong to one branch (e.g. 'karachi') and
-    // widget.branchId was stale/mismatched, infer it from the active LAN clients.
+    // _serverBranch was stale/mismatched, infer it from the active LAN clients.
     final clientBranches = <String>{};
     for (final c in _connectedClients.values) {
       final cb = c.branchId.trim().toLowerCase();
@@ -273,7 +434,7 @@ class _ServerDashboardWithSyncState
     if (CampSessionService.isKarachiFamily(candidate)) {
       return 'karachi';
     }
-    return candidate.isNotEmpty ? candidate : widget.branchId;
+    return candidate.isNotEmpty ? candidate : _serverBranch;
   }
 
   String _resolveBranchAndCampDisplay() {
@@ -282,8 +443,8 @@ class _ServerDashboardWithSyncState
     if (!CampSessionService.hasCampsForBranch(effBranch)) {
       return branchTitle;
     }
-    // Resolve active camp from CampSessionService or from today's active tokens/connected clients
-    String? campId = CampSessionService.getActiveCamp(effBranch);
+    // The camp saved in the server location wins; otherwise the active camp / connected desks.
+    String? campId = _serverCamp ?? CampSessionService.getActiveCamp(effBranch);
     if (campId == null || campId.isEmpty || campId == 'all') {
       for (final c in _connectedClients.values) {
         final cb = c.branchId.trim().toLowerCase();
@@ -325,6 +486,9 @@ class _ServerDashboardWithSyncState
       }
     } catch (_) {}
     _initializeSync();
+    // Real firewall check (the banner used to show on every Windows PC). Rechecked every 5 min.
+    unawaited(_checkFirewall());
+    _firewallTimer = Timer.periodic(const Duration(minutes: 5), (_) => _checkFirewall());
     _checkConnectivity();
     _startBeaconWatch();
     // 15 s (was 5): each tick rebuilds the whole dashboard.
@@ -337,15 +501,8 @@ class _ServerDashboardWithSyncState
       ]);
       _lanSamples.removeWhere((s) => now - s[0] > 65000);
 
-      final snap = SystemMetricsService().currentSnapshot;
-      _telemetryHistory.add(NexusTelemetryPoint(
-        timestamp: DateTime.now(),
-        cpuPercent: snap.cpuPercent,
-        ramPercent: snap.ramPercent,
-      ));
-      if (_telemetryHistory.length > 50) {
-        _telemetryHistory.removeAt(0);
-      }
+      // (CPU/RAM history is filled from the live metrics stream below, every 5 s. Adding the
+      // same cached reading here as well put stale duplicate points on the chart.)
 
       // Refresh lastActiveAt for all connected clients from the server's tracked activity
       if (_server != null) {
@@ -427,21 +584,19 @@ class _ServerDashboardWithSyncState
     });
 
     SystemMetricsService().startMonitoring();
-    final initialSnap = SystemMetricsService().currentSnapshot;
-    _telemetryHistory.add(NexusTelemetryPoint(
-      timestamp: DateTime.now(),
-      cpuPercent: initialSnap.cpuPercent,
-      ramPercent: initialSnap.ramPercent,
-    ));
     _metricsSubscription = SystemMetricsService().metricsStream.listen((snap) {
       if (mounted) {
-        _telemetryHistory.add(NexusTelemetryPoint(
-          timestamp: snap.timestamp,
-          cpuPercent: snap.cpuPercent,
-          ramPercent: snap.ramPercent,
-        ));
-        if (_telemetryHistory.length > 50) {
-          _telemetryHistory.removeAt(0);
+        // Only real CPU readings go on the chart (the first sample only sets the baseline).
+        if (snap.cpuKnown) {
+          _telemetryHistory.add(NexusTelemetryPoint(
+            timestamp: snap.timestamp,
+            cpuPercent: snap.cpuPercent,
+            ramPercent: snap.ramPercent,
+          ));
+          // 15 minutes of 5-second samples.
+          while (_telemetryHistory.length > 180) {
+            _telemetryHistory.removeAt(0);
+          }
         }
         setState(() {});
       }
@@ -459,85 +614,141 @@ class _ServerDashboardWithSyncState
     });
   }
 
+  // ── Windows Firewall: real check + one-click fix ──────────────────────────────
+  // The banner used to show on every Windows PC (it never looked at the firewall), and the
+  // fix ran netsh without administrator rights, so Windows refused it and nothing happened.
+
+  /// True only when the firewall really does not let desks reach the LAN server port.
+  bool _firewallBlocked = false;
+  bool _isFixingFirewall = false;
+
+  /// Reads the firewall through Windows' FwPolicy2 object (works without admin rights;
+  /// Get-NetFirewallPortFilter does not). Prints OK, BLOCKED (a Block rule for this program
+  /// beats every Allow rule) or MISSING (no rule lets the port in on the current network).
+  static const String _firewallCheckScript = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+$exe  = "$env:GMWF_EXE"
+$port = "$env:GMWF_PORT"
+$fw = New-Object -ComObject HNetCfg.FwPolicy2
+$cur = $fw.CurrentProfileTypes
+$ok = $false; $blocked = $false
+foreach ($r in $fw.Rules) {
+  if ($r.Direction -ne 1 -or -not $r.Enabled) { continue }
+  if (($r.Profiles -band $cur) -eq 0) { continue }
+  if ($r.Protocol -ne 6 -and $r.Protocol -ne 256) { continue }
+  $lp = "$($r.LocalPorts)"
+  $ports = @($lp -split ',' | ForEach-Object { $_.Trim() })
+  $portOk = ($lp -eq '' -or $lp -eq '*' -or ($ports -contains $port))
+  if (-not $portOk) {
+    foreach ($p in $ports) { if ($p -match '^(\d+)-(\d+)$' -and [int]$port -ge [int]$matches[1] -and [int]$port -le [int]$matches[2]) { $portOk = $true } }
+  }
+  $app = "$($r.ApplicationName)"
+  $appOk = ($app -eq '') -or ($exe -ne '' -and $app -ieq $exe)
+  $specific = ($ports -contains $port) -or ($exe -ne '' -and $app -ieq $exe)
+  if ($portOk -and $appOk -and $specific) {
+    if ($r.Action -eq 0) { $blocked = $true } elseif ($r.Action -eq 1) { $ok = $true }
+  }
+}
+if ($blocked) { 'BLOCKED' } elseif ($ok) { 'OK' } else { 'MISSING' }
+''';
+
+  /// Runs [script] with Windows PowerShell from a temporary file; returns trimmed stdout.
+  Future<({int code, String out})> _runPowerShellScript(String script,
+      {Map<String, String>? env, Duration timeout = const Duration(seconds: 20)}) async {
+    final file = io.File(
+        '${io.Directory.systemTemp.path}${io.Platform.pathSeparator}gmwf_fw_${DateTime.now().microsecondsSinceEpoch}.ps1');
+    try {
+      await file.writeAsString(script);
+      final res = await io.Process.run(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file.path],
+        environment: env,
+      ).timeout(timeout);
+      return (code: res.exitCode, out: res.stdout.toString().trim());
+    } finally {
+      try { await file.delete(); } catch (_) {}
+    }
+  }
+
+  Future<String> _checkFirewall() async {
+    if (kIsWeb || !io.Platform.isWindows) return 'OK';
+    try {
+      final r = await _runPowerShellScript(_firewallCheckScript, env: {
+        'GMWF_EXE': io.Platform.resolvedExecutable,
+        'GMWF_PORT': AppNetwork.websocketPort.toString(),
+      });
+      final state = r.out.split(RegExp(r'\s+')).lastWhere((s) => s.isNotEmpty, orElse: () => 'OK');
+      final blocked = state == 'BLOCKED' || state == 'MISSING';
+      if (mounted && blocked != _firewallBlocked) setState(() => _firewallBlocked = blocked);
+      if (blocked) _addLog('🛡️ Firewall check: port ${AppNetwork.websocketPort} is $state for desks on this network');
+      return state;
+    } catch (e) {
+      // Could not read the firewall: do not show a false alarm.
+      debugPrint('[Server] Firewall check failed: $e');
+      return 'UNKNOWN';
+    }
+  }
+
   Future<void> _openFirewallPort() async {
     if (kIsWeb || !io.Platform.isWindows) {
       _showError('Firewall configuration is only applicable on Windows.');
       return;
     }
+    if (_isFixingFirewall) return;
+    _isFixingFirewall = true;
+    final port = AppNetwork.websocketPort;
+    final exe = io.Platform.resolvedExecutable.replaceAll("'", "''");
+    // Runs elevated (Windows shows its "allow changes" prompt). Replaces GMWF's own rules
+    // (so re-running never piles up duplicates) and disables any Block rule Windows created
+    // for this program when its first-run firewall prompt was cancelled.
+    final fixScript = '''
+\$exe = '$exe'
+foreach (\$n in 'GMWF_LAN_Server','GMWF_LAN','GMWF_LAN_UDP_53280','GMWF_ZKTeco_ADMS_8088','GMWF_ZKTeco_UDP_4370','GMWF_ZKTeco_UDP','GMWF_App_Inbound') {
+  netsh advfirewall firewall delete rule name="\$n" | Out-Null
+}
+netsh advfirewall firewall add rule name="GMWF_LAN_Server" dir=in action=allow protocol=TCP localport=$port profile=any | Out-Null
+netsh advfirewall firewall add rule name="GMWF_LAN_UDP_53280" dir=in action=allow protocol=UDP localport=53280 profile=any | Out-Null
+netsh advfirewall firewall add rule name="GMWF_ZKTeco_ADMS_8088" dir=in action=allow protocol=TCP localport=8088 profile=any | Out-Null
+netsh advfirewall firewall add rule name="GMWF_ZKTeco_UDP_4370" dir=in action=allow protocol=UDP localport=4370 profile=any | Out-Null
+netsh advfirewall firewall add rule name="GMWF_App_Inbound" dir=in action=allow program="\$exe" enable=yes profile=any | Out-Null
+\$fw = New-Object -ComObject HNetCfg.FwPolicy2
+foreach (\$r in @(\$fw.Rules)) {
+  if (\$r.Direction -eq 1 -and \$r.Action -eq 0 -and \$r.Enabled -and "\$(\$r.ApplicationName)" -ieq \$exe) { \$r.Enabled = \$false }
+}
+exit 0
+''';
+    final fixFile = io.File(
+        '${io.Directory.systemTemp.path}${io.Platform.pathSeparator}gmwf_fw_fix_${DateTime.now().microsecondsSinceEpoch}.ps1');
     try {
-      final port = AppNetwork.websocketPort;
-      // Check if rule already exists in Windows Defender Firewall
-      final checkRes = await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'show', 'rule',
-        'name=GMWF_LAN_Server',
-      ]);
-      
-      final alreadyAdded = checkRes.exitCode == 0 && checkRes.stdout.toString().contains('GMWF_LAN_Server');
-      if (alreadyAdded) {
-        _addLog('ℹ️ Firewall rules already verified active for ports $port, 8088, and 4370');
+      await fixFile.writeAsString(fixScript);
+      _addLog('🛡️ Asking Windows for administrator permission to open port $port…');
+      final launcher = "try { \$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
+          "-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','\"${fixFile.path}\"'); exit \$p.ExitCode } "
+          "catch { exit 1223 }";
+      final res = await io.Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', launcher])
+          .timeout(const Duration(minutes: 2));
+      if (res.exitCode == 1223) {
+        _addLog('⚠️ Firewall fix cancelled at the Windows permission prompt');
+        if (mounted) _showError('Firewall not changed: the Windows permission prompt was cancelled. Click "Fix Firewall" again and choose Yes.');
         return;
       }
-
-      // 1. Local LAN Sync Websocket (53281)
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_LAN_Server',
-        'dir=in',
-        'action=allow',
-        'protocol=TCP',
-        'localport=$port',
-      ]);
-      // 2. Combined LAN Sync & ZKTeco ADMS (53281, 8088)
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_LAN',
-        'dir=in',
-        'action=allow',
-        'protocol=TCP',
-        'localport=$port,8088',
-      ]);
-      // 3. ZKTeco ADMS Web Push Port (8088)
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_ZKTeco_ADMS_8088',
-        'dir=in',
-        'action=allow',
-        'protocol=TCP',
-        'localport=8088',
-      ]);
-      // 4. ZKTeco UDP Hardware Socket Port (4370)
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_ZKTeco_UDP_4370',
-        'dir=in',
-        'action=allow',
-        'protocol=UDP',
-        'localport=4370',
-      ]);
-      // 5. GMWF LAN UDP Broadcast Discovery Port (53280)
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_LAN_UDP_53280',
-        'dir=in',
-        'action=allow',
-        'protocol=UDP',
-        'localport=53280',
-      ]);
-      await io.Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=GMWF_ZKTeco_UDP',
-        'dir=in',
-        'action=allow',
-        'protocol=UDP',
-        'localport=4370',
-      ]);
-
-      _addLog('🔓 Firewall rules added for ports $port, 8088 (ADMS TCP), and 4370 (ZKTeco UDP)');
-    } catch (e) {
-      _addLog('⚠️ Could not add firewall rule automatically: $e');
-      if (mounted) {
-        _showError('Could not execute firewall command automatically. Please run PowerShell as Administrator.');
+      final state = await _checkFirewall();
+      if (state == 'OK') {
+        _addLog('🔓 Firewall opened: TCP $port (LAN), UDP 53280 (discovery), TCP 8088 / UDP 4370 (biometrics)');
+        if (mounted) _showSuccess('Firewall fixed — other PCs can now connect on port $port.');
+      } else {
+        _addLog('⚠️ Firewall still reports $state after the fix (exit ${res.exitCode})');
+        if (mounted) {
+          _showError('The firewall still blocks port $port. A company/antivirus firewall may be overriding Windows — '
+              'ask IT to allow TCP $port and UDP 53280 for GMWF.');
+        }
       }
+    } catch (e) {
+      _addLog('⚠️ Could not open the firewall automatically: $e');
+      if (mounted) _showError('Could not change the firewall automatically: $e');
+    } finally {
+      _isFixingFirewall = false;
+      try { await fixFile.delete(); } catch (_) {}
     }
   }
 
@@ -570,7 +781,7 @@ class _ServerDashboardWithSyncState
       }
       // Non-blocking staggered sweeps to guarantee zero UI stall on startup
       Future.delayed(const Duration(seconds: 4), () {
-        LocalStorageService.purgePhantomUnknownTokens(widget.branchId).ignore();
+        LocalStorageService.purgePhantomUnknownTokens(_serverBranch).ignore();
       });
       Future.delayed(const Duration(seconds: 8), () {
         LocalStorageService.purgeBloatedSyncQueue().ignore();
@@ -638,7 +849,7 @@ class _ServerDashboardWithSyncState
     try {
       _server = LanServer(port: AppNetwork.websocketPort)
         // Announced in the discovery beacon so desks join their own branch's server only.
-        ..branchId = widget.branchId;
+        ..branchId = _serverBranch;
 
       _server!.onClientConnected = (socketId, info) {
         final cId = info['clientId']?.toString();
@@ -656,7 +867,7 @@ class _ServerDashboardWithSyncState
           _connectedClients[socketId] = ConnectedClient(
             socketId:    socketId,
             role:        info['role']     as String? ?? 'unknown',
-            branchId:    info['branchId'] as String? ?? widget.branchId,
+            branchId:    info['branchId'] as String? ?? _serverBranch,
             clientId:    info['clientId'] as String?,
             username:    info['username'] as String?,
             deviceOs:    info['deviceOs'] as String? ?? info['platform'] as String? ?? (kIsWeb ? 'Chrome Web' : 'Windows PC'),
@@ -732,7 +943,7 @@ class _ServerDashboardWithSyncState
       }
 
       _syncManager = ServerSyncManager(
-        branchId: widget.branchId,
+        branchId: _serverBranch,
         server:   _server!,
         onSyncComplete: (int count) {
           if (!mounted) return;
@@ -788,7 +999,7 @@ class _ServerDashboardWithSyncState
       }
 
       MultiServerService().startHeartbeatLoop(
-        branchId: widget.branchId,
+        branchId: _serverBranch,
         roleSupplier: () => 'primary',
         clientsSupplier: () => _connectedClients.length,
         queueSupplier: () => _syncManager?.queueSize ?? 0,
@@ -797,7 +1008,7 @@ class _ServerDashboardWithSyncState
       // Immediately publish activeServerIp to Firestore for instant discovery by clients
       if (_serverIp != null && _serverIp!.isNotEmpty) {
         MultiServerService().registerAndHeartbeat(
-          branchId: widget.branchId,
+          branchId: _serverBranch,
           serverRole: 'primary',
           connectedClientsCount: _connectedClients.length,
           syncQueueSize: _syncManager?.queueSize ?? 0,
@@ -806,7 +1017,7 @@ class _ServerDashboardWithSyncState
         // Also publish directly to Firestore branches doc so all network desks discover this server automatically
         if (_serverIp != '127.0.0.1' && _serverIp != 'localhost') {
           try {
-            CloudDb.instance.collection('branches').doc(widget.branchId).set({ // REST: no hidden SDK queue
+            CloudDb.instance.collection('branches').doc(_serverBranch).set({ // REST: no hidden SDK queue
               'activeServerIp': _serverIp,
               'activeServerPort': AppNetwork.websocketPort,
               'serverLastSeen': FieldValue.serverTimestamp(),
@@ -872,7 +1083,7 @@ class _ServerDashboardWithSyncState
         }
         final message = utf8.encode(
             '${AppNetwork.udpMessagePrefix}'
-            '$_serverIp:${AppNetwork.websocketPort}:${LocalStorageService.sanitizeBranchId(widget.branchId)}');
+            '$_serverIp:${AppNetwork.websocketPort}:${LocalStorageService.sanitizeBranchId(_serverBranch)}');
         
         // 1. Global broadcast
         _serverUdpSocket?.send(message, io.InternetAddress('255.255.255.255'), AppNetwork.udpBroadcastPort);
@@ -899,7 +1110,7 @@ class _ServerDashboardWithSyncState
 
       await Future.wait([
         Future(() async {
-          try { await MultiServerService().stopHeartbeat(widget.branchId); } catch (_) {}
+          try { await MultiServerService().stopHeartbeat(_serverBranch); } catch (_) {}
         }),
         Future(() async {
           try { await _syncManager?.stop(); } catch (_) {}
@@ -1465,6 +1676,7 @@ class _ServerDashboardWithSyncState
     _updateTimer?.cancel();
     _syncTimer?.cancel();
     _queueStatsTimer?.cancel();
+    _firewallTimer?.cancel();
     _udpBroadcastTimer?.cancel();
     _clientUiThrottleTimer?.cancel();
     _connectivitySub?.cancel();
@@ -1515,7 +1727,7 @@ class _ServerDashboardWithSyncState
                 activeUsersCount: staffCount > 0 ? staffCount : (_isRunning ? 1 : 0),
                 pendingEventsCount: _syncQueueSize,
                 cpuLoadPercent: snap.cpuPercent,
-                adminName: FirebaseAuth.instance.currentUser?.displayName ?? 'Admin',
+                adminName: 'Server Control Panel',
                 onToggleServer: _isRunning ? _stopServer : _startServer,
                 onCatchUp: _isRunning ? _triggerCatchUpAndFixMismatch : null,
                 onCloudSync: _isOnline ? _manualSync : null,
@@ -1544,8 +1756,12 @@ class _ServerDashboardWithSyncState
                       },
                       onCatchUp: _isRunning ? _triggerCatchUpAndFixMismatch : null,
                       onCloudSync: _isOnline ? _manualSync : null,
-                      adminName: FirebaseAuth.instance.currentUser?.displayName ?? 'Admin',
+                      adminName: 'Server Control Panel',
                       branchDisplay: _resolveBranchAndCampDisplay(),
+                      onLocationTap: _showServerLocationDialog,
+                      locationWarning: _locationMismatch
+                          ? 'Desks on this network are from ' + LocalStorageService.getBranchName(_desksBranchFamily() ?? '') + ' — click to set this server\'s location'
+                          : (!_hasSiteLocation ? 'Location taken from the logged-in account — click to confirm' : null),
                     ),
 
                     // Content View for Selected Navigation Tab (Truly Lazy Initialized)
@@ -1556,11 +1772,11 @@ class _ServerDashboardWithSyncState
                           index: _selectedTab,
                           children: [
                             _buildNexusOverviewView(), // Tab 0: Overview
-                            DepartmentActivityWidget(branchId: widget.branchId), // Tab 1: Department Activity
+                            DepartmentActivityWidget(branchId: _serverBranch), // Tab 1: Department Activity
                             _buildNexusDevicesView(),  // Tab 2: Connected Devices
                             _buildNexusUsersView(),    // Tab 3: Users & Sessions
                             BiometricDeviceManagerPage( // Tab 4: Biometrics
-                              branchId: widget.branchId,
+                              branchId: _serverBranch,
                               isEmbedded: true,
                               onBack: null,
                             ),
@@ -1572,10 +1788,10 @@ class _ServerDashboardWithSyncState
                             _buildNexusLogsView(),     // Tab 7: System Logs
                             _buildNexusNetworkView(),  // Tab 8: Network & Interfaces
                             MultiServerControlWidget(  // Tab 9: Multi-Server Mesh
-                              branchId: widget.branchId,
+                              branchId: _serverBranch,
                               onTriggerSync: _manualSync,
                             ),
-                            ServerDataViewer(branchId: widget.branchId, isEmbedded: true), // Tab 10: Data Vault
+                            ServerDataViewer(branchId: _serverBranch, isEmbedded: true), // Tab 10: Data Vault
                             _buildNexusSettingsView(), // Tab 11: Settings & Firewall
                           ],
                         ),
@@ -1674,7 +1890,7 @@ class _ServerDashboardWithSyncState
             label: Text('Run Repairs Now', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
             style: ElevatedButton.styleFrom(
               backgroundColor: NexusColors.primary,
-              foregroundColor: Colors.white,
+              foregroundColor: NexusColors.onPrimary,
               elevation: 0,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
@@ -1687,7 +1903,7 @@ class _ServerDashboardWithSyncState
       AppToast.showSnackBar(context, const SnackBar(content: Text('⏳ Running database repair suite in background...'), duration: Duration(seconds: 2)));
       final purged = await LocalStorageService.purgeBloatedSyncQueue(force: true);
       final flattened = await LocalStorageService.healNestedPrescriptions();
-      final healed = await LocalStorageService.healAndRestorePatientCnics(widget.branchId, true);
+      final healed = await LocalStorageService.healAndRestorePatientCnics(_serverBranch, true);
       await LocalStorageService.compactBloatedBoxes();
       if (mounted) {
         setState(() {
@@ -1709,7 +1925,7 @@ class _ServerDashboardWithSyncState
     final devices = _buildNexusDeviceItems();
     final onlineCount = devices.where((d) => DateTime.now().difference(d.lastActive).inMinutes < 2).length;
     final staffUsersCount = _connectedClients.values.map((c) => c.username).where((u) => u != null && u.isNotEmpty).toSet().length;
-    final showFirewall = !kIsWeb && io.Platform.isWindows && !_isFirewallBannerDismissed;
+    final showFirewall = !kIsWeb && io.Platform.isWindows && _firewallBlocked && !_isFirewallBannerDismissed;
 
     return NexusOverviewView(
       totalDevices: devices.length,
@@ -1762,7 +1978,7 @@ class _ServerDashboardWithSyncState
     final devices = _buildNexusDeviceItems();
     return NexusUsersView(
       devices: devices,
-      departmentActivityWidget: DepartmentActivityWidget(branchId: widget.branchId),
+      departmentActivityWidget: DepartmentActivityWidget(branchId: _serverBranch),
       branchDisplay: _resolveBranchAndCampDisplay(),
     );
   }
@@ -1797,7 +2013,7 @@ class _ServerDashboardWithSyncState
   }
 
   Widget _buildNexusNetworkView() {
-    final showFirewall = !kIsWeb && io.Platform.isWindows && !_isFirewallBannerDismissed;
+    final showFirewall = !kIsWeb && io.Platform.isWindows && _firewallBlocked && !_isFirewallBannerDismissed;
     return NexusNetworkView(
       serverIp: _serverIp ?? '127.0.0.1',
       port: AppNetwork.websocketPort,
@@ -1812,11 +2028,11 @@ class _ServerDashboardWithSyncState
   Widget _buildNexusSettingsView() {
     return NexusSettingsView(
       multiServerControl: MultiServerControlWidget(
-        branchId: widget.branchId,
+        branchId: _serverBranch,
         onTriggerSync: _manualSync,
       ),
       biometricDeviceManager: BiometricDeviceManagerPage(
-        branchId: widget.branchId,
+        branchId: _serverBranch,
         isEmbedded: true,
         onBack: null,
       ),
@@ -1824,7 +2040,7 @@ class _ServerDashboardWithSyncState
         isEmbedded: true,
         onBack: null,
       ),
-      dataVaultViewer: ServerDataViewer(branchId: widget.branchId, isEmbedded: true),
+      dataVaultViewer: ServerDataViewer(branchId: _serverBranch, isEmbedded: true),
     );
   }
 
@@ -2607,7 +2823,7 @@ class _ServerDashboardWithSyncState
         // another branch's server on a shared network is ignored by desks of this branch.
         final otherBranch = parts.length > 2 ? LocalStorageService.sanitizeBranchId(parts[2].trim(), fallback: '') : '';
         if (otherBranch.isNotEmpty &&
-            otherBranch != LocalStorageService.sanitizeBranchId(widget.branchId, fallback: '')) {
+            otherBranch != LocalStorageService.sanitizeBranchId(_serverBranch, fallback: '')) {
           return;
         }
         _otherServerSeen[ip] = DateTime.now();
@@ -2674,7 +2890,7 @@ class _ServerDashboardWithSyncState
 
   // ── Main dashboard (running) ───────────────────────────────────────────────────
   Widget _buildRunningView([bool isDark = false]) {
-    final showFirewall = !kIsWeb && io.Platform.isWindows && !_isFirewallBannerDismissed;
+    final showFirewall = !kIsWeb && io.Platform.isWindows && _firewallBlocked && !_isFirewallBannerDismissed;
     final rows = _connectedClients.values
         .map((c) => ServerClientRow(
               name: c.username?.isNotEmpty == true ? c.username! : c.displayName,
@@ -2755,7 +2971,7 @@ class _ServerDashboardWithSyncState
     final bootTimeStr = _startTime != null
         ? DateFormat('d MMM yyyy, HH:mm').format(_startTime!)
         : DateFormat('d MMM yyyy, HH:mm').format(DateTime.now());
-    final locationName = LocalStorageService.getBranchName(widget.branchId);
+    final locationName = LocalStorageService.getBranchName(_serverBranch);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -4227,7 +4443,7 @@ class _ServerDashboardWithSyncState
                                   border: Border.all(color: borderColor),
                                 ),
                                 child: Text(
-                                  widget.branchId.toUpperCase(),
+                                  _serverBranch.toUpperCase(),
                                   style: GoogleFonts.inter(
                                     fontSize: 10.5,
                                     fontWeight: FontWeight.bold,

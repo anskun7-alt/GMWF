@@ -335,7 +335,7 @@ class NexusSidebar extends StatelessWidget {
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: isRunning ? NexusColors.error : NexusColors.primary,
-                        foregroundColor: Colors.white,
+                        foregroundColor: isRunning ? Colors.white : NexusColors.onPrimary,
                         elevation: 0,
                         padding: EdgeInsets.zero,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
@@ -360,7 +360,7 @@ class NexusSidebar extends StatelessWidget {
           fontSize: 10,
           fontWeight: FontWeight.w700,
           letterSpacing: 0.9,
-          color: const Color(0xFF4B5565),
+          color: NexusColors.sidebarText.withValues(alpha: 0.8),
         ),
       ),
     );
@@ -426,7 +426,7 @@ class NexusSidebar extends StatelessWidget {
                     style: GoogleFonts.inter(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
-                      color: isSelected ? Colors.white : NexusColors.sidebarText,
+                      color: isSelected ? NexusColors.onPrimary : NexusColors.sidebarText,
                     ),
                   ),
                 ),

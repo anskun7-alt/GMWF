@@ -189,7 +189,7 @@ class ServerThemeSelectorDialog extends StatelessWidget {
                       onPressed: () => Navigator.of(context).pop(),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: NexusColors.primary,
-                        foregroundColor: Colors.white,
+                        foregroundColor: NexusColors.onPrimary,
                         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
@@ -288,7 +288,7 @@ class ServerThemeSelectorDialog extends StatelessWidget {
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 0.5,
-                            color: isSelected ? Colors.white : NexusColors.textSecondary,
+                            color: isSelected ? NexusColors.onPrimary : NexusColors.textSecondary,
                           ),
                         ),
                       ),

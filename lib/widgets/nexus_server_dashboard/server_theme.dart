@@ -40,6 +40,10 @@ class ServerThemeTokens {
   final Color textMain;
   final Color textSecondary;
   final Color textMuted;
+  /// Text / icons drawn ON a primary-filled surface (button, selected chip).
+  final Color onPrimary;
+  /// Text / icons drawn ON a warning-filled surface.
+  final Color onWarning;
 
   // Semantic
   final Color success;
@@ -82,6 +86,8 @@ class ServerThemeTokens {
     required this.textMain,
     required this.textSecondary,
     required this.textMuted,
+    required this.onPrimary,
+    required this.onWarning,
     required this.success,
     required this.successMuted,
     required this.successBorder,
@@ -113,17 +119,19 @@ class ServerThemeTokens {
     cardBg: Color(0xFFFFFFFF),             // Pure White
     cardBorder: Color(0xFFE8E2EC),         // Lavender Grey
     mutedBg: Color(0xFFEFEBF5),
-    primary: Color(0xFF8E6BD9),            // Accessible Violet / Lavender
-    primaryHover: Color(0xFF7A54C9),
+    primary: Color(0xFF7650CC),            // Accessible Violet / Lavender
+    primaryHover: Color(0xFF6542B8),
     primaryMuted: Color(0xFFF0EAFC),
     secondaryAccent: Color(0xFFE9E3F1),    // Pale Lilac
     textMain: Color(0xFF292231),           // Deep Charcoal
-    textSecondary: Color(0xFF777080),      // Muted Slate
-    textMuted: Color(0xFFA199AB),
+    textSecondary: Color(0xFF655E6E),      // Muted Slate
+    textMuted: Color(0xFF8A8296),
+    onWarning: Color(0xFFFFFFFF),
+    onPrimary: Color(0xFFFFFFFF),
     success: Color(0xFF299D72),            // Restrained Emerald
     successMuted: Color(0xFFE8F6F0),
     successBorder: Color(0xFFB8E6D3),
-    warning: Color(0xFFD69A3A),            // Warm Amber
+    warning: Color(0xFFB06F12),            // Warm Amber
     warningMuted: Color(0xFFFDF6EC),
     warningBorder: Color(0xFFF6D9AF),
     error: Color(0xFFD65B69),              // Rose Red
@@ -158,6 +166,8 @@ class ServerThemeTokens {
     textMain: Color(0xFFF6F3FA),           // Crisp Lilac-White
     textSecondary: Color(0xFFADA5BA),
     textMuted: Color(0xFF827891),
+    onPrimary: Color(0xFF1B1524),
+    onWarning: Color(0xFF1B1524),
     success: Color(0xFF299D72),
     successMuted: Color(0xFF1A382C),
     successBorder: Color(0xFF245F45),
@@ -189,17 +199,19 @@ class ServerThemeTokens {
     cardBg: Color(0xFFFFFFFF),
     cardBorder: Color(0xFFE9EDF3),
     mutedBg: Color(0xFFEDF2FF),
-    primary: Color(0xFF5577EF),
-    primaryHover: Color(0xFF4264DC),
+    primary: Color(0xFF3D60DD),
+    primaryHover: Color(0xFF3352C4),
     primaryMuted: Color(0xFFEDF2FF),
     secondaryAccent: Color(0xFFDCE6FF),
     textMain: Color(0xFF172235),
-    textSecondary: Color(0xFF8993A5),
-    textMuted: Color(0xFFA0ABBB),
-    success: Color(0xFF13A77A),
+    textSecondary: Color(0xFF5A6476),
+    textMuted: Color(0xFF7D8798),
+    onWarning: Color(0xFFFFFFFF),
+    onPrimary: Color(0xFFFFFFFF),
+    success: Color(0xFF0B8A63),
     successMuted: Color(0xFFE6F7F2),
     successBorder: Color(0xFFB4EBD8),
-    warning: Color(0xFFDB9941),
+    warning: Color(0xFFAC6D12),
     warningMuted: Color(0xFFFDF6EC),
     warningBorder: Color(0xFFF6D9AF),
     error: Color(0xFFD15B5B),
@@ -229,11 +241,13 @@ class ServerThemeTokens {
     mutedBg: Color(0xFF1E293B),
     primary: Color(0xFF6366F1),
     primaryHover: Color(0xFF4F46E5),
-    primaryMuted: Color(0xFF28334E),
+    primaryMuted: Color(0xFF1F2742),
     secondaryAccent: Color(0xFF312E81),
     textMain: Color(0xFFF8FAFC),
     textSecondary: Color(0xFF94A3B8),
     textMuted: Color(0xFF64748B),
+    onWarning: Color(0xFF0F172A),
+    onPrimary: Color(0xFFFFFFFF),
     success: Color(0xFF10B981),
     successMuted: Color(0xFF064E3B),
     successBorder: Color(0xFF047857),

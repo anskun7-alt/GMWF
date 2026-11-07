@@ -808,7 +808,19 @@ class RealtimeManager {
         final srvBranch = (decoded['serverBranch'] ?? decoded['branchId'])?.toString().trim();
         if (srvBranch != null && srvBranch.isNotEmpty && srvBranch != 'all' && srvBranch != 'default') {
           final normSrv = LocalStorageService.sanitizeBranchId(srvBranch);
-          if (normSrv.isNotEmpty && _branchId?.toLowerCase().trim() != normSrv) {
+          final myBranch = _branchId?.toLowerCase().trim() ?? '';
+          // Only adopt the server's spelling of OUR branch (e.g. haji_camp -> karachi). A server
+          // logged in under an account from another branch (a Karachi camp server whose user
+          // record said "sialkot") used to switch every desk to that branch, after which the
+          // desks dropped all live Karachi tokens as "another branch".
+          final sameFamily = myBranch.isEmpty ||
+              myBranch == 'all' ||
+              CampSessionService.areBranchesMatching(normSrv, myBranch);
+          if (!sameFamily) {
+            debugPrint('[RealtimeManager] ⚠️ Server reports branch "$normSrv" but this desk is "$myBranch" — '
+                'keeping "$myBranch" (set the server location on the server PC)');
+          }
+          if (sameFamily && normSrv.isNotEmpty && myBranch != normSrv) {
             if (kDebugMode) {
               print('[RealtimeManager] 🔄 Server identified branch mismatch: adopting $normSrv (was: $_branchId)');
             }

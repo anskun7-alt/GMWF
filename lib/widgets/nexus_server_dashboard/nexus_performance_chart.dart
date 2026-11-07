@@ -199,8 +199,12 @@ class _NexusLineChartPainter extends CustomPainter {
     required this.currentRam,
   });
 
+  /// Theme the last paint used (repaint when the server theme switches light/dark).
+  bool _paintedDark = NexusColors.isDark;
+
   @override
   void paint(Canvas canvas, Size size) {
+    _paintedDark = NexusColors.isDark;
     const leftMargin = 38.0;
     const bottomMargin = 24.0;
     final chartWidth = size.width - leftMargin;
@@ -242,21 +246,18 @@ class _NexusLineChartPainter extends CustomPainter {
       );
     }
 
-    // Prepare data series
+    // Real samples only (this used to draw invented sine-wave points when there was no
+    // history, which looked like live CPU data but was not).
     final effectiveHistory = List<NexusTelemetryPoint>.from(history);
-    if (effectiveHistory.isEmpty) {
-      final now = DateTime.now();
-      for (int i = 12; i >= 0; i--) {
-        effectiveHistory.add(NexusTelemetryPoint(
-          timestamp: now.subtract(Duration(minutes: i)),
-          cpuPercent: math.max(0.05, math.min(0.95, currentCpu + (math.sin(i) * 0.08))),
-          ramPercent: math.max(0.1, math.min(0.90, currentRam + (math.cos(i) * 0.05))),
-        ));
-      }
-    }
-
     final n = effectiveHistory.length;
-    if (n < 2) return;
+    if (n < 2) {
+      final tp = TextPainter(
+        text: TextSpan(text: 'Collecting live readings…', style: labelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(leftMargin + (chartWidth - tp.width) / 2, chartHeight / 2 - tp.height / 2));
+      return;
+    }
 
     final cpuPoints = <Offset>[];
     final ramPoints = <Offset>[];
@@ -276,8 +277,14 @@ class _NexusLineChartPainter extends CustomPainter {
     // 3. Draw gradients and lines for CPU (Blue)
     _drawSeries(canvas, cpuPoints, chartHeight, leftMargin, size.width, NexusColors.cpuAccent);
 
-    // 4. Draw X-axis timestamps
-    final xSteps = ['15m ago', '10m ago', '5m ago', 'Now'];
+    // 4. Draw X-axis timestamps from the real time span of the samples.
+    final spanSec = math.max(1, effectiveHistory.last.timestamp.difference(effectiveHistory.first.timestamp).inSeconds);
+    String ago(double frac) {
+      final s = (spanSec * frac).round();
+      if (s <= 0) return 'Now';
+      return s >= 60 ? '${(s / 60).round()}m ago' : '${s}s ago';
+    }
+    final xSteps = [ago(1.0), ago(2 / 3), ago(1 / 3), 'Now'];
     for (int i = 0; i < xSteps.length; i++) {
       final x = leftMargin + (i / (xSteps.length - 1)) * chartWidth;
       final textSpan = TextSpan(
@@ -353,7 +360,7 @@ class _NexusLineChartPainter extends CustomPainter {
     canvas.drawCircle(
       last,
       4.5,
-      Paint()..color = Colors.white,
+      Paint()..color = NexusColors.cardBg,
     );
     canvas.drawCircle(
       last,
@@ -364,9 +371,13 @@ class _NexusLineChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _NexusLineChartPainter oldDelegate) {
+    // History is a rolling list (same length once full), so compare the newest sample too.
     return oldDelegate.currentCpu != currentCpu ||
         oldDelegate.currentRam != currentRam ||
-        oldDelegate.history.length != history.length;
+        oldDelegate.history.length != history.length ||
+        (history.isNotEmpty && oldDelegate.history.isNotEmpty &&
+            oldDelegate.history.last.timestamp != history.last.timestamp) ||
+        NexusColors.isDark != _paintedDark;
   }
 }
 

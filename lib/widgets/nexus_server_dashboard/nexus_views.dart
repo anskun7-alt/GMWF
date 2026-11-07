@@ -157,9 +157,9 @@ class NexusOverviewView extends StatelessWidget {
               margin: const EdgeInsets.only(bottom: 16),
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: const Color(0xFFFFFBEB),
+                color: NexusColors.warningMuted,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFFDE68A)),
+                border: Border.all(color: NexusColors.warningBorder),
                 boxShadow: const [
                   BoxShadow(color: Color(0x08D97706), blurRadius: 8, offset: Offset(0, 2)),
                 ],
@@ -169,10 +169,10 @@ class NexusOverviewView extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                      color: NexusColors.warning.withValues(alpha: 0.15),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(Icons.shield_outlined, color: Color(0xFFD97706), size: 22),
+                    child: Icon(Icons.shield_outlined, color: NexusColors.warning, size: 22),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -180,19 +180,20 @@ class NexusOverviewView extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Windows Defender Firewall: Inbound Port 53281 Blocked',
+                          'Windows Firewall is blocking port 53281',
                           style: GoogleFonts.inter(
                             fontSize: 14,
                             fontWeight: FontWeight.w700,
-                            color: const Color(0xFF92400E),
+                            color: NexusColors.textMain,
                           ),
                         ),
                         const SizedBox(height: 3),
                         Text(
-                          'Workstation tablets & PCs on clinic Wi-Fi cannot connect or sync until port 53281 is allowed.',
+                          'Other PCs on this network cannot connect until the port is allowed. '
+                          'Click the button and choose "Yes" on the Windows permission prompt.',
                           style: GoogleFonts.inter(
                             fontSize: 12.5,
-                            color: const Color(0xFFB45309),
+                            color: NexusColors.textSecondary,
                           ),
                         ),
                       ],
@@ -207,8 +208,8 @@ class NexusOverviewView extends StatelessWidget {
                       style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD97706),
-                      foregroundColor: Colors.white,
+                      backgroundColor: NexusColors.warning,
+                      foregroundColor: NexusColors.onWarning,
                       elevation: 0,
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -339,7 +340,7 @@ class NexusOverviewView extends StatelessWidget {
                   subtext: ramKnown ? '${(ramPercent * 100).toStringAsFixed(0)}% utilized' : 'GMWF app footprint',
                   icon: Icons.storage_rounded,
                   iconColor: NexusColors.diskAccent,
-                  iconBgColor: const Color(0xFFF6F0FE),
+                  iconBgColor: NexusColors.primaryMuted,
                 ),
               ];
 
