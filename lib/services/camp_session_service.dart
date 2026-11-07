@@ -246,7 +246,7 @@ class CampSessionService {
       if (Hive.isBoxOpen('local_branches')) {
         final box = Hive.box('local_branches');
         final raw = box.get('branch:$b') ?? box.get(b);
-        final map = raw is Map ? Map<String, dynamic>.from(raw) : {'id': branchId};
+        final Map<String, dynamic> map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{'id': branchId};
         map['camps'] = camps;
         map['campsCount'] = camps.length;
         await box.put('branch:$b', map);
@@ -1634,8 +1634,9 @@ class CampSessionService {
           }
         }
 
-        // If not found in userMap schedule, check branch defaults (Karachi: morning -> saddar, evening/night -> haji_camp)
-        if (scheduledCamp == null && isKarachiFamily(effBranch ?? '')) {
+        // If not found in userMap schedule, only check branch defaults if no active camp is already stored
+        final currentStored = box.get(_activeCampKey)?.toString().trim().toLowerCase();
+        if (scheduledCamp == null && isKarachiFamily(effBranch ?? '') && (currentStored == null || currentStored.isEmpty)) {
           scheduledCamp = (currentShift == 'morning') ? 'saddar' : 'haji_camp';
           debugPrint('[CampSessionService] getActiveCamp: Karachi fallback -> $scheduledCamp');
         }
@@ -1913,30 +1914,37 @@ class CampSessionService {
     // 2. Secondary fallback by dispensaryId / campId
     final isHajiToken = dId.contains('haji') || cId.contains('haji');
     final isSaddarToken = dId.contains('sadd') || dId.contains('kap') || cId.contains('sadd') || cId.contains('kap');
+    final hasOtherSpecificCamp = (dId.isNotEmpty && dId != 'all' && dId != 'general' && dId != 'karachi' && !isHajiToken && !isSaddarToken) ||
+        (cId.isNotEmpty && cId != 'all' && cId != 'general' && cId != 'karachi' && !isHajiToken && !isSaddarToken);
     final isSharedGeneralStock = (dId == 'all' || cId == 'all' || (dId.isEmpty && cId.isEmpty)) && !isExplicitSaddar && !isExplicitHaji;
 
     if (isSharedGeneralStock) return true;
 
     if (isSaddar) {
-      if (isHajiToken) return false;
-      return true; // Any token not explicitly tagged as Haji belongs to Saddar / General
+      if (isHajiToken || hasOtherSpecificCamp) return false;
+      return true;
     }
 
     if (isHaji) {
-      if (isSaddarToken) return false;
+      if (isSaddarToken || hasOtherSpecificCamp) return false;
       return isHajiToken || dId == 'all' || cId == 'all' || isSharedGeneralStock || (!isSaddarToken && !isExplicitSaddar);
     }
 
-    // Generic fallback for any other camp ID
+    // Generic future-proof matching for any newly created camp ID in any branch
     final normSel = sel.replaceAll(RegExp(r'[^a-z0-9]'), '');
     final normD = dId.replaceAll(RegExp(r'[^a-z0-9]'), '');
     final normC = cId.replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final upperNormSel = normSel.toUpperCase();
+    if (upperNormSel.isNotEmpty &&
+        (ser.startsWith('$upperNormSel--') || ser.startsWith('STOCK:$upperNormSel--'))) {
+      return true;
+    }
     if (normD.isNotEmpty && (normD == normSel || normD.contains(normSel) || normSel.contains(normD))) return true;
     if (normC.isNotEmpty && (normC == normSel || normC.contains(normSel) || normSel.contains(normC))) return true;
 
-    // Serial prefix fallback
+    // Serial prefix & dispensaryTag fallback for any camp
     final tagFromSel = getDispensaryKeyword(selectedCamp).toUpperCase();
-    if (tagFromSel.isNotEmpty && ser.contains('-$tagFromSel-')) return true;
+    if (tagFromSel.isNotEmpty && (ser.contains('-$tagFromSel-') || tag == tagFromSel)) return true;
 
     return false;
   }

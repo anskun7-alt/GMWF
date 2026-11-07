@@ -111,7 +111,7 @@ $d=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='__DRIVE__'"
           final result = await io.Process.run(
             'powershell',
             ['-NoProfile', '-NonInteractive', '-Command', script.replaceAll('__DRIVE__', drive)],
-          ).timeout(const Duration(seconds: 15));
+          ).timeout(const Duration(seconds: 4));
           if (result.exitCode == 0) {
             final j = jsonDecode(result.stdout.toString().trim()) as Map<String, dynamic>;
             final c = j['cpu'];
@@ -137,7 +137,7 @@ $d=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='__DRIVE__'"
             debugPrint('[SystemMetricsService] PowerShell exit ${result.exitCode}: ${result.stderr}');
           }
         } catch (e) {
-          debugPrint('[SystemMetricsService] Windows metrics query failed: $e');
+          debugPrint('[SystemMetricsService] Windows metrics query failed or timed out: $e');
         }
       }
 

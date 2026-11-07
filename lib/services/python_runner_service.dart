@@ -383,13 +383,20 @@ class PythonRunnerService extends ChangeNotifier {
     String scriptFileName, {
     List<String> args = const [],
     String? customWorkingDir,
+    bool forceRestart = false,
   }) async {
     if (isRunning) {
-      _appendLine(
-        '⚠️ A process is already running (PID: ${_process!.pid}). Please stop it first.',
-        TerminalLineType.warning,
-      );
-      return false;
+      if (forceRestart) {
+        _appendLine('🔄 Terminating existing process (PID: ${_process!.pid}) before starting...', TerminalLineType.warning);
+        await stopProcess();
+        await Future.delayed(const Duration(milliseconds: 400));
+      } else {
+        _appendLine(
+          '⚠️ A process is already running (PID: ${_process!.pid}). Tap "Stop" or "Restart" to manage it.',
+          TerminalLineType.warning,
+        );
+        return false;
+      }
     }
 
     final pyPath = await resolvePythonExecutable();

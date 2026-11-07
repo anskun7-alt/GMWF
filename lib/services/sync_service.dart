@@ -888,9 +888,29 @@ class SyncService {
     }
   }
 
+  /// In-memory transient throttle for LAN pushes of locally saved records.
+  /// Unlike `lanPushSig` (which is ONLY stamped in Hive on data that arrived from the LAN server),
+  /// this transient map is never persisted to Hive and expires automatically so failed uploads
+  /// or server restarts always re-send local records.
+  final Map<String, DateTime> _lanPushAttemptedAt = {};
+  bool _lanPushResetHooked = false;
+
   /// Pushes any local tokens, prescriptions, and dispenses created while offline directly to the LAN server upon reconnection
   Future<void> _pushUnsyncedEntriesToLanServer(String branchId) async {
     try {
+      if (!RealtimeManager().isConnected) {
+        _lanPushAttemptedAt.clear();
+      }
+      // A (re)connection to the LAN server forgets every attempt, so records sent into a link
+      // that then dropped are re-sent at once instead of after the 45 s cooldown.
+      if (!_lanPushResetHooked) {
+        _lanPushResetHooked = true;
+        RealtimeManager().addIdentifiedListener(_lanPushAttemptedAt.clear);
+      }
+      // Expired attempts are dropped: every new record signature adds a key, so the map
+      // otherwise grew for the whole run.
+      final pruneBefore = DateTime.now().subtract(const Duration(minutes: 2));
+      _lanPushAttemptedAt.removeWhere((_, t) => t.isBefore(pruneBefore));
       if (!Hive.isBoxOpen(LocalStorageService.entriesBox)) {
         await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
       }
@@ -926,13 +946,17 @@ class SyncService {
         if (!entryUnsynced && !prescUnsynced && !dispenseUnsynced) continue;
         if (LocalStorageService.isStressTestRecord(data, key)) continue;
 
-        // "Unsynced" means "not yet in Firestore", not "the LAN server lacks it". While the
-        // cloud refuses writes (daily quota) nothing ever becomes synced, so every device used
-        // to re-send every token it holds - including the ones the server itself sent it - on
-        // each sweep and reconnect, and the server broadcast them all to the doctor again.
-        // A token is now pushed once per state change, and never when it came from the server.
+        // "Unsynced" means "not yet in Firestore", not "the LAN server lacks it".
+        // `lanPushSig` in Hive is ONLY stamped on records that arrived from the LAN server
+        // (echo prevention). For locally created/edited records, we use a transient in-memory
+        // cooldown so failed sends or server restarts never permanently drop a local write.
         final pushSig = LocalStorageService.lanPushSignature(data);
         if (data['lanPushSig'] == pushSig) continue;
+        final attemptKey = '$key|$pushSig';
+        final lastAttempt = _lanPushAttemptedAt[attemptKey];
+        if (lastAttempt != null && DateTime.now().difference(lastAttempt).inSeconds < 45) {
+          continue;
+        }
 
         final serial = (data['serial'] ?? key.toString().split('-').last).toString().trim().toUpperCase();
         if (serial.isEmpty) continue;
@@ -976,6 +1000,8 @@ class SyncService {
                 'completedAt': data['completedAt'] ?? data['prescription']['completedAt'],
               if (data['prescription'] is Map && data['prescription']['updatedAt'] != null)
                 'updatedAt': data['prescription']['updatedAt'],
+              if ((data['revision'] ?? (data['prescription'] is Map ? data['prescription']['revision'] : null)) != null)
+                'revision': data['revision'] ?? data['prescription']['revision'],
               'doctorName': data['doctorName'],
               'doctorId': data['doctorId'],
               'daysOfMedicine': data['daysOfMedicine'] ?? 1,
@@ -1018,8 +1044,9 @@ class SyncService {
           pushed++;
         }
 
-        // RealtimeManager keeps undelivered messages in its outbox, so one send is enough.
-        await entriesBox.put(key, {...data, 'lanPushSig': pushSig});
+        // Record transient attempt in memory only (NEVER stamp lanPushSig on local Hive records;
+        // lanPushSig is reserved strictly for records received from the LAN server).
+        _lanPushAttemptedAt[attemptKey] = DateTime.now();
       }
       if (pushed > 0) {
         Logger().d('[SyncService] 📤 Pushed $pushed unsynced local events (tokens/prescriptions/dispenses) to LAN Server');
@@ -5160,10 +5187,10 @@ class SyncService {
           }
         }
         // Yield to event loop on every item so Windows message pump stays alive and UI never freezes
-        await Future.delayed(const Duration(milliseconds: 10));
+        await Future.delayed(const Duration(milliseconds: 20));
       }
-      // Between batches, yield 50ms so Windows message pump processes clicks and draws UI
-      await Future.delayed(const Duration(milliseconds: 50));
+      // Between batches, yield 80ms so Windows message pump processes clicks and draws UI
+      await Future.delayed(const Duration(milliseconds: 80));
       }
       if (backlogDeferred > 0) {
         SyncLog.write('📦 Backlog share of today\'s quota used — $backlogDeferred older item(s) wait for the '

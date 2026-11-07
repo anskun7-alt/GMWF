@@ -37,22 +37,22 @@ class PythonTerminalScreen extends StatelessWidget {
       },
       child: Scaffold(
         backgroundColor: SoftPalette.slate900, // Deepest Onyx/Slate
-        appBar: AppBar(
-          automaticallyImplyLeading: false,
-          backgroundColor: SoftPalette.slate900, // Slate 900
-          elevation: 0,
-          leading: isEmbedded
-              ? null
-              : IconButton(
-                  icon: const Icon(Icons.arrow_back_rounded, color: SoftPalette.gray50),
-                  onPressed: () {
-                    if (onBack != null) {
-                      onBack!();
-                    } else if (Navigator.canPop(context)) {
-                      Navigator.pop(context);
-                    }
-                  },
-                ),
+        appBar: isEmbedded
+            ? null
+            : AppBar(
+                automaticallyImplyLeading: false,
+                backgroundColor: SoftPalette.slate900, // Slate 900
+                elevation: 0,
+                leading: IconButton(
+                    icon: const Icon(Icons.arrow_back_rounded, color: SoftPalette.gray50),
+                    onPressed: () {
+                      if (onBack != null) {
+                        onBack!();
+                      } else if (Navigator.canPop(context)) {
+                        Navigator.pop(context);
+                      }
+                    },
+                  ),
           title: Row(
             children: [
               Container(
@@ -311,7 +311,11 @@ class _PythonTerminalViewState extends State<PythonTerminalView> {
   Future<void> _startSelectedScript() async {
     final rawArgs = _argsController.text.trim();
     final argsList = rawArgs.isEmpty ? <String>[] : rawArgs.split(RegExp(r'\s+'));
-    await _runner.startScript(_selectedScript, args: argsList);
+    if (_runner.isRunning) {
+      await _runner.startScript(_selectedScript, args: argsList, forceRestart: true);
+    } else {
+      await _runner.startScript(_selectedScript, args: argsList);
+    }
   }
 
   Future<void> _stopScript() async {

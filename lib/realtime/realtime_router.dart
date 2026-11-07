@@ -646,9 +646,20 @@ Serial: ${data['serial'] ?? 'N/A'}
       'patientId':    data['patientId'] ?? '',
       // No 'Unknown' placeholder: it hid the real name sent as 'name', and saveEntryLocal
       // keeps an existing name or looks the patient up when this is missing.
-      if ((data['patientName'] ?? data['name']) != null)
-        'patientName':  data['patientName'] ?? data['name'],
-      'patientCnic':  data['patientCnic'] ?? data['cnic'] ?? '',
+      if (LocalStorageService.isValidPatientNameValue(data['patientName'] ?? data['name']))
+        'patientName': LocalStorageService.resolveFirstValidPatientName([
+          data['patientName'],
+          data['name'],
+          data['fullName'],
+        ]),
+      if (LocalStorageService.isValidCnicValue(data['patientCnic']) ||
+          LocalStorageService.isValidCnicValue(data['cnic']) ||
+          LocalStorageService.isValidCnicValue(data['guardianCnic']))
+        'patientCnic': LocalStorageService.resolveFirstValidCnic([
+          data['patientCnic'],
+          data['cnic'],
+          data['guardianCnic'],
+        ]),
       'guardianCnic': data['guardianCnic'],
       'createdAt':    data['createdAt'] ?? data['time'],
       'status':       data['status'] ?? 'waiting',
@@ -690,14 +701,10 @@ Serial: ${data['serial'] ?? 'N/A'}
             fullMessage['_isReplay'] == true ||
             data['isCatchUp'] == true ||
             fullMessage['_serverPush'] == true;
-        if (!isReplayCopy && seq != null && seq > 1 && seq < 9999) {
-          final padWidth = seqStr.length < 3 ? 3 : seqStr.length;
+        if (!isReplayCopy && seq != null && seq > 1 && seq <= 999) {
+          const padWidth = 3;
           bool hasGap = false;
-          // Only this token's own number block (shared 1..999, or a desk's offline block
-          // N*1000+1..), and only a short way back: offline token 1001 used to probe 1..1000.
-          final blockStart = (seq ~/ LocalStorageService.offlineBandSize) *
-                  LocalStorageService.offlineBandSize + 1;
-          final from = (seq - 20) > blockStart ? seq - 20 : blockStart;
+          final from = (seq - 20) > 1 ? seq - 20 : 1;
           for (int i = from; i < seq; i++) {
             final checkSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
             if (LocalStorageService.getLocalEntry(branchId, checkSerial) == null) {
@@ -706,8 +713,6 @@ Serial: ${data['serial'] ?? 'N/A'}
             }
           }
           if (hasGap) {
-            // Not forced: coalesced with other catch-up requests (3 s), so a burst of tokens
-            // cannot fire a burst of full catch-ups.
             RealtimeManager().requestCatchUp(branchId: branchId, reason: 'sequence_gap');
           }
         }
@@ -746,7 +751,11 @@ Serial: ${data['serial'] ?? 'N/A'}
     }
 
     // CRITICAL: Save prescription to its own box IMMEDIATELY
-    await LocalStorageService.saveLocalPrescription(data);
+    // Stamp lanPushSig because this record arrived from the LAN server.
+    await LocalStorageService.saveLocalPrescription({
+      ...data,
+      'lanPushSig': LocalStorageService.lanPushSignature(data),
+    });
 
     // NEW: Handle medicine restriction for multi-day prescriptions
     _handleMedicineRestriction(data, fullMessage);
@@ -789,7 +798,35 @@ Serial: ${data['serial'] ?? 'N/A'}
               updated['complaint'] = comp;
               updated['condition'] = comp;
             }
-            if (data['vitals'] != null) updated['vitals'] = data['vitals'];
+            updated['vitals'] = LocalStorageService.mergeVitalsPreservingReceptionist(
+              data['vitals'],
+              entry['vitals'],
+            );
+            // ⚠️ Strict Receptionist Name & CNIC Immutability on LAN prescription saves:
+            final bestName = LocalStorageService.resolveFirstValidPatientName([
+              entry['patientName'],
+              entry['name'],
+              entry['fullName'],
+              data['patientName'],
+              data['name'],
+              data['fullName'],
+            ]);
+            if (bestName.isNotEmpty) {
+              updated['patientName'] = bestName;
+              updated['name'] = bestName;
+            }
+            final bestCnic = LocalStorageService.resolveFirstValidCnic([
+              entry['patientCnic'],
+              entry['cnic'],
+              entry['guardianCnic'],
+              data['patientCnic'],
+              data['cnic'],
+              data['guardianCnic'],
+            ]);
+            if (bestCnic.isNotEmpty) {
+              updated['patientCnic'] = bestCnic;
+              updated['cnic'] = bestCnic;
+            }
             if (data['labResults'] != null) updated['labResults'] = data['labResults'];
             if (data['extraCharge'] != null) updated['extraCharge'] = data['extraCharge'];
             updated['lanPushSig']     = LocalStorageService.lanPushSignature(updated);

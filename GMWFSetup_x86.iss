@@ -88,10 +88,11 @@ Source: "build\windows\x64\runner\Release\*"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
 
 ; ── Standalone Python Runtime (x86 / 32-bit) ──────────────────
+; Bundled with pyzk & firebase-admin pre-installed (Zero setup / 100% offline)
+; Overwrites and repairs missing/corrupted runtime DLLs (python312.dll, python3.dll, vcruntime140.dll)
 Source: "Installer\python-3.12.10-embed-win32\*"; \
     DestDir: "{app}\python"; \
-    Check: ShouldInstallPython; \
-    Flags: recursesubdirs createallsubdirs onlyifdoesntexist uninsneveruninstall
+    Flags: recursesubdirs createallsubdirs ignoreversion
 
 ; ── Background Sync Scripts & Configs ────────────────────────
 Source: "scripts\*"; \
@@ -173,7 +174,7 @@ Filename: "{cmd}"; \
 
 [UninstallRun]
 Filename: "{cmd}"; \
-    Parameters: "/c taskkill /f /im gmwf.exe"; \
+    Parameters: "/c taskkill /f /im gmwf.exe /im python.exe /im pythonw.exe >nul 2>&1"; \
     Flags: runhidden waituntilterminated; \
     RunOnceId: "KillGMWF"
 
@@ -190,6 +191,7 @@ Filename: "{cmd}"; \
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\*.log"
+Type: filesandordirs; Name: "{app}\python"
 Type: files; Name: "{commonstartup}\GMWF.lnk"
 ; Type: filesandordirs; Name: "{userappdata}\com.example\gmwf"
 
@@ -226,21 +228,19 @@ begin
   end;
 end;
 
-function ShouldInstallPython(): Boolean;
+function IsPythonInstalled(): Boolean;
 var
-  AppPython: String;
+  AppPython, AppDll: String;
 begin
   AppPython := ExpandConstant('{app}\python\python.exe');
-  if FileExists(AppPython) then
-  begin
-    Log('[GMWF] Existing Python detected. Preserving.');
-    Result := False;
-  end
-  else
-  begin
-    Log('[GMWF] No Python found. Installing bundled Python 3.12 (x86).');
-    Result := True;
-  end;
+  AppDll := ExpandConstant('{app}\python\python312.dll');
+  Result := FileExists(AppPython) and FileExists(AppDll);
+end;
+
+function ShouldInstallPython(): Boolean;
+begin
+  // Always install and repair Python runtime to prevent missing python312.dll errors
+  Result := True;
 end;
 
 function IsUpgrade(): Boolean;
@@ -259,10 +259,10 @@ begin
   else
     S := S + 'INSTALLATION MODE' + NewLine + Space + 'Fresh Installation' + NewLine + NewLine;
 
-  if not ShouldInstallPython() then
-    S := S + 'PYTHON RUNTIME' + NewLine + Space + 'Existing runtime found (will be preserved)' + NewLine + NewLine
+  if IsPythonInstalled() then
+    S := S + 'PYTHON RUNTIME' + NewLine + Space + 'Updating & repairing bundled Python 3.12 runtime (32-bit)' + NewLine + NewLine
   else
-    S := S + 'PYTHON RUNTIME' + NewLine + Space + 'Installing bundled Python 3.12 (32-bit)' + NewLine + NewLine;
+    S := S + 'PYTHON RUNTIME' + NewLine + Space + 'Installing bundled Python 3.12 embedded runtime (32-bit)' + NewLine + NewLine;
 
   S := S + MemoDirInfo + NewLine + NewLine;
   if MemoTasksInfo <> '' then
@@ -308,6 +308,8 @@ begin
     WizardForm.OuterNotebook.SetBounds(SidebarW, 0, ContentW, GBottomSep.Top);
     WizardForm.MainPanel.SetBounds(SidebarW, 0, ContentW, ScaleY(74));
     WizardForm.InnerNotebook.SetBounds(0, ScaleY(74), ContentW, WizardForm.OuterNotebook.Height - ScaleY(74));
+    WizardForm.PageNameLabel.Width := ContentW - ScaleX(48);
+    WizardForm.PageDescriptionLabel.Width := ContentW - ScaleX(48);
   end;
 
   if CurPageID = wpWelcome then
@@ -326,6 +328,47 @@ begin
   // Dynamically update sidebar stepper and framing
   UpdateGMWFSidebar(CurPageID);
   ApplyGMWFTheme(GIsDarkMode);
+
+  // Clear, non-overflowing page header descriptions
+  case CurPageID of
+    wpWelcome:
+    begin
+      WizardForm.PageNameLabel.Caption := 'Welcome';
+      WizardForm.PageDescriptionLabel.Caption := 'Install GMWF Management System on your computer.';
+    end;
+    wpLicense:
+    begin
+      WizardForm.PageNameLabel.Caption := 'License Agreement';
+      WizardForm.PageDescriptionLabel.Caption := 'Review and accept the license terms before proceeding.';
+    end;
+    wpSelectDir:
+    begin
+      WizardForm.PageNameLabel.Caption := 'Destination Location';
+      WizardForm.PageDescriptionLabel.Caption := 'Choose the folder where GMWF will be installed.';
+    end;
+    wpSelectTasks:
+    begin
+      WizardForm.PageNameLabel.Caption := 'Additional Tasks';
+      WizardForm.PageDescriptionLabel.Caption := 'Select shortcuts and desktop configurations.';
+    end;
+    wpReady:
+    begin
+      WizardForm.PageNameLabel.Caption := 'Ready to Install';
+      WizardForm.PageDescriptionLabel.Caption := 'Setup is ready to begin installing GMWF on your computer.';
+    end;
+    wpInstalling:
+    begin
+      WizardForm.PageNameLabel.Caption := 'Installing';
+      WizardForm.PageDescriptionLabel.Caption := 'Please wait while Setup installs GMWF on your computer.';
+      StartProgressTimer();
+    end;
+    wpFinished:
+    begin
+      StopProgressTimer();
+      WizardForm.PageNameLabel.Caption := 'Complete';
+      WizardForm.PageDescriptionLabel.Caption := 'GMWF Management System has been successfully installed.';
+    end;
+  end;
 
   // Ensure navigation buttons are always visible on every step
   WizardForm.BackButton.BringToFront;
@@ -350,14 +393,17 @@ begin
 end;
 
 // ══════════════════════════════════════════════════════════════
-// PRE-INSTALL — kill running instance, clean lock files
+// PRE-INSTALL — kill running instances, release file locks, clean locks
 // ══════════════════════════════════════════════════════════════
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
+    // Terminate application and background python daemons so python312.dll is not locked
     KillProcessByName('gmwf.exe');
-    Sleep(800);
+    KillProcessByName('python.exe');
+    KillProcessByName('pythonw.exe');
+    Sleep(1000);
     DeleteHiveLockFiles();
   end;
 end;
@@ -370,7 +416,9 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     KillProcessByName('gmwf.exe');
-    Sleep(600);
+    KillProcessByName('python.exe');
+    KillProcessByName('pythonw.exe');
+    Sleep(800);
   end;
 
   if CurUninstallStep = usPostUninstall then

@@ -717,8 +717,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       dispensaryId: activeCamp,
       session: session,
       increment: false,
-      // Without the server this desk issues from its own offline block; show that number.
-      offlineSlot: RealtimeManager().hasServerLink ? 0 : LocalStorageService.offlineDeskSlot,
     );
     final sessionLetter = CampSessionService.getSessionLetter(session);
     final dispTag = CampSessionService.getDispensaryKeyword(activeCamp, branchId: widget.branchId);
@@ -940,14 +938,19 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     final input = cnicController.text.trim();
     if (input.isEmpty) return;
     final digitsOnly = input.replaceAll(RegExp(r'[^0-9]'), '');
-    final looksLikeCnic  = RegExp(r'^\d{5}-\d{7}-\d{1}$').hasMatch(input) || digitsOnly.length == 13;
-    final looksLikePhone = digitsOnly.length >= 7 && digitsOnly.length <= 13;
-    final looksLikeName  = input.length >= 3 && !RegExp(r'^\d+$').hasMatch(input);
-    final looksLikeId    = input.contains('_child_') || input.length >= 4;
+    final hasLetters = RegExp(r'[a-zA-Z]').hasMatch(input);
+    final isPhonePrefix = digitsOnly.startsWith('03') || digitsOnly.startsWith('923');
+    final looksLikeCnic  = !hasLetters && !isPhonePrefix &&
+        (RegExp(r'^\d{5}-\d{7}-\d{1}$').hasMatch(input) || digitsOnly.length == 13);
+    final looksLikePhone = !hasLetters &&
+        ((digitsOnly.startsWith('03') && digitsOnly.length == 11) ||
+         (digitsOnly.startsWith('92') && digitsOnly.length == 12));
+    final looksLikeName  = hasLetters && !input.contains('_child_') && input.length >= 3;
+    final looksLikeId    = input.contains('_child_');
 
     if (!looksLikeCnic && !looksLikePhone && !looksLikeName && !looksLikeId) {
       AppToast.showSnackBar(context, const SnackBar(
-        content: Text('Enter CNIC (13 digits), Phone, Name, or Patient ID'),
+        content: Text('Please enter complete 13-digit CNIC or 11-digit Phone (03XXXXXXXXX)'),
         backgroundColor: SoftPalette.amber300,
       ));
       return;
@@ -1377,10 +1380,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         session: session,
       );
       final sessionLetter = CampSessionService.getSessionLetter(session);
-      // The LAN server numbers tokens for every desk from one shared sequence (no two
-      // patients on one number). Without it, this desk numbers from its own offline block
-      // (slot N -> N*1000+1 ...), which the server gave this PC, so desks that are offline at
-      // the same time cannot issue the same number.
+      // Strictly single canonical numbering sequence (001 to 999) for both online and offline.
       final serverSeq = await RealtimeManager().reserveSerial('$dateKey$sessionLetter-$normDispTag', localSeq);
       final int nextSeq;
       if (serverSeq != null) {
@@ -1394,17 +1394,14 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           atLeast: nextSeq,
         );
       } else {
-        final slot = LocalStorageService.offlineDeskSlot;
-        // slot 0: this PC has never reached the server, so it has no block yet; fall back to
-        // the shared count (the old behaviour, collision-prone if another desk is also offline).
+        // Offline: continue directly in the single shared 001..999 sequence
         nextSeq = await LocalStorageService.getNextLocalSerialSequence(
           widget.branchId,
           dateKey,
           dispensaryId: effectiveCampId,
           session: session,
           increment: true,
-          atLeast: slot > 0 ? 0 : localSeq,
-          offlineSlot: slot,
+          atLeast: localSeq,
         );
       }
       final seqPadded = nextSeq.toString().padLeft(3, '0');
@@ -1467,10 +1464,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       try {
         if (nextSeq > 1) {
           final prefix = '$dateKey$sessionLetter-$normDispTag';
-          // Own number block only, last 50 numbers (an offline token 1001 checked 1000 here).
-          final blockStart = (nextSeq ~/ LocalStorageService.offlineBandSize) *
-                  LocalStorageService.offlineBandSize + 1;
-          final from = (nextSeq - 50) > blockStart ? nextSeq - 50 : blockStart;
+          final from = (nextSeq - 20) > 1 ? nextSeq - 20 : 1;
           for (int i = from; i < nextSeq; i++) {
             final priorSer = '$prefix-${i.toString().padLeft(3, '0')}';
             final priorLogical = 'save_entry|$priorSer';
@@ -2282,9 +2276,13 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                       return;
                     }
 
-                    final isFullCnic = d.length == 13;
-                    final isFullPhone = (d.length >= 10 && d.length <= 12);
-                    final isNameSearch = v.trim().length >= 3 && !RegExp(r'^\d+$').hasMatch(v.trim());
+                    final hasLetters = RegExp(r'[a-zA-Z]').hasMatch(v);
+                    final isPhonePrefix = d.startsWith('03') || d.startsWith('923');
+                    final isFullCnic = !hasLetters && !isPhonePrefix && d.length == 13;
+                    final isFullPhone = !hasLetters &&
+                        ((d.startsWith('03') && d.length == 11) ||
+                         (d.startsWith('92') && d.length == 12));
+                    final isNameSearch = hasLetters && !v.contains('_child_') && v.trim().length >= 3;
                     final isIdSearch = v.contains('_child_');
 
                     if (isFullCnic || isFullPhone || isNameSearch || isIdSearch) {
@@ -2292,10 +2290,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                         if (mounted) _searchPatient();
                       });
                     } else {
-                      if (_patientData != null || _errorMessage != null) {
+                      if (_patientData != null || _patientsList.isNotEmpty || _errorMessage != null) {
                         setState(() {
                           _patientData = null;
+                          _patientsList.clear();
                           _errorMessage = null;
+                          _hasTokenToday = false;
                         });
                       }
                     }
@@ -2427,7 +2427,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   _isVitalsTokenAllowed
                                       ? '🎟️ Dual Tokens Done'
                                       : (regularToken != null && regularToken['serial'] != null
-                                          ? '🎟️ #${regularToken['serial']}'
+                                          ? '🎟️ #${LocalStorageService.formatCanonicalSerialForDisplay(regularToken['serial']?.toString())}'
                                           : '🎟️ Token Issued'),
                                   style: const TextStyle(
                                       color: SoftPalette.gray50,
@@ -2445,7 +2445,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Text(
-                                      '🩺 Vitals: #${vitalsToken['serial'] ?? 'Issued'}',
+                                      '🩺 Vitals: #${LocalStorageService.formatCanonicalSerialForDisplay(vitalsToken['serial']?.toString())}',
                                       style: const TextStyle(color: SoftPalette.gray50, fontSize: 10.5, fontWeight: FontWeight.bold),
                                     ),
                                   ),
@@ -2457,7 +2457,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Text(
-                                      '🎟️ Regular: #${regularToken['serial'] ?? 'Issued'}',
+                                      '🎟️ Regular: #${LocalStorageService.formatCanonicalSerialForDisplay(regularToken['serial']?.toString())}',
                                       style: const TextStyle(color: SoftPalette.gray50, fontSize: 10.5, fontWeight: FontWeight.bold),
                                     ),
                                   ),
@@ -2516,7 +2516,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                     const SizedBox(width: 6),
                                     Expanded(
                                       child: Text(
-                                        'Vitals Inspection: #${vitalsToken['serial'] ?? 'Issued'} (${(vitalsToken['status'] ?? 'waiting').toString().toUpperCase()})',
+                                        'Vitals Inspection: #${LocalStorageService.formatCanonicalSerialForDisplay(vitalsToken['serial']?.toString())} (${(vitalsToken['status'] ?? 'waiting').toString().toUpperCase()})',
                                         style: TextStyle(
                                             color: isDark ? SoftPalette.purple350 : SoftPalette.violet700,
                                             fontSize: 11,
@@ -2536,7 +2536,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                     const SizedBox(width: 6),
                                     Expanded(
                                       child: Text(
-                                        'Regular Visit: #${regularToken['serial'] ?? 'Issued'} (${(regularToken['status'] ?? 'waiting').toString().toUpperCase()})',
+                                        'Regular Visit: #${LocalStorageService.formatCanonicalSerialForDisplay(regularToken['serial']?.toString())} (${(regularToken['status'] ?? 'waiting').toString().toUpperCase()})',
                                         style: TextStyle(
                                             color: isDark ? SoftPalette.teal300 : SoftPalette.teal700,
                                             fontSize: 11,
@@ -2714,7 +2714,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                           ? 'Patient skipped twice today. Doctor exception required'
                                           : (_isVitalsTokenAllowed
                                               ? 'Both tokens (Vitals Inspection & Regular Visit) issued today'
-                                              : 'Token (#${regularTodayToken?['serial'] ?? vitalsTodayToken?['serial'] ?? 'Issued'}) already issued today'),
+                                              : 'Token (#${LocalStorageService.formatCanonicalSerialForDisplay(regularTodayToken?['serial']?.toString() ?? vitalsTodayToken?['serial']?.toString())}) already issued today'),
                                       style: const TextStyle(
                                           color:      SoftPalette.red400,
                                           fontWeight: FontWeight.bold,
@@ -2751,7 +2751,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                 Icon(Icons.info_outline, color: _isDark ? SoftPalette.indigo300 : SoftPalette.purple600, size: 20),
                                 const SizedBox(width: 8),
                                 Expanded(child: Text(
-                                  '🩺 Vitals token (#${vitalsTodayToken['serial'] ?? 'Issued'}) taken. 🟢 Regular visit token still available today.',
+                                  '🩺 Vitals token (#${LocalStorageService.formatCanonicalSerialForDisplay(vitalsTodayToken['serial']?.toString())}) taken. 🟢 Regular visit token still available today.',
                                   style: TextStyle(
                                     color: _isDark ? SoftPalette.slate150 : SoftPalette.violet700,
                                     fontSize: 12,
@@ -2773,7 +2773,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                 Icon(Icons.info_outline, color: _isDark ? SoftPalette.teal200 : SoftPalette.teal550, size: 20),
                                 const SizedBox(width: 8),
                                 Expanded(child: Text(
-                                  '🎟️ Regular visit token (#${regularTodayToken['serial'] ?? 'Issued'}) taken. 🩺 Vitals inspection token still available today.',
+                                  '🎟️ Regular visit token (#${LocalStorageService.formatCanonicalSerialForDisplay(regularTodayToken['serial']?.toString())}) taken. 🩺 Vitals inspection token still available today.',
                                   style: TextStyle(
                                     color: _isDark ? SoftPalette.teal100 : SoftPalette.teal700,
                                     fontSize: 12,

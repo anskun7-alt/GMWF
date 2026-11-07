@@ -230,6 +230,27 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
                     // Sync Status Indicator Pill (Queue Doctor trigger)
                     const SizedBox(width: 6),
                     SyncStatusIndicator(isDark: isDark),
+                    if (!isMobile) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
+                          ),
+                        ),
+                        child: Text(
+                          'v${AutoUpdateService.currentVersion}',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                            color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
+                          ),
+                        ),
+                      ),
+                    ],
 
                     // Right Action Controls
                     if (useMenuButton) ...[

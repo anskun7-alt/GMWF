@@ -22,6 +22,7 @@ import '../services/auto_update_service.dart';
 import '../widgets/update_dialog_widget.dart';
 import '../services/camp_session_service.dart';
 import '../services/cloud/lan_firestore_gate.dart';
+import '../services/firebase_session_guard.dart';
 import 'home_router.dart';
 import 'access_revoked_screen.dart';
 
@@ -1111,13 +1112,10 @@ class _LoginPageState extends State<LoginPage> {
         }
       }
 
-      // If email auth didn't establish a user session, establish fallback anonymous auth
+      // If email auth didn't establish a user session, establish fallback session via FirebaseSessionGuard
       // so Firestore security rules (request.auth != null) never block sync writes
       if (FirebaseAuth.instance.currentUser == null) {
-        try {
-          await FirebaseAuth.instance.signInAnonymously().timeout(const Duration(seconds: 10));
-          debugPrint('[LoginPage] 🛡️ Fallback anonymous auth established for cloud Firestore sync');
-        } catch (_) {}
+        await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
       }
 
       final uid = cred?.user?.uid ?? FirebaseAuth.instance.currentUser?.uid;
@@ -2619,7 +2617,6 @@ class _LoginPageState extends State<LoginPage> {
           await box.put('current_branch', 'karachi');
         }
       }
-
       final assigned = CampSessionService.getAssignedCamps(userData);
       if (assigned.length == 1) {
         await CampSessionService.setActiveCamp(assigned.first);
@@ -2677,7 +2674,6 @@ class _LoginPageState extends State<LoginPage> {
           await box.put('current_branch', 'karachi');
         }
       }
-
       final assigned = CampSessionService.getAssignedCamps(userData);
       if (assigned.length == 1) {
         await CampSessionService.setActiveCamp(assigned.first);

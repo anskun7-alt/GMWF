@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 
 import '../config/constants.dart';
+import '../services/camp_session_service.dart';
 import '../services/local_storage_service.dart';
 import '../utils/network_utils.dart';
 
@@ -109,15 +110,22 @@ class LanDiscovery {
               // Another branch's server on the same network: not ours, keep listening. (A
               // beacon without a branch — older server — is accepted as before.)
               final serverBranch = parts.length > 2 ? LocalStorageService.sanitizeBranchId(parts[2], fallback: '') : '';
-              if (myBranch.isNotEmpty && serverBranch.isNotEmpty && serverBranch != myBranch) {
-                debugPrint('UDP: ignoring $ip:$port (branch $serverBranch, this desk is $myBranch)');
+              if (myBranch.isNotEmpty &&
+                  serverBranch.isNotEmpty &&
+                  !CampSessionService.areBranchesMatching(myBranch, serverBranch)) {
+                debugPrint('UDP: ignoring $ip:$port (branch $serverBranch does not match desk $myBranch)');
                 return;
               }
               if (ip.isNotEmpty) {
-                debugPrint('UDP found: $ip:$port');
-                s?.call('Found server at $ip');
-                try { sock.close(); } catch (_) {}
-                c.complete(DiscoveredServer(ip: ip, port: port, method: 'udp'));
+                // Verify reachability so an outdated IP broadcast after DHCP renewal is not accepted
+                unawaited(isReachable(ip, port).then((reachable) {
+                  if (reachable && !c.isCompleted) {
+                    debugPrint('UDP found & verified: $ip:$port');
+                    s?.call('Found server at $ip');
+                    try { sock.close(); } catch (_) {}
+                    c.complete(DiscoveredServer(ip: ip, port: port, method: 'udp'));
+                  }
+                }));
               }
             }
           }

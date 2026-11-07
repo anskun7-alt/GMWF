@@ -74,8 +74,13 @@ def main():
         sys.exit(1)
 
     # 7. Build Inno Setup Installers (x64 and x86) if ISCC is installed
-    iscc_path = r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-    if os.path.exists(iscc_path):
+    iscc_candidates = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"),
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    ]
+    iscc_path = next((p for p in iscc_candidates if os.path.exists(p)), None)
+    if iscc_path:
         for iss_file in ['GMWFSetup.iss', 'GMWFSetup_x86.iss']:
             iss_full_path = os.path.join(os.getcwd(), iss_file)
             if os.path.exists(iss_full_path):

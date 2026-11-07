@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:collection/collection.dart';
-import '../../../services/cloud/cloud_db.dart';
+import '../../../services/firebase_session_guard.dart';
 import '../../../services/image_upload_service.dart';
 import '../../../services/local_storage_service.dart';
 import '../../../services/sync_service.dart';
@@ -25,6 +26,8 @@ class MadrassaLocalStorage {
   static const String holidaysBox = LocalStorageService.madrassaHolidaysBox;
   static const String feesBox     = LocalStorageService.madrassaFeesBox;
 
+  static bool _healedPoisonedQueueThisSession = false;
+
   static Future<void> ensureBoxesOpen() async {
     await Future.wait([
       LocalStorageService.ensureBoxOpen(studentsBox),
@@ -32,9 +35,13 @@ class MadrassaLocalStorage {
       LocalStorageService.ensureBoxOpen(holidaysBox),
       LocalStorageService.ensureBoxOpen(feesBox),
       LocalStorageService.ensureBoxOpen(LocalStorageService.usersBox),
+      LocalStorageService.ensureBoxOpen(LocalStorageService.syncBox),
       LocalStorageService.ensureBoxOpen('app_settings'),
     ]);
-    unawaited(healPoisonedMadrassaSyncQueue());
+    if (!_healedPoisonedQueueThisSession) {
+      _healedPoisonedQueueThisSession = true;
+      unawaited(healPoisonedMadrassaSyncQueue());
+    }
   }
 
   static Box _getStudentsBox() => Hive.box(studentsBox);
@@ -98,7 +105,7 @@ class MadrassaLocalStorage {
   // Each image field and the other names the screens read it under (enrollment_dialog stores
   // every image two or three times).
   static const Map<String, List<String>> _mediaAliases = {
-    'photoUrl': ['photoBase64', 'studentPhotoBase64'],
+    'photoUrl': ['photoBase64', 'studentPhotoBase64', 'image'],
     'bFormUrl': ['bFormBase64', 'bformUrl', 'bformBase64'],
     'guardianCnicUrl': ['guardianCnicBase64', 'fatherCnicUrl', 'fatherCnicBase64'],
     'hifzCertificateUrl': ['hifzCertificateBase64'],
@@ -129,10 +136,12 @@ class MadrassaLocalStorage {
       }
     });
 
-    // 1. Primary document fields compression (retina avatar 350x350, documents 550x550)
+    // 1. Primary document fields compression — only recompress if a single field exceeds 220 KB
+    // (ImageUploadService.pickAndProcessImage already compresses images when picked; re-decoding
+    // every 25 KB photo synchronously on the UI thread caused freezes/ANR on Android phones).
     for (final primary in _mediaAliases.keys) {
       final val = out[primary];
-      if (val is String && val.length > 25000 && ImageUploadService.isValidMediaString(val)) {
+      if (val is String && val.length > 220000 && ImageUploadService.isValidMediaString(val)) {
         try {
           final bytes = ImageUploadService.decodeBase64ToBytes(val);
           if (bytes != null && bytes.isNotEmpty) {
@@ -153,12 +162,16 @@ class MadrassaLocalStorage {
 
     // 2. Strict total document size verification for Firestore's 1 MiB (1,048,576 byte) limit
     try {
-      final jsonStr = jsonEncode(out);
-      if (jsonStr.length > 450000) {
-        // Aggressive emergency downscale pass if total document payload still exceeds 450 KB
+      int totalMediaLen = 0;
+      for (final primary in _mediaAliases.keys) {
+        final v = out[primary];
+        if (v is String) totalMediaLen += v.length;
+      }
+      if (totalMediaLen > 650000) {
+        // Emergency downscale pass only if combined media payload exceeds 650 KB
         for (final primary in _mediaAliases.keys) {
           final val = out[primary];
-          if (val is String && val.length > 20000 && ImageUploadService.isValidMediaString(val)) {
+          if (val is String && val.length > 120000 && ImageUploadService.isValidMediaString(val)) {
             final bytes = ImageUploadService.decodeBase64ToBytes(val);
             if (bytes != null && bytes.isNotEmpty) {
               final isAvatar = primary == 'photoUrl';
@@ -387,28 +400,33 @@ class MadrassaLocalStorage {
     // 4. Try immediate direct cloud upload if online (Android lifecycle protection: ensures data reaches Firestore
     // before the user minimizes or locks the app).
     bool cloudUploaded = false;
-    try {
-      final isOnline = NetworkHealthService().isStableOnline ||
-          (!kIsWeb && (await Connectivity().checkConnectivity()).any((r) => r != ConnectivityResult.none));
-      if (isOnline) {
-        final docRef = CloudDb.instance
-            .collection('branches')
-            .doc(effectiveBranchId)
-            .collection('madrassa_students')
-            .doc(effectiveStudentId);
-        final compacted = compactMediaForCloud(cleanData);
-        final fsData = LocalStorageService.sanitizeForCloudUpload(compacted);
-        await docRef.set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 15));
+    if (Firebase.apps.isNotEmpty) {
+      try {
+        final isOnline = NetworkHealthService().isStableOnline ||
+            (!kIsWeb && (await Connectivity().checkConnectivity()).any((r) => r != ConnectivityResult.none));
+        if (isOnline) {
+          if (FirebaseAuth.instance.currentUser == null) {
+            await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+          }
+          final fsData = LocalStorageService.sanitizeForCloudUpload(cleanData);
+          await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(effectiveBranchId)
+              .collection('madrassa_students')
+              .doc(effectiveStudentId)
+              .set(fsData, SetOptions(merge: true))
+              .timeout(const Duration(seconds: 12));
 
-        cloudUploaded = true;
-        cleanData['syncStatus'] = 'synced';
-        cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
-        cleanData['synced'] = true;
-        cleanData['pendingSync'] = false;
-        await cacheStudent(effectiveBranchId, effectiveStudentId, cleanData);
+          cloudUploaded = true;
+          cleanData['syncStatus'] = 'synced';
+          cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
+          cleanData['synced'] = true;
+          cleanData['pendingSync'] = false;
+          await cacheStudent(effectiveBranchId, effectiveStudentId, cleanData);
+        }
+      } catch (e) {
+        debugPrint('[MadrassaLocalStorage] Direct cloud upload deferred to sync queue: $e');
       }
-    } catch (e) {
-      debugPrint('[MadrassaLocalStorage] Direct cloud upload deferred to sync queue: $e');
     }
 
     if (!cloudUploaded) {
@@ -1268,6 +1286,7 @@ class MadrassaLocalStorage {
             : await LocalStorageService.openBoxSafe(LocalStorageService.syncBox);
 
         for (final k in dlq.keys.toList()) {
+          await Future<void>.delayed(Duration.zero);
           final val = dlq.get(k);
           if (val is Map && isStudentAction(val)) {
             final act = Map<String, dynamic>.from(val);
@@ -1303,6 +1322,7 @@ class MadrassaLocalStorage {
         for (final k in syncBox.keys.toList()) {
           final val = syncBox.get(k);
           if (val is Map && isStudentAction(val)) {
+            await Future<void>.delayed(Duration.zero);
             final act = Map<String, dynamic>.from(val);
             if (isCorruptStudentAction(act)) {
               await syncBox.delete(k);
@@ -1352,15 +1372,35 @@ class MadrassaLocalStorage {
     return n;
   }
 
+  static final Map<String, Future<bool>> _inFlightStudentDownloads = {};
+
   /// Downloads a branch's students into Hive. Returns false when the cloud could not be read.
   static Future<bool> downloadStudents(String branchId, {bool force = false}) async {
-    try {
-      final normBranch = normalizeBranch(branchId);
-      if (normBranch.isEmpty || normBranch == 'unknown') return false;
+    final normBranch = normalizeBranch(branchId);
+    if (normBranch.isEmpty || normBranch == 'unknown') return false;
 
+    final inFlight = _inFlightStudentDownloads[normBranch];
+    if (inFlight != null && !force) return inFlight;
+
+    final future = _doDownloadStudents(normBranch, force: force);
+    _inFlightStudentDownloads[normBranch] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlightStudentDownloads[normBranch], future)) {
+        _inFlightStudentDownloads.remove(normBranch);
+      }
+    }
+  }
+
+  static Future<bool> _doDownloadStudents(String normBranch, {bool force = false}) async {
+    try {
       // Ensure local records are healed and cross-enrolled duplicates cleaned across branches
       await repairMissingStudentsFromLocalData(force: force);
-      await healPoisonedMadrassaSyncQueue();
+      if (force || !_healedPoisonedQueueThisSession) {
+        _healedPoisonedQueueThisSession = true;
+        await healPoisonedMadrassaSyncQueue();
+      }
 
       if (normBranch == 'all' || normBranch == 'global') {
         final branches = _getAllBranchIds().map(normalizeBranch).where((b) => b != 'all').toSet();
@@ -1851,10 +1891,11 @@ class MadrassaLocalStorage {
     }
 
     // Always enqueue sync action for durable Firestore upload
+    final syncEntityId = 'mlog_${effectiveBranch}_$dateKey';
     try {
       await LocalStorageService.enqueueSync({
         'type': 'save_madrassa_log',
-        'entityId': 'mlog_${effectiveBranch}_$dateKey',
+        'entityId': syncEntityId,
         'branchId': effectiveBranch,
         'dateKey': dateKey,
         'data': delta,
@@ -1864,33 +1905,108 @@ class MadrassaLocalStorage {
       });
 
       // Enqueue sync actions for changed students' currentLines
-      logData.forEach((sId, data) {
+      for (final entry in logData.entries) {
+        final sId = entry.key;
+        final data = entry.value;
         if (data is Map && data.containsKey('currentLines')) {
-          unawaited(LocalStorageService.enqueueSync({
+          await LocalStorageService.enqueueSync({
             'type': 'update_madrassa_student',
             'branchId': effectiveBranch,
             'studentId': sId,
             'entityId': sId, // stable key: repeated edits coalesce instead of piling up
             'currentLines': data['currentLines'],
-          }));
+          });
         }
-      });
-
-      // Uploaded by the queued item above. The direct write that was here was a second
-      // write of the same document, left in the SDK's hidden queue whenever Firestore
-      // did not answer (and sent again later, costing quota twice).
-
-      unawaited(SyncService().triggerUpload(urgent: true));
+      }
     } catch (e) {
       debugPrint('[MadrassaLocalStorage] enqueueSync error: $e');
     }
+
+    // Immediate direct cloud upload if online (Android APK lifecycle protection:
+    // ensures daily logs & parent replies reach Firestore immediately before the
+    // app is backgrounded or closed).
+    bool directUploaded = false;
+    if (Firebase.apps.isNotEmpty) {
+      try {
+        final isOnline = NetworkHealthService().isStableOnline ||
+            (!kIsWeb && (await Connectivity().checkConnectivity()).any((r) => r != ConnectivityResult.none));
+        if (isOnline) {
+          if (FirebaseAuth.instance.currentUser == null) {
+            await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+          }
+          final cloudDelta = <String, dynamic>{
+            for (final e in delta.entries)
+              if (e.key != 'syncStatus' && e.key != 'pendingSync' && e.key != 'synced')
+                e.key: LocalStorageService.sanitizeForCloudUpload(e.value),
+            'lastModified': FieldValue.serverTimestamp(),
+          };
+          await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(effectiveBranch)
+              .collection('madrassa_daily_logs')
+              .doc(dateKey)
+              .set(cloudDelta, SetOptions(merge: true))
+              .timeout(const Duration(seconds: 10));
+
+          // Also push changed students' currentLines directly
+          for (final entry in logData.entries) {
+            final sId = entry.key;
+            final data = entry.value;
+            if (data is Map && data.containsKey('currentLines')) {
+              unawaited(
+                FirebaseFirestore.instance
+                    .collection('branches')
+                    .doc(effectiveBranch)
+                    .collection('madrassa_students')
+                    .doc(sId)
+                    .set({'currentLines': data['currentLines']}, SetOptions(merge: true))
+                    .timeout(const Duration(seconds: 8))
+                    .catchError((_) {}),
+              );
+            }
+          }
+
+          directUploaded = true;
+          sanitized['syncStatus'] = 'synced';
+          sanitized['pendingSync'] = false;
+          sanitized['synced'] = true;
+          sanitized['lastSyncedAt'] = DateTime.now().toIso8601String();
+          await box.put(key, sanitized);
+          await box.flush();
+        }
+      } catch (e) {
+        debugPrint('[MadrassaLocalStorage] Direct daily log upload deferred to sync queue: $e');
+      }
+    }
+
+    if (!directUploaded) {
+      unawaited(SyncService().triggerUpload(urgent: true));
+    }
   }
 
-  static Future<void> downloadLogsForMonth(String branchId, int year, int month) async {
-    try {
-      final normBranch = normalizeBranch(branchId);
-      if (normBranch.isEmpty || normBranch == 'unknown') return;
+  static final Map<String, Future<void>> _inFlightLogDownloads = {};
 
+  static Future<void> downloadLogsForMonth(String branchId, int year, int month) async {
+    final normBranch = normalizeBranch(branchId);
+    if (normBranch.isEmpty || normBranch == 'unknown') return;
+
+    final inflightKey = '$normBranch|$year|$month';
+    final existing = _inFlightLogDownloads[inflightKey];
+    if (existing != null) return existing;
+
+    final future = _doDownloadLogsForMonth(normBranch, year, month);
+    _inFlightLogDownloads[inflightKey] = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_inFlightLogDownloads[inflightKey], future)) {
+        _inFlightLogDownloads.remove(inflightKey);
+      }
+    }
+  }
+
+  static Future<void> _doDownloadLogsForMonth(String normBranch, int year, int month) async {
+    try {
       if (normBranch == 'all' || normBranch == 'global') {
         final branches = _getAllBranchIds().map(normalizeBranch).where((b) => b != 'all').toSet();
         await Future.wait(branches.map((b) => downloadLogsForMonth(b, year, month)));

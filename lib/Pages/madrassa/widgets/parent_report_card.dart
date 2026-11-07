@@ -14,6 +14,8 @@ import '../widgets/madrassa_common_widgets.dart';
 import '../utils/madrassa_report_helper.dart';
 import '../utils/madrassa_local_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import '../../../services/firebase_session_guard.dart';
 import '../../../services/offline_auth_service.dart';
 import '../../../services/local_storage_service.dart';
 import '../../../services/image_upload_service.dart';
@@ -223,11 +225,24 @@ class _ParentReportCardState extends State<ParentReportCard> {
   Map<String, dynamic>? _liveStudentData;
   Map<String, dynamic> get studentData => _liveStudentData ?? widget.studentData;
 
+  String get _effectiveBranch {
+    final normWidget = MadrassaLocalStorage.normalizeBranch(widget.branchId);
+    if (normWidget.isNotEmpty && normWidget != 'all' && normWidget != 'global') {
+      return normWidget;
+    }
+    final rawStd = (studentData['branchId'] ?? studentData['branch'] ?? '').toString().trim();
+    final normStd = MadrassaLocalStorage.normalizeBranch(rawStd);
+    if (normStd.isNotEmpty && normStd != 'all' && normStd != 'global') {
+      return normStd;
+    }
+    return 'gujrat';
+  }
+
   bool get isNazraStudent =>
       (studentData['isNazra'] == true) ||
       (studentData['program']?.toString().toLowerCase() == 'nazra') ||
       (studentData['class']?.toString().toLowerCase() == 'nazra') ||
-      LocalStorageService.isMadrassaNazraOnly(widget.branchId);
+      LocalStorageService.isMadrassaNazraOnly(_effectiveBranch);
 
   late Stream<List<Map<String, dynamic>>> _logsStream;
   late Stream<MadrassaConfig> _configStream;
@@ -244,17 +259,18 @@ class _ParentReportCardState extends State<ParentReportCard> {
   }
 
   void _initStreams() {
-    _logsStream = MadrassaLocalStorage.streamLogsForMonthCached(widget.branchId, _selectedYear, _selectedMonth);
-    _configStream = MadrassaLocalStorage.streamConfigCached(widget.branchId);
-    _holidaysStream = MadrassaLocalStorage.streamHolidaysCached(widget.branchId);
+    final effBranch = _effectiveBranch;
+    _logsStream = MadrassaLocalStorage.streamLogsForMonthCached(effBranch, _selectedYear, _selectedMonth);
+    _configStream = MadrassaLocalStorage.streamConfigCached(effBranch);
+    _holidaysStream = MadrassaLocalStorage.streamHolidaysCached(effBranch);
 
     // Refresh current month daily logs from cloud in background so parent sees latest dates
-    if (widget.branchId.isNotEmpty) {
+    if (effBranch.isNotEmpty) {
       final now = DateTime.now();
       final isCurrent = _selectedYear == now.year && _selectedMonth == now.month;
-      final cached = MadrassaLocalStorage.getLogsForMonthCached(widget.branchId, _selectedYear, _selectedMonth);
+      final cached = MadrassaLocalStorage.getLogsForMonthCached(effBranch, _selectedYear, _selectedMonth);
       if (cached.isEmpty || isCurrent) {
-        MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, _selectedYear, _selectedMonth);
+        MadrassaLocalStorage.downloadLogsForMonth(effBranch, _selectedYear, _selectedMonth);
       }
     }
   }
@@ -284,9 +300,10 @@ class _ParentReportCardState extends State<ParentReportCard> {
   }
 
   Future<void> _submitParentReply(BuildContext context, String branchId, String dateStr, String studentId) async {
+    final effBranch = _effectiveBranch;
     try {
       await MadrassaLocalStorage.saveLogRecordLocal(
-        branchId: branchId,
+        branchId: effBranch,
         dateKey: dateStr,
         logData: {
           studentId: {
@@ -297,26 +314,29 @@ class _ParentReportCardState extends State<ParentReportCard> {
         },
         editorName: 'Parent/Guardian',
         editorRole: 'guardian',
-      ).timeout(const Duration(seconds: 3), onTimeout: () {});
+      ).timeout(const Duration(seconds: 6), onTimeout: () {});
 
-      unawaited(
-        FirebaseFirestore.instance
+      if (Firebase.apps.isNotEmpty) {
+        if (FirebaseAuth.instance.currentUser == null) {
+          await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+        }
+        await FirebaseFirestore.instance
             .collection('branches')
-            .doc(branchId)
+            .doc(effBranch)
             .collection('madrassa_daily_logs')
             .doc(dateStr)
             .set({
           studentId: {
             'parentReplied': true,
             'parentRepliedRequested': true,
-            'timestamp': FieldValue.serverTimestamp()
+            'timestamp': FieldValue.serverTimestamp(),
           }
         }, SetOptions(merge: true))
-        .timeout(const Duration(seconds: 4))
-        .catchError((err) {
+            .timeout(const Duration(seconds: 8))
+            .catchError((err) {
           debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
-        })
-      );
+        });
+      }
 
       if (mounted) {
         setState(() {});
@@ -499,6 +519,7 @@ class _ParentReportCardState extends State<ParentReportCard> {
 
                         setDs(() => isSaving = true);
                         try {
+                          final effBranch = _effectiveBranch;
                           final batch = FirebaseFirestore.instance.batch();
                           int totalDays = 0;
 
@@ -509,7 +530,7 @@ class _ParentReportCardState extends State<ParentReportCard> {
 
                             // Save to local storage & enqueue sync
                             await MadrassaLocalStorage.saveLogRecordLocal(
-                              branchId: branchId,
+                              branchId: effBranch,
                               dateKey: dStr,
                               logData: {
                                 studentId: {
@@ -522,11 +543,11 @@ class _ParentReportCardState extends State<ParentReportCard> {
                               },
                               editorName: 'Parent/Guardian',
                               editorRole: 'guardian',
-                            ).timeout(const Duration(seconds: 3), onTimeout: () {});
+                            ).timeout(const Duration(seconds: 6), onTimeout: () {});
 
                             final docRef = FirebaseFirestore.instance
                                 .collection('branches')
-                                .doc(branchId)
+                                .doc(effBranch)
                                 .collection('madrassa_daily_logs')
                                 .doc(dStr);
 
@@ -547,13 +568,17 @@ class _ParentReportCardState extends State<ParentReportCard> {
                             curr = curr.add(const Duration(days: 1));
                           }
 
-                          unawaited(
-                            batch.commit()
-                              .timeout(const Duration(seconds: 4))
-                              .catchError((err) {
-                                debugPrint('[ParentReportCard] Direct Firestore leave batch note: $err');
-                              })
-                          );
+                          if (Firebase.apps.isNotEmpty) {
+                            if (FirebaseAuth.instance.currentUser == null) {
+                              await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+                            }
+                            await batch
+                                .commit()
+                                .timeout(const Duration(seconds: 8))
+                                .catchError((err) {
+                              debugPrint('[ParentReportCard] Direct Firestore leave batch note: $err');
+                            });
+                          }
 
                           if (mounted) {
                             setState(() {});
@@ -667,39 +692,43 @@ class _ParentReportCardState extends State<ParentReportCard> {
                     return;
                   }
 
+                  final effBranch = _effectiveBranch;
                   // 1. Update student cache locally
-                  final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId) ?? {};
+                  final cached = MadrassaLocalStorage.getStudentCached(effBranch, widget.studentId) ?? {};
                   cached['rejoinRequestStatus'] = 'pending';
                   cached['rejoinRequestReason'] = reasonCtrl.text.trim();
                   cached['rejoinRequestDate'] = DateTime.now().toIso8601String();
-                  await MadrassaLocalStorage.cacheStudent(widget.branchId, widget.studentId, cached);
+                  await MadrassaLocalStorage.cacheStudent(effBranch, widget.studentId, cached);
 
                   // 2. Enqueue sync
                   await LocalStorageService.enqueueSync({
                     'type': 'save_madrassa_student',
-                    'branchId': widget.branchId,
+                    'branchId': effBranch,
                     'studentId': widget.studentId,
                     'data': cached,
                   });
-                  unawaited(SyncService().triggerUpload());
+                  unawaited(SyncService().triggerUpload(urgent: true));
 
-                  // 3. Direct Firestore update in background with timeout
-                  unawaited(
-                    FirebaseFirestore.instance
+                  // 3. Direct Firestore update with session ensure
+                  if (Firebase.apps.isNotEmpty) {
+                    if (FirebaseAuth.instance.currentUser == null) {
+                      await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+                    }
+                    await FirebaseFirestore.instance
                         .collection('branches')
-                        .doc(widget.branchId)
+                        .doc(effBranch)
                         .collection('madrassa_students')
                         .doc(widget.studentId)
-                        .update({
+                        .set({
                       'rejoinRequestStatus': 'pending',
                       'rejoinRequestReason': reasonCtrl.text.trim(),
                       'rejoinRequestDate': FieldValue.serverTimestamp(),
-                    })
-                    .timeout(const Duration(seconds: 4))
-                    .catchError((err) {
+                    }, SetOptions(merge: true))
+                        .timeout(const Duration(seconds: 8))
+                        .catchError((err) {
                       debugPrint('[ParentReportCard] Rejoin update note: $err');
-                    })
-                  );
+                    });
+                  }
 
                   if (mounted) setState(() {});
                   if (ctx.mounted) Navigator.pop(ctx);
@@ -791,39 +820,43 @@ class _ParentReportCardState extends State<ParentReportCard> {
                     return;
                   }
 
+                  final effBranch = _effectiveBranch;
                   // 1. Update student cache locally
-                  final cached = MadrassaLocalStorage.getStudentCached(widget.branchId, widget.studentId) ?? {};
+                  final cached = MadrassaLocalStorage.getStudentCached(effBranch, widget.studentId) ?? {};
                   cached['rejoinRequestStatus'] = 'pending';
                   cached['rejoinRequestReason'] = reasonCtrl.text.trim();
                   cached['rejoinRequestDate'] = DateTime.now().toIso8601String();
-                  await MadrassaLocalStorage.cacheStudent(widget.branchId, widget.studentId, cached);
+                  await MadrassaLocalStorage.cacheStudent(effBranch, widget.studentId, cached);
 
                   // 2. Enqueue sync
                   await LocalStorageService.enqueueSync({
                     'type': 'save_madrassa_student',
-                    'branchId': widget.branchId,
+                    'branchId': effBranch,
                     'studentId': widget.studentId,
                     'data': cached,
                   });
-                  unawaited(SyncService().triggerUpload());
+                  unawaited(SyncService().triggerUpload(urgent: true));
 
-                  // 3. Direct Firestore update in background with timeout
-                  unawaited(
-                    FirebaseFirestore.instance
+                  // 3. Direct Firestore update with session ensure
+                  if (Firebase.apps.isNotEmpty) {
+                    if (FirebaseAuth.instance.currentUser == null) {
+                      await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+                    }
+                    await FirebaseFirestore.instance
                         .collection('branches')
-                        .doc(widget.branchId)
+                        .doc(effBranch)
                         .collection('madrassa_students')
                         .doc(widget.studentId)
-                        .update({
+                        .set({
                       'rejoinRequestStatus': 'pending',
                       'rejoinRequestReason': reasonCtrl.text.trim(),
                       'rejoinRequestDate': FieldValue.serverTimestamp(),
-                    })
-                    .timeout(const Duration(seconds: 4))
-                    .catchError((err) {
+                    }, SetOptions(merge: true))
+                        .timeout(const Duration(seconds: 8))
+                        .catchError((err) {
                       debugPrint('[ParentReportCard] Rejoin update note: $err');
-                    })
-                  );
+                    });
+                  }
 
                   if (mounted) setState(() {});
                   if (ctx.mounted) Navigator.pop(ctx);
@@ -1103,6 +1136,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                         if (text.isEmpty) return;
                         setDs(() => isSaving = true);
                         try {
+                          final effBranch = _effectiveBranch;
                           final replyData = {
                             widget.studentId: {
                               'parentReplied': true,
@@ -1115,20 +1149,23 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
                           // 1. Immediately save to Local Hive & broadcast/enqueue sync
                           await MadrassaLocalStorage.saveLogRecordLocal(
-                            branchId: widget.branchId,
+                            branchId: effBranch,
                             dateKey: dateStr,
                             logData: replyData,
                             editorName: 'Parent/Guardian',
                             editorRole: 'guardian',
-                          ).timeout(const Duration(seconds: 4), onTimeout: () {
+                          ).timeout(const Duration(seconds: 6), onTimeout: () {
                             debugPrint('[ParentReportCard] Local log save timeout note');
                           });
 
-                          // 2. Direct Firestore update for cloud instant reflection in background
-                          unawaited(
-                            FirebaseFirestore.instance
+                          // 2. Direct Firestore update for cloud instant reflection
+                          if (Firebase.apps.isNotEmpty) {
+                            if (FirebaseAuth.instance.currentUser == null) {
+                              await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+                            }
+                            await FirebaseFirestore.instance
                                 .collection('branches')
-                                .doc(widget.branchId)
+                                .doc(effBranch)
                                 .collection('madrassa_daily_logs')
                                 .doc(dateStr)
                                 .set({
@@ -1140,11 +1177,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 'parentReplyTime': FieldValue.serverTimestamp(),
                               }
                             }, SetOptions(merge: true))
-                            .timeout(const Duration(seconds: 4))
-                            .catchError((err) {
+                                .timeout(const Duration(seconds: 8))
+                                .catchError((err) {
                               debugPrint('[ParentReportCard] Direct Firestore reply update note: $err');
-                            })
-                          );
+                            });
+                          }
 
                           if (mounted) {
                             setState(() {});
@@ -1537,9 +1574,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
   Future<void> _claimPtmJoin(BuildContext context) async {
     final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final effBranch = _effectiveBranch;
     try {
       await MadrassaLocalStorage.saveLogRecordLocal(
-        branchId: widget.branchId,
+        branchId: effBranch,
         dateKey: todayStr,
         logData: {
           widget.studentId: {
@@ -1549,25 +1587,28 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         },
         editorName: 'Parent/Guardian',
         editorRole: 'guardian',
-      ).timeout(const Duration(seconds: 3), onTimeout: () {});
+      ).timeout(const Duration(seconds: 6), onTimeout: () {});
 
-      unawaited(
-        FirebaseFirestore.instance
+      if (Firebase.apps.isNotEmpty) {
+        if (FirebaseAuth.instance.currentUser == null) {
+          await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+        }
+        await FirebaseFirestore.instance
             .collection('branches')
-            .doc(widget.branchId)
+            .doc(effBranch)
             .collection('madrassa_daily_logs')
             .doc(todayStr)
             .set({
           widget.studentId: {
             'ptmRequestStatus': 'claimed',
-            'timestamp': FieldValue.serverTimestamp()
+            'timestamp': FieldValue.serverTimestamp(),
           }
         }, SetOptions(merge: true))
-        .timeout(const Duration(seconds: 4))
-        .catchError((err) {
+            .timeout(const Duration(seconds: 8))
+            .catchError((err) {
           debugPrint('[ParentReportCard] Claim PTM join note: $err');
-        })
-      );
+        });
+      }
 
       if (mounted) setState(() {});
 
@@ -1641,9 +1682,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                         }
                         setDs(() => isSaving = true);
                         try {
+                          final effBranch = _effectiveBranch;
                           final text = replyCtrl.text.trim();
                           await MadrassaLocalStorage.saveLogRecordLocal(
-                            branchId: widget.branchId,
+                            branchId: effBranch,
                             dateKey: todayStr,
                             logData: {
                               widget.studentId: {
@@ -1656,12 +1698,15 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             },
                             editorName: 'Parent/Guardian',
                             editorRole: 'guardian',
-                          ).timeout(const Duration(seconds: 3), onTimeout: () {});
+                          ).timeout(const Duration(seconds: 6), onTimeout: () {});
 
-                          unawaited(
-                            FirebaseFirestore.instance
+                          if (Firebase.apps.isNotEmpty) {
+                            if (FirebaseAuth.instance.currentUser == null) {
+                              await FirebaseSessionGuard.ensureSession(reason: 'direct_write');
+                            }
+                            await FirebaseFirestore.instance
                                 .collection('branches')
-                                .doc(widget.branchId)
+                                .doc(effBranch)
                                 .collection('madrassa_daily_logs')
                                 .doc(todayStr)
                                 .set({
@@ -1673,11 +1718,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 'parentReplyTime': FieldValue.serverTimestamp(),
                               }
                             }, SetOptions(merge: true))
-                            .timeout(const Duration(seconds: 4))
-                            .catchError((err) {
+                                .timeout(const Duration(seconds: 8))
+                                .catchError((err) {
                               debugPrint('[ParentReportCard] Reply text note: $err');
-                            })
-                          );
+                            });
+                          }
 
                           if (mounted) setState(() {});
                           if (ctx.mounted) {

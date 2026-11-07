@@ -19,7 +19,9 @@ class TokenOrder {
 
   static bool isOffline(Map<String, dynamic> e) {
     final seq = seqOf(e);
-    return LocalStorageService.isOfflineBandSeq(seq) && seq < 999999;
+    // New tokens are always 001..999; a legacy 1000+/2000+ token (issued by an older build's
+    // offline block and still stored) is placed by its issue time.
+    return seq >= LocalStorageService.offlineBandSize && seq < 999999;
   }
 
   /// Issue time in epoch ms (server-corrected `issuedAtMs` when present), or null.

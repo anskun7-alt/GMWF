@@ -194,9 +194,19 @@ def save_offline_punch(punch):
         json.dump(pending, f, indent=2)
 
 
+# Global quota cooldown tracking (epoch seconds). Prevents 60-second retry timeout loops when Firestore daily limit is reached.
+_quota_cooldown_until = 0
+
+
 def flush_offline_buffer(db):
-    """Attempts to push unsent offline buffered punches to Firestore."""
+    """Attempts to push unsent offline buffered punches to Firestore using batched writes."""
+    global _quota_cooldown_until
     if not db or not os.path.exists(OFFLINE_BUFFER_FILE):
+        return
+
+    now = time.time()
+    if now < _quota_cooldown_until:
+        remaining_mins = int((_quota_cooldown_until - now) // 60) + 1
         return
 
     try:
@@ -207,21 +217,40 @@ def flush_offline_buffer(db):
             return
 
         print(f"[SYNC] Found {len(pending)} offline buffered punches. Uploading to Firestore...")
-        remaining = []
+        remaining = list(pending)
+        flushed_count = 0
+        batch_size = 200
 
-        for punch in pending:
-            doc_id = punch.get("doc_id") or f"{punch['deviceIp']}_{punch['pin']}_{punch['timestamp']}"
+        while remaining:
+            chunk = remaining[:batch_size]
+            batch = db.batch()
+            for punch in chunk:
+                doc_id = punch.get("doc_id") or punch.get("id") or f"{punch.get('branchId', '')}_{punch.get('deviceIp', '')}_{punch.get('pin', '')}_{punch.get('timestamp_epoch', '')}"
+                ref = db.collection("biometric_punches").document(doc_id)
+                batch.set(ref, punch, merge=True)
+
             try:
-                db.collection("biometric_punches").document(doc_id).set(punch, merge=True)
-            except Exception as e:
-                print(f"[WARN] Failed to flush punch {doc_id}: {e}")
-                remaining.append(punch)
-
-        with open(OFFLINE_BUFFER_FILE, "w") as f:
-            json.dump(remaining, f, indent=2)
+                batch.commit()
+                flushed_count += len(chunk)
+                remaining = remaining[batch_size:]
+                # Update file progressively after each successful batch
+                with open(OFFLINE_BUFFER_FILE, "w") as f:
+                    json.dump(remaining, f, indent=2)
+            except Exception as be:
+                err_str = str(be)
+                if "429" in err_str or "Quota" in err_str or "ResourceExhausted" in err_str:
+                    _quota_cooldown_until = time.time() + 900  # 15 min cooldown
+                    print(f"[SYNC] ⚠️ Firestore daily write quota reached (HTTP 429).")
+                    print(f"[SYNC] 🔒 {len(remaining)} punches safely preserved in '{OFFLINE_BUFFER_FILE}'. Cloud flush paused for 15 minutes.")
+                    break
+                else:
+                    print(f"[WARN] Batch commit encountered error: {be}. Retaining {len(remaining)} punches for next cycle.")
+                    break
 
         if not remaining:
-            print("[SYNC] ✅ All offline buffered punches flushed successfully!")
+            print(f"[SYNC] ✅ All {flushed_count} offline buffered punches flushed successfully!")
+        elif flushed_count > 0:
+            print(f"[SYNC] ℹ️ Flushed {flushed_count} punches; {len(remaining)} remain safely buffered.")
 
     except Exception as e:
         print(f"[WARN] Error reading offline buffer file: {e}")
@@ -423,12 +452,17 @@ def fetch_and_sync_device(device_cfg, db, synced_keys, clear_memory=False):
                 "isMapped": is_mapped,
             }
 
-            if db:
+            if db and time.time() >= _quota_cooldown_until:
                 try:
                     db.collection("biometric_punches").document(doc_id).set(punch_record, merge=True)
                     print(f"  └─ [SYNCED] {emp_name} (PIN: {pin}) | Time: {timestamp_str} | Loc: {location}")
                 except Exception as e:
-                    print(f"  └─ [OFFLINE BUFFERED] Firestore error: {e}")
+                    err_str = str(e)
+                    if "429" in err_str or "Quota" in err_str or "ResourceExhausted" in err_str:
+                        _quota_cooldown_until = time.time() + 900
+                        print(f"  └─ [OFFLINE BUFFERED] Quota reached (HTTP 429) -> safely buffered locally. Pausing Firestore writes for 15 min.")
+                    else:
+                        print(f"  └─ [OFFLINE BUFFERED] Firestore error: {e}")
                     all_writes_succeeded = False
                     save_offline_punch(punch_record)
             else:

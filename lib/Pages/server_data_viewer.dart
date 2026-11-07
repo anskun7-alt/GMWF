@@ -7,8 +7,9 @@ import '../services/local_storage_service.dart';
 
 class ServerDataViewer extends StatefulWidget {
   final String branchId;
+  final bool isEmbedded;
 
-  const ServerDataViewer({super.key, required this.branchId});
+  const ServerDataViewer({super.key, required this.branchId, this.isEmbedded = false});
 
   @override
   State<ServerDataViewer> createState() => _ServerDataViewerState();
@@ -193,33 +194,36 @@ class _ServerDataViewerState extends State<ServerDataViewer> {
 
     return Scaffold(
       backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.slate100,
-      appBar: AppBar(
-        backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: Text(
-          'Server Data Archive',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-          ),
-        ),
-        iconTheme: IconThemeData(color: isDark ? SoftPalette.gray50 : SoftPalette.slate900),
-        actions: [
-          IconButton(
-            icon: Icon(
-              _sortNewestFirst ? Icons.sort_rounded : Icons.history_rounded,
-              color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate600,
+      appBar: widget.isEmbedded
+          ? null
+          : AppBar(
+              automaticallyImplyLeading: false,
+              backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              title: Text(
+                'Server Data Archive',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                ),
+              ),
+              iconTheme: IconThemeData(color: isDark ? SoftPalette.gray50 : SoftPalette.slate900),
+              actions: [
+                IconButton(
+                  icon: Icon(
+                    _sortNewestFirst ? Icons.sort_rounded : Icons.history_rounded,
+                    color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate600,
+                  ),
+                  tooltip: _sortNewestFirst ? 'Sorting: Newest First' : 'Sorting: Oldest First',
+                  onPressed: () {
+                    setState(() {
+                      _sortNewestFirst = !_sortNewestFirst;
+                    });
+                  },
+                ),
+              ],
             ),
-            tooltip: _sortNewestFirst ? 'Sorting: Newest First' : 'Sorting: Oldest First',
-            onPressed: () {
-              setState(() {
-                _sortNewestFirst = !_sortNewestFirst;
-              });
-            },
-          ),
-        ],
-      ),
       body: ValueListenableBuilder(
         valueListenable: Hive.box(LocalStorageService.entriesBox).listenable(),
         builder: (context, Box box, _) {

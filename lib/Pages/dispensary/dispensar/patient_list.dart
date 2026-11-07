@@ -896,7 +896,7 @@ class _PatientListState extends State<PatientList> {
       statusIcon = Icons.medication_outlined;
     }
 
-    final seqNumber = serial.split('-').last.padLeft(3, '0');
+    final seqNumber = LocalStorageService.formatTokenDisplay(serial);
 
     String campTag = (e['dispensaryTag'] ?? e['dispensaryId'] ?? '').toString().trim().toUpperCase();
     if (campTag.isEmpty || campTag == 'ALL') {

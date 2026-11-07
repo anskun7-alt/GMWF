@@ -75,20 +75,43 @@ class DispenseQueue {
     bool newestFirst = false,
     String filter = 'all',
   }) {
-    final todayKey = CampSessionService.resolveShiftAndDateKey(null, branchId).dateKey;
-    final hasMultiCamps = CampSessionService.hasCampsForBranch(branchId);
+    final effectiveBranch = (RealtimeManager().isConnected &&
+            RealtimeManager().branchId != null &&
+            RealtimeManager().branchId!.trim().isNotEmpty &&
+            RealtimeManager().branchId!.toLowerCase().trim() != 'all')
+        ? RealtimeManager().branchId!.toLowerCase().trim()
+        : branchId.toLowerCase().trim();
+
+    final queryBranch = effectiveBranch.isNotEmpty ? effectiveBranch : branchId;
+    final todayKey = CampSessionService.resolveShiftAndDateKey(null, queryBranch).dateKey;
+    final hasMultiCamps = CampSessionService.hasCampsForBranch(queryBranch);
     final userData = _userData();
-    final allowedSessions = CampSessionService.getAllowedSessions(branchId, userData: userData);
+    final allowedSessions = CampSessionService.getAllowedSessions(queryBranch, userData: userData);
     final scheduledCamps = CampSessionService.getMatchingScheduledCamps(userData);
     final effectiveCamp = hasMultiCamps
         ? ((campFilter.isNotEmpty && campFilter != 'all')
             ? campFilter
             : (scheduledCamps.isNotEmpty
                 ? scheduledCamps.first
-                : CampSessionService.getActiveCamp(branchId)))
+                : CampSessionService.getActiveCamp(queryBranch)))
         : null;
 
-    final allList = LocalStorageService.getLocalEntries(branchId);
+    final Set<String> branchesToQuery = {
+      if (branchId.trim().isNotEmpty && branchId.toLowerCase().trim() != 'all') branchId.toLowerCase().trim(),
+      if (effectiveBranch.trim().isNotEmpty && effectiveBranch != 'all') effectiveBranch,
+    };
+    if (branchesToQuery.isEmpty) branchesToQuery.add('all');
+
+    final List<Map<String, dynamic>> allList = [];
+    final seenIds = <String>{};
+    for (final b in branchesToQuery) {
+      for (final e in LocalStorageService.getLocalEntries(b)) {
+        final id = (e['serial'] ?? e['id'] ?? '').toString();
+        if (id.isEmpty || seenIds.add(id)) {
+          allList.add(e);
+        }
+      }
+    }
     final todayIso = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
     // getLocalEntries hands out the shared index maps (read by the doctor/reception screens and
@@ -102,11 +125,17 @@ class DispenseQueue {
     var all = allList.where((e) {
       final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
 
-      if (!CampSessionService.isSerialMatchingBranch(serial, branchId)) {
+      final matchesBranch = branchesToQuery.any((b) => CampSessionService.isSerialMatchingBranch(serial, b)) ||
+          CampSessionService.isSerialMatchingBranch(serial, branchId) ||
+          CampSessionService.isSerialMatchingBranch(serial, queryBranch);
+
+      if (!matchesBranch) {
         return false;
       }
 
-      if (!isEffectivelyToday(e, todayKey, todayIso, branchId)) return false;
+      final isToday = isEffectivelyToday(e, todayKey, todayIso, queryBranch) ||
+          (queryBranch != branchId && isEffectivelyToday(e, todayKey, todayIso, branchId));
+      if (!isToday) return false;
 
       final presc = (e['prescription'] is Map && (e['prescription'] as Map).isNotEmpty)
           ? (e['prescription'] as Map)
@@ -125,41 +154,90 @@ class DispenseQueue {
         (presc['isVitalsOnly'] == true && presc['completedAt'] != null)
       );
 
-      var name = (e['patientName'] ?? e['name'] ?? '').toString().trim().toLowerCase();
-      var cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'] ?? '').toString().trim();
+      var name = LocalStorageService.resolveFirstValidPatientName([
+        e['patientName'],
+        e['name'],
+        e['fullName'],
+      ]).toLowerCase();
+      var cnic = LocalStorageService.resolveFirstValidCnic([
+        e['patientCnic'],
+        e['cnic'],
+        e['guardianCnic'],
+      ]);
 
-      // Fall back to prescription details if entry name/cnic is missing
-      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown') && presc != null) {
-        final prName = (presc['patientName'] ?? presc['name'])?.toString().trim();
-        if (prName != null && prName.isNotEmpty && prName.toLowerCase() != 'unknown' && prName.toLowerCase() != 'unknown patient') {
-          name = prName.toLowerCase();
-          ov(e)['patientName'] = prName;
+      // Fall back to prescription details if entry name OR cnic is missing/synthetic
+      if ((name.isEmpty || cnic.isEmpty) && presc != null) {
+        if (name.isEmpty) {
+          final prName = LocalStorageService.resolveFirstValidPatientName([
+            presc['patientName'],
+            presc['name'],
+            presc['fullName'],
+          ]);
+          if (prName.isNotEmpty) {
+            name = prName.toLowerCase();
+            ov(e)['patientName'] = prName;
+            ov(e)['name'] = prName;
+          }
         }
-        final prCnic = (presc['patientCnic'] ?? presc['cnic'] ?? presc['guardianCnic'])?.toString().trim();
-        if (prCnic != null && prCnic.isNotEmpty) {
-          cnic = prCnic;
-          ov(e)['cnic'] = prCnic;
+        if (cnic.isEmpty) {
+          final prCnic = LocalStorageService.resolveFirstValidCnic([
+            presc['patientCnic'],
+            presc['cnic'],
+            presc['guardianCnic'],
+          ]);
+          if (prCnic.isNotEmpty) {
+            cnic = prCnic;
+            ov(e)['cnic'] = prCnic;
+            ov(e)['patientCnic'] = prCnic;
+          }
         }
       }
 
-      if ((name.isEmpty || name == 'unknown patient' || name == 'unknown') && cnic.isEmpty) {
+      if (name.isEmpty || cnic.isEmpty) {
         if (serial.isNotEmpty && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
           final box = Hive.box(LocalStorageService.entriesBox);
-          final raw = box.get('$branchId-$serial') ?? box.get(serial) ?? box.get(serial.toUpperCase());
+          final raw = box.get('$branchId-$serial') ?? box.get('$queryBranch-$serial') ?? box.get(serial) ?? box.get(serial.toUpperCase());
           if (raw is Map) {
-            final rName = (raw['patientName'] ?? raw['name'] ?? '').toString().trim();
-            final rCnic = (raw['patientCnic'] ?? raw['cnic'] ?? raw['guardianCnic'] ?? '').toString().trim();
-            if (rName.isNotEmpty && rName.toLowerCase() != 'unknown' && rName.toLowerCase() != 'unknown patient') {
+            final rName = LocalStorageService.resolveFirstValidPatientName([
+              raw['patientName'],
+              raw['name'],
+              raw['fullName'],
+            ]);
+            final rCnic = LocalStorageService.resolveFirstValidCnic([
+              raw['patientCnic'],
+              raw['cnic'],
+              raw['guardianCnic'],
+            ]);
+            if (name.isEmpty && rName.isNotEmpty) {
               name = rName.toLowerCase();
               ov(e)['patientName'] = rName;
+              ov(e)['name'] = rName;
             }
-            if (rCnic.isNotEmpty) {
+            if (cnic.isEmpty && rCnic.isNotEmpty) {
               cnic = rCnic;
               ov(e)['cnic'] = rCnic;
+              ov(e)['patientCnic'] = rCnic;
             }
           }
         }
-        if ((name.isEmpty || name == 'unknown patient' || name == 'unknown') && cnic.isEmpty) {
+        if (cnic.isEmpty) {
+          final pId = (e['patientId'] ?? e['id'] ?? '').toString().trim();
+          if (pId.isNotEmpty && !pId.toLowerCase().startsWith('unknown')) {
+            final lp = LocalStorageService.getLocalPatient(pId);
+            final lpCnic = LocalStorageService.resolveFirstValidCnic([
+              lp?['cnic'],
+              lp?['patientCnic'],
+              lp?['guardianCnic'],
+              pId.contains('_child_') ? pId.split('_child_').first : pId,
+            ]);
+            if (lpCnic.isNotEmpty) {
+              cnic = lpCnic;
+              ov(e)['cnic'] = lpCnic;
+              ov(e)['patientCnic'] = lpCnic;
+            }
+          }
+        }
+        if (name.isEmpty && cnic.isEmpty) {
           // If token has prescription or completed status, NEVER hide it from dispenser!
           if (hasPresc || status == 'completed' || status == 'dispensed' || isDisp) {
             name = 'token #$serial';

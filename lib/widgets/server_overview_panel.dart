@@ -9,8 +9,8 @@
 // It only receives plain values and callbacks, so it can be reused and tested in isolation.
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:intl/intl.dart';
+import 'nexus_server_dashboard/nexus_colors.dart';
 
 class ServerClientRow {
   final String name;
@@ -90,16 +90,16 @@ class ServerOverviewPanel extends StatelessWidget {
     this.onOpenQueue,
   });
 
-  // ── palette (one accent, flat surfaces) ──────────────────────────────────
-  Color get _surface => isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-  Color get _subtle => isDark ? SoftPalette.slate800 : SoftPalette.gray100;
-  Color get _line => isDark ? SoftPalette.slate750 : SoftPalette.gray150;
-  Color get _text => isDark ? SoftPalette.gray100 : SoftPalette.slate900;
-  Color get _muted => isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-  static const Color _accent = SoftPalette.teal550;
-  static const Color _ok = SoftPalette.green550;
-  static const Color _warn = SoftPalette.orange500;
-  static const Color _bad = SoftPalette.red550;
+  // ── palette (NEXUS.CORE design tokens) ──────────────────────────────────
+  Color get _surface => NexusColors.cardBg;
+  Color get _subtle => NexusColors.mainBg;
+  Color get _line => NexusColors.cardBorder;
+  Color get _text => NexusColors.textMain;
+  Color get _muted => NexusColors.textSecondary;
+  static Color get _accent => NexusColors.primary;
+  static Color get _ok => NexusColors.success;
+  static Color get _warn => NexusColors.warning;
+  static Color get _bad => NexusColors.error;
 
   static String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
@@ -295,7 +295,7 @@ class ServerOverviewPanel extends StatelessWidget {
       );
     }
 
-    final online = clients.where((c) => DateTime.now().difference(c.lastActive).inSeconds < 45).length;
+    final online = clients.where((c) => DateTime.now().difference(c.lastActive).inSeconds < 90).length;
     return Row(
       children: [
         tile('Devices connected', '$online',
@@ -380,7 +380,7 @@ class ServerOverviewPanel extends StatelessWidget {
       );
 
   Widget _clientRow(ServerClientRow c) {
-    final live = DateTime.now().difference(c.lastActive).inSeconds < 45;
+    final live = DateTime.now().difference(c.lastActive).inSeconds < 90;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
@@ -427,7 +427,7 @@ class ServerOverviewPanel extends StatelessWidget {
           const SizedBox(height: 10),
           if (alerts.isEmpty)
             Row(children: [
-              const Icon(Icons.check_circle_outline_rounded, size: 18, color: _ok),
+              Icon(Icons.check_circle_outline_rounded, size: 18, color: _ok),
               const SizedBox(width: 8),
               Text('Nothing needs your attention.', style: TextStyle(fontSize: 13, color: _muted)),
             ])

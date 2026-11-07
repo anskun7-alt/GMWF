@@ -1017,9 +1017,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       final serial = (e['serial'] ?? e['id'])?.toString();
       if (!CampSessionService.isSerialMatchingBranch(serial, widget.branchId)) return false;
 
-      // 2. Strict Branch filter
+      // 2. Strict Branch filter (supports multi-camp aliases across any branch)
       final eBranch = (e['branchId'] ?? '').toString().toLowerCase().trim();
-      if (eBranch.isNotEmpty && eBranch != normBranch) return false;
+      if (eBranch.isNotEmpty && eBranch != normBranch && !CampSessionService.areBranchesMatching(eBranch, normBranch)) {
+        return false;
+      }
 
       // 3. Strict User filter (cannot see another user's tokens)
       if (!_isCreatedByMe(e)) return false;
@@ -1488,11 +1490,17 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 rawName.toLowerCase() != 'unknown patient')
             ? rawName
             : '';
-        var cnic = (e['patientCnic'] ?? e['cnic'] ?? '').toString().trim();
-        var guardianCnic = (e['guardianCnic'] ?? '').toString().trim();
+        var cnic = lss.LocalStorageService.resolveFirstValidCnic([
+          e['patientCnic'],
+          e['cnic'],
+          e['guardianCnic'],
+        ]);
+        var guardianCnic = lss.LocalStorageService.resolveFirstValidCnic([
+          e['guardianCnic'],
+        ]);
         final pId = (e['patientId'] ?? e['id'] ?? '').toString().trim();
 
-        if (name.isEmpty) {
+        if (name.isEmpty || cnic.isEmpty) {
           final presc = e['prescription'] is Map
               ? e['prescription'] as Map
               : lss.LocalStorageService.getLocalPrescription(
@@ -1502,42 +1510,66 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                   patientId: pId,
                   patientName: rawName,
                 );
-          final pName = (presc?['patientName'] ?? presc?['name'] ?? presc?['fullName'])?.toString().trim();
-          if (pName != null &&
-              pName.isNotEmpty &&
-              pName.toLowerCase() != 'null' &&
-              pName.toLowerCase() != 'unknown' &&
-              pName.toLowerCase() != 'unknown patient') {
-            name = pName;
-            e['patientName'] = name;
+          if (name.isEmpty) {
+            final pName = lss.LocalStorageService.resolveFirstValidPatientName([
+              presc?['patientName'],
+              presc?['name'],
+              presc?['fullName'],
+            ]);
+            if (pName.isNotEmpty) {
+              name = pName;
+              e['patientName'] = name;
+            }
+          }
+          if (cnic.isEmpty) {
+            final pCnic = lss.LocalStorageService.resolveFirstValidCnic([
+              presc?['patientCnic'],
+              presc?['cnic'],
+              presc?['guardianCnic'],
+            ]);
+            if (pCnic.isNotEmpty) {
+              cnic = pCnic;
+              e['cnic'] = cnic;
+              e['patientCnic'] = cnic;
+            }
           }
         }
 
-        final isSyntheticCnic = cnic.isEmpty ||
-            cnic.startsWith('unknown_cnic_') ||
-            cnic.startsWith('unknown_') ||
-            cnic == '00000-0000000-0' ||
-            cnic == '-';
+        bool isSyntheticCnic = !lss.LocalStorageService.isValidCnicValue(cnic);
 
         if (name.isEmpty || isSyntheticCnic) {
-          if (pId.isNotEmpty && !pId.startsWith('unknown_')) {
+          if (pId.isNotEmpty && !pId.toLowerCase().startsWith('unknown')) {
             final lp = lss.LocalStorageService.getLocalPatient(pId);
             if (lp != null) {
-              final lpName = (lp['name'] ?? lp['patientName'] ?? lp['fullName'])?.toString().trim();
-              if (name.isEmpty &&
-                  lpName != null &&
-                  lpName.isNotEmpty &&
-                  lpName.toLowerCase() != 'null' &&
-                  lpName.toLowerCase() != 'unknown' &&
-                  lpName.toLowerCase() != 'unknown patient') {
+              final lpName = lss.LocalStorageService.resolveFirstValidPatientName([
+                lp['name'],
+                lp['patientName'],
+                lp['fullName'],
+              ]);
+              if (name.isEmpty && lpName.isNotEmpty) {
                 name = lpName;
                 e['patientName'] = name;
               }
-              final lpCnic = (lp['cnic'] ?? lp['guardianCnic'])?.toString().trim() ?? '';
-              if (isSyntheticCnic && lpCnic.isNotEmpty && !lpCnic.startsWith('unknown_')) {
+              final lpCnic = lss.LocalStorageService.resolveFirstValidCnic([
+                lp['cnic'],
+                lp['patientCnic'],
+                lp['guardianCnic'],
+              ]);
+              if (isSyntheticCnic && lpCnic.isNotEmpty) {
                 cnic = lpCnic;
                 e['cnic'] = cnic;
                 e['patientCnic'] = cnic;
+                isSyntheticCnic = false;
+              }
+            }
+            // Fallback: extract CNIC directly from patientId if patientId is a CNIC or `<cnic>_child_<name>`
+            if (isSyntheticCnic) {
+              final pidCandidate = pId.contains('_child_') ? pId.split('_child_').first : pId;
+              if (lss.LocalStorageService.isValidCnicValue(pidCandidate)) {
+                cnic = pidCandidate;
+                e['cnic'] = cnic;
+                e['patientCnic'] = cnic;
+                isSyntheticCnic = false;
               }
             }
           }
@@ -1545,12 +1577,12 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           if (name.isEmpty && cnic.isNotEmpty && !isSyntheticCnic && !isChildEntry) {
             final lp = lss.LocalStorageService.getLocalPatientByCnic(cnic);
             if (lp != null) {
-              final lpName = (lp['name'] ?? lp['patientName'] ?? lp['fullName'])?.toString().trim();
-              if (lpName != null &&
-                  lpName.isNotEmpty &&
-                  lpName.toLowerCase() != 'null' &&
-                  lpName.toLowerCase() != 'unknown' &&
-                  lpName.toLowerCase() != 'unknown patient') {
+              final lpName = lss.LocalStorageService.resolveFirstValidPatientName([
+                lp['name'],
+                lp['patientName'],
+                lp['fullName'],
+              ]);
+              if (lpName.isNotEmpty) {
                 name = lpName;
                 e['patientName'] = name;
               }
@@ -1560,12 +1592,16 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           if (isSyntheticCnic && name.isNotEmpty && name != 'Unknown Patient') {
             final lp = lss.LocalStorageService.findPatientByName(name);
             if (lp != null) {
-              final realC = (lp['cnic'] ?? lp['patientCnic'] ?? lp['guardianCnic'])?.toString().trim() ?? '';
-              if (realC.isNotEmpty && !realC.startsWith('unknown_')) {
+              final realC = lss.LocalStorageService.resolveFirstValidCnic([
+                lp['cnic'],
+                lp['patientCnic'],
+                lp['guardianCnic'],
+              ]);
+              if (realC.isNotEmpty) {
                 cnic = realC;
                 e['cnic'] = cnic;
                 e['patientCnic'] = cnic;
-                if (lp['guardianCnic'] != null) {
+                if (lss.LocalStorageService.isValidCnicValue(lp['guardianCnic'])) {
                   guardianCnic = lp['guardianCnic'].toString().trim();
                   e['guardianCnic'] = guardianCnic;
                 }
@@ -1679,7 +1715,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                 ? validGuard
                 : '-';
 
-        final seqNumber = serial.split('-').last.padLeft(3, '0');
+        final seqNumber = LocalStorageService.formatTokenDisplay(serial);
 
         String campTag = (e['dispensaryTag'] ?? e['dispensaryId'] ?? '').toString().trim().toUpperCase();
         if (campTag.isEmpty || campTag == 'ALL') {

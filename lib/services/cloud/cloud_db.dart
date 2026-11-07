@@ -90,6 +90,7 @@ class CloudDb {
 
   bool get _useRest {
     if (kIsWeb) return false;
+    if (Platform.isAndroid || Platform.isIOS) return false;
     if (_restDisabledReason != null) return false;
     try {
       if (Hive.isBoxOpen('app_flags') &&
@@ -101,19 +102,66 @@ class CloudDb {
   }
 
   static bool _isDispensaryPath(String path) {
-    final parts = path.toLowerCase().split('/');
-    const dispCols = {
-      'patients',
-      'serials',
-      'prescriptions',
-      'inventory',
-      'medicines',
-      'stock',
-      'camps',
-      'doctor_templates',
-      'medicine_restrictions',
+    final parts = path.toLowerCase().split('/').where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) return false;
+    const nonDispModules = {
+      'kitchen',
+      'dasterkhwaan',
+      'madrassa',
+      'madrassa_students',
+      'madrassa_daily_logs',
+      'madrassa_logs',
+      'school',
+      'school_students',
+      'donations',
+      'employees',
+      'attendance',
+      'finance',
+      'users',
     };
-    return parts.any((p) => dispCols.contains(p));
+    if (parts.any((p) => nonDispModules.contains(p))) return false;
+    if (parts.first == 'patients' ||
+        parts.first == 'medicine_restrictions' ||
+        parts.first == 'dispensary' ||
+        parts.first == 'doctor_templates') {
+      return true;
+    }
+    if (parts.length >= 3 && parts[0] == 'branches') {
+      const branchDispCols = {
+        'patients',
+        'serials',
+        'prescriptions',
+        'inventory',
+        'medicines',
+        'stock',
+        'camps',
+        'doctor_templates',
+        'medicine_restrictions',
+        'dispensary',
+      };
+      return branchDispCols.contains(parts[2]);
+    }
+    return false;
+  }
+
+  static bool _isParentSession() {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final u = Hive.box('app_settings').get('user_data') ??
+            Hive.box('app_settings').get('currentUser');
+        if (u is Map) {
+          final role = (u['role'] ?? u['userRole'] ?? '').toString().trim().toLowerCase();
+          return role == 'parent' || role == 'guardian';
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  static bool _isAllowedParentWritePath(String path) {
+    final p = path.toLowerCase();
+    return p.contains('madrassa') &&
+        (p.contains('log') || p.contains('repl') || p.contains('feedback') || p.contains('homework'));
   }
 
   // ── Sending ───────────────────────────────────────────────────────────────
@@ -135,6 +183,16 @@ class CloudDb {
         message: 'Daily write quota used up — waiting for the reset',
       );
     }
+    // CNIC-only parent login scope guard: a parent session may only write to Madrassa
+    // daily log / reply documents, never to unrelated collections or student enrollment records.
+    if (_isParentSession() && writes.any((w) => !_isAllowedParentWritePath(w.path))) {
+      throw FirebaseException(
+        plugin: 'cloud_firestore',
+        code: 'permission-denied',
+        message: 'Parent session is restricted to Madrassa log replies only',
+      );
+    }
+
     // A dispensary desk on the LAN never writes dispensary records to Firestore itself: the LAN server uploads.
     // 'unavailable' is treated like being offline, so queued items wait rather than fail.
     // Standalone collections (madrassa_students, madrassa_daily_logs, school_students, donations, users, etc.) are never blocked.
@@ -175,6 +233,13 @@ class CloudDb {
       await _sendViaSdk(writes);
       _recordSuccess(writes, ctx);
       return;
+    } on FirebaseException catch (fe) {
+      if (fe.code == 'invalid-argument' || fe.code == 'unauthenticated' || fe.code == 'permission-denied') {
+        await _sendViaSdk(writes);
+        _recordSuccess(writes, ctx);
+        return;
+      }
+      rethrow;
     } catch (e) {
       if (kIsWeb || e is UnsupportedError || e.toString().contains('Unsupported') || e.toString().contains('HttpClient')) {
         _restDisabledReason = 'REST not supported on this platform';
@@ -281,9 +346,14 @@ class CloudDb {
     return {'authorization': 'Bearer $token'};
   }
 
-  /// Kill-switch path: the old SDK writes, with a time limit so an unanswered write can
-  /// never hang a whole upload pass.
+  /// Kill-switch & mobile native path: the SDK writes, with a time limit so an unanswered
+  /// write can never hang a whole upload pass.
   Future<void> _sendViaSdk(List<_Write> writes) async {
+    if (FirebaseAuth.instance.currentUser == null) {
+      try {
+        await FirebaseSessionGuard.ensureSession(reason: 'cloud_db_auth').timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
     if (writes.length == 1) {
       await _sdkOp(writes.single, null).timeout(const Duration(seconds: 20));
       return;

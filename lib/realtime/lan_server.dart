@@ -76,6 +76,8 @@ class LanServer {
   /// [unsavedMessagesBox] and ACKed after [_maxSaveFailures], so it does not loop forever.
   final Map<String, int> _saveFailures = {};
   static const int _maxSaveFailures = 5;
+  /// Longest a desk message's local save may take before it counts as failed.
+  static const Duration _saveTimeout = Duration(seconds: 25);
   static const String unsavedMessagesBox = 'lan_unsaved_messages';
 
   /// Set by ServerSyncManager once its handler saves incoming messages (to Hive and the cloud
@@ -235,52 +237,9 @@ class LanServer {
     if (m == null) return;
     final prefix = m.group(1)!;
     final seq = int.parse(m.group(2)!);
-    // A desk's offline-block number (1001+) is not part of the shared sequence; counting it
-    // would make every desk jump to 1002, 1003 ... and into that desk's offline block.
-    if (LocalStorageService.isOfflineBandSeq(seq)) return;
+    // Ignore legacy test tokens > 999 so today's sequence stays strictly 001..999
+    if (seq > 999) return;
     if (seq > (_lastIssuedSeq[prefix] ?? 0)) _lastIssuedSeq[prefix] = seq;
-  }
-
-  /// Gives each desk PC its own offline token block (1..9), remembered on this server PC so a
-  /// desk keeps its slot across restarts. When all 9 are taken, the slot of the desk not seen
-  /// for the longest time is reused.
-  int _deskSlotFor(String deviceKey) {
-    if (deviceKey.isEmpty || !Hive.isBoxOpen('app_settings')) return 0;
-    try {
-      final box = Hive.box('app_settings');
-      final raw = box.get('lan_offline_desk_slots');
-      final slots = <String, Map<String, dynamic>>{};
-      if (raw is Map) {
-        raw.forEach((k, v) {
-          if (v is Map) slots[k.toString()] = Map<String, dynamic>.from(v);
-        });
-      }
-      final now = DateTime.now().millisecondsSinceEpoch;
-      var mine = slots[deviceKey];
-      if (mine == null) {
-        final used = slots.values.map((v) => (v['slot'] as num?)?.toInt() ?? 0).toSet();
-        int slot = 0;
-        for (var s = 1; s <= LocalStorageService.maxOfflineDeskSlot; s++) {
-          if (!used.contains(s)) { slot = s; break; }
-        }
-        if (slot == 0) {
-          // All taken: take over the slot of the desk seen longest ago.
-          final oldest = slots.entries.reduce((a, b) =>
-              ((a.value['seen'] as num?) ?? 0) <= ((b.value['seen'] as num?) ?? 0) ? a : b);
-          slot = (oldest.value['slot'] as num?)?.toInt() ?? 0;
-          slots.remove(oldest.key);
-        }
-        mine = {'slot': slot};
-      }
-      final lastSeen = (mine['seen'] as num?)?.toInt() ?? 0;
-      mine['seen'] = now;
-      slots[deviceKey] = mine;
-      // Write at most every 10 min per desk (a new desk is written at once).
-      if (now - lastSeen > 600000) box.put('lan_offline_desk_slots', slots);
-      return (mine['slot'] as num?)?.toInt() ?? 0;
-    } catch (_) {
-      return 0;
-    }
   }
 
   /// First request for a prefix since this server started: also count the tokens already
@@ -308,25 +267,23 @@ class LanServer {
       seq = repeated;
     } else {
       var proposed = (data['proposed'] as num?)?.toInt() ?? 0;
-      // An older desk build may propose an offset number (e.g. 501) or an offline-block one;
-      // only a shared-sequence proposal may move the shared counter forward.
-      if (LocalStorageService.isOfflineBandSeq(proposed)) proposed = 0;
+      if (proposed > 999) proposed = 0;
       final last = _lastIssuedSeq[prefix] ?? 0;
-      seq = proposed > last ? proposed : last + 1;
+      var candidate = proposed > last ? proposed : last + 1;
+      if (candidate > 999) candidate = 999;
+      seq = candidate;
       _lastIssuedSeq[prefix] = seq;
       _reservedByRequest[requestId] = seq;
       if (_reservedByRequest.length > 2000) {
         _reservedByRequest.remove(_reservedByRequest.keys.first);
       }
     }
-    final deskSlot = _deskSlotFor((data['deviceKey'] ?? '').toString());
     try {
       socket.add(jsonEncode({
         'event_type': 'serial_reserved',
         'requestId':  requestId,
         'prefix':     prefix,
         'seq':        seq,
-        if (deskSlot > 0) 'deskSlot': deskSlot,
       }));
     } catch (_) {}
   }
@@ -411,6 +368,7 @@ class LanServer {
   Function(String socketId, Map<String, dynamic> info)? onClientConnected;
   Function(String socketId)?                             onClientDisconnected;
   Function(Map<String, dynamic>)?                        onMessageReceived;
+  Function(String socketId)?                             onClientActivity;
 
   LanServer({this.port = AppNetwork.websocketPort, this.authToken});
 
@@ -483,7 +441,7 @@ class LanServer {
               ..headers.contentType = ContentType.json
               ..statusCode = HttpStatus.ok
               ..write(jsonEncode({
-                'serverIp': ipShown,
+                'serverIp': _serverIp ?? ipShown,
                 'port': port,
                 'clientsCount': _clientInfo.length,
                 'clients': getConnectedClients(),
@@ -554,11 +512,9 @@ class LanServer {
               deadSockets.add(client);
             }
           }
-          // Desks ping every 5 s. A socket silent for 35 s is dead (cable re-plugged, desk asleep,
-          // Wi-Fi drop leave it half-open) and everything forwarded into it is lost until the
-          // desk reconnects and catches up — so evict it sooner than the old 60 s. A frozen
-          // server tick (lateTick) still never evicts anyone.
-          if (!lateTick && now.difference(lastActive) > const Duration(seconds: 35)) {
+          // Desks ping every 5 s. Only evict sockets truly silent for >60 s so normal
+          // Wi-Fi jitter or busy Flutter renders never cause false disconnects.
+          if (!lateTick && now.difference(lastActive) > const Duration(seconds: 60)) {
             deadSockets.add(client);
           }
         }
@@ -574,6 +530,13 @@ class LanServer {
     });
   }
 
+  void updateServerIp(String newIp) {
+    if (newIp.isNotEmpty && newIp != _serverIp) {
+      if (kDebugMode) print('[LanServer] 🔄 Updating server IP from $_serverIp to $newIp');
+      _serverIp = newIp;
+    }
+  }
+
   // ── UDP Broadcast ──────────────────────────────────────────────────────────
   void _startUdpBroadcast(String ipShown) {
     try {
@@ -581,13 +544,25 @@ class LanServer {
         socket.broadcastEnabled = true;
         _udpSocket = socket;
         
-        final b = LocalStorageService.sanitizeBranchId(branchId, fallback: '');
-        final payload = utf8.encode('${AppNetwork.udpMessagePrefix}$ipShown:$port${b.isNotEmpty ? ':$b' : ''}');
         final broadcastAddr = InternetAddress('255.255.255.255');
-        
-        // 5 s is plenty for discovery (was 2 s, plus a duplicate beacon from the server page).
-        _udpTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        int checkCounter = 0;
+
+        Future<void> sendBeacon() async {
           try {
+            // Periodically check primary LAN IP to pick up DHCP changes (e.g. .38 -> .40)
+            checkCounter++;
+            if (checkCounter % 3 == 0) {
+              final liveIp = await getPrimaryLanIp();
+              if (liveIp != null && liveIp.isNotEmpty && liveIp != _serverIp) {
+                print('[LanServer] 🔄 Live IP changed: $_serverIp -> $liveIp. Updating broadcast.');
+                _serverIp = liveIp;
+              }
+            }
+
+            final activeIp = _serverIp ?? ipShown;
+            final b = LocalStorageService.sanitizeBranchId(branchId, fallback: '');
+            final payload = utf8.encode('${AppNetwork.udpMessagePrefix}$activeIp:$port${b.isNotEmpty ? ':$b' : ''}');
+
             _udpSocket?.send(payload, broadcastAddr, AppNetwork.udpBroadcastPort);
             final localSubnets = await getAllLanSubnets();
             for (final sub in localSubnets) {
@@ -598,6 +573,21 @@ class LanServer {
           } catch (e) {
             if (kDebugMode) print('[LanServer] UDP send error: $e');
           }
+        }
+
+        // Send immediately when server opens (and a quick startup burst at 1.5s and 3s)
+        // so waiting client desks discover a late-starting server within <1 second.
+        unawaited(sendBeacon());
+        Timer(const Duration(milliseconds: 1500), () {
+          if (_isRunning) unawaited(sendBeacon());
+        });
+        Timer(const Duration(milliseconds: 3000), () {
+          if (_isRunning) unawaited(sendBeacon());
+        });
+
+        // 5 s steady-state periodic announcement.
+        _udpTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+          unawaited(sendBeacon());
         });
         print('[LanServer] UDP Broadcaster started for $ipShown.');
       });
@@ -683,6 +673,7 @@ class LanServer {
   // ── Handle message ─────────────────────────────────────────────────────────
   void _handleMessage(WebSocket socket, String socketId, dynamic message) {
     _lastActiveTimes[socket] = DateTime.now();
+    onClientActivity?.call(socketId);
     if (message is! String) return;
     trafficMsgsIn++;
     trafficBytesIn += message.length;
@@ -818,15 +809,19 @@ class LanServer {
           // Desks send identify again on the live socket whenever a screen starts the
           // connection. Treating that as a new client reset the server's per-socket "seen" set
           // and pushed the whole day again each time.
+          final effectiveClientBranch = (this.branchId != null && this.branchId!.trim().isNotEmpty)
+              ? this.branchId!.toLowerCase().trim()
+              : normBranch;
+
           final prevInfo = _clientInfo[socket];
           final reIdentify = prevInfo != null &&
               prevInfo['identified'] == true &&
               prevInfo['role'] == normRole &&
-              prevInfo['branchId'] == normBranch;
+              prevInfo['branchId'] == effectiveClientBranch;
 
           final info = {
             'role':        normRole,
-            'branchId':    normBranch,
+            'branchId':    effectiveClientBranch,
             'username':    username,
             'clientId':    clientId,
             'platform':    platform,
@@ -838,7 +833,7 @@ class LanServer {
 
           print('╔════════════════════════════════════════════════════════════╗');
           print('║ CLIENT IDENTIFIED  Socket: $socketId  IP: $ipAddress');
-          print('║ Role: $role  Branch: $branchId  Username: $username');
+          print('║ Role: $role  Branch: $effectiveClientBranch  Username: $username');
           print('║ Total identified: ${_clientInfo.length}');
           print('╚════════════════════════════════════════════════════════════╝');
 
@@ -846,7 +841,8 @@ class LanServer {
           socket.add(jsonEncode({
             'event_type':   'identified',
             'role':         role,
-            'branchId':     branchId,
+            'branchId':     effectiveClientBranch,
+            'serverBranch': this.branchId ?? effectiveClientBranch,
             'username':     username,
             'clientId':     clientId,
             'timestamp':    DateTime.now().toIso8601String(),
@@ -915,16 +911,17 @@ class LanServer {
 
       // ── [DEDUP] Server-side deduplication ─────────────────────────────────
       final messageId = (data['_messageId'] ?? data['messageId'])?.toString();
-      if (messageId != null &&
-          messageId.isNotEmpty &&
-          !persistenceReady &&
-          !_serverOnlyEventTypes.contains(eventType)) {
-        // Not ACKed, so the desk keeps it in its outbox and resends it shortly.
-        print('[LanServer] ⏳ Sync manager not ready — leaving $eventType ($messageId) with the desk');
-        return;
-      }
       if (messageId != null && messageId.isNotEmpty) {
-        if (_inFlightMessageIds.contains(messageId)) return; // still being saved; no ACK yet
+        if (_inFlightMessageIds.contains(messageId)) {
+          // Still being saved here, so no ACK yet. But a desk that missed the first forward
+          // (reconnecting doctor) must still get it now: returning silently left the token
+          // stuck until the save finished — forever if the save hung.
+          final previous = _routed[messageId];
+          if (previous != null && !_serverOnlyEventTypes.contains(eventType)) {
+            previous.reached.addAll(_routeMessage(socket, previous.message, skip: previous.reached));
+          }
+          return;
+        }
         if (_processedMessageIds.containsKey(messageId)) {
           // Already processed — send immediate ACK so client removes from outbox
           // but do NOT process or broadcast.
@@ -1031,7 +1028,19 @@ class LanServer {
     final tracked = messageId != null && messageId.isNotEmpty;
     if (tracked) _inFlightMessageIds.add(messageId);
     try {
-      await onMessageReceived?.call(message);
+      // If persistence/sync manager is warming up, wait briefly for it to be ready
+      if (!persistenceReady) {
+        for (int i = 0; i < 15; i++) {
+          if (persistenceReady) break;
+          await Future.delayed(const Duration(milliseconds: 200));
+        }
+      }
+      // Bounded: a save that never finishes (box under repair, a lock chain behind a hung
+      // save) kept this id "in flight" forever, so every resend was swallowed and the token
+      // never reached the server's store — and the catch-up only sends what is stored.
+      // On timeout the message is treated as failed (not ACKed): the desk resends it.
+      final pending = onMessageReceived?.call(message);
+      if (pending is Future) await pending.timeout(_saveTimeout);
     } catch (e, st) {
       print('❌ onMessageReceived handler threw (peer routing was NOT affected): $e\n$st');
       if (tracked) {
@@ -1111,6 +1120,7 @@ class LanServer {
           .toLowerCase()
           .trim();
       final sameBranch = msgBranch.isEmpty || clientBranch.isEmpty || msgBranch == 'all' || clientBranch == 'all' ||
+          (this.branchId != null && this.branchId!.trim().isNotEmpty) ||
           CampSessionService.areBranchesMatching(msgBranch, clientBranch);
       if (!sameBranch) continue;
       try {
@@ -1180,6 +1190,7 @@ class LanServer {
       final clientBranch = (info['branchId'] as String?)?.toLowerCase().trim() ?? '';
       final isUniversal = targetBranch.isEmpty || targetBranch == 'all' || targetBranch == 'default' ||
           clientBranch.isEmpty || clientBranch == 'all' || clientBranch == 'default' ||
+          (this.branchId != null && this.branchId!.trim().isNotEmpty) ||
           CampSessionService.areBranchesMatching(targetBranch, clientBranch);
       if (!isUniversal) {
         continue;
@@ -1289,7 +1300,7 @@ class LanServer {
         'clientId':  e.value['clientId'],
         'ipAddress': e.value['ipAddress'] ?? _clientIps[e.key] ?? '127.0.0.1',
         'deviceOs':  e.value['deviceOs'] ?? (kIsWeb ? 'Chrome Web' : 'Windows PC'),
-
+        'lastActive': _lastActiveTimes[e.key] ?? DateTime.now(),
         'appVersion': e.value['appVersion'] ?? 'v${AutoUpdateService.currentVersion}',
       };
     }).toList();

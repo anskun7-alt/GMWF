@@ -148,6 +148,9 @@ class _PatientFormState extends State<PatientForm> {
     if (_rxFingerprint(list) != beforeFingerprint) {
       _doctorUpdatedLive = true;
       _doctorLiveUpdateSummary = 'Doctor updated prescription (${list.length} items)';
+      // Reset manual syringe/needle overrides so removed/added injections recalculate immediately
+      _selectedSyringeCount = null;
+      _selectedNeedleCount = null;
     }
   }
 
@@ -377,7 +380,9 @@ class _PatientFormState extends State<PatientForm> {
     if (_data.isEmpty) setState(() => _isLoadingPrescription = true);
     final beforeFingerprint = _data.isNotEmpty ? _rxFingerprint(_getPrescriptionsList()) : null;
     try {
-      // 1. Direct embedded check from widget.queueEntry (fastest and most accurate)
+      // 1. Check embedded prescription from widget.queueEntry, but DO NOT return early before
+      // checking Hive: when a doctor edits a prescription (e.g. removes an injection or changes
+      // timing), Hive is updated immediately while widget.queueEntry may still hold the older map.
       final directEmbedded = widget.queueEntry['prescription'];
       final directRxList = directEmbedded is Map
           ? (directEmbedded['prescriptions'] ?? directEmbedded['medicines'] ?? directEmbedded['items'])
@@ -386,23 +391,10 @@ class _PatientFormState extends State<PatientForm> {
       final directIsVitals = directEmbedded is Map &&
           (directEmbedded['isVitalsOnly'] == true || directEmbedded['vitalsOnly'] == true) &&
           directEmbedded['completedAt'] != null;
-
-      if (directEmbedded is Map && directEmbedded.isNotEmpty &&
-          LocalStorageService.mayReplacePrescription(directEmbedded, _data) &&
-          (directHasMeds || directIsVitals)) {
-        if (mounted) {
-          setState(() {
-            _data = LocalStorageService.prescriptionForEmbedding(directEmbedded);
-            _gender = _resolveGender();
-            _age = _resolveAge();
-            _isDispensed = _isDispensed ||
-                (widget.queueEntry['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
-            _isLoadingPrescription = false;
-            _flagIfPrescriptionChanged(beforeFingerprint);
-          });
-          return;
-        }
-      }
+      final Map<String, dynamic>? validDirect =
+          (directEmbedded is Map && directEmbedded.isNotEmpty && (directHasMeds || directIsVitals))
+              ? LocalStorageService.prescriptionForEmbedding(directEmbedded)
+              : null;
 
       String serial = '';
       for (final f in ['serial', 'id', 'tokenSerial', 'tokenId', 'serialNumber']) {
@@ -421,7 +413,7 @@ class _PatientFormState extends State<PatientForm> {
       final pId = widget.queueEntry['patientId']?.toString() ?? _data['patientId']?.toString();
       final pDateKey = widget.queueEntry['dateKey']?.toString() ?? _data['dateKey']?.toString();
       found = _searchHive(cleanS, cnic, patientId: pId, dateKey: pDateKey);
-      if (found.isEmpty && cleanS.isNotEmpty) {
+      if (cleanS.isNotEmpty) {
         final presc = LocalStorageService.getLocalPrescription(
           cleanS,
           cnic: cnic,
@@ -431,10 +423,12 @@ class _PatientFormState extends State<PatientForm> {
           dateKey: pDateKey,
         );
         if (presc != null && presc.isNotEmpty) {
-          found = presc;
+          if (found.isEmpty || LocalStorageService.mayReplacePrescription(presc, found)) {
+            found = presc;
+          }
         }
       }
-      if (found.isEmpty && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+      if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
         final normB = widget.branchId.toLowerCase().trim();
         final normS = cleanS.toLowerCase();
         final normSUpper = cleanS.toUpperCase();
@@ -444,7 +438,21 @@ class _PatientFormState extends State<PatientForm> {
             eBox.get(normS) ??
             eBox.get(normSUpper);
         if (direct is Map && direct['prescription'] is Map && (direct['prescription'] as Map).isNotEmpty) {
-          found = Map<String, dynamic>.from(direct['prescription'] as Map);
+          final entryRx = Map<String, dynamic>.from(direct['prescription'] as Map);
+          if (found.isEmpty || LocalStorageService.mayReplacePrescription(entryRx, found)) {
+            found = entryRx;
+          }
+        }
+      }
+
+      if (validDirect != null) {
+        if (found.isEmpty) {
+          found = validDirect;
+        } else {
+          final preferred = LocalStorageService.preferredPrescription(found, validDirect);
+          if (preferred != null && preferred.isNotEmpty) {
+            found = preferred;
+          }
         }
       }
       final status = (widget.queueEntry['status'] ?? '').toString().toLowerCase();
@@ -673,17 +681,37 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   // ─── Inventory deduction ──────────────────────────────────────────────────
-  static bool _isInjectableType(String? type) {
-    final t = (type ?? '').toLowerCase();
-    return t.contains('injection') || t.contains('inj') ||
-        t.contains('infusion') || t.contains('inf') ||
-        t.contains('drip') || t.contains('syringe') || t.contains('nebulization');
+  static bool _isInjectableType(String? type, [String? name]) {
+    final t = (type ?? '').toLowerCase().trim();
+    if (t.contains('syringe') || t.contains('nebulization')) return true;
+    return PatientFormHelper.isInjectablePrescription(t, name ?? '');
   }
 
   static bool _isSyrupType(String? type, String? name) {
     final t = (type ?? '').toLowerCase();
     final n = (name ?? '').toLowerCase();
     return t.contains('syrup') || t.contains('syp') || n.contains('syrup') || n.contains('syp');
+  }
+
+  /// Resolves the authoritative daily unit count for a prescribed medicine:
+  /// - Syrups: always 1 bottle
+  /// - Injections: prescribed quantity
+  /// - Oral/other medicines with a timing string (e.g. "1+0+0", "1+0+1", "1+1+1"):
+  ///   always equals the sum of timing slots so 1-time is strictly 1/day and 2-time is 2/day.
+  static int _resolvePerDayQty(Map item, {required bool isInj, required bool isSyrup}) {
+    if (isSyrup) return 1;
+    final rawQty = item['quantity'] ?? item['qty'] ?? 1;
+    final storedQty = rawQty is num
+        ? rawQty.toInt()
+        : (int.tryParse(rawQty.toString()) ?? 1);
+    if (isInj) return storedQty > 0 ? storedQty : 1;
+
+    final timing = (item['timing'] ?? '').toString().trim();
+    if (timing.isNotEmpty) {
+      final fromTiming = PatientFormHelper.totalPerDay(timing);
+      if (fromTiming > 0) return fromTiming;
+    }
+    return storedQty > 0 ? storedQty : 1;
   }
 
   static RegExp get _ivWord => PatientFormHelper.ivWord;
@@ -734,15 +762,11 @@ class _PatientFormState extends State<PatientForm> {
       final medMap = Map<String, dynamic>.from(med);
       final rawMedicineId = (medMap['inventoryId'] ??
               medMap['medicineId'] ?? medMap['id'] ?? '').toString().trim();
-      final perDayRaw = medMap['quantity'] ?? medMap['qty'] ?? 0;
-      final perDay = perDayRaw is num
-          ? perDayRaw.toDouble()
-          : double.tryParse(perDayRaw.toString()) ?? 0.0;
-      if (perDay <= 0) continue;
       final isSyrup = _isSyrupType(medMap['type']?.toString(), medMap['name']?.toString());
-      final multiplier = isSyrup
-          ? 1.0
-          : (_isInjectableType(medMap['type']?.toString()) ? 1.0 : days.toDouble());
+      final isInj = _isInjectableType(medMap['type']?.toString(), medMap['name']?.toString());
+      final perDay = _resolvePerDayQty(medMap, isInj: isInj, isSyrup: isSyrup).toDouble();
+      if (perDay <= 0) continue;
+      final multiplier = isSyrup ? 1.0 : (isInj ? 1.0 : days.toDouble());
       final qtyNum = isSyrup ? 1.0 : perDay * multiplier;
       debugPrint('[PatientForm] FEFO deduct for ${medMap['name']} ($rawMedicineId): perDay=$perDay × $multiplier = $qtyNum');
 
@@ -1377,16 +1401,12 @@ class _PatientFormState extends State<PatientForm> {
       final medMap = Map<String, dynamic>.from(med);
       final rawMedicineId = (medMap['inventoryId'] ??
               medMap['medicineId'] ?? medMap['id'] ?? '').toString().trim();
-      final perDayRaw = medMap['quantity'] ?? medMap['qty'] ?? 0;
-      final perDay = perDayRaw is num
-          ? perDayRaw.toDouble()
-          : double.tryParse(perDayRaw.toString()) ?? 0.0;
+      final isSyrup = _isSyrupType(medMap['type']?.toString(), medMap['name']?.toString());
+      final isInj = _isInjectableType(medMap['type']?.toString(), medMap['name']?.toString());
+      final perDay = _resolvePerDayQty(medMap, isInj: isInj, isSyrup: isSyrup).toDouble();
       if (rawMedicineId.isEmpty || perDay <= 0) continue;
       
-      final isSyrup = _isSyrupType(medMap['type']?.toString(), medMap['name']?.toString());
-      final multiplier = isSyrup
-          ? 1.0
-          : (_isInjectableType(medMap['type']?.toString()) ? 1.0 : days.toDouble());
+      final multiplier = isSyrup ? 1.0 : (isInj ? 1.0 : days.toDouble());
       final qtyNum = isSyrup ? 1.0 : perDay * multiplier;
 
       var targetName = MasterProformaService.cleanBrandToFormula((medMap['name'] ?? medMap['formula'] ?? '').toString().toLowerCase().trim());
@@ -2225,9 +2245,10 @@ class _PatientFormState extends State<PatientForm> {
         final displayName = '$abbrev $rawName'.trim();
         final urduLine = PatientFormHelper.buildUrduDosageLine(item);
         final mealUrdu = PatientFormHelper.getMealUrdu(item['meal']?.toString() ?? '');
-        final isInj = _isInjectableType(item['type']?.toString());
+        final isInj = _isInjectableType(item['type']?.toString(), item['name']?.toString());
         final isSyrup = _isSyrupType(item['type']?.toString(), item['name']?.toString());
-        final perDayQty = ((item['quantity'] ?? 1) as num).toInt();
+        final isUnclassified = PatientFormHelper.isUnclassifiedMedicine(item);
+        final perDayQty = _resolvePerDayQty(item, isInj: isInj, isSyrup: isSyrup);
         final totalQty = isSyrup ? 1 : (isInj ? perDayQty : perDayQty * days);
         
         final formula = (item['formula'] ?? '').toString().trim();
@@ -2239,7 +2260,9 @@ class _PatientFormState extends State<PatientForm> {
 
         final qtyLabel = isSyrup
             ? '1 Bottle'
-            : (isInj ? 'Single Dose · qty $perDayQty' : '$perDayQty/day · qty $totalQty');
+            : (isInj
+                ? 'Single Dose · qty $perDayQty'
+                : (isUnclassified ? 'Unclassified · qty $totalQty' : '$perDayQty/day · qty $totalQty'));
 
         return Container(
           margin: const EdgeInsets.only(bottom: 10),

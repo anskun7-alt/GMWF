@@ -12,17 +12,93 @@ class PatientFormHelper {
   static bool _isSyrup(String t, String n) =>
       t.contains('syrup') || t.contains('syp') || n.contains('syrup') || n.contains('syp');
 
-  /// "IV" / "I.V." as a word, not inside Multivitamin, Ivermectin, Rivotril, Ativan …
-  static final RegExp ivWord = RegExp(r'(^|[^a-z])i\.?v\.?([^a-z]|$)');
+  /// True when an explicit medicine type/form is oral or topical (never an injection).
+  static bool isOralOrTopicalForm(String type) {
+    final t = type.toLowerCase().trim();
+    if (t.isEmpty) return false;
+    return t.contains('tablet') ||
+        t.contains('tab') ||
+        t.contains('capsule') ||
+        t.contains('cap') ||
+        t.contains('syrup') ||
+        t.contains('syp') ||
+        t.contains('suspension') ||
+        t.contains('susp') ||
+        t.contains('drop') ||
+        t.contains('cream') ||
+        t.contains('ointment') ||
+        t.contains('oint') ||
+        t.contains('gel') ||
+        t.contains('lotion') ||
+        t.contains('inhaler') ||
+        t.contains('sachet') ||
+        t.contains('powder');
+  }
 
-  /// A prescribed item that needs a syringe/needle (injection, drip, infusion, IV).
+  /// "IV" / "I.V." or "IM" / "I.M." as standalone route words, not inside Multivitamin, Ivermectin, Rivotril, Ativan, Timolol…
+  static final RegExp ivWord = RegExp(r'(^|[^a-z])i\.?v\.?([^a-z]|$)');
+  static final RegExp imWord = RegExp(r'(^|[^a-z])i\.?m\.?([^a-z]|$)');
+  static final RegExp injWord = RegExp(
+    r'(^|[^a-z])(inj\.?|injection|injectable|infusion|inf\.?|drip|ampoule|amp\.|vial)([^a-z]|$)',
+  );
+
+  /// Standard IV infusions / fluids that are often prescribed with a blank type.
+  static final RegExp infusionNamePattern = RegExp(
+    r'(normal\s+saline|\bn/?s\s*(0\.9%|500\s*ml|1000\s*ml|1\s*l)\b|ringer(\x27?s)?(\s+lactate)?|\br/?l\s*(500\s*ml|1000\s*ml|1\s*l)\b|dextrose\s*(saline|water|5%|10%|25%)?|\bd/?s\s*(500\s*ml|1000\s*ml)\b|\bd/?w\s*(5%|10%|500\s*ml)\b|haemaccel|mannitol|hartmann)',
+  );
+
+  /// True when a medicine name carries an explicit oral or topical prefix/keyword.
+  static final RegExp oralOrTopicalNamePattern = RegExp(
+    r'(^|[^a-z])(tab\.?|tablet|cap\.?|capsule|syp\.?|syrup|susp\.?|suspension|drop|drops|cream|oint\.?|ointment|gel|lotion|inhaler|sachet|oral)([^a-z]|$)',
+  );
+
+  /// A prescribed item that needs a syringe/needle (injection, drip, infusion, IV, IM,
+  /// "Powder for Injection", "Injectable Suspension", "Normal Saline", etc.).
+  /// Explicit injection markers are ALWAYS checked BEFORE oral/topical form keywords so
+  /// compound types like "Powder for Injection" or "Injectable Suspension" are never missed.
   static bool isInjectablePrescription(String type, String name) {
-    final t = type.toLowerCase();
-    final n = name.toLowerCase();
-    if (_isSyrup(t, n) || t.contains('tablet') || t.contains('capsule')) return false;
-    return t.contains('injection') || t.contains('inj') || t.contains('infusion') ||
-        t.contains('drip') || ivWord.hasMatch(t) ||
-        n.startsWith('inj') || n.contains(' inj') || n.contains('inj.') || ivWord.hasMatch(n);
+    final t = type.toLowerCase().trim();
+    final n = name.toLowerCase().trim();
+
+    // 1. Check explicit injection / infusion / parenteral route markers in type FIRST
+    if (t.contains('injection') ||
+        t.contains('injectable') ||
+        t.contains('inj') ||
+        t.contains('infusion') ||
+        t == 'inf' ||
+        t == 'inf.' ||
+        t.contains('drip') ||
+        t.contains('ampoule') ||
+        t.contains('vial') ||
+        ivWord.hasMatch(t) ||
+        imWord.hasMatch(t)) {
+      return true;
+    }
+
+    // 2. Check explicit injection / IV / IM markers in medicine name
+    if (injWord.hasMatch(n) || ivWord.hasMatch(n) || imWord.hasMatch(n)) {
+      return true;
+    }
+
+    // 3. Check oral or topical forms (only after explicit injection markers have been ruled out)
+    if (isOralOrTopicalForm(t) || _isSyrup(t, n)) return false;
+
+    // 4. Catch known IV fluids / infusions (e.g. "Normal Saline", "Ringer Lactate", "Dextrose") when type is blank
+    if (infusionNamePattern.hasMatch(n)) return true;
+
+    return false;
+  }
+
+  /// True when a prescribed medicine has neither an explicit injectable marker nor a
+  /// recognizable oral/topical form, so the UI can show a visible "Unclassified" badge
+  /// instead of silently guessing.
+  static bool isUnclassifiedMedicine(Map m) {
+    final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase().trim();
+    final name = (m['name'] ?? '').toString().toLowerCase().trim();
+    if (isInjectable(m)) return false;
+    if (isOralOrTopicalForm(type) || _isSyrup(type, name)) return false;
+    if (oralOrTopicalNamePattern.hasMatch(name)) return false;
+    return true;
   }
 
   /// A stock item that is a syringe. 'syr.' is this app's own TYPE abbreviation for syringe
@@ -94,18 +170,79 @@ class PatientFormHelper {
   static int totalPerDay(String timing) =>
       parseTiming(timing).reduce((a, b) => a + b);
 
+  /// Normalizes a raw timing input (e.g. "1", "1+0", "1+1", "1+0+1", "0+0+1") into a
+  /// canonical 3-slot "m+e+n" string and exact daily unit count.
+  /// Unspecified slots ALWAYS default to 0 (never 1).
+  static ({String timing, int dailyQty}) resolveCanonicalTiming(
+    String rawTiming, {
+    String mealTiming = 'After Meal',
+  }) {
+    final trimmed = rawTiming.trim();
+    final isBedtime = mealTiming.toLowerCase().contains('sleep') ||
+        mealTiming.toLowerCase().contains('bed');
+    // Nothing typed: once a day (never silently twice a day).
+    if (trimmed.isEmpty) {
+      return isBedtime
+          ? (timing: '0+0+1', dailyQty: 1)
+          : (timing: '1+0+0', dailyQty: 1);
+    }
+
+    // A bare number is "times per day", not "units in the morning":
+    // 1 -> 1+0+0 (0+0+1 before sleep), 2 -> 1+0+1, 3 -> 1+1+1, 4 -> 1+1+1+1.
+    // Explicit slots ("2+0+0" = two in the morning) are kept as typed below.
+    final bare = RegExp(r'^\d+$').hasMatch(trimmed) ? int.tryParse(trimmed) : null;
+    if (bare != null && bare > 0) {
+      if (bare == 1) {
+        return isBedtime ? (timing: '0+0+1', dailyQty: 1) : (timing: '1+0+0', dailyQty: 1);
+      }
+      if (bare == 2) return (timing: '1+0+1', dailyQty: 2);
+      if (bare == 3) return (timing: '1+1+1', dailyQty: 3);
+      return (timing: '1+1+1+1', dailyQty: 4);
+    }
+
+    final parts = parseTiming(trimmed);
+    int m = parts.isNotEmpty ? parts[0] : 0;
+    int e = parts.length > 1 ? parts[1] : 0;
+    int n = parts.length > 2 ? parts[2] : 0;
+    final extra = parts.length > 3 ? parts[3] : 0;
+    int sum = m + e + n + extra;
+
+    // If doctor typed a single digit like "1" with "Before Sleep", place it in the night slot
+    if (!trimmed.contains('+') &&
+        !trimmed.contains('-') &&
+        !trimmed.contains('/') &&
+        trimmed.length == 1 &&
+        isBedtime &&
+        m > 0 &&
+        e == 0 &&
+        n == 0) {
+      n = m;
+      m = 0;
+    }
+
+    if (sum <= 0) {
+      if (isBedtime) {
+        m = 0;
+        e = 0;
+        n = 1;
+        sum = 1;
+      } else {
+        m = 1;
+        e = 0;
+        n = 0;
+        sum = 1;
+      }
+    }
+
+    final canonical = extra > 0 ? '$m+$e+$n+$extra' : '$m+$e+$n';
+    return (timing: canonical, dailyQty: sum);
+  }
+
   static bool isInjectable(Map m) {
-    final type = (m['type'] ?? '').toString().toLowerCase().trim();
-    final name = (m['name'] ?? '').toString().toLowerCase();
-    return type.contains('injection') ||
-        type.contains('inj') ||
-        type.contains('infusion') ||
-        type.contains('inf') ||
-        type.contains('drip') ||
-        type.contains('syringe') ||
-        name.contains('injection') ||
-        name.contains('inj') ||
-        name.contains('infusion');
+    final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase().trim();
+    final name = (m['name'] ?? '').toString().toLowerCase().trim();
+    if (type.contains('syringe')) return true;
+    return isInjectablePrescription(type, name);
   }
 
   static bool isInventoryMed(Map m) {
@@ -126,13 +263,14 @@ class PatientFormHelper {
         dosage.contains('spoon')) {
       return 'چمچ';
     }
-    if (type.contains('injection') || type.contains('inj') || name.contains('injection') || name.contains('inj')) {
+    if (type.contains('capsule') || type.contains('cap')) return 'کیپسول';
+    if (type.contains('tablet') || type.contains('tab')) return 'گولی';
+    if (isInjectable(med)) {
+      if (type.contains('infusion') || type == 'inf' || type == 'inf.' || type.contains('drip') || name.contains('infusion') || name.contains('drip')) {
+        return 'ڈرپ';
+      }
       return 'ٹیقہ';
     }
-    if (type.contains('infusion') || type.contains('inf') || type.contains('drip') || name.contains('infusion')) {
-      return 'ڈرپ';
-    }
-    if (type.contains('capsule') || type.contains('cap')) return 'کیپسول';
     return 'گولی';
   }
 

@@ -152,6 +152,11 @@ class RealtimeManager {
   static const _maxOutboxRetries = 3;
   /// Sends without a server ACK before a message is set aside in the failed outbox.
   static const _maxUnackedSends = 20;
+  /// Critical (token/prescription/dispense) sends after which re-sends slow down.
+  static const _criticalSlowAfterSends = 30;
+  static const _criticalSlowResendEvery = Duration(seconds: 30);
+  /// When each outbox key was last written to the socket (memory only).
+  final Map<dynamic, DateTime> _outboxLastSendAt = {};
 
   // [BUG-3] Track serials to ACK — only cleared after a successful send.
   final Set<String> _pendingAckSerials = {};
@@ -190,7 +195,7 @@ class RealtimeManager {
   /// frame (pong or data) received in the last 15 s. Use this for status displays instead of
   /// cached connection-manager snapshots, which can stay "connected" after the server is gone.
   bool get isLinkAlive =>
-      _isConnected && _serverIdentified && _lastPong != null && DateTime.now().difference(_lastPong!).inSeconds < 15;
+      _isConnected && _serverIdentified && _lastPong != null && DateTime.now().difference(_lastPong!).inSeconds < 45;
 
   /// True once the server has accepted this PC on the current socket. [isConnected] alone
   /// turns true as soon as a connection attempt starts (and stays true for a while on a
@@ -222,6 +227,10 @@ class RealtimeManager {
   VoidCallback? onNeedRediscovery;
   VoidCallback? onDisconnected;
   void Function(String ip, int port)? onConnected;
+
+  final List<VoidCallback> _identifiedListeners = [];
+  void addIdentifiedListener(VoidCallback cb) => _identifiedListeners.add(cb);
+  void removeIdentifiedListener(VoidCallback cb) => _identifiedListeners.remove(cb);
 
   void _recordHealthSuccess() {
     _consecutivePingSuccesses++;
@@ -297,6 +306,7 @@ class RealtimeManager {
 
   void _clearOutboxCounters(dynamic key) {
     if (key == null) return;
+    _outboxLastSendAt.remove(key);
     for (final kind in const ['s', 'r']) {
       final k = '$kind|$key';
       _outboxCountersMem.remove(k);
@@ -462,9 +472,9 @@ class RealtimeManager {
     final normBranch = branchId.trim().toLowerCase();
     final normIp = serverIp.trim();
 
-    // A socket that was accepted but has had no frame for >15 s (pings go every 10 s) is
+    // A socket that was accepted but has had no frame for >45 s (pings go every 10 s) is
     // half-open after a Wi-Fi drop: reusing it kept the desk "connected" to nothing.
-    final staleLink = _serverIdentified && _lastPong != null && DateTime.now().difference(_lastPong!).inSeconds > 15;
+    final staleLink = _serverIdentified && _lastPong != null && DateTime.now().difference(_lastPong!).inSeconds > 45;
     if (_isConnected && !staleLink && _serverIp == normIp && _branchId == normBranch) {
       _role = normRole;
       if (username != null && username.trim().isNotEmpty) {
@@ -582,19 +592,19 @@ class RealtimeManager {
         if (_serverIdentified) return;
         // Fired late because the UI thread was frozen: the server's reply may be queued
         // behind this timer. Look again shortly instead of dropping the attempt.
-        if (DateTime.now().difference(armedAt).inSeconds > 10 &&
+        if (DateTime.now().difference(armedAt).inSeconds > 15 &&
             DateTime.now().difference(armedAt).inSeconds < 60) {
-          Timer(const Duration(seconds: 3), () {
+          Timer(const Duration(seconds: 4), () {
             if (gen != _connectGen || _serverIdentified) return;
             debugPrint('[RealtimeManager] ⏱️ Handshake watchdog: still no identify from $wsUrl → reconnect');
             _handleDisconnect();
           });
           return;
         }
-        debugPrint('[RealtimeManager] ⏱️ Handshake watchdog: no identify from $wsUrl in 6s → reconnect');
+        debugPrint('[RealtimeManager] ⏱️ Handshake watchdog: no identify from $wsUrl in 15s → reconnect');
         _handleDisconnect();
       }
-      Timer(const Duration(seconds: 6), watchdog);
+      Timer(const Duration(seconds: 15), watchdog);
 
       if (kIsWeb) {
         try {
@@ -794,8 +804,27 @@ class RealtimeManager {
       // A stress-test token relayed as a real event (older server build) is never shown or saved.
       if (LocalStorageService.isStressTestMessage(decoded)) return;
 
-      if (decoded['event_type'] == 'identified' && !_serverIdentified) {
-        _onServerIdentified();
+      if (decoded['event_type'] == 'identified') {
+        final srvBranch = (decoded['serverBranch'] ?? decoded['branchId'])?.toString().trim();
+        if (srvBranch != null && srvBranch.isNotEmpty && srvBranch != 'all' && srvBranch != 'default') {
+          final normSrv = LocalStorageService.sanitizeBranchId(srvBranch);
+          if (normSrv.isNotEmpty && _branchId?.toLowerCase().trim() != normSrv) {
+            if (kDebugMode) {
+              print('[RealtimeManager] 🔄 Server identified branch mismatch: adopting $normSrv (was: $_branchId)');
+            }
+            _branchId = normSrv;
+            try {
+              if (Hive.isBoxOpen('app_settings')) {
+                final settingsBox = Hive.box('app_settings');
+                settingsBox.put('selected_branch', normSrv);
+                settingsBox.put('current_branch', normSrv);
+              }
+            } catch (_) {}
+          }
+        }
+        if (!_serverIdentified) {
+          _onServerIdentified();
+        }
       }
 
       if (decoded['event_type'] == 'event_log_position') {
@@ -929,16 +958,13 @@ class RealtimeManager {
         box.delete(messageId);
         return;
       }
-      // Entries written without a message id use generated keys: only scan when the box is small.
-      if (box.length > 300) return;
+      // Entries written without a message id use generated keys: scan to match entry's messageId.
       for (final key in box.keys.toList()) {
         final entry = box.get(key);
         if (entry is Map) {
           final entryMsgId = (entry['_messageId'] ?? entry['messageId'])?.toString();
           if (entryMsgId == messageId) {
             box.delete(key);
-            if (kDebugMode) {
-            }
             return;
           }
         }
@@ -983,6 +1009,9 @@ class RealtimeManager {
   void _onServerIdentified() {
     versionRejectedNotifier.value = null; // accepted by this server
     _serverIdentified = true;
+    for (final cb in List<VoidCallback>.from(_identifiedListeners)) {
+      try { cb(); } catch (_) {}
+    }
     // Safety net: remove any stress-test tokens left by a test this device missed. Once per
     // run: both sweeps scan the whole entries box on the UI thread, and on flapping Wi-Fi this
     // ran on every reconnect.
@@ -1001,15 +1030,9 @@ class RealtimeManager {
     final hadPending = _pendingMessages.isNotEmpty;
     _sendPendingMessages();
 
-    if (!_flushedOnConnect) {
-      _flushedOnConnect = true;
-      Future.delayed(
-        hadPending
-            ? const Duration(milliseconds: 800)
-            : const Duration(milliseconds: 500),
-        _flushOutbox,
-      );
-    }
+    _flushedOnConnect = true;
+    // Flush outbox immediately without delay so offline tokens reach the server right away
+    unawaited(_flushOutbox());
 
     // Start periodic outbox sweep to catch stuck messages
     _startOutboxSweepTimer();
@@ -1061,11 +1084,10 @@ class RealtimeManager {
       // reconnect plus a full catch-up, which froze the desk again. Judge it on the next tick.
       final lateTick = now.difference(_lastPingTick ?? now).inSeconds > 12;
       _lastPingTick = now;
-      // No pong for 20 s → treat the socket as dead. (It was 14 s once: whenever the server's UI
-      // thread was busy for a moment, every client dropped and reconnected at once, and each
-      // reconnect asked for a full catch-up, which made the server even busier.)
-      if (!lateTick && _lastPong != null && now.difference(_lastPong!).inSeconds > 20) {
-        debugPrint('[RealtimeManager] ⚠️ Pong timeout (>20s) → tearing down half-dead socket');
+      // No pong for 45 s → treat the socket as dead. (Increased from 20s to prevent
+      // disconnects during Wi-Fi jitter or heavy background SQLite/Hive writes).
+      if (!lateTick && _lastPong != null && now.difference(_lastPong!).inSeconds > 45) {
+        debugPrint('[RealtimeManager] ⚠️ Pong timeout (>45s) → tearing down half-dead socket');
         _recordHealthFailure();
         _handleDisconnect();
         return;
@@ -1098,10 +1120,31 @@ class RealtimeManager {
   // stuck in Hive outbox that were written but never delivered (silent WS drops,
   // buffering issues, or send appeared to succeed but server never ACK'd).
   // Also retries the failed outbox periodically instead of only on reconnect.
+  DateTime? _lastRediscoveryNudge;
+  bool _disposedSweep = false;
+
   void _startOutboxSweepTimer() {
+    _disposedSweep = false;
     _outboxSweepTimer?.cancel();
     _outboxSweepTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (!_isConnected || !_serverIdentified) return;
+      if (_disposedSweep) return;
+      // Unsent items on a desk with no link: nudge the ConnectionManager to look for the
+      // server. Only when fully disconnected (never during a handshake, which this would
+      // interrupt) and at most every 20 s (a full rediscovery scans the subnet).
+      if (!_isConnected) {
+        try {
+          final now = DateTime.now();
+          if (Hive.isBoxOpen(_outboxBox) &&
+              Hive.box(_outboxBox).isNotEmpty &&
+              (_lastRediscoveryNudge == null ||
+                  now.difference(_lastRediscoveryNudge!) >= const Duration(seconds: 20))) {
+            _lastRediscoveryNudge = now;
+            onNeedRediscovery?.call();
+          }
+        } catch (_) {}
+        return;
+      }
+      if (!_serverIdentified) return;
       try {
         final box = Hive.box(_outboxBox);
         if (box.isNotEmpty) {
@@ -1152,7 +1195,8 @@ class RealtimeManager {
     _flushedOnConnect = false;
     _pingTimer?.cancel();
     _ackFlushTimer?.cancel();
-    _outboxSweepTimer?.cancel();
+    // Keep outbox sweep timer running so unsent queued items proactively prompt rediscovery
+    _startOutboxSweepTimer();
     _channelSub?.cancel();
     _closeChannelQuietly();
     _channelSub = null;
@@ -1518,14 +1562,10 @@ class RealtimeManager {
         final prefix = ser.substring(0, lastDash);
         final seqStr = ser.substring(lastDash + 1);
         final seq = int.tryParse(seqStr);
-        if (seq != null && seq > 1 && seq < 9999) {
-          final padWidth = seqStr.length < 3 ? 3 : seqStr.length;
+        if (seq != null && seq > 1 && seq <= 999) {
+          const padWidth = 3;
           bool hasPriorPending = false;
-          // Own number block only (shared 1..999 or offline N*1000+1..), last 50 numbers:
-          // an offline token 1001 used to check 1000 serials here on every send.
-          final blockStart = (seq ~/ LocalStorageService.offlineBandSize) *
-                  LocalStorageService.offlineBandSize + 1;
-          final from = (seq - 50) > blockStart ? seq - 50 : blockStart;
+          final from = (seq - 20) > 1 ? seq - 20 : 1;
           for (int i = from; i < seq; i++) {
             final priorSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
             if (isRecordPendingOrUnacked('save_entry|$priorSerial')) {
@@ -1535,7 +1575,6 @@ class RealtimeManager {
           }
           if (hasPriorPending) {
             unawaited(_flushOutbox());
-            return;
           }
         }
       }
@@ -1706,6 +1745,17 @@ class RealtimeManager {
           continue;
         }
 
+        // A critical item the server has not ACKed after many sends stays here (it used to be
+        // parked in the failed box, retried only every 5 min or on logout/restart — why tokens
+        // "needed a trigger"). From then on it is re-sent at most every 30 s, not every sweep.
+        if (_isCriticalOutboxItem(item) &&
+            _outboxCounter('s', key, item['_outboxSends']) >= _criticalSlowAfterSends) {
+          final last = _outboxLastSendAt[key];
+          if (last != null && DateTime.now().difference(last) < _criticalSlowResendEvery) {
+            continue;
+          }
+        }
+
         final msg = Map<String, dynamic>.from(item);
         msg.remove('_outboxKey');
         msg.remove('_outboxTimestamp');
@@ -1742,7 +1792,11 @@ class RealtimeManager {
               _moveToFailedOutbox(key, item, reason: 'no server acknowledgement after $sends sends');
               toDelete.add(key);
             } else {
+              // Critical items are never parked: after [_criticalSlowAfterSends] sends they are
+              // throttled to one send per [_criticalSlowResendEvery] (see the check above).
               _setOutboxCounter('s', key, sends);
+              _outboxLastSendAt[key] = DateTime.now();
+              if (_outboxLastSendAt.length > 5000) _outboxLastSendAt.remove(_outboxLastSendAt.keys.first);
             }
           }
           await Future.delayed(const Duration(milliseconds: 20));
@@ -1755,6 +1809,9 @@ class RealtimeManager {
           // first flush after the reconnect (not the 5-minute failed-box retry).
           if (newRetryCount >= _maxOutboxRetries && !_isCriticalOutboxItem(item)) {
             _moveToFailedOutbox(key, item, reason: e.toString());
+            toDelete.add(key);
+          } else if (newRetryCount >= 30) {
+            _moveToFailedOutbox(key, item, reason: 'critical item consecutive send failures ($newRetryCount): $e');
             toDelete.add(key);
           } else {
             // Update retry count and stop flushing (channel is down).
@@ -2004,7 +2061,12 @@ class RealtimeManager {
         ?.toString().toLowerCase().trim();
     final myBranch = _branchId?.toLowerCase().trim();
 
-    final isUniversalBranch = msgBranch == null ||
+    final isPushedFromServer = decoded['_serverPush'] == true ||
+        decoded['isCatchUp'] == true ||
+        decoded['_catchUp'] == true;
+
+    final isUniversalBranch = isPushedFromServer ||
+        msgBranch == null ||
         msgBranch.isEmpty ||
         msgBranch == 'all' ||
         msgBranch == 'default' ||
@@ -2117,7 +2179,11 @@ class RealtimeManager {
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();
     _ackFlushTimer?.cancel();
+    // Logout / re-initialize: stop the sweep (it restarted itself here and kept asking for
+    // rediscovery after the user had left the screen). initialize() starts it again.
+    _disposedSweep = true;
     _outboxSweepTimer?.cancel();
+    _outboxSweepTimer = null;
     _channelSub?.cancel();
     try {
       // Never block on closing: a half-open (SYN_SENT) socket can hang ~20s.

@@ -26,6 +26,7 @@ import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
 import 'package:gmwf/pages/dispensary/doctor/patient_info.dart';
+import 'package:gmwf/Pages/dispensary/dispensar/patient_form_helper.dart';
 
 class PatientQueue extends StatefulWidget {
   final String branchId;
@@ -181,7 +182,7 @@ class _PatientQueueState extends State<PatientQueue> {
             ? _selectedCampFilter
             : (allowedCamps.isNotEmpty && !allowedCamps.contains('all')
                 ? allowedCamps.first
-                : CampSessionService.getActiveCamp(widget.branchId)))
+                : 'all'))
         : null;
 
     final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -1006,10 +1007,8 @@ class _PatientQueueState extends State<PatientQueue> {
   // ─── Injection / drip check ───────────────────────────────────────────────
   bool _isInjectionOrDrip(Map<String, dynamic> med) {
     final type = (med['type'] ?? '').toString().toLowerCase();
-    final name = (med['name'] ?? '').toString().toLowerCase();
-    return type.contains('injection') || type.contains('inj') ||
-        type.contains('drip') ||
-        name.contains('inj.') || name.contains('drip');
+    if (type.contains('nebulization')) return true;
+    return PatientFormHelper.isInjectable(med);
   }
 
   // ─── Medicine abbreviation helper ─────────────────────────────────────────
@@ -1159,25 +1158,17 @@ class _PatientQueueState extends State<PatientQueue> {
       if (isInventory && inventoryMed != null) {
         final type  = (inventoryMed['type'] ?? '').toString().toLowerCase();
         final name  = (inventoryMed['name'] ?? '').toString().toLowerCase();
-        isInjection = type.contains('injection') || type.contains('inj') ||
-                      type.contains('infusion') || type.contains('inf') ||
-                      type.contains('drip') ||
-                      name.contains('inj') || name.contains('infusion') || name.contains('drip');
-        isSyrup     = type.contains('syrup')     || type.contains('syp') || name.contains('syp') || name.contains('syrup');
+        isInjection = _isInjectionOrDrip(inventoryMed);
+        isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else if (isEditing) {
         final type  = (existingMed['type'] ?? '').toString().toLowerCase();
         final name  = (existingMed['name'] ?? '').toString().toLowerCase();
-        isInjection = type.contains('injection') || type.contains('inj') ||
-                      type.contains('infusion') || type.contains('inf') ||
-                      type.contains('drip') ||
-                      name.contains('inj') || name.contains('infusion') || name.contains('drip');
-        isSyrup     = type.contains('syrup')     || type.contains('syp') || name.contains('syp') || name.contains('syrup');
+        isInjection = _isInjectionOrDrip(existingMed);
+        isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else {
         final text  = nameCtrl.text.toLowerCase().trim();
-        isInjection = text.contains('inj.') || text.contains('inj') ||
-                      text.contains('inf.') || text.contains('infusion') ||
-                      text.contains('drip');
-        isSyrup     = text.contains('syp.') || text.contains('syrup');
+        isInjection = PatientFormHelper.isInjectablePrescription('', text);
+        isSyrup     = !isInjection && (text.contains('syp.') || text.contains('syrup'));
       }
     }
 
@@ -1438,6 +1429,13 @@ class _PatientQueueState extends State<PatientQueue> {
                     setStateDialog(() => stockError = 'Please enter medicine name');
                     return;
                   }
+                  final resolvedDose = (inventoryMed != null
+                          ? (inventoryMed['dose'] ?? inventoryMed['dosage'] ?? '')
+                          : (existingMed != null ? (existingMed['dose'] ?? existingMed['dosage'] ?? '') : ''))
+                      .toString()
+                      .trim();
+                  final effectiveId = inventoryMed?['id'] ?? existingMed?['inventoryId'] ?? existingMed?['medicineId'];
+
                   Map<String, dynamic> newMed;
                   if (isInjection) {
                     final qty = int.tryParse(qtyCtrl.text) ?? 1;
@@ -1445,6 +1443,9 @@ class _PatientQueueState extends State<PatientQueue> {
                       setStateDialog(() => stockError = 'Quantity must be at least 1');
                       return;
                     }
+                    final medType = inventoryMed != null
+                        ? (inventoryMed['type'] ?? 'Injection')
+                        : ((existingMed?['type']) ?? 'Injection');
                     if (isInventory) {
                       final bool isStockZero = availableStock <= 0;
                       final bool exceedsStock = qty > availableStock;
@@ -1452,8 +1453,11 @@ class _PatientQueueState extends State<PatientQueue> {
                         'name': name,
                         'formula': (inventoryMed?['formula'] ?? existingMed?['formula'] ?? '').toString().trim(),
                         'quantity': qty,
-                        'type': 'Injection',
-                        'inventoryId': inventoryMed?['id'] ?? existingMed?['inventoryId'],
+                        'type': medType,
+                        'dose': resolvedDose,
+                        'dosage': resolvedDose,
+                        'inventoryId': effectiveId,
+                        'medicineId': effectiveId,
                         if (isStockZero || exceedsStock) 'isExternal': true,
                         if (isStockZero) 'outOfStock': true,
                         if (exceedsStock) 'stockShortage': qty - (availableStock > 0 ? availableStock : 0),
@@ -1463,23 +1467,26 @@ class _PatientQueueState extends State<PatientQueue> {
                         'name': name,
                         'formula': (inventoryMed?['formula'] ?? existingMed?['formula'] ?? '').toString().trim(),
                         'quantity': qty,
-                        'type': 'Injection',
-                        'inventoryId': inventoryMed?['id'] ?? existingMed?['inventoryId'],
+                        'type': medType,
+                        'dose': resolvedDose,
+                        'dosage': resolvedDose,
+                        'inventoryId': effectiveId,
+                        'medicineId': effectiveId,
                       };
                     }
                   } else {
-                    final rawTiming = timingCtrl.text.trim();
-                    final timingStr = rawTiming.isNotEmpty ? rawTiming : '1+0+1';
-                    final digits = timingStr.replaceAll('+', '').trim();
-                    final m      = int.tryParse(digits.isNotEmpty ? digits[0] : '1') ?? 1;
-                    final e      = digits.length > 1 ? int.tryParse(digits[1]) ?? 0 : 0;
-                    final n      = digits.length > 2 ? int.tryParse(digits[2]) ?? 1 : 1;
-                    int sum    = m + e + n;
-                    if (sum == 0 && digits.length == 1) {
-                      sum = int.tryParse(digits) ?? 1;
-                    }
-                    final qty    = (mealTiming == 'Before Sleep' && sum == 0) ? 1 : (sum > 0 ? sum : 1);
-                    final totalRequired = qty * daysOfMedicine;
+                    final resolvedTiming = PatientFormHelper.resolveCanonicalTiming(
+                      timingCtrl.text,
+                      mealTiming: mealTiming,
+                    );
+                    final timingStr = resolvedTiming.timing;
+                    final qty = isSyrup ? 1 : resolvedTiming.dailyQty;
+                    final totalRequired = isSyrup ? 1 : qty * daysOfMedicine;
+                    final medType = isSyrup
+                        ? 'Syrup'
+                        : (inventoryMed != null
+                            ? (inventoryMed['type'] ?? 'Tablet')
+                            : ((existingMed?['type']) ?? 'Tablet'));
                     if (isInventory) {
                       final bool isStockZero = availableStock <= 0;
                       final bool exceedsStock = totalRequired > availableStock;
@@ -1489,9 +1496,11 @@ class _PatientQueueState extends State<PatientQueue> {
                         'quantity': qty,
                         'timing': timingStr,
                         'meal': mealTiming,
-                        'dosage': isSyrup ? dosage : '',
-                        'type': isSyrup ? 'Syrup' : 'Tablet',
-                        'inventoryId': inventoryMed?['id'] ?? existingMed?['inventoryId'],
+                        'dosage': isSyrup ? dosage : resolvedDose,
+                        'dose': resolvedDose,
+                        'type': medType,
+                        'inventoryId': effectiveId,
+                        'medicineId': effectiveId,
                         if (isStockZero || exceedsStock) 'isExternal': true,
                         if (isStockZero) 'outOfStock': true,
                         if (exceedsStock) 'stockShortage': totalRequired - (availableStock > 0 ? availableStock : 0),
@@ -1503,9 +1512,11 @@ class _PatientQueueState extends State<PatientQueue> {
                         'quantity': qty,
                         'timing': timingStr,
                         'meal': mealTiming,
-                        'dosage': isSyrup ? dosage : '',
-                        'type': isSyrup ? 'Syrup' : 'Tablet',
-                        'inventoryId': inventoryMed?['id'] ?? existingMed?['inventoryId'],
+                        'dosage': isSyrup ? dosage : resolvedDose,
+                        'dose': resolvedDose,
+                        'type': medType,
+                        'inventoryId': effectiveId,
+                        'medicineId': effectiveId,
                       };
                     }
                   }
@@ -3276,8 +3287,11 @@ class _PatientQueueState extends State<PatientQueue> {
 
     final updatedPresc = <String, dynamic>{
       ...originalPresc,
+      'id':              serial,
       'serial':          serial,
       'branchId':        branchId,
+      if (patientCnic.trim().isNotEmpty) 'patientCnic': patientCnic.trim(),
+      if (patientCnic.trim().isNotEmpty) 'cnic': patientCnic.trim(),
       'queueType':       queueType,
       'condition':       complaint,
       'complaint':       complaint,

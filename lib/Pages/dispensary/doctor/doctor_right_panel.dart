@@ -21,6 +21,7 @@ import 'package:gmwf/services/prescription_template_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/Pages/dispensary/dispensar/patient_form_helper.dart';
 
 class DoctorRightPanel extends StatefulWidget {
   final String branchId;
@@ -650,19 +651,24 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
             ((inv['_batchIds'] as List?)?.any((b) => b.toString() == oldId) ?? false)).firstOrNull;
       }
 
-      // 2. Same medicine by name/formula, form and strength; then by name and form, or
-      //    name alone, but only when that leaves exactly one medicine.
+      // 2. Same medicine by name/formula, form and strength; then by name and form.
+      //    NEVER relink an oral/topical medicine to an injectable stock item (or vice versa),
+      //    and never cross different dosage forms (e.g. Tablet -> Injection or Syrup).
       if (match == null) {
         final names = {clean(med['name']), clean(med['formula'])}..remove('');
         final type = (med['type'] ?? '').toString().toLowerCase().trim();
+        final medIsInj = _isInjectionOrDrip(med);
         final dose = cleanDose(_getMedicineDose(med));
-        final byName = realStock.where((inv) => names.contains(clean(inv['name'])) || names.contains(clean(inv['formula']))).toList();
-        bool sameType(Map<String, dynamic> inv) => type.isEmpty || (inv['type'] ?? '').toString().toLowerCase().trim() == type;
+        final byName = realStock
+            .where((inv) =>
+                _isInjectionOrDrip(inv) == medIsInj &&
+                (names.contains(clean(inv['name'])) || names.contains(clean(inv['formula']))))
+            .toList();
+        bool sameType(Map<String, dynamic> inv) =>
+            type.isEmpty || _getMedicineType(inv).toLowerCase().trim() == type || (inv['type'] ?? '').toString().toLowerCase().trim() == type;
         bool sameDose(Map<String, dynamic> inv) => dose.isEmpty || cleanDose(_getMedicineDose(inv)) == dose;
         match = single(byName.where((inv) => sameType(inv) && sameDose(inv))) ??
-            single(byName.where(sameType)) ??
-            single(byName.where(sameDose)) ??
-            single(byName);
+            single(byName.where(sameType));
       }
 
       if (match == null) {
@@ -954,11 +960,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
   bool _isInjectionOrDrip(Map<String, dynamic> med) {
     final t = (med['type'] ?? '').toString().trim().toLowerCase();
-    final n = (med['name'] ?? '').toString().trim().toLowerCase();
-    return t.contains('injection') || t.contains('inj') ||
-        t.contains('infusion') || t.contains('inf') ||
-        t.contains('drip') || t.contains('syringe') || t.contains('nebulization') ||
-        n.contains('inj') || n.contains('infusion') || n.contains('drip');
+    if (t.contains('nebulization')) return true;
+    return PatientFormHelper.isInjectable(med);
   }
 
   static String _getMedicineDose(Map<String, dynamic> med) {
@@ -2415,25 +2418,17 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       if (inv != null) {
         final type  = (inv['type'] ?? '').toString().toLowerCase();
         final name  = (inv['name'] ?? '').toString().toLowerCase();
-        isInjection = type.contains('injection') || type.contains('inj') ||
-                      type.contains('infusion') || type.contains('inf') ||
-                      type.contains('drip') ||
-                      name.contains('inj') || name.contains('infusion') || name.contains('drip');
-        isSyrup     = type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup');
+        isInjection = _isInjectionOrDrip(inv);
+        isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else if (isEditing && existing != null) {
         final type  = (existing['type'] ?? '').toString().toLowerCase();
         final name  = (existing['name'] ?? '').toString().toLowerCase();
-        isInjection = type.contains('injection') || type.contains('inj') ||
-                      type.contains('infusion') || type.contains('inf') ||
-                      type.contains('drip') ||
-                      name.contains('inj') || name.contains('infusion') || name.contains('drip');
-        isSyrup     = type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup');
+        isInjection = _isInjectionOrDrip(existing);
+        isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else {
         final text  = nameCtrl.text.toLowerCase();
-        isInjection = text.contains('inj.') || text.contains('inj') ||
-                      text.contains('inf.') || text.contains('infusion') ||
-                      text.contains('drip');
-        isSyrup     = text.contains('syp.') || text.contains('syrup');
+        isInjection = PatientFormHelper.isInjectablePrescription('', text);
+        isSyrup     = !isInjection && (text.contains('syp.') || text.contains('syrup'));
       }
     }
 
@@ -2482,7 +2477,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
             Map<String, dynamic>? currentInv = effectiveInv;
             if (!isEditing && currentInv == null) {
               final matched = _allInventory.firstWhere(
-                (m) => (m['name'] ?? '').toString().trim().toLowerCase() == name.toLowerCase(),
+                (m) =>
+                    (m['name'] ?? '').toString().trim().toLowerCase() == name.toLowerCase() &&
+                    _isInjectionOrDrip(m) == isInjection,
                 orElse: () => {},
               );
               if (matched.isNotEmpty) {
@@ -2569,19 +2566,12 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                 if (exceedsStock) 'stockShortage': qty - (avail > 0 ? avail : 0),
               };
             } else {
-              final rawTiming = timingCtrl.text.trim();
-              final timingStr = rawTiming.isNotEmpty ? rawTiming : '1+0+1';
-              final digits = timingStr.replaceAll('+', '').trim();
-              final m      = int.tryParse(digits.isNotEmpty ? digits[0] : '1') ?? 1;
-              final e      = digits.length > 1 ? int.tryParse(digits[1]) ?? 0 : 0;
-              final n      = digits.length > 2 ? int.tryParse(digits[2]) ?? 1 : 1;
-              int sum      = m + e + n;
-              if (sum == 0 && digits.length == 1) {
-                sum = int.tryParse(digits) ?? 1;
-              }
-              final qty = isSyrup
-                  ? 1
-                  : ((mealTiming == 'Before Sleep' && sum == 0) ? 1 : (sum > 0 ? sum : 1));
+              final resolvedTiming = PatientFormHelper.resolveCanonicalTiming(
+                timingCtrl.text,
+                mealTiming: mealTiming,
+              );
+              final timingStr = resolvedTiming.timing;
+              final qty = isSyrup ? 1 : resolvedTiming.dailyQty;
               final totalRequired = isSyrup ? 1 : qty * _daysOfMedicine;
               totalNeeded = totalRequired;
               exceedsStock = inv != null && totalRequired > avail;
@@ -2995,15 +2985,11 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                     ],
                     Builder(
                       builder: (_) {
-                        final digits = timingCtrl.text.replaceAll('+', '').trim();
-                        final m = int.tryParse(digits.isNotEmpty ? digits[0] : '0') ?? 0;
-                        final e = digits.length > 1 ? int.tryParse(digits[1]) ?? 0 : 0;
-                        final n = digits.length > 2 ? int.tryParse(digits[2]) ?? 0 : 0;
-                        int sum = m + e + n;
-                        if (sum == 0 && digits.length == 1) {
-                          sum = int.tryParse(digits) ?? 0;
-                        }
-                        final dailyCount = (mealTiming == 'Before Sleep' && sum == 0) ? 1 : (sum > 0 ? sum : 1);
+                        final resolvedTiming = PatientFormHelper.resolveCanonicalTiming(
+                          timingCtrl.text,
+                          mealTiming: mealTiming,
+                        );
+                        final dailyCount = resolvedTiming.dailyQty;
                         final totalUnits = isSyrup ? 1 : (dailyCount * _daysOfMedicine);
 
                         return Container(
@@ -3301,13 +3287,24 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     }
   }
 
-  Map<String, dynamic>? _findMatchingInventoryItem(String searchName) {
+  Map<String, dynamic>? _findMatchingInventoryItem(String searchName, {String? preferredType}) {
     if (_allInventory.isEmpty) return null;
     final clean = searchName.trim().toLowerCase();
     if (clean.isEmpty) return null;
 
-    // 1. Exact Name or Formula match
+    final wantInj = PatientFormHelper.isInjectablePrescription(preferredType ?? '', searchName);
+    final normPrefType = (preferredType ?? '').trim().toLowerCase();
+
+    bool isCompatibleForm(Map<String, dynamic> inv) {
+      if (_isInjectionOrDrip(inv) != wantInj) return false;
+      if (normPrefType.isEmpty) return true;
+      final invType = _getMedicineType(inv).toLowerCase().trim();
+      return invType == normPrefType;
+    }
+
+    // 1. Exact Name or Formula match with compatible form
     for (final inv in _allInventory) {
+      if (!isCompatibleForm(inv)) continue;
       final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
       final invFormula = (inv['formula'] ?? '').toString().trim().toLowerCase();
       if (invName == clean || (invFormula.isNotEmpty && invFormula == clean)) {
@@ -3315,8 +3312,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       }
     }
 
-    // 2. Contains match
+    // 2. Contains match with compatible form
     for (final inv in _allInventory) {
+      if (!isCompatibleForm(inv)) continue;
       final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
       final invFormula = (inv['formula'] ?? '').toString().trim().toLowerCase();
       if (invName.contains(clean) || clean.contains(invName) ||
@@ -3340,12 +3338,13 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     for (final raw in meds) {
       final tplMed = Map<String, dynamic>.from(raw as Map);
       final rawName = tplMed['name']?.toString() ?? '';
-      final invMatch = _findMatchingInventoryItem(rawName);
+      final tplType = (tplMed['type'] ?? 'Tablet').toString();
+      final invMatch = _findMatchingInventoryItem(rawName, preferredType: tplType);
 
       int availableStock = 999;
       String? inventoryId;
       String medName = rawName;
-      String medType = tplMed['type'] ?? 'Tablet';
+      String medType = tplType;
 
       if (invMatch != null) {
         inventoryId = invMatch['id']?.toString();
@@ -3354,24 +3353,31 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         availableStock = _getAvailableStock(invMatch);
       }
 
-      final timing = tplMed['timing'] ?? tplMed['dose'] ?? '1+1+1';
-      final digits = timing.toString().replaceAll('+', '');
-      final m = int.tryParse(digits.isNotEmpty ? digits[0] : '0') ?? 0;
-      final e = digits.length > 1 ? int.tryParse(digits[1]) ?? 0 : 0;
-      final n = digits.length > 2 ? int.tryParse(digits[2]) ?? 0 : 0;
-      final sum = m + e + n;
-      final perDayQty = (tplMed['quantity'] is num)
-          ? (tplMed['quantity'] as num).toInt()
-          : (sum > 0 ? sum : 1);
-
+      final mealInstruction = (tplMed['instructions'] ?? tplMed['meal'] ?? 'After Meal').toString();
+      final rawTiming = (tplMed['timing'] ?? tplMed['dose'] ?? '1+1+1').toString();
+      final resolvedTiming = PatientFormHelper.resolveCanonicalTiming(
+        rawTiming,
+        mealTiming: mealInstruction,
+      );
       final isInj = _isInjectionOrDrip({'type': medType, 'name': medName});
-      final totalNeeded = isInj ? perDayQty : perDayQty * (template['defaultDays'] as int? ?? 1);
+      final isSyrup = !isInj &&
+          (medType.toLowerCase().contains('syrup') ||
+              medType.toLowerCase().contains('syp') ||
+              medName.toLowerCase().contains('syrup') ||
+              medName.toLowerCase().contains('syp'));
+      final perDayQty = isSyrup
+          ? 1
+          : (isInj
+              ? ((tplMed['quantity'] is num) ? (tplMed['quantity'] as num).toInt() : 1)
+              : resolvedTiming.dailyQty);
+
+      final totalNeeded = isInj ? perDayQty : (isSyrup ? 1 : perDayQty * (template['defaultDays'] as int? ?? 1));
 
       final medEntry = {
         'name': medName,
         'quantity': perDayQty,
-        'timing': timing,
-        'meal': tplMed['instructions'] ?? tplMed['meal'] ?? 'After Meal',
+        if (!isInj) 'timing': resolvedTiming.timing,
+        if (!isInj) 'meal': mealInstruction,
         'dosage': tplMed['dosage'] ?? '',
         'type': medType,
         'inventoryId': inventoryId,
@@ -4759,12 +4765,65 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
     try {
       final patientData = Map<String, dynamic>.from(widget.selectedPatientData ?? {});
+      final existingHiveEntry = LocalStorageService.getLocalEntry(widget.branchId, widget.serialId);
+      // ⚠️ PERMANENT ARCHITECTURAL RULE:
+      // Receptionist-entered patient identity (`patientName`, `name`, `patientCnic`, `cnic`, `guardianCnic`)
+      // is authoritative truth and must NEVER be overwritten by the Doctor screen.
+      if (existingHiveEntry != null) {
+        bool isMeaningfulVal(dynamic v) {
+          if (v == null) return false;
+          final s = v.toString().trim();
+          if (s.isEmpty) return false;
+          final low = s.toLowerCase();
+          return low != 'n/a' && low != 'null' && low != 'unknown' && low != 'unknown patient' && low != '-' && !low.startsWith('unknown_');
+        }
+        // Authoritative Receptionist fields ALWAYS win if present on existingHiveEntry
+        for (final authKey in const [
+          'patientName', 'name', 'fullName',
+          'patientCnic', 'cnic', 'guardianCnic', 'guardianName', 'patientId',
+          'campId', 'campName', 'dispensaryId', 'dispensaryTag', 'session',
+          'createdBy', 'createdByName', 'receptionistId', 'receptionistName', 'tokenBy',
+        ]) {
+          if (isMeaningfulVal(existingHiveEntry[authKey])) {
+            patientData[authKey] = existingHiveEntry[authKey];
+          }
+        }
+        for (final key in const [
+          'age', 'patientAge', 'gender', 'patientGender',
+          'phone', 'contactNumber', 'mobile', 'address',
+          'bp', 'temp', 'sugar', 'weight',
+        ]) {
+          if (!isMeaningfulVal(patientData[key]) && isMeaningfulVal(existingHiveEntry[key])) {
+            patientData[key] = existingHiveEntry[key];
+          }
+        }
+        patientData['vitals'] = LocalStorageService.mergeVitalsPreservingReceptionist(
+          patientData['vitals'],
+          existingHiveEntry['vitals'],
+        );
+      }
 
-      String patientCnic = (patientData['cnic']?.toString() ??
-              patientData['guardianCnic']?.toString() ??
-              patientData['patientCnic']?.toString() ?? '')
-          .trim()
-          .replaceAll(RegExp(r'[-\s]'), '');
+      String rawResolvedCnic = LocalStorageService.resolveFirstValidCnic([
+        existingHiveEntry?['patientCnic'],
+        existingHiveEntry?['cnic'],
+        existingHiveEntry?['guardianCnic'],
+        patientData['patientCnic'],
+        patientData['cnic'],
+        patientData['guardianCnic'],
+      ]);
+      if (rawResolvedCnic.isEmpty) {
+        final pIdLookup = (existingHiveEntry?['patientId'] ?? patientData['patientId'] ?? '').toString().trim();
+        if (pIdLookup.isNotEmpty && !pIdLookup.toLowerCase().startsWith('unknown')) {
+          final lp = LocalStorageService.getLocalPatient(pIdLookup);
+          rawResolvedCnic = LocalStorageService.resolveFirstValidCnic([
+            lp?['cnic'],
+            lp?['patientCnic'],
+            lp?['guardianCnic'],
+            pIdLookup.contains('_child_') ? pIdLookup.split('_child_').first : pIdLookup,
+          ]);
+        }
+      }
+      String patientCnic = rawResolvedCnic.replaceAll(RegExp(r'[-\s]'), '');
       if (patientCnic.isEmpty || patientCnic == '0000000000000') {
         patientCnic = 'unknown_${DateTime.now().millisecondsSinceEpoch}';
       }
@@ -4779,34 +4838,47 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
           'queue="$queueType" serial="${widget.serialId}" '
           'days=$days extraCharge=$extraCharge');
 
-      final now         = DateTime.now();
+      final now         = CampSessionService.getAuthoritativeTime();
       final nowIso      = now.toIso8601String();
       final serialClean = CampSessionService.cleanSerial(widget.serialId, widget.branchId).trim().toLowerCase();
-      String resolvedPatientName = (patientData['patientName'] ?? patientData['name'] ?? patientData['fullName'])?.toString().trim() ?? '';
-      if (resolvedPatientName.isEmpty || resolvedPatientName.toLowerCase() == 'unknown' || resolvedPatientName.toLowerCase() == 'unknown patient') {
-        final normB = widget.branchId.toLowerCase().trim();
-        final normS = serialClean.toLowerCase();
-        try {
-          if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
-            final eBox = Hive.box(LocalStorageService.entriesBox);
-            final directEntry = eBox.get('$normB-$normS') ??
-                eBox.get('$normB-${normS.toUpperCase()}') ??
-                eBox.get(normS) ??
-                eBox.get(normS.toUpperCase());
-            if (directEntry is Map) {
-              final n = (directEntry['patientName'] ?? directEntry['name'] ?? directEntry['fullName'])?.toString().trim();
-              if (n != null && n.isNotEmpty && n.toLowerCase() != 'unknown' && n.toLowerCase() != 'unknown patient') {
-                resolvedPatientName = n;
-              }
-            }
-          }
-        } catch (_) {}
-      }
+      final directEntry = existingHiveEntry ?? LocalStorageService.getLocalEntry(widget.branchId, serialClean);
+      String resolvedPatientName = LocalStorageService.resolveFirstValidPatientName([
+        directEntry?['patientName'],
+        directEntry?['name'],
+        directEntry?['fullName'],
+        patientData['patientName'],
+        patientData['name'],
+        patientData['fullName'],
+      ]);
       if (resolvedPatientName.isEmpty) resolvedPatientName = 'Unknown Patient';
 
       final dateKey = CampSessionService.getDateKeyFromSerial(serialClean).isNotEmpty
           ? CampSessionService.getDateKeyFromSerial(serialClean)
           : (patientData['dateKey']?.toString() ?? LocalStorageService.getTodayDateKey());
+
+      final existingRx = (directEntry?['prescription'] is Map
+              ? Map<String, dynamic>.from(directEntry!['prescription'] as Map)
+              : null) ??
+          LocalStorageService.getLocalPrescription(
+            serialClean,
+            branchId: widget.branchId,
+            dateKey: dateKey,
+            cnic: patientCnic,
+            patientName: resolvedPatientName,
+          );
+      final int prevRevision = [
+        LocalStorageService.intOf(existingRx?['revision']),
+        LocalStorageService.intOf(existingRx?['prescriptionRevision']),
+        LocalStorageService.intOf(directEntry?['prescriptionRevision']),
+        LocalStorageService.intOf(directEntry?['revision']),
+      ].reduce((a, b) => a > b ? a : b);
+      final int nextRevision = prevRevision + 1;
+      final String? effectiveCampId = (directEntry?['campId'] ??
+              directEntry?['dispensaryId'] ??
+              patientData['campId'] ??
+              patientData['dispensaryId'] ??
+              CampSessionService.getActiveCamp(widget.branchId))
+          ?.toString();
 
       final medicineList = widget.prescriptions.map((m) {
         return {
@@ -4825,16 +4897,31 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       final labList = widget.labResults.map((l) => {'name': l['name']}).toList();
 
       final rawVitals = patientData['vitals'];
-      final vitalsMap = rawVitals is Map
-          ? Map<String, dynamic>.from(rawVitals)
-          : <String, dynamic>{
-              if (patientData['bp'] != null && patientData['bp'] != 'N/A') 'bp': patientData['bp'],
-              if (patientData['temp'] != null && patientData['temp'] != 'N/A') 'temp': patientData['temp'],
-              if (patientData['sugar'] != null && patientData['sugar'] != 'N/A') 'sugar': patientData['sugar'],
-              if (patientData['weight'] != null && patientData['weight'] != 'N/A') 'weight': patientData['weight'],
-            };
+      final topLevelVitals = <String, dynamic>{
+        if (patientData['bp'] != null && patientData['bp'] != 'N/A') 'bp': patientData['bp'],
+        if (patientData['temp'] != null && patientData['temp'] != 'N/A') 'temp': patientData['temp'],
+        if (patientData['sugar'] != null && patientData['sugar'] != 'N/A') 'sugar': patientData['sugar'],
+        if (patientData['weight'] != null && patientData['weight'] != 'N/A') 'weight': patientData['weight'],
+      };
+      final vitalsMap = LocalStorageService.mergeVitalsPreservingReceptionist(
+        rawVitals is Map ? rawVitals : topLevelVitals,
+        existingHiveEntry?['vitals'] ?? topLevelVitals,
+      );
 
+      final resolvedPatientId = LocalStorageService.resolveIndividualPatientId(patientData);
       final medicalData = <String, dynamic>{
+        'id':              serialClean,
+        'serial':          serialClean,
+        'patientId':       resolvedPatientId,
+        'patientCnic':     patientCnic,
+        'cnic':            patientCnic,
+        'branchId':        widget.branchId,
+        'dateKey':         dateKey,
+        'queueType':       queueType,
+        'campId':          effectiveCampId,
+        'dispensaryId':    effectiveCampId,
+        'revision':        nextRevision,
+        'prescriptionRevision': nextRevision,
         'complaint':       complaint,
         'condition':       complaint,
         'diagnosis':       diagnosis,
@@ -4860,7 +4947,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'serial':          serialClean,
         'patientCnic':     patientCnic,
         'cnic':            patientCnic,
-        'patientId':       LocalStorageService.resolveIndividualPatientId(patientData),
+        'patientId':       resolvedPatientId,
         'guardianCnic':    patientData['guardianCnic']?.toString(),
         // Lets peers link a no-CNIC patient's multi-day restriction to the family phone.
         'phone':           (patientData['phone'] ?? patientData['contactNumber'] ?? patientData['mobile'])?.toString(),
@@ -4879,6 +4966,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'extraCharge':     extraCharge,
         'completedAt':     nowIso,
         'updatedAt':       nowIso,
+        'revision':        nextRevision,
+        'prescriptionRevision': nextRevision,
         'status':          'completed',
         'queueType':       queueType,
         'createdAt':       nowIso,
@@ -4889,8 +4978,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         'prescribedBy':    doctorName,
         'updatedBy':       doctorName,
         'dispensaryTag':   patientData['dispensaryTag']?.toString(),
-        'dispensaryId':    patientData['dispensaryId']?.toString(),
-        'campId':          patientData['campId']?.toString(),
+        'dispensaryId':    effectiveCampId,
+        'campId':          effectiveCampId,
         'campName':        patientData['campName']?.toString(),
         'session':         patientData['session']?.toString() ?? CampSessionService.getCurrentSession(null, widget.branchId),
         // ── FIX: Mark as not yet dispensed so _buildReservedQuantities
@@ -4941,6 +5030,19 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
           matchingKeys.add(ck);
         }
       }
+      final suffixLower = '-$serialClean';
+      for (final k in entriesBox.keys) {
+        if (matchingKeys.contains(k)) continue;
+        final kLower = k.toString().toLowerCase().trim();
+        if (kLower == serialClean ||
+            (kLower.endsWith(suffixLower) &&
+                CampSessionService.areBranchesMatching(
+                  kLower.substring(0, kLower.length - suffixLower.length),
+                  normBranch,
+                ))) {
+          matchingKeys.add(k);
+        }
+      }
 
       if (matchingKeys.isEmpty) {
         matchingKeys.add(canonicalKey);
@@ -4952,15 +5054,69 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         final base = current != null
             ? Map<String, dynamic>.from(current as Map)
             : Map<String, dynamic>.from(patientData);
-
-        final curName = (base['patientName'] ?? base['name'])?.toString().trim();
-        if (resolvedPatientName != 'Unknown Patient' || curName == null || curName.isEmpty || curName.toLowerCase() == 'unknown' || curName.toLowerCase() == 'unknown patient') {
-          base['patientName'] = resolvedPatientName;
-          base['name'] = resolvedPatientName;
+        if (updated != null) {
+          for (final entry in updated.entries) {
+            final curVal = base[entry.key]?.toString().trim() ?? '';
+            if ((curVal.isEmpty || curVal.toLowerCase() == 'n/a' || curVal.toLowerCase() == 'unknown patient' || curVal.toLowerCase().startsWith('unknown_')) &&
+                entry.value != null) {
+              base[entry.key] = entry.value;
+            }
+          }
+          base['vitals'] = LocalStorageService.mergeVitalsPreservingReceptionist(
+            base['vitals'],
+            updated['vitals'],
+          );
         }
+
+        // ⚠️ Strict Receptionist Name & CNIC Immutability:
+        // Existing valid Receptionist patientName / cnic on `base` ALWAYS wins.
+        final authoritativeBaseName = LocalStorageService.resolveFirstValidPatientName([
+          base['patientName'],
+          base['name'],
+          base['fullName'],
+          resolvedPatientName,
+        ]);
+        if (authoritativeBaseName.isNotEmpty) {
+          base['patientName'] = authoritativeBaseName;
+          base['name'] = authoritativeBaseName;
+          resolvedPatientName = authoritativeBaseName;
+          medicalData['patientName'] = authoritativeBaseName;
+          medicalData['name'] = authoritativeBaseName;
+          fullPrescriptionData['patientName'] = authoritativeBaseName;
+          fullPrescriptionData['name'] = authoritativeBaseName;
+        }
+
+        final authoritativeBaseCnic = LocalStorageService.resolveFirstValidCnic([
+          base['patientCnic'],
+          base['cnic'],
+          base['guardianCnic'],
+          patientCnic,
+        ]);
+        if (authoritativeBaseCnic.isNotEmpty) {
+          base['patientCnic'] = authoritativeBaseCnic;
+          base['cnic'] = authoritativeBaseCnic;
+          patientCnic = authoritativeBaseCnic;
+          medicalData['patientCnic'] = authoritativeBaseCnic;
+          medicalData['cnic'] = authoritativeBaseCnic;
+          fullPrescriptionData['patientCnic'] = authoritativeBaseCnic;
+          fullPrescriptionData['cnic'] = authoritativeBaseCnic;
+        } else {
+          base['patientCnic'] ??= patientCnic;
+          base['cnic'] ??= patientCnic;
+        }
+
+        final mergedVitals = LocalStorageService.mergeVitalsPreservingReceptionist(
+          vitalsMap,
+          base['vitals'],
+        );
+        medicalData['vitals'] = mergedVitals;
+        fullPrescriptionData['vitals'] = mergedVitals;
 
         base['status']         = 'completed';
         base['completedAt']    = nowIso;
+        base['updatedAt']      = nowIso;
+        base['revision']       = nextRevision;
+        base['prescriptionRevision'] = nextRevision;
         base['prescription']   = medicalData;
         base['prescriptionId'] = serialClean;
         base['queueType']      = queueType;
@@ -4970,14 +5126,13 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         base['medicines']      = medicineList;
         base['prescriptions']  = medicineList;
         base['extraCharge']    = extraCharge;
-        base['vitals']         = vitalsMap;
+        base['vitals']         = mergedVitals;
         base['dispenseStatus'] ??= 'pending';
         base['dateKey']        ??= dateKey;
+        base.remove('lanPushSig');
         base['session']        ??= (patientData['session'] ?? CampSessionService.getCurrentSession(null, widget.branchId));
         base['branchId']       ??= widget.branchId;
         base['serial']         ??= serialClean;
-        base['patientCnic']    ??= patientCnic;
-        base['cnic']           ??= patientCnic;
         base['guardianCnic']   ??= patientData['guardianCnic']?.toString();
         base['patientAge']     ??= (patientData['age'] ?? patientData['patientAge'])?.toString();
         base['patientGender']  ??= (patientData['gender'] ?? patientData['patientGender'])?.toString();

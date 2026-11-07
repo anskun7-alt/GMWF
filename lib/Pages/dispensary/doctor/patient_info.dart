@@ -51,18 +51,11 @@ class PatientInfo extends StatelessWidget {
   static const Color _teal  = SoftPalette.teal600;
   static const Color _amber = SoftPalette.amber300;
 
-  /// Extract a clean token number (e.g. '#005' or '#002') from a full serial string
+  /// Extract a clean token number (e.g. '#005' or '#002') strictly within 001..999
   static String formatDisplayToken(String? serial) {
     if (serial == null || serial.trim().isEmpty) return '-';
-    final s = serial.trim();
-    final parts = s.split('-');
-    if (parts.isNotEmpty) {
-      final last = parts.last;
-      if (int.tryParse(last) != null) {
-        return '#$last';
-      }
-    }
-    return s;
+    final token = LocalStorageService.formatTokenDisplay(serial);
+    return token.isNotEmpty ? '#$token' : '-';
   }
 
   static VitalEvaluation evaluateBp(dynamic rawBp, bool isDark) {

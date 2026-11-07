@@ -21,6 +21,7 @@ import 'widgets/parent_report_card.dart';
 import 'madrassa_strings.dart';
 import 'utils/madrassa_local_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/firebase_session_guard.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/offline_auth_service.dart';
 import '../../services/image_upload_service.dart';
@@ -81,6 +82,11 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
   Future<void> _loadLanguage() async {
     try {
       await MadrassaLocalStorage.ensureBoxesOpen();
+      FirebaseSessionGuard.start();
+      final rawBranch = (widget.userData['branchId'] ?? '').toString().trim();
+      final normBranch = MadrassaLocalStorage.normalizeBranch(rawBranch);
+      final syncBranch = (normBranch.isEmpty || normBranch == 'all') ? 'gujrat' : normBranch;
+      SyncService().start(syncBranch);
       final saved = UserLanguageService.getLanguage();
       if (mounted) setState(() => _langCode = saved);
     } catch (_) {
@@ -121,11 +127,11 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
     if (ids.isEmpty) return [];
 
     // Auto-resolve branch if branchId is empty, 'all', or 'global'
-    String effectiveBranch = branchId.trim().toLowerCase();
+    String effectiveBranch = MadrassaLocalStorage.normalizeBranch(branchId);
     if (effectiveBranch.isEmpty || effectiveBranch == 'all' || effectiveBranch == 'global') {
       // 1. Check local Hive cached branches
       for (final b in LocalStorageService.getLocalBranchesList()) {
-        final bId = (b['id'] ?? '').toString().trim().toLowerCase();
+        final bId = MadrassaLocalStorage.normalizeBranch((b['id'] ?? '').toString());
         if (bId.isNotEmpty && bId != 'all' && bId != 'global') {
           for (final id in ids) {
             if (MadrassaLocalStorage.getStudentCached(bId, id) != null) {
@@ -145,11 +151,11 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
               .where(FieldPath.documentId, isEqualTo: ids.first)
               .limit(1)
               .get()
-              .timeout(const Duration(seconds: 4));
+              .timeout(const Duration(seconds: 6));
           if (groupSnap.docs.isNotEmpty) {
             final parentBranch = groupSnap.docs.first.reference.parent.parent?.id;
             if (parentBranch != null && parentBranch.isNotEmpty) {
-              effectiveBranch = parentBranch.toLowerCase();
+              effectiveBranch = MadrassaLocalStorage.normalizeBranch(parentBranch);
             }
           }
         } catch (_) {}
@@ -161,6 +167,8 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       }
     }
 
+    SyncService().start(effectiveBranch);
+
     final now = DateTime.now();
     final allStudentsCached = ids.every((id) => MadrassaLocalStorage.getStudentCached(effectiveBranch, id) != null);
 
@@ -168,12 +176,12 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
     if (!allStudentsCached) {
       try {
         await MadrassaLocalStorage.downloadStudentsForGuardian(effectiveBranch, ids)
-            .timeout(const Duration(seconds: 4), onTimeout: () {});
+            .timeout(const Duration(seconds: 8), onTimeout: () {});
         await Future.wait([
           MadrassaLocalStorage.downloadLogsForMonth(effectiveBranch, now.year, now.month),
           MadrassaLocalStorage.downloadHolidays(effectiveBranch),
           MadrassaLocalStorage.downloadConfig(effectiveBranch),
-        ]).timeout(const Duration(seconds: 4), onTimeout: () => []);
+        ]).timeout(const Duration(seconds: 8), onTimeout: () => []);
       } catch (_) {}
     } else {
       // Hive already has all linked student records.
@@ -187,19 +195,51 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
       }
     }
 
-    try {
-      // Fetch each student doc, checking candidate branches if not found under effectiveBranch
-      final snaps = await Future.wait(ids.map((id) async {
-        DocumentSnapshot doc = await FirebaseFirestore.instance
+    final candidateBranches = effectiveBranch == 'gujrat'
+        ? const ['karachi', 'saddar', 'jalalpurjattan', 'sialkot', 'rawalpindi', 'grt']
+        : const ['gujrat', 'karachi', 'saddar', 'jalalpurjattan', 'sialkot', 'rawalpindi', 'grt'];
+
+    Future<DocumentSnapshot?> fetchFromServer(String id) async {
+      try {
+        final serverDoc = await FirebaseFirestore.instance
             .collection('branches')
             .doc(effectiveBranch)
             .collection('madrassa_students')
             .doc(id)
-            .get(const GetOptions(source: Source.cache));
-        if (!doc.exists) {
-          final candidateBranches = effectiveBranch == 'gujrat'
-              ? const ['karachi', 'saddar', 'jalalpurjattan']
-              : const ['gujrat', 'saddar', 'jalalpurjattan'];
+            .get()
+            .timeout(const Duration(seconds: 8));
+        if (serverDoc.exists) return serverDoc;
+      } catch (_) {}
+      for (final altBranch in candidateBranches) {
+        try {
+          final altDoc = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(altBranch)
+              .collection('madrassa_students')
+              .doc(id)
+              .get()
+              .timeout(const Duration(seconds: 5));
+          if (altDoc.exists) return altDoc;
+        } catch (_) {}
+      }
+      return null;
+    }
+
+    try {
+      // Fetch each student doc from cache first, falling back to server if not in cache!
+      final snaps = await Future.wait(ids.map((id) async {
+        DocumentSnapshot? doc;
+        try {
+          final cachedDoc = await FirebaseFirestore.instance
+              .collection('branches')
+              .doc(effectiveBranch)
+              .collection('madrassa_students')
+              .doc(id)
+              .get(const GetOptions(source: Source.cache));
+          if (cachedDoc.exists) doc = cachedDoc;
+        } catch (_) {}
+
+        if (doc == null || !doc.exists) {
           for (final altBranch in candidateBranches) {
             try {
               final altDoc = await FirebaseFirestore.instance
@@ -215,40 +255,30 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
             } catch (_) {}
           }
         }
-        return doc;
+
+        if (doc == null || !doc.exists) {
+          final serverDoc = await fetchFromServer(id);
+          if (serverDoc != null) doc = serverDoc;
+        }
+
+        return doc ??
+            await FirebaseFirestore.instance
+                .collection('branches')
+                .doc(effectiveBranch)
+                .collection('madrassa_students')
+                .doc(id)
+                .get();
       }));
       return snaps;
     } catch (e) {
       debugPrint('[MadrassaGuardianScreen] Firestore cache fetch fallback: $e');
       try {
-        return await Future.wait(ids.map((id) async {
-          DocumentSnapshot doc = await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(effectiveBranch)
-              .collection('madrassa_students')
-              .doc(id)
-              .get();
-          if (!doc.exists) {
-            final candidateBranches = effectiveBranch == 'gujrat'
-                ? const ['karachi', 'saddar']
-                : const ['gujrat', 'saddar'];
-            for (final altBranch in candidateBranches) {
-              try {
-                final altDoc = await FirebaseFirestore.instance
-                    .collection('branches')
-                    .doc(altBranch)
-                    .collection('madrassa_students')
-                    .doc(id)
-                    .get();
-                if (altDoc.exists) {
-                  doc = altDoc;
-                  break;
-                }
-              } catch (_) {}
-            }
-          }
-          return doc;
-        }));
+        final snaps = <DocumentSnapshot>[];
+        for (final id in ids) {
+          final doc = await fetchFromServer(id);
+          if (doc != null) snaps.add(doc);
+        }
+        return snaps;
       } catch (_) {
         return [];
       }
@@ -757,9 +787,11 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
               if (!selectedDoc.exists) return _EmptyState(onLogout: _logout);
               final studentData = selectedDoc.data() as Map<String, dynamic>;
 
-              final studentBranch = (studentData['branchId']?.toString().trim().isNotEmpty == true)
+              final rawStudentBranch = (studentData['branchId']?.toString().trim().isNotEmpty == true)
                   ? studentData['branchId'].toString().trim()
                   : (branchId.isNotEmpty ? branchId : 'gujrat');
+              final normStudentBranch = MadrassaLocalStorage.normalizeBranch(rawStudentBranch);
+              final studentBranch = (normStudentBranch.isEmpty || normStudentBranch == 'all') ? 'gujrat' : normStudentBranch;
 
               return RefreshIndicator(
                 onRefresh: _refreshData,

@@ -35,6 +35,7 @@
 //               AP isolation vs server-not-running issues.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' as io;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -44,6 +45,8 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
 import '../config/constants.dart';
+import '../services/camp_session_service.dart';
+import '../services/local_storage_service.dart';
 import 'lan_discovery.dart';
 import 'realtime_manager.dart';
 
@@ -185,27 +188,30 @@ class ConnectionManager {
       });
     };
 
-    // RealtimeManager also retries the last server on its own. When that succeeds outside a
-    // discovery run, nothing here used to hear of it: desk screens kept showing "Server not
-    // found" and the reconnect listeners (which re-push this PC's pending work) never ran.
+    // RealtimeManager also retries the last server on its own. When that succeeds (even while
+    // LanDiscovery is scanning in the background), immediately mark the link up and run
+    // reconnect listeners so pending offline work is pushed to the server right away.
     RealtimeManager().onConnected = (ip, port) {
-      if (!_running || _disposed || _discovering) return; // _connectTo handles its own success
+      if (!_running || _disposed || _inConnectTo) return; // _connectTo handles its own success
+      _stopPassiveBeaconWatch();
       _reconnectTimer?.cancel();
       _reconnectTimer = null;
       _reconnectAttempts = 0;
+      _saveServer(ip, port);
       _onLinkUp(ip, port);
     };
 
     debugPrint('[ConnectionManager] Starting: role=$_role branch=$_branchId'
         '${AppNetwork.useDedicatedServer ? " [dedicated: ${AppNetwork.dedicatedServerIp}]" : ""}');
 
-    if (isConnected && _current.ip != null) {
-      debugPrint('[ConnectionManager] Already connected to ${_current.ip}:${_current.port} — updating identity without rediscovery');
+    final activeIp = _current.ip ?? RealtimeManager().serverIp;
+    if (isConnected && activeIp != null) {
+      debugPrint('[ConnectionManager] Already connected to $activeIp:${_current.port ?? RealtimeManager().port} — updating identity without rediscovery');
       await RealtimeManager().initialize(
         role: _role!,
         branchId: _branchId!,
-        serverIp: _current.ip!,
-        port: _current.port ?? AppNetwork.websocketPort,
+        serverIp: activeIp,
+        port: _current.port ?? RealtimeManager().port,
         username: _username,
       );
       _emit(status);
@@ -217,10 +223,80 @@ class ConnectionManager {
 
   // ── Discovery + connect loop ───────────────────────────────────────────────
   bool _discovering = false;
+  bool _inConnectTo = false;
+  io.RawDatagramSocket? _passiveBeaconSocket;
+
+  void _stopPassiveBeaconWatch() {
+    try {
+      _passiveBeaconSocket?.close();
+    } catch (_) {}
+    _passiveBeaconSocket = null;
+  }
+
+  /// Listens for the server's 5s UDP broadcast while sitting in [_scheduleReconnect] backoff.
+  /// When the server is the last PC to open, desks wake up and connect within <1 second of
+  /// the server starting instead of waiting out the backoff + subnet scan cycle.
+  Future<void> _startPassiveBeaconWatch() async {
+    if (kIsWeb || !_running || _disposed || _discovering || RealtimeManager().hasServerLink) return;
+    if (_passiveBeaconSocket != null) return;
+    try {
+      final socket = await io.RawDatagramSocket.bind(
+        io.InternetAddress.anyIPv4,
+        AppNetwork.udpBroadcastPort,
+        reuseAddress: true,
+      );
+      if (!_running || _disposed || _discovering || RealtimeManager().hasServerLink) {
+        socket.close();
+        return;
+      }
+      _passiveBeaconSocket = socket;
+      socket.listen((event) {
+        if (event != io.RawSocketEvent.read) return;
+        final dg = socket.receive();
+        if (dg == null) return;
+        final msg = utf8.decode(dg.data, allowMalformed: true).trim();
+        if (!msg.startsWith(AppNetwork.udpMessagePrefix)) return;
+        final payload = msg.substring(AppNetwork.udpMessagePrefix.length);
+        final parts = payload.split(':');
+        if (parts.length < 2) return;
+        final ip = parts[0].trim();
+        final port = int.tryParse(parts[1].trim()) ?? AppNetwork.websocketPort;
+        final beaconBranch = parts.length >= 3
+            ? LocalStorageService.sanitizeBranchId(parts[2], fallback: '')
+            : '';
+        final myBranch = LocalStorageService.sanitizeBranchId(_branchId, fallback: '');
+        if (beaconBranch.isNotEmpty &&
+            myBranch.isNotEmpty &&
+            beaconBranch != myBranch &&
+            !CampSessionService.areBranchesMatching(beaconBranch, myBranch)) {
+          return;
+        }
+        if (ip.isEmpty) return;
+        // Verify reachability so a stale IP from a DHCP renewal does not hijack our connection
+        unawaited(LanDiscovery.isReachable(ip, port).then((reachable) {
+          if (!reachable || !_running || _disposed || RealtimeManager().hasServerLink) return;
+          debugPrint('[ConnectionManager] ⚡ Passive UDP beacon heard & verified from $ip:$port — connecting immediately');
+          _stopPassiveBeaconWatch();
+          _reconnectTimer?.cancel();
+          _reconnectTimer = null;
+          _reconnectAttempts = 0;
+          _saveServer(ip, port);
+          unawaited(_tryConnect());
+        }));
+      }, onError: (_) {
+        _stopPassiveBeaconWatch();
+      }, onDone: () {
+        _passiveBeaconSocket = null;
+      });
+    } catch (_) {
+      // Port 53280 may already be bound on the server machine itself; safe to ignore.
+    }
+  }
 
   Future<void> _tryConnect() async {
     if (!_running || _disposed) return;
     if (_discovering) return;
+    _stopPassiveBeaconWatch();
     _discovering = true;
     try {
       await _tryConnectInner();
@@ -454,6 +530,7 @@ class ConnectionManager {
   // ── Connect to specific IP ─────────────────────────────────────────────────
   Future<bool> _connectTo(String ip, int port) async {
     if (!_running || _disposed) return false;
+    _inConnectTo = true;
 
     _emit(ConnectionStatus(
       state: LanConnectionState.connecting,
@@ -471,7 +548,7 @@ class ConnectionManager {
         username: _username,
       );
 
-      final confirmed = await _waitForIdentified(timeoutSeconds: 6);
+      final confirmed = await _waitForIdentified(timeoutSeconds: 15);
 
       if (!confirmed) {
         debugPrint('[ConnectionManager] No identified response from $ip');
@@ -492,6 +569,8 @@ class ConnectionManager {
         message: 'Connection failed: $e',
       ));
       return false;
+    } finally {
+      _inConnectTo = false;
     }
   }
 
@@ -524,24 +603,34 @@ class ConnectionManager {
     if (RealtimeManager().isServerIdentified) return true;
 
     final completer = Completer<bool>();
+    void identifiedListener() {
+      if (RealtimeManager().isServerIdentified && !completer.isCompleted) {
+        completer.complete(true);
+      }
+    }
+
+    RealtimeManager().addIdentifiedListener(identifiedListener);
 
     late StreamSubscription sub;
     sub = RealtimeManager().messageStream.listen((event) {
       if ((event['event_type'] == 'identified' || RealtimeManager().isServerIdentified) && !completer.isCompleted) {
-        sub.cancel();
         completer.complete(true);
       }
     });
 
     Timer(Duration(seconds: timeoutSeconds), () {
       if (!completer.isCompleted) {
-        sub.cancel();
         // Only return true if actively identified and confirmed by server
         completer.complete(RealtimeManager().isServerIdentified);
       }
     });
 
-    return completer.future;
+    try {
+      return await completer.future;
+    } finally {
+      RealtimeManager().removeIdentifiedListener(identifiedListener);
+      sub.cancel();
+    }
   }
 
   bool get _isFirebaseReady {
@@ -594,6 +683,7 @@ class ConnectionManager {
     if (_reconnectAttempts <= 5 || _reconnectAttempts % 5 == 0) {
       debugPrint('[ConnectionManager] Reconnect in ${delay}s (attempt $_reconnectAttempts)');
     }
+    _startPassiveBeaconWatch();
     // Cleared when it fires: the heartbeat's "nothing scheduled" check relies on it.
     _reconnectTimer = Timer(Duration(seconds: delay), () {
       _reconnectTimer = null;

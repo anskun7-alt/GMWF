@@ -409,7 +409,11 @@ class _LanServerConfigDialogState extends State<LanServerConfigDialog> {
                   const SizedBox(height: 22),
 
                   // Actions
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 10,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       TextButton.icon(
                         onPressed: _openOrCopyLog,
@@ -419,7 +423,6 @@ class _LanServerConfigDialogState extends State<LanServerConfigDialog> {
                           foregroundColor: context.adapt(SoftPalette.gray550),
                         ),
                       ),
-                      const SizedBox(width: 4),
                       TextButton.icon(
                         onPressed: _runNetworkPressureTest,
                         icon: Icon(Icons.speed_rounded, size: 16, color: context.adapt(SoftPalette.emerald600)),
@@ -431,12 +434,10 @@ class _LanServerConfigDialogState extends State<LanServerConfigDialog> {
                           foregroundColor: context.adapt(SoftPalette.emerald600),
                         ),
                       ),
-                      const Spacer(),
                       TextButton(
                         onPressed: () => Navigator.of(context).pop(),
                         child: const Text('Close'),
                       ),
-                      const SizedBox(width: 8),
                       OutlinedButton.icon(
                         onPressed: _isReconnecting ? null : _handleReconnect,
                         icon: _isReconnecting

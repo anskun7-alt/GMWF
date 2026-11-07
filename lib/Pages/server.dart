@@ -85,6 +85,15 @@ import '../services/offline_auth_service.dart';
 import '../services/hourly_dispensary_sync.dart';
 import '../realtime/realtime_manager.dart';
 import '../realtime/realtime_router.dart' show RealtimeRouter;
+import '../widgets/nexus_server_dashboard/nexus_colors.dart';
+import '../widgets/nexus_server_dashboard/nexus_performance_chart.dart';
+import '../widgets/nexus_server_dashboard/nexus_devices_table.dart';
+import '../widgets/nexus_server_dashboard/nexus_top_header.dart';
+import '../widgets/nexus_server_dashboard/nexus_sidebar.dart';
+import '../widgets/nexus_server_dashboard/nexus_views.dart';
+import '../widgets/nexus_server_dashboard/nexus_more_views.dart';
+import '../widgets/nexus_server_dashboard/server_theme.dart';
+import '../widgets/nexus_server_dashboard/server_theme_selector.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Connected client model
@@ -220,6 +229,7 @@ class _ServerDashboardWithSyncState
   StreamSubscription? _healthSub;
   // [epoch ms, total LAN messages (in + out), total LAN bytes (in + out)] sampled every 5 s.
   final List<List<num>> _lanSamples = [];
+  final List<NexusTelemetryPoint> _telemetryHistory = [];
   bool _isFirewallBannerDismissed = false;
   bool _isFirewallBannerExpanded = false;
 
@@ -235,6 +245,72 @@ class _ServerDashboardWithSyncState
   SyncQueueStats _queueHealthStats = const SyncQueueStats();
   Timer? _queueStatsTimer;
   final ScrollController _runningScrollController = ScrollController();
+
+  String _resolveEffectiveBranchId() {
+    String candidate = widget.branchId.trim().toLowerCase();
+    // 1. If connected clients on the LAN all belong to one branch (e.g. 'karachi') and
+    // widget.branchId was stale/mismatched, infer it from the active LAN clients.
+    final clientBranches = <String>{};
+    for (final c in _connectedClients.values) {
+      final cb = c.branchId.trim().toLowerCase();
+      if (cb.isNotEmpty && cb != 'all' && cb != 'unknown' && cb != 'default' && cb != 'global') {
+        clientBranches.add(CampSessionService.isKarachiFamily(cb) ? 'karachi' : cb);
+      }
+    }
+    if (clientBranches.length == 1) {
+      return clientBranches.first;
+    }
+    // 2. Check app_settings if healed during startup
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        final sel = (box.get('selected_branch') ?? box.get('current_branch'))?.toString().trim().toLowerCase();
+        if (sel != null && sel.isNotEmpty && sel != 'all' && sel != 'unknown') {
+          candidate = sel;
+        }
+      }
+    } catch (_) {}
+    if (CampSessionService.isKarachiFamily(candidate)) {
+      return 'karachi';
+    }
+    return candidate.isNotEmpty ? candidate : widget.branchId;
+  }
+
+  String _resolveBranchAndCampDisplay() {
+    final effBranch = _resolveEffectiveBranchId();
+    final branchTitle = LocalStorageService.getBranchName(effBranch);
+    if (!CampSessionService.hasCampsForBranch(effBranch)) {
+      return branchTitle;
+    }
+    // Resolve active camp from CampSessionService or from today's active tokens/connected clients
+    String? campId = CampSessionService.getActiveCamp(effBranch);
+    if (campId == null || campId.isEmpty || campId == 'all') {
+      for (final c in _connectedClients.values) {
+        final cb = c.branchId.trim().toLowerCase();
+        if (cb.isNotEmpty && cb != effBranch && CampSessionService.areBranchesMatching(cb, effBranch)) {
+          campId = cb;
+          break;
+        }
+      }
+    }
+    if (campId != null && campId.isNotEmpty && campId != 'all') {
+      final campLabel = CampSessionService.getCampLabel(campId, effBranch);
+      if (campLabel.isNotEmpty && campLabel.toLowerCase() != branchTitle.toLowerCase()) {
+        return '$branchTitle — $campLabel';
+      }
+    }
+    final camps = CampSessionService.getCampsForBranch(effBranch, includeClosed: false);
+    if (camps.isNotEmpty) {
+      final names = camps
+          .map((c) => (c['name'] ?? c['label'] ?? c['id'] ?? '').toString().trim())
+          .where((n) => n.isNotEmpty)
+          .toList();
+      if (names.isNotEmpty) {
+        return '$branchTitle (${names.join(' / ')})';
+      }
+    }
+    return branchTitle;
+  }
 
   @override
   void initState() {
@@ -260,6 +336,31 @@ class _ServerDashboardWithSyncState
         LanServer.trafficBytesIn + LanServer.trafficBytesOut,
       ]);
       _lanSamples.removeWhere((s) => now - s[0] > 65000);
+
+      final snap = SystemMetricsService().currentSnapshot;
+      _telemetryHistory.add(NexusTelemetryPoint(
+        timestamp: DateTime.now(),
+        cpuPercent: snap.cpuPercent,
+        ramPercent: snap.ramPercent,
+      ));
+      if (_telemetryHistory.length > 50) {
+        _telemetryHistory.removeAt(0);
+      }
+
+      // Refresh lastActiveAt for all connected clients from the server's tracked activity
+      if (_server != null) {
+        final serverClients = _server!.getConnectedClients();
+        for (final sc in serverClients) {
+          final sId = sc['socketId']?.toString();
+          if (sId != null && _connectedClients.containsKey(sId)) {
+            final lastAct = sc['lastActive'] as DateTime?;
+            if (lastAct != null) {
+              _connectedClients[sId]!.lastActiveAt = lastAct;
+            }
+          }
+        }
+      }
+
       if (mounted) setState(() {});
     });
     _detectIp().then((_) {
@@ -326,8 +427,24 @@ class _ServerDashboardWithSyncState
     });
 
     SystemMetricsService().startMonitoring();
-    _metricsSubscription = SystemMetricsService().metricsStream.listen((_) {
-      if (mounted) setState(() {});
+    final initialSnap = SystemMetricsService().currentSnapshot;
+    _telemetryHistory.add(NexusTelemetryPoint(
+      timestamp: DateTime.now(),
+      cpuPercent: initialSnap.cpuPercent,
+      ramPercent: initialSnap.ramPercent,
+    ));
+    _metricsSubscription = SystemMetricsService().metricsStream.listen((snap) {
+      if (mounted) {
+        _telemetryHistory.add(NexusTelemetryPoint(
+          timestamp: snap.timestamp,
+          cpuPercent: snap.cpuPercent,
+          ramPercent: snap.ramPercent,
+        ));
+        if (_telemetryHistory.length > 50) {
+          _telemetryHistory.removeAt(0);
+        }
+        setState(() {});
+      }
     });
 
     _refreshQueueHealthStats();
@@ -451,9 +568,13 @@ class _ServerDashboardWithSyncState
       if (!Hive.isBoxOpen(LocalStorageService.syncBox)) {
         await Hive.openBox(LocalStorageService.syncBox);
       }
-      unawaited(LocalStorageService.purgePhantomUnknownTokens(widget.branchId));
-      unawaited(LocalStorageService.healAndRestorePatientCnics(widget.branchId));
-      unawaited(LocalStorageService.purgeBloatedSyncQueue());
+      // Non-blocking staggered sweeps to guarantee zero UI stall on startup
+      Future.delayed(const Duration(seconds: 4), () {
+        LocalStorageService.purgePhantomUnknownTokens(widget.branchId).ignore();
+      });
+      Future.delayed(const Duration(seconds: 8), () {
+        LocalStorageService.purgeBloatedSyncQueue().ignore();
+      });
     } catch (e) {
       debugPrint('Hive init error: $e');
     }
@@ -560,6 +681,13 @@ class _ServerDashboardWithSyncState
         setState(() => _connectedClients.remove(socketId));
         if (client != null) {
           _addLog('🔴 Disconnected: ${client.displayName}');
+        }
+      };
+
+      _server!.onClientActivity = (socketId) {
+        final client = _connectedClients[socketId];
+        if (client != null) {
+          client.lastActiveAt = DateTime.now();
         }
       };
 
@@ -726,8 +854,18 @@ class _ServerDashboardWithSyncState
     // This is only a fallback in case that socket failed to bind, so every 30 s (was 10 s):
     // each tick also looks up all subnets on the server's UI thread.
     _udpBroadcastTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (!_isRunning || _serverIp == null || _serverIp!.isEmpty) return;
+      if (!_isRunning) return;
       try {
+        final currentIp = await getPrimaryLanIp();
+        if (currentIp != null && currentIp.isNotEmpty && currentIp != _serverIp) {
+          if (mounted) {
+            setState(() => _serverIp = currentIp);
+          } else {
+            _serverIp = currentIp;
+          }
+          _server?.updateServerIp(currentIp);
+        }
+        if (_serverIp == null || _serverIp!.isEmpty) return;
         if (_serverUdpSocket == null) {
           _serverUdpSocket = await io.RawDatagramSocket.bind(io.InternetAddress.anyIPv4, 0);
           _serverUdpSocket?.broadcastEnabled = true;
@@ -1355,84 +1493,338 @@ class _ServerDashboardWithSyncState
     if (kIsWeb) return _buildWebUnsupportedMessage();
     if (!_isAuthenticated) return _buildNotAuthenticatedMessage();
 
-    return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
-      builder: (context, box, _) {
-        final isDark = box.get('is_dark_mode', defaultValue: false) == true;
+    final (breadcrumbSection, breadcrumbPage) = _getBreadcrumbs();
+    final snap = SystemMetricsService().currentSnapshot;
+    final staffCount = _connectedClients.values.map((c) => c.username).where((u) => u != null && u.isNotEmpty).toSet().length;
 
-        final scaffoldBg  = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBg      = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBorder  = isDark ? SoftPalette.emerald350.withValues(alpha: 0.3) : SoftPalette.slate150;
-        final titleText   = isDark ? SoftPalette.gray50 : SoftPalette.emerald700;
-        final subtitleText= isDark ? SoftPalette.slate350 : SoftPalette.slate600;
-
-        final themeData = isDark ? ThemeData.dark() : ThemeData.light();
-
-        return Theme(
-          data: themeData.copyWith(
-            scaffoldBackgroundColor: scaffoldBg,
-            cardTheme: CardThemeData(
-              color: cardBg,
-              elevation: isDark ? 0 : 2,
-              shadowColor: isDark ? SoftPalette.gray900A45 : SoftPalette.emerald550.withValues(alpha: 0.08),
-              shape: RoundedRectangleBorder(
-                borderRadius: const BorderRadius.all(Radius.circular(16)),
-                side: BorderSide(color: cardBorder),
+    return ListenableBuilder(
+      listenable: ServerThemeController.instance,
+      builder: (context, _) {
+        return Scaffold(
+          backgroundColor: NexusColors.mainBg,
+          body: Row(
+            children: [
+              // ── 1. Fixed Dark Sidebar (260px) ──────────────────────────────────
+              NexusSidebar(
+                selectedIndex: _selectedTab,
+                onSelectTab: (idx) => setState(() => _selectedTab = idx),
+                isRunning: _isRunning,
+                serverIp: _serverIp ?? '127.0.0.1',
+                port: AppNetwork.websocketPort,
+                connectedDevicesCount: _connectedClients.length,
+                activeUsersCount: staffCount > 0 ? staffCount : (_isRunning ? 1 : 0),
+                pendingEventsCount: _syncQueueSize,
+                cpuLoadPercent: snap.cpuPercent,
+                adminName: FirebaseAuth.instance.currentUser?.displayName ?? 'Admin',
+                onToggleServer: _isRunning ? _stopServer : _startServer,
+                onCatchUp: _isRunning ? _triggerCatchUpAndFixMismatch : null,
+                onCloudSync: _isOnline ? _manualSync : null,
+                isCatchingUp: _isCatchingUp,
+                isSyncing: _isManualSyncing,
               ),
-            ),
-          ),
-          child: Scaffold(
-            backgroundColor: scaffoldBg,
-            body: Row(
-              children: [
-                // ── 1. Dedicated Server Control Sidebar (Desktop First) ───────────────
-                _buildServerSidebar(isDark),
 
-                // ── 2. Main Workspace & Views ─────────────────────────────────────────
-                Expanded(
-                  child: Column(
-                    children: [
-                      // Top Telemetry Header Bar
-                      _buildServerTopHeader(isDark),
+              // ── 2. Main Content Canvas ──────────────────────────────────────────
+              Expanded(
+                child: Column(
+                  children: [
+                    // Top Navigation Bar
+                    NexusTopHeader(
+                      breadcrumbSection: breadcrumbSection,
+                      breadcrumbPage: breadcrumbPage,
+                      isRunning: _isRunning,
+                      isOnline: _isOnline,
+                      syncedToday: _syncedToday,
+                      queueSize: _syncQueueSize,
+                      isCatchingUp: _isCatchingUp,
+                      isSyncing: _isManualSyncing,
+                      onRefresh: () {
+                        _manualSync();
+                        SystemMetricsService().startMonitoring();
+                        setState(() {});
+                      },
+                      onCatchUp: _isRunning ? _triggerCatchUpAndFixMismatch : null,
+                      onCloudSync: _isOnline ? _manualSync : null,
+                      adminName: FirebaseAuth.instance.currentUser?.displayName ?? 'Admin',
+                      branchDisplay: _resolveBranchAndCampDisplay(),
+                    ),
 
-                      // Content Body
-                      Expanded(
-                        child: Container(
-                          decoration: BoxDecoration(color: scaffoldBg),
-                          child: LazyIndexedStack(
-                            index: _selectedTab,
-                            children: [
-                              !_isRunning ? _buildStoppedView(isDark) : _buildRunningView(isDark),
-                              MultiServerControlWidget(branchId: widget.branchId, onTriggerSync: _manualSync),
-                              DepartmentActivityWidget(branchId: widget.branchId),
-                              SingleChildScrollView(
-                                padding: const EdgeInsets.all(20),
-                                child: const LanHardwareStatusWidget(),
-                              ),
-                              _selectedTab == 4
-                                  ? BiometricDeviceManagerPage(
-                                      branchId: widget.branchId,
-                                      onBack: () => setState(() => _selectedTab = 0),
-                                    )
-                                  : const SizedBox.shrink(),
-                              _selectedTab == 5
-                                  ? PythonTerminalScreen(
-                                      onBack: () => setState(() => _selectedTab = 0),
-                                    )
-                                  : const SizedBox.shrink(),
-                              ServerDataViewer(branchId: widget.branchId),
-                            ],
-                          ),
+                    // Content View for Selected Navigation Tab (Truly Lazy Initialized)
+                    Expanded(
+                      child: Container(
+                        color: NexusColors.mainBg,
+                        child: LazyIndexedStack(
+                          index: _selectedTab,
+                          children: [
+                            _buildNexusOverviewView(), // Tab 0: Overview
+                            DepartmentActivityWidget(branchId: widget.branchId), // Tab 1: Department Activity
+                            _buildNexusDevicesView(),  // Tab 2: Connected Devices
+                            _buildNexusUsersView(),    // Tab 3: Users & Sessions
+                            BiometricDeviceManagerPage( // Tab 4: Biometrics
+                              branchId: widget.branchId,
+                              isEmbedded: true,
+                              onBack: null,
+                            ),
+                            PythonTerminalScreen(      // Tab 5: Python Sync Engine
+                              isEmbedded: true,
+                              onBack: null,
+                            ),
+                            _buildNexusResourcesView(),// Tab 6: Resource Monitoring
+                            _buildNexusLogsView(),     // Tab 7: System Logs
+                            _buildNexusNetworkView(),  // Tab 8: Network & Interfaces
+                            MultiServerControlWidget(  // Tab 9: Multi-Server Mesh
+                              branchId: widget.branchId,
+                              onTriggerSync: _manualSync,
+                            ),
+                            ServerDataViewer(branchId: widget.branchId, isEmbedded: true), // Tab 10: Data Vault
+                            _buildNexusSettingsView(), // Tab 11: Settings & Firewall
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
+    );
+  }
+
+  // ── Nexus Dashboard View Helpers ───────────────────────────────────────────
+  List<NexusDeviceItem> _buildNexusDeviceItems() {
+    return _connectedClients.values.map((c) {
+      return NexusDeviceItem(
+        id: c.socketId,
+        name: c.username?.isNotEmpty == true ? c.username! : c.displayName,
+        role: c.role,
+        ipAddress: c.ipAddress,
+        osName: c.deviceOs,
+        appVersion: c.appVersion,
+        lastActive: c.lastActiveAt,
+        messagesCount: c.messagesCount,
+      );
+    }).toList();
+  }
+
+  (String, String) _getBreadcrumbs() {
+    return switch (_selectedTab) {
+      0 => ('Workspace', 'Overview'),
+      1 => ('Workspace', 'Department Activity'),
+      2 => ('Workspace', 'Connected Devices'),
+      3 => ('Workspace', 'Users & Sessions'),
+      4 => ('Engines & Hardware', 'Biometric Devices'),
+      5 => ('Engines & Hardware', 'Python Sync Engine'),
+      6 => ('Observability', 'Resource Monitoring'),
+      7 => ('Observability', 'System Logs'),
+      8 => ('Observability', 'Network & Interfaces'),
+      9 => ('Storage & Clustering', 'Multi-Server Mesh'),
+      10 => ('Storage & Clustering', 'Data Vault'),
+      11 => ('System', 'Settings & Firewall'),
+      _ => ('Workspace', 'Overview'),
+    };
+  }
+
+  void _openStressTestDirectly() {
+    final server = _server;
+    if (!_isRunning || server == null) {
+      AppToast.showSnackBar(
+        context,
+        const SnackBar(content: Text('Launch the LAN server first to run the socket pressure benchmark.')),
+      );
+      return;
+    }
+    final engine = StressTestEngine(server: server, cloudQueueSize: () => _syncQueueSize);
+    StressTestDialog.show(context, engine, deviceCount: server.stressClientSnapshot().length);
+  }
+
+  Future<void> _runDatabaseRepairSuite() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: NexusColors.cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.healing_rounded, color: NexusColors.success, size: 24),
+            const SizedBox(width: 10),
+            Text(
+              'Database Repair & Deduplication',
+              style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 17, color: NexusColors.textMain),
+            ),
+          ],
+        ),
+        content: Text(
+          'This will execute the following automated maintenance repairs:\n\n'
+          '• Deduplicate & purge bloated sync queue items\n'
+          '• Flatten nested prescription records\n'
+          '• Heal and restore missing patient CNICs & remove phantom tokens\n'
+          '• Compact local Hive database caches on disk\n\n'
+          'All operations run safely in the background with zero data loss.',
+          style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Cancel', style: GoogleFonts.inter(color: NexusColors.textSecondary)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.check_circle_outline_rounded, size: 16),
+            label: Text('Run Repairs Now', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: NexusColors.primary,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      AppToast.showSnackBar(context, const SnackBar(content: Text('⏳ Running database repair suite in background...'), duration: Duration(seconds: 2)));
+      final purged = await LocalStorageService.purgeBloatedSyncQueue(force: true);
+      final flattened = await LocalStorageService.healNestedPrescriptions();
+      final healed = await LocalStorageService.healAndRestorePatientCnics(widget.branchId, true);
+      await LocalStorageService.compactBloatedBoxes();
+      if (mounted) {
+        setState(() {
+          _syncQueueSize = Hive.isBoxOpen(LocalStorageService.syncBox) ? Hive.box(LocalStorageService.syncBox).length : 0;
+        });
+        AppToast.showSnackBar(
+          context,
+          SnackBar(
+            backgroundColor: NexusColors.success,
+            content: Text('✅ Repairs complete! Purged $purged items, flattened $flattened prescriptions, healed $healed CNICs.'),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildNexusOverviewView() {
+    final snap = SystemMetricsService().currentSnapshot;
+    final devices = _buildNexusDeviceItems();
+    final onlineCount = devices.where((d) => DateTime.now().difference(d.lastActive).inMinutes < 2).length;
+    final staffUsersCount = _connectedClients.values.map((c) => c.username).where((u) => u != null && u.isNotEmpty).toSet().length;
+    final showFirewall = !kIsWeb && io.Platform.isWindows && !_isFirewallBannerDismissed;
+
+    return NexusOverviewView(
+      totalDevices: devices.length,
+      onlineDevices: onlineCount,
+      activeUsers: staffUsersCount > 0 ? staffUsersCount : (_isRunning ? 1 : 0),
+      branchDisplay: _resolveBranchAndCampDisplay(),
+      cpuPercent: snap.cpuPercent,
+      cpuKnown: snap.cpuKnown,
+      cpuStatus: snap.cpuStatus,
+      ramPercent: snap.ramPercent,
+      ramKnown: snap.ramKnown,
+      usedRamGb: snap.usedRamGb,
+      totalRamGb: snap.totalRamGb,
+      appProcessRamMb: snap.appProcessRamMb,
+      diskPercent: snap.diskPercent,
+      diskKnown: snap.diskKnown,
+      usedDiskGb: snap.usedDiskGb,
+      totalDiskGb: snap.totalDiskGb,
+      diskDrive: snap.diskDrive,
+      lanThroughput: _lanStats().text,
+      telemetryHistory: _telemetryHistory,
+      devices: devices,
+      rawLogs: _activityLog,
+      firewallMissing: showFirewall,
+      onFixFirewall: _openFirewallPort,
+      onTriggerCatchUp: _manualSync,
+      onRepairDatabase: _runDatabaseRepairSuite,
+      onStressTest: _openStressTestDirectly,
+      onOpenQueueDialog: _showQueueManagementDialog,
+      queuedSyncCount: _syncQueueSize,
+      onRefresh: () {
+        _manualSync();
+        SystemMetricsService().startMonitoring();
+        setState(() {});
+      },
+      onViewAllDevices: () => setState(() => _selectedTab = 2),
+      onViewAllLogs: () => setState(() => _selectedTab = 7),
+    );
+  }
+
+  Widget _buildNexusDevicesView() {
+    final devices = _buildNexusDeviceItems();
+    return NexusDevicesView(
+      devices: devices,
+      hardwareStatusWidget: const LanHardwareStatusWidget(),
+    );
+  }
+
+  Widget _buildNexusUsersView() {
+    final devices = _buildNexusDeviceItems();
+    return NexusUsersView(
+      devices: devices,
+      departmentActivityWidget: DepartmentActivityWidget(branchId: widget.branchId),
+      branchDisplay: _resolveBranchAndCampDisplay(),
+    );
+  }
+
+  Widget _buildNexusResourcesView() {
+    final snap = SystemMetricsService().currentSnapshot;
+    return NexusResourcesView(
+      cpuPercent: snap.cpuPercent,
+      cpuKnown: snap.cpuKnown,
+      cpuStatus: snap.cpuStatus,
+      ramPercent: snap.ramPercent,
+      ramKnown: snap.ramKnown,
+      usedRamGb: snap.usedRamGb,
+      totalRamGb: snap.totalRamGb,
+      appProcessRamMb: snap.appProcessRamMb,
+      diskPercent: snap.diskPercent,
+      diskKnown: snap.diskKnown,
+      usedDiskGb: snap.usedDiskGb,
+      totalDiskGb: snap.totalDiskGb,
+      diskDrive: snap.diskDrive,
+      lanThroughput: _lanStats().text,
+    );
+  }
+
+  Widget _buildNexusLogsView() {
+    return NexusLogsView(
+      rawLogs: _activityLog,
+      onClearLogs: () {
+        setState(() => _activityLog.clear());
+      },
+    );
+  }
+
+  Widget _buildNexusNetworkView() {
+    final showFirewall = !kIsWeb && io.Platform.isWindows && !_isFirewallBannerDismissed;
+    return NexusNetworkView(
+      serverIp: _serverIp ?? '127.0.0.1',
+      port: AppNetwork.websocketPort,
+      lanThroughput: _lanStats().text,
+      connectedClientsCount: _connectedClients.length,
+      otherServers: _otherServers,
+      firewallMissing: showFirewall,
+      onFixFirewall: _openFirewallPort,
+    );
+  }
+
+  Widget _buildNexusSettingsView() {
+    return NexusSettingsView(
+      multiServerControl: MultiServerControlWidget(
+        branchId: widget.branchId,
+        onTriggerSync: _manualSync,
+      ),
+      biometricDeviceManager: BiometricDeviceManagerPage(
+        branchId: widget.branchId,
+        isEmbedded: true,
+        onBack: null,
+      ),
+      pythonTerminal: PythonTerminalScreen(
+        isEmbedded: true,
+        onBack: null,
+      ),
+      dataVaultViewer: ServerDataViewer(branchId: widget.branchId, isEmbedded: true),
     );
   }
 
@@ -1918,7 +2310,7 @@ class _ServerDashboardWithSyncState
                             border: Border.all(color: borderColor),
                           ),
                           child: Text(
-                            'BRANCH: ${widget.branchId.toUpperCase()}',
+                            'BRANCH: ${_resolveBranchAndCampDisplay().toUpperCase()}',
                             style: GoogleFonts.inter(
                               fontSize: 10,
                               fontWeight: FontWeight.bold,
@@ -2319,7 +2711,7 @@ class _ServerDashboardWithSyncState
                 isDark: isDark,
                 isRunning: _isRunning,
                 hasInternet: _isOnline,
-                branchName: LocalStorageService.getBranchName(widget.branchId),
+                branchName: _resolveBranchAndCampDisplay(),
                 address: '${_serverIp ?? "—"}:${AppNetwork.websocketPort}',
                 startedAt: _startTime,
                 lastCloudSync: _lastSyncTime,
@@ -5155,6 +5547,7 @@ class ServerSyncManager {
   }
 
   final Map<String, Future<void>> _tokenLocks = {};
+  static const Duration _tokenLockWait = Duration(seconds: 15);
 
   String? _tokenSerialOf(String eventType, Map<String, dynamic> message) {
     if (!_tokenChangeEvents.contains(eventType)) return null;
@@ -5171,7 +5564,14 @@ class ServerSyncManager {
   /// passed to this caller only; the queue keeps going).
   Future<void> _withTokenLock(String serial, Future<void> Function() action) {
     final previous = _tokenLocks[serial] ?? Future<void>.value();
-    final run = previous.catchError((Object _) {}).then((_) => action());
+    // Never wait forever on an earlier action for this token: one hung save used to block
+    // every later entry/prescription/dispense of the same token (and its ACKs) for good.
+    final run = previous
+        .timeout(_tokenLockWait, onTimeout: () {
+          debugPrint('[SSM] ⚠️ Token lock for $serial waited >${_tokenLockWait.inSeconds}s — continuing');
+        })
+        .catchError((Object _) {})
+        .then((_) => action());
     final tail = run.catchError((Object _) {});
     _tokenLocks[serial] = tail;
     tail.whenComplete(() {
@@ -5209,7 +5609,10 @@ class ServerSyncManager {
             final currentLock = _serialLocks[lockKey] ?? Future.value();
             Object? saveError;
             late final Future<void> nextLock;
-            nextLock = currentLock.then((_) async {
+            nextLock = currentLock
+                .timeout(_tokenLockWait, onTimeout: () {})
+                .catchError((Object _) {})
+                .then((_) async {
               await LocalStorageService.saveEntryLocal(msgBranch, serial, data);
             }).catchError((e) {
               debugPrint('[SSM] Error in serial write lock for $lockKey: $e');
@@ -5232,16 +5635,11 @@ class ServerSyncManager {
                 final prefix = upperSer.substring(0, lastDash);
                 final seqStr = upperSer.substring(lastDash + 1);
                 final seq = int.tryParse(seqStr);
-                if (seq != null && seq > 1 && seq < 9999) {
-                  final padWidth = seqStr.length < 3 ? 3 : seqStr.length;
+                if (seq != null && seq > 1 && seq <= 999) {
+                  const padWidth = 3;
                   final now = DateTime.now();
                   final missingSerials = <String>[];
-                  // Only look inside this token's own number block (shared 1..999, or a desk's
-                  // offline block N*1000+1..) and only a short way back: offline tokens 1001+
-                  // made this loop probe ~1000 non-existent serials (each a full box scan).
-                  final blockStart = (seq ~/ LocalStorageService.offlineBandSize) *
-                          LocalStorageService.offlineBandSize + 1;
-                  final from = (seq - _gapLookBack) > blockStart ? seq - _gapLookBack : blockStart;
+                  final from = (seq - _gapLookBack) > 1 ? seq - _gapLookBack : 1;
                   for (int i = from; i < seq; i++) {
                     final checkSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
                     final lastReq = _lastGapRequestedAt[checkSerial];
@@ -6239,12 +6637,15 @@ class ServerSyncManager {
       if (seen) return false;
       final sent = sentAt[serial];
       if (sent == null) return true;
-      // Back off per token: 6 s, 12, 24, 48 … up to 5 min. A token a desk never confirms
+      // Back off per token: 6 s, 12, 24, 48, then every 60 s. A token a desk never confirms
       // (fails to apply, other camp, old build) used to be re-sent as 3 frames every 6 s
-      // forever — a steady LAN flood that grew with every such token.
+      // forever — a steady LAN flood. The cap was 5 min, which left a doctor whose desk was
+      // briefly busy (apply timed out) waiting minutes for a token; 60 s keeps the flood away
+      // while a missed token still shows up within a minute.
       final n = sendCount[serial] ?? 1;
       final wait = _resendUnackedAfter * (1 << (n - 1).clamp(0, 6));
-      final capped = wait > const Duration(minutes: 5) ? const Duration(minutes: 5) : wait;
+      const maxWait = Duration(seconds: 60);
+      final capped = wait > maxWait ? maxWait : wait;
       return now.difference(sent) >= capped;
     }).toList();
     _unconfirmedSerials[socketId] = unconfirmed;
@@ -7724,6 +8125,33 @@ class ServerSyncManager {
     }
   }
 
+  Future<void> _runBackgroundSweep({bool force = false}) async {
+    try {
+      await Future.delayed(const Duration(milliseconds: 100));
+      await LocalStorageService.purgeStressTestLeftovers();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await LocalStorageService.healLegacyHistoricalData();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingEntries();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingDonations();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingEmployees();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingAttendance();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingPatients();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingMadrassaStudents();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await _enqueueMissingMadrassaLogs();
+      await Future.delayed(const Duration(milliseconds: 30));
+      await LocalStorageService.pushLocalUsersToFirestore();
+    } catch (e) {
+      debugPrint('[SSM] _runBackgroundSweep error: $e');
+    }
+  }
+
   /// Fast parallelized sync processor with auto-purging
   Future<void> triggerSync({bool force = false, bool urgent = false}) async {
     if (_isSyncing && !force) return;
@@ -7733,24 +8161,14 @@ class ServerSyncManager {
     }
 
     // Periodic sweep for missing offline tokens and donations:
-    // Run on force OR every 15 minutes (was 3: each sweep walks every box on the PC that
-    // has to stay responsive; new records are queued when they are saved anyway).
+    // Run on force OR every 15 minutes in non-blocking background task so server UI and WebSockets never freeze.
     final now = DateTime.now();
     final bool shouldSweep = !urgent && (force ||
         _lastSweepTime == null ||
         now.difference(_lastSweepTime!).inMinutes >= 15);
     if (shouldSweep) {
       _lastSweepTime = now;
-      await LocalStorageService.purgeStressTestLeftovers();
-      await LocalStorageService.healLegacyHistoricalData();
-      await _enqueueMissingEntries();
-      await _enqueueMissingDonations();
-      await _enqueueMissingEmployees();
-      await _enqueueMissingAttendance();
-      await _enqueueMissingPatients();
-      await _enqueueMissingMadrassaStudents();
-      await _enqueueMissingMadrassaLogs();
-      await LocalStorageService.pushLocalUsersToFirestore();
+      unawaited(_runBackgroundSweep(force: force));
     }
 
     if (!Hive.isBoxOpen(LocalStorageService.syncBox)) return;

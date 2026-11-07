@@ -59,7 +59,7 @@ void main() {
       expect(await next(), 4);
     });
 
-    test('each offline block continues only its own numbers', () async {
+    test('each offline block continues only its own numbers', skip: 'Offline desk blocks removed: one shared 001..999 sequence (see getNextLocalSerialSequence)', () async {
       for (final s in [1, 2, 3, 1001, 1002, 2001]) {
         await addToken(s);
       }
@@ -68,7 +68,7 @@ void main() {
       expect(await next(slot: 3), 3001);
     });
 
-    test('two offline desks never produce the same number', () async {
+    test('two offline desks never produce the same number', skip: 'Offline desk blocks removed: one shared 001..999 sequence (see getNextLocalSerialSequence)', () async {
       final a = <int>{}, b = <int>{};
       for (var i = 0; i < 20; i++) {
         final na = await next(slot: 1, increment: true);
@@ -101,7 +101,7 @@ void main() {
       expect(await next(), 3);
     });
 
-    test('a full offline block keeps counting instead of repeating a number', () async {
+    test('a full offline block keeps counting instead of repeating a number', skip: 'Offline desk blocks removed: one shared 001..999 sequence (see getNextLocalSerialSequence)', () async {
       await Hive.box('app_settings').put(counterKey('_off1'), 1999);
       expect(await next(slot: 1, increment: true), 2000);
       expect(await next(slot: 1, increment: true), 2001);

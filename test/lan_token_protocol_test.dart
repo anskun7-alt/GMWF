@@ -124,7 +124,7 @@ void main() {
     await a.close();
   });
 
-  test('each PC gets its own offline block, the same one every time', () async {
+  test('each PC gets its own offline block, the same one every time', skip: 'Offline desk blocks removed: one shared 001..999 sequence (see getNextLocalSerialSequence)', () async {
     final (a, aS) = await connect('receptionist', 'rec-d');
     final s1 = (await reserve(a, aS, 'r5', deviceKey: 'pc-one'))['deskSlot'];
     final s2 = (await reserve(a, aS, 'r6', deviceKey: 'pc-two'))['deskSlot'];

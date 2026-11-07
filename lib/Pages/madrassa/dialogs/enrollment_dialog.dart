@@ -1715,12 +1715,17 @@ void showAddStudentDialog(
                   }
 
                   String photoUrl = studentPhotoBase64 ?? studentData?['photoUrl'] ?? '';
-                  if (selectedImageBytes != null) {
+                  if (photoUrl.isEmpty && selectedImageBytes != null) {
                     final b64 = ImageUploadService.processBytesToBase64(selectedImageBytes!);
                     if (b64 != null && b64.isNotEmpty) {
                       photoUrl = b64;
                     }
                   }
+
+                  final normSelectedBranch = MadrassaLocalStorage.normalizeBranch(selectedBranch);
+                  selectedBranch = (normSelectedBranch.isEmpty || normSelectedBranch == 'all')
+                      ? effectiveBranch
+                      : normSelectedBranch;
 
                   final finalData = {
                     'name': nameCtrl.text.trim(),
@@ -1858,6 +1863,28 @@ void showAddStudentDialog(
                               'data': map,
                             });
                             unawaited(SyncService().triggerUpload(urgent: true));
+
+                            // Also directly write the updated guardian user doc to Firestore so
+                            // the parent's phone immediately sees the newly linked studentIds.
+                            final fsGuardian = LocalStorageService.sanitizeForCloudUpload(map);
+                            unawaited(
+                              FirebaseFirestore.instance
+                                  .collection('users')
+                                  .doc(gUid)
+                                  .set(fsGuardian, SetOptions(merge: true))
+                                  .timeout(const Duration(seconds: 8))
+                                  .catchError((_) {}),
+                            );
+                            unawaited(
+                              FirebaseFirestore.instance
+                                  .collection('branches')
+                                  .doc(selectedBranch)
+                                  .collection('users')
+                                  .doc(gUid)
+                                  .set(fsGuardian, SetOptions(merge: true))
+                                  .timeout(const Duration(seconds: 8))
+                                  .catchError((_) {}),
+                            );
                             break;
                           }
                         }

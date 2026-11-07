@@ -31,6 +31,7 @@ import 'package:gmwf/pages/dispensary/dispensar/inventory.dart';
 import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/widgets/update_dialog_widget.dart';
 import 'package:gmwf/services/prescription_template_service.dart';
+import 'package:gmwf/services/auto_update_service.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:gmwf/design/design_system.dart';
 
@@ -353,11 +354,60 @@ class _DoctorScreenState extends State<DoctorScreen>
     }
   }
 
+  void _mergeReceptionistFieldsIntoSelectedPatient(Map<String, dynamic> source) {
+    if (_selectedPatientData == null) return;
+    bool isMeaningful(dynamic v) {
+      if (v == null) return false;
+      final s = v.toString().trim();
+      if (s.isEmpty) return false;
+      final low = s.toLowerCase();
+      return low != 'n/a' && low != 'null' && low != 'unknown' && low != 'unknown patient' && !low.startsWith('unknown_');
+    }
+
+    const receptionistKeys = [
+      'patientName', 'name', 'fullName',
+      'patientCnic', 'cnic', 'guardianCnic', 'guardianName', 'patientId',
+      'age', 'patientAge', 'gender', 'patientGender',
+      'phone', 'contactNumber', 'mobile', 'address',
+      'bp', 'temp', 'sugar', 'weight',
+      'campId', 'campName', 'dispensaryId', 'dispensaryTag', 'session',
+      'createdBy', 'createdByName', 'receptionistId', 'receptionistName', 'tokenBy',
+    ];
+    for (final key in receptionistKeys) {
+      if (isMeaningful(source[key])) {
+        _selectedPatientData![key] = source[key];
+      }
+    }
+    if (isMeaningful(_selectedPatientData!['patientName'])) {
+      _selectedPatientData!['name'] = _selectedPatientData!['patientName'];
+    } else if (isMeaningful(_selectedPatientData!['name'])) {
+      _selectedPatientData!['patientName'] = _selectedPatientData!['name'];
+    }
+    _selectedPatientData!['vitals'] = LocalStorageService.mergeVitalsPreservingReceptionist(
+      source['vitals'],
+      _selectedPatientData!['vitals'],
+    );
+  }
+
   void _handleNewToken(Map<String, dynamic> data, [Map<String, dynamic>? fullEvent]) {
     // DO NOT call saveEntryLocal() here — RealtimeRouter._handleSaveEntry()
     // already persisted this token to Hive before this stream listener fires.
     // Calling it again is a duplicate write that triggers an extra Hive flush
     // per token (200 bytes of disk I/O per token in a catch-up batch).
+
+    final incomingSerial = (data['serial'] ?? data['id'])?.toString();
+    final selectedSerial = (_selectedPatientData?['serial'] ?? _selectedPatientData?['id'])?.toString();
+    if (_selectedPatientData != null &&
+        incomingSerial != null &&
+        selectedSerial != null &&
+        CampSessionService.isSameSerial(incomingSerial, selectedSerial, widget.branchId)) {
+      _mergeReceptionistFieldsIntoSelectedPatient(data);
+      final latestHive = LocalStorageService.getLocalEntry(widget.branchId, incomingSerial);
+      if (latestHive != null) {
+        _mergeReceptionistFieldsIntoSelectedPatient(latestHive);
+      }
+      if (mounted) setState(() {});
+    }
 
     final isReplay = fullEvent?['_serverPush'] == true ||
         fullEvent?['_resent'] == true ||
@@ -615,6 +665,13 @@ class _DoctorScreenState extends State<DoctorScreen>
     setState(() => _isSaving = true);
     try {
       _selectedPatientData = Map.from(rawEntry);
+      final rawSerial = (rawEntry['serial'] ?? rawEntry['id'])?.toString();
+      if (rawSerial != null && rawSerial.isNotEmpty) {
+        final latestEntry = LocalStorageService.getLocalEntry(widget.branchId, rawSerial);
+        if (latestEntry != null) {
+          _mergeReceptionistFieldsIntoSelectedPatient(latestEntry);
+        }
+      }
       final currentName = (_selectedPatientData!['patientName'] ?? _selectedPatientData!['name'])?.toString().trim();
       if (currentName == null || currentName.isEmpty || currentName.toLowerCase() == 'unknown' || currentName.toLowerCase() == 'unknown patient') {
         final pId = (_selectedPatientData!['patientId'] ?? '').toString().trim();
@@ -1414,6 +1471,21 @@ class _DoctorScreenState extends State<DoctorScreen>
                   Text(
                     'Logout',
                     style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.red400)),
+                  ),
+                ],
+              ),
+            ),
+            const PopupMenuDivider(height: 8),
+            PopupMenuItem<String>(
+              enabled: false,
+              height: 32,
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline_rounded, size: 16, color: isDark ? SoftPalette.slate550 : SoftPalette.slate350),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Version ${AutoUpdateService.currentVersion}',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.slate350 : SoftPalette.slate550),
                   ),
                 ],
               ),
