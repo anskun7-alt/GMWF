@@ -948,14 +948,28 @@ class _PatientFormState extends State<PatientForm> {
         }
 
         // If stock was insufficient across all non-zero batches, deduct any remaining
-        // from the first batch (or primary match) so it is accounted for
+        // from the first batch (or primary match) — but only what it actually still holds.
+        // Stock cannot go below 0, so the cloud must not be sent a larger deduction than the
+        // shelf had (it used to send the full shortfall and the cloud went negative).
         if (remainingToDeduct > 0 && dedupedBatches.isNotEmpty) {
           final primary = dedupedBatches.first;
           final hiveKey = primary['_hiveKey'];
           final existingPrimary = stockBox.get(hiveKey);
-          if (existingPrimary is Map) {
+          final curPrimary = existingPrimary is Map
+              ? (existingPrimary['quantity'] is num
+                  ? (existingPrimary['quantity'] as num).toDouble()
+                  : double.tryParse(existingPrimary['quantity']?.toString() ?? '') ?? 0.0)
+              : 0.0;
+          final actualShortfallDeduct =
+              remainingToDeduct <= curPrimary ? remainingToDeduct : (curPrimary > 0 ? curPrimary : 0.0);
+          if (actualShortfallDeduct < remainingToDeduct) {
+            debugPrint('[PatientForm] Stock short for ${medMap['name']}: '
+                '${remainingToDeduct - actualShortfallDeduct} not in stock — not deducted (stock stays at 0)');
+          }
+          remainingToDeduct = actualShortfallDeduct;
+          if (existingPrimary is Map && remainingToDeduct > 0) {
             final updated = Map<String, dynamic>.from(existingPrimary);
-            final cur = (updated['quantity'] as num?)?.toDouble() ?? 0.0;
+            final cur = curPrimary;
             updated['quantity'] = (cur - remainingToDeduct).clamp(0.0, double.infinity);
             final hKey = hiveKey?.toString() ?? '';
             updated.remove('_hiveKey');
@@ -984,19 +998,26 @@ class _PatientFormState extends State<PatientForm> {
           // Fallback if no matching batch found by name/attributes
           final fallbackKey = stockBox.containsKey('stock:$rawMedicineId') ? 'stock:$rawMedicineId' : rawMedicineId;
           final existing = stockBox.get(fallbackKey);
+          // Deduct only what is in stock locally; with no local record, send the full amount
+          // and let the cloud floor (StockFloor) keep it at 0.
+          double fallbackDeduct = qtyNum;
           if (existing is Map) {
             final updated = Map<String, dynamic>.from(existing);
-            final cur = (updated['quantity'] as num?)?.toDouble() ?? 0.0;
+            final q = updated['quantity'];
+            final cur = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
+            fallbackDeduct = qtyNum <= cur ? qtyNum : (cur > 0 ? cur : 0.0);
             updated['quantity'] = (cur - qtyNum).clamp(0.0, double.infinity);
             stockBox.put(fallbackKey, updated);
           }
-          final dedInfo = {
-            'medicineId': rawMedicineId,
-            'name': medMap['name'],
-            'delta': -qtyNum,
-          };
-          medDeductions.add(dedInfo);
-          allDeductedBatches.add(dedInfo);
+          if (fallbackDeduct > 0) {
+            final dedInfo = {
+              'medicineId': rawMedicineId,
+              'name': medMap['name'],
+              'delta': -fallbackDeduct,
+            };
+            medDeductions.add(dedInfo);
+            allDeductedBatches.add(dedInfo);
+          }
         }
 
         // Enqueue offline/server sync for each affected batch (enqueueSync delegates when a LAN client is linked to a LAN server)

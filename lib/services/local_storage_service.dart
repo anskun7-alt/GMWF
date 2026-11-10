@@ -25,6 +25,7 @@ import 'package:gmwf/services/hourly_dispensary_sync.dart';
 import 'camp_session_service.dart';
 import 'master_proforma_service.dart';
 import 'serials_service.dart';
+import 'stock_floor.dart';
 import 'offline_auth_service.dart';
 import 'finance_local_storage.dart';
 import 'network_health_service.dart';
@@ -10997,6 +10998,9 @@ class LocalStorageService {
       final effectiveFirestoreBranch = CampSessionService.isKarachiFamily(branchId) ? 'karachi' : branchId;
 
       for (final invCol in invPaths) {
+        // Stock cannot be below 0: set any negative cloud quantities (left by older versions
+        // or by a deduction larger than the stock) back to 0. Reads only negative documents.
+        unawaited(StockFloor.repairCollection('branches/$effectiveFirestoreBranch/$invCol'));
         final syncKey = 'inventory_${branchId}_$invCol';
         final lastSyncedStr = getLastSyncedServerTimestamp(syncKey);
         final currentCount = Hive.box(stockBox).length;

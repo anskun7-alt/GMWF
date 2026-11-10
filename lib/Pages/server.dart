@@ -54,6 +54,7 @@ import '../utils/network_utils.dart';
 import '../services/auth_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/camp_session_service.dart';
+import '../utils/branch_labels.dart';
 import '../widgets/department_activity_widget.dart';
 import '../widgets/server_overview_panel.dart';
 import '../widgets/stress_test_dialog.dart';
@@ -74,6 +75,7 @@ import '../services/donations_local_storage.dart';
 import 'madrassa/utils/madrassa_local_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../services/sync_service.dart';
+import '../services/stock_floor.dart';
 import '../services/quota_service.dart';
 import '../services/cloud/cloud_db.dart';
 import '../services/cloud/lan_firestore_gate.dart';
@@ -1612,7 +1614,7 @@ exit 0
     switch (type) {
       case 'save_entry':
       case 'token_created':
-        return 'Issued Token #${map['serial'] ?? 'N/A'} (${map['queueType'] ?? 'Zakat'})';
+        return 'Issued Token #${map['serial'] ?? 'N/A'} (${BranchLabels.text((map['queueType'] ?? 'Zakat').toString(), map['branchId']?.toString())})';
       case 'save_prescription':
       case 'prescription_created':
         return 'Created Prescription for Token #${map['serial'] ?? 'N/A'}';
@@ -9232,11 +9234,17 @@ class ServerSyncManager {
         if (batch != null) {
           batch.set(docRef, incData, SetOptions(merge: true));
           if (markerRef != null) batch.set(markerRef, markerData);
+          // Floor at 0 once the batch has landed (the repair needs the committed value).
+          if (d < 0) {
+            postCommitCallbacks?.add(() async => unawaited(StockFloor.repair(docRef.path)));
+          }
         } else {
           final b = db.batch();
           b.set(docRef, incData, SetOptions(merge: true));
           if (markerRef != null) b.set(markerRef, markerData);
           await b.commit();
+          // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
+          if (d < 0) unawaited(StockFloor.repair(docRef.path));
         }
         debugPrint('✅ update_inventory → $invCol/$mid delta=$d');
         break;

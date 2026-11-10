@@ -30,6 +30,7 @@ import '../../realtime/realtime_events.dart';
 import '../../services/sync_service.dart';
 import '../../services/pre_login_security_service.dart';
 import '../../services/cloud/cloud_db.dart';
+import '../../services/stock_floor.dart';
 import '../settings_page.dart';
 import 'food_log_screen.dart';
 export 'widgets/cook_dialog.dart'
@@ -427,6 +428,15 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
       List<StockItem> items =
           snap.docs.map((e) => StockItem.fromMap(e.data(), e.id)).toList();
 
+      // Stock cannot be below 0: set negative cloud values back to 0 (StockItem already
+      // shows them as 0).
+      final negativePaths = <String>[
+        for (final d in snap.docs)
+          if ((d.data()['quantity'] is num) && (d.data()['quantity'] as num) < 0)
+            d.reference.path,
+      ];
+      if (negativePaths.isNotEmpty) unawaited(StockFloor.repairAll(negativePaths));
+
       if (items.isEmpty) {
         final batch = CloudDb.instance.batch();
         for (final item in _defaultStockItems) {
@@ -548,10 +558,13 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
       'quantity':    FieldValue.increment(delta),
       'lastUpdated': FieldValue.serverTimestamp(),
     });
+    // Stock cannot go below 0: floor the cloud value after a deduction.
+    if (delta < 0) unawaited(StockFloor.repair(ref.path));
     final idx = _allStockItems.indexWhere((i) => i.name == itemName);
     if (idx != -1) {
       setState(() {
-        _allStockItems[idx].quantity    += delta;
+        final next = _allStockItems[idx].quantity + delta;
+        _allStockItems[idx].quantity     = next < 0 ? 0.0 : next;
         _allStockItems[idx].lastUpdated  = Timestamp.now();
       });
     }

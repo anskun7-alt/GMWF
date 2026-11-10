@@ -54,6 +54,7 @@ import '../services/camp_session_service.dart';
 import '../services/quota_service.dart';
 import '../services/cloud/cloud_db.dart';
 import '../services/cloud/sync_log.dart';
+import '../services/stock_floor.dart';
 import 'lan_server.dart';
 import 'realtime_events.dart';
 
@@ -1968,6 +1969,8 @@ class ServerSyncManager {
           'quantity': FieldValue.increment(delta),
           'lastUpdated': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
+        // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
+        if (delta < 0) unawaited(StockFloor.repair(docRef.path));
         break;
 
       case 'approve_token_exception':

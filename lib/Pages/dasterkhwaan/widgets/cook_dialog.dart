@@ -10,6 +10,8 @@
 //  • For Saved Food: used + saved + wasted cannot exceed available stock qty
 //  • For Cooked Food: saved + wasted cannot exceed used (total output)
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -17,6 +19,7 @@ import 'package:gmwf/design/components/app_toast.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../models/stock_item.dart';
 import '../../../services/cloud/cloud_db.dart';
+import '../../../services/stock_floor.dart';
 
 /// Kitchen writes go through [CloudDb]: Firestore answers or the call fails within seconds.
 /// An SDK commit on Windows never returns when the daily quota is used up, which left these
@@ -1315,17 +1318,29 @@ void showCookDialog(
                                   'lastUpdated': FieldValue.serverTimestamp(),
                                 });
                               } else {
+                                // Merge + increment: if the 8 s read missed a document that
+                                // does exist, this still deducts instead of overwriting it.
+                                // StockFloor below keeps a missing item at 0, not negative.
                                 batch.set(stockRef, {
                                   'name':     ing['name'],
-                                  'quantity': -(ing['qty'] as num).toDouble(),
+                                  'quantity': FieldValue.increment(
+                                      -(ing['qty'] as num).toDouble()),
                                   'unit':     ing['unit'],
                                   'lastUpdated': FieldValue.serverTimestamp(),
-                                });
+                                }, SetOptions(merge: true));
                               }
                             }
                           }
 
                           if (!await commitKitchenBatch(ctx, batch)) return;
+                          if (!isReceived) {
+                            // Stock cannot go below 0: floor every deducted ingredient.
+                            unawaited(StockFloor.repairAll(cleanIngredients.map((ing) => fs
+                                .collection('branches').doc(branchId)
+                                .collection('dasterkhwaan_stock')
+                                .doc(ing['name'] as String)
+                                .path)));
+                          }
                           await onDone();
                           if (ctx.mounted) Navigator.pop(ctx);
 

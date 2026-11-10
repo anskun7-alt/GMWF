@@ -44,6 +44,7 @@ import 'package:gmwf/realtime/server_sync_coordinator.dart';
 import 'package:gmwf/realtime/lan_server.dart';
 import 'package:gmwf/realtime/lan_host_manager.dart';
 import 'package:gmwf/services/hourly_dispensary_sync.dart';
+import 'package:gmwf/services/stock_floor.dart';
 import 'package:gmwf/tools/firestore_structure_sanitizer.dart';
 
 class SyncQueueStats {
@@ -5291,6 +5292,8 @@ class SyncService {
       'appliedAt': FieldValue.serverTimestamp(),
     });
     await batch.commit();
+    // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
+    if (amount < 0) unawaited(StockFloor.repair(docRef.path));
   }
 
   /// Marks the local record a queued action came from as synced, when the action names it

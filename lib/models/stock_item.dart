@@ -17,7 +17,9 @@ class StockItem {
 
   factory StockItem.fromMap(Map<String, dynamic> map, String id) {
     final rawQty = map['quantity'];
-    final qty = rawQty is num ? rawQty.toDouble() : (double.tryParse(rawQty?.toString() ?? '') ?? 0.0);
+    final parsed = rawQty is num ? rawQty.toDouble() : (double.tryParse(rawQty?.toString() ?? '') ?? 0.0);
+    // Stock cannot be below 0 (a negative cloud value is set back to 0 by StockFloor).
+    final qty = parsed < 0 ? 0.0 : parsed;
     final rawTs = map['lastUpdated'] ?? map['updatedAt'];
     Timestamp ts;
     if (rawTs is Timestamp) {
