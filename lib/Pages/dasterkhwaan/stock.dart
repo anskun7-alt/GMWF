@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -8,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/cloud/cloud_db.dart';
+import '../../services/stock_floor.dart';
 import '../../models/stock_item.dart';
 import 'widgets/cook_dialog.dart';
 
@@ -483,10 +486,14 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
         .collection('dasterkhwaan_stock')
         .doc(item.name);
 
+    // Increment, not the screen's copy + delta: the kitchen may have deducted ingredients
+    // since this screen loaded, and writing a fixed number erased those deductions.
     await CloudDb.instance.ref(ref).update({
-      'quantity': newQty,
+      'quantity': FieldValue.increment(delta),
       'lastUpdated': FieldValue.serverTimestamp(),
     });
+    // Stock cannot go below 0.
+    if (delta < 0) unawaited(StockFloor.repair(ref.path));
 
     await _writeAuditLog(
       itemName: item.name,

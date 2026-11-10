@@ -632,6 +632,17 @@ class SyncService {
   DateTime _failureLogWindowStart = DateTime.now();
   final Map<String, int> _failureCountsByType = {};
 
+  static const Set<String> _alwaysLoggedFailureTypes = {
+    'save_donation',
+    'update_donation',
+    'delete_donation',
+    'save_dasterkhwan_tokens',
+    'reverse_dasterkhwan_tokens',
+    'serve_dasterkhwan_token',
+    'save_food_token',
+    'save_dasterkhwan_entry',
+  };
+
   void _noteUploadFailure(String type, String key, int attempt, Object error, StackTrace st) {
     _failureCountsByType[type] = (_failureCountsByType[type] ?? 0) + 1;
     final now = DateTime.now();
@@ -644,6 +655,13 @@ class SyncService {
       _failureLogWindowStart = now;
     }
     // Show only the first few individual failures per minute; the summary above covers the rest.
+    // Donations and food tokens: every failure goes to gmwf_sync.log (release builds have no
+    // console, so these failures were invisible).
+    if (_alwaysLoggedFailureTypes.contains(type)) {
+      final shortErr = error is TimeoutException ? 'timed out' : error.toString();
+      SyncLog.write('❌ $type upload failed (attempt $attempt, $key): '
+          '${shortErr.length > 200 ? shortErr.substring(0, 200) : shortErr}');
+    }
     if (_failuresLoggedThisMinute < 3) {
       _failuresLoggedThisMinute++;
       final shortErr = error is TimeoutException ? 'timed out (no answer from Firestore)' : error.toString();
@@ -1951,13 +1969,16 @@ class SyncService {
         final currentRole = _currentUserRole;
         final isDispensary = LocalStorageService.isDispensaryRole(currentRole);
 
-        // If this station is exclusively dispensary, defer entirely to LAN server
+        // Dispensary data on this desk was just purged from the queue (the LAN server uploads
+        // it) and the upload pass drops any that remain. What is left is this PC's own
+        // standalone data — donations, food tokens, madrassa, school — which the LAN server
+        // never uploads for another PC. Returning here for a dispensary role left those
+        // stuck until someone with another role logged in, so the pass continues.
         if (isDispensary) {
-          debugPrint('[SyncService] 🏥 Dispensary client station connected to LAN Server. Upload deferred to server.');
-          return;
+          debugPrint('[SyncService] 🏥 Dispensary client station on LAN: dispensary data goes via the server; uploading standalone items only.');
         }
 
-        // If other role, check if any pending standalone items remain
+        // Check if any pending standalone items remain
         final hasLocalPending = Hive.isBoxOpen(LocalStorageService.syncBox) &&
             Hive.box(LocalStorageService.syncBox).isNotEmpty;
         if (!hasLocalPending) {
@@ -2533,6 +2554,7 @@ class SyncService {
           }
 
         final action   = Map<String, dynamic>.from(raw);
+        _uploadingKey = key;
         // Revision of the queued item when this upload started. enqueueSync merges a newer edit
         // into the same key (and stamps a new enqueuedAt) while the upload is in flight; the
         // item must then stay queued (success) and must not be overwritten with this older
@@ -3373,8 +3395,13 @@ class SyncService {
             final hasRemoteId = (data['firestoreId'] as String?)?.isNotEmpty == true;
             if (hasRemoteId) {
               try {
-                final remoteDoc = await docRef.get().timeout(const Duration(seconds: 4));
-                if (remoteDoc.exists) {
+                // Server copy only: the offline cache can hold this PC's own not-yet-sent write
+                // (newer timestamp), which made the donation look "already uploaded" and it was
+                // dropped from the queue without ever reaching the cloud.
+                final remoteDoc = await docRef
+                    .get(const GetOptions(source: Source.server))
+                    .timeout(const Duration(seconds: 6));
+                if (remoteDoc.exists && !remoteDoc.metadata.hasPendingWrites) {
                   final remoteUpdate = (remoteDoc.data()?['lastUpdatedAt'] ?? remoteDoc.data()?['updatedAt']) as String?;
                   final localUpdate  = (data['lastUpdatedAt'] ?? data['updatedAt']) as String?;
                   if (remoteUpdate != null && localUpdate != null && DateTime.parse(remoteUpdate).isAfter(DateTime.parse(localUpdate))) {
@@ -3476,8 +3503,11 @@ class SyncService {
             final bId = _cleanBranch(action['branchId'] ?? branchId);
             final docRef = _db.collection('branches').doc(bId).collection('donations').doc(firestoreId);
             try {
-              final remoteDoc = await docRef.get().timeout(const Duration(seconds: 4));
-              if (remoteDoc.exists) {
+              // Server copy only (see save_donation): a cached pending write is not "in the cloud".
+              final remoteDoc = await docRef
+                  .get(const GetOptions(source: Source.server))
+                  .timeout(const Duration(seconds: 6));
+              if (remoteDoc.exists && !remoteDoc.metadata.hasPendingWrites) {
                 final remoteUpdate = (remoteDoc.data()?['lastUpdatedAt'] ?? remoteDoc.data()?['updatedAt']) as String?;
                 final localUpdate  = (fields['lastUpdatedAt'] ?? fields['updatedAt']) as String?;
                 if (remoteUpdate != null && localUpdate != null && DateTime.parse(remoteUpdate).isAfter(DateTime.parse(localUpdate))) {
@@ -4276,23 +4306,15 @@ class SyncService {
                 .collection('dasterkhwaan')
                 .doc(dateKey);
 
-            // Check if this batch was already applied by direct write to avoid double counting!
-            bool alreadyApplied = false;
-            if (batchId != null && batchId.isNotEmpty) {
-              try {
-                final daySnap = await dayDocRef.get().timeout(const Duration(seconds: 4));
-                if (daySnap.exists) {
-                  final applied = (daySnap.data()?['appliedBatches'] as List?)?.map((e) => e.toString()).toSet() ?? {};
-                  if (applied.contains(batchId)) {
-                    alreadyApplied = true;
-                  }
-                }
-              } catch (_) {}
-            }
+            // Was this batch's count already added (an earlier attempt, or an older direct
+            // write)? Read from the SERVER: the offline cache may not have a write that went up
+            // through REST, and guessing "no" on a retry counted the batch twice. If the read
+            // fails, the item is retried later instead of guessing.
+            final alreadyApplied = await _dayDocListHas(dayDocRef, 'appliedBatches', batchId);
 
             final tokensColRef = dayDocRef.collection('tokens');
 
-            final batch = _db.batch();
+            final tokenDocs = <MapEntry<String, Map<String, dynamic>>>[];
             for (final t in tokensList) {
               if (t is Map) {
                 final tMap = Map<String, dynamic>.from(t);
@@ -4314,7 +4336,7 @@ class SyncService {
                   if ((tMap['pricePerToken'] ?? data['pricePerToken']) != null)
                     'pricePerToken': tMap['pricePerToken'] ?? data['pricePerToken'],
                 };
-                batch.set(tokensColRef.doc(tokenId), fsToken, SetOptions(merge: true));
+                tokenDocs.add(MapEntry(tokenId, fsToken));
               }
             }
 
@@ -4337,19 +4359,33 @@ class SyncService {
                 for (final e in sessionCounts.entries) 'session_${e.key}_total': FieldValue.increment(e.value),
               if (batchId != null) 'appliedBatches': FieldValue.arrayUnion([batchId]),
               'lastUpdated': FieldValue.serverTimestamp(),
+              'date': dateKey, // the Office Boy's direct write set this too; kept for readers
               'dateKey': dateKey,
               'branchId': bId,
             };
 
-            if (!alreadyApplied) {
-              await dayDocRef.set(dayUpdate, SetOptions(merge: true));
-            }
-
-            try {
-              await batch.commit();
-            } catch (tokErr) {
-              debugPrint('[SyncService] Individual subcollection tokens commit deferred: $tokErr');
-            }
+            // Firestore takes at most 500 writes per commit; a busy day's backlog in one batch
+            // was rejected every time. The day totals go in the FIRST chunk, so the count and
+            // its first tokens land together or not at all. Token docs are set by id (merge), so
+            // re-sending a chunk after a failure is harmless. Any failure is thrown: the item
+            // stays queued and is retried, and its tokens are not marked synced.
+            const chunkSize = 450;
+            var first = true;
+            var i = 0;
+            do {
+              final chunk = tokenDocs.skip(i).take(chunkSize).toList();
+              final b = _db.batch();
+              final withTotals = first && !alreadyApplied;
+              if (withTotals) {
+                b.set(dayDocRef, dayUpdate, SetOptions(merge: true));
+              }
+              for (final e in chunk) {
+                b.set(tokensColRef.doc(e.key), e.value, SetOptions(merge: true));
+              }
+              if (withTotals || chunk.isNotEmpty) await b.commit();
+              first = false;
+              i += chunkSize;
+            } while (i < tokenDocs.length);
 
             try {
               if (Hive.isBoxOpen('dasterkhwaan_tokens')) {
@@ -4383,25 +4419,11 @@ class SyncService {
                 .collection('dasterkhwaan')
                 .doc(dateKey);
 
-            bool alreadyReversed = false;
-            if (revBatchId != null && revBatchId.isNotEmpty) {
-              try {
-                final daySnap = await dayDocRef.get().timeout(const Duration(seconds: 4));
-                if (daySnap.exists) {
-                  final reversed = (daySnap.data()?['reversedBatchIds'] as List?)?.map((e) => e.toString()).toSet() ?? {};
-                  if (reversed.contains(revBatchId)) {
-                    alreadyReversed = true;
-                  }
-                }
-              } catch (_) {}
-            }
+            // Server read, as for issuing: a cached "not yet reversed" on a retry took the
+            // count down twice.
+            final alreadyReversed = await _dayDocListHas(dayDocRef, 'reversedBatchIds', revBatchId);
 
             final tokensColRef = dayDocRef.collection('tokens');
-            final batch = _db.batch();
-
-            for (final id in tokenIds) {
-              batch.delete(tokensColRef.doc(id));
-            }
 
             final dayUpdate = <String, dynamic>{
               if (!alreadyReversed) 'totalTokens': FieldValue.increment(-qty),
@@ -4417,15 +4439,24 @@ class SyncService {
               });
             }
 
-            if (!alreadyReversed) {
-              await dayDocRef.set(dayUpdate, SetOptions(merge: true));
-            }
-
-            try {
-              await batch.commit();
-            } catch (delErr) {
-              debugPrint('[SyncService] Individual token deletes commit deferred: $delErr');
-            }
+            // Totals and the first deletes in one commit, at most 450 per commit; a failure
+            // is thrown so the reversal is retried (it used to be logged and dropped, leaving
+            // reversed tokens in the cloud).
+            const chunkSize = 450;
+            var first = true;
+            var i = 0;
+            do {
+              final chunk = tokenIds.skip(i).take(chunkSize).toList();
+              final b = _db.batch();
+              final withTotals = first && !alreadyReversed;
+              if (withTotals) b.set(dayDocRef, dayUpdate, SetOptions(merge: true));
+              for (final id in chunk) {
+                b.delete(tokensColRef.doc(id));
+              }
+              if (withTotals || chunk.isNotEmpty) await b.commit();
+              first = false;
+              i += chunkSize;
+            } while (i < tokenIds.length);
           }
           else if (type == 'serve_dasterkhwan_token') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
@@ -5187,6 +5218,7 @@ class SyncService {
             await _logInventorySyncFailure(key, action, type, e.toString());
           }
         }
+        _uploadingKey = null;
         // Yield to event loop on every item so Windows message pump stays alive and UI never freezes
         await Future.delayed(const Duration(milliseconds: 20));
       }
@@ -5236,6 +5268,7 @@ class SyncService {
     } catch (fatal) {
       Logger().d("FATAL sync: $fatal");
     } finally {
+      _uploadingKey = null;
       uploadStatus?.end();
       // Only the current pass releases the flag (a hung pass the watchdog replaced does not).
       if (myUploadGen == _uploadGen) _isUploading = false;
@@ -5252,6 +5285,66 @@ class SyncService {
 
   bool _forceRequested = false;
   bool _urgentRequested = false;
+
+  /// Short tag of this PC for food-token ids. Each PC numbers tokens from its own records, so
+  /// two PCs issuing at once both made `dst_branch_date_12` and one overwrote the other in the
+  /// cloud. The visible token number is unchanged; only the id gets this suffix.
+  static String foodTokenDeviceTag(String deviceId) {
+    final clean = deviceId.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    if (clean.isEmpty) return 'pc';
+    return clean.length <= 6 ? clean : clean.substring(clean.length - 6);
+  }
+
+  /// Queue key of the item being uploaded right now (null between items).
+  static Object? _uploadingKey;
+
+  /// Takes the given food tokens out of issue items (`save_dasterkhwan_tokens`) that are still
+  /// waiting in this PC's queue, and returns the ids taken out. Those tokens never reached the
+  /// cloud, so reversing them only needs this; uploading a reversal for them instead could run
+  /// before the issue item (when that one is waiting out a retry) and the reversed tokens then
+  /// reappeared in the cloud. The item being uploaded at this moment is left alone; its tokens
+  /// are reversed in the cloud as before.
+  static Future<Set<String>> withdrawQueuedFoodTokens(Iterable<String> tokenIds) async {
+    final wanted = tokenIds.where((id) => id.isNotEmpty).toSet();
+    final taken = <String>{};
+    if (wanted.isEmpty) return taken;
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(LocalStorageService.syncBox);
+      for (final k in box.keys.toList()) {
+        if (k == _uploadingKey) continue;
+        final v = box.get(k);
+        if (v is! Map || v['type'] != 'save_dasterkhwan_tokens') continue;
+        // An item that was already tried may have partly landed (its count is then in the
+        // cloud): leave it, and let the cloud reversal handle its tokens.
+        if (v['lastAttempt'] != null || ((v['attempts'] as num?) ?? 0) > 0) continue;
+        final data = v['data'] is Map ? Map<String, dynamic>.from(v['data'] as Map) : <String, dynamic>{};
+        final tokens = List<dynamic>.from(data['tokens'] as List? ?? const []);
+        final keep = <dynamic>[];
+        for (final t in tokens) {
+          final id = t is Map ? (t['id'] ?? t['localId'])?.toString() : null;
+          if (id != null && wanted.contains(id) && !taken.contains(id)) {
+            taken.add(id);
+          } else {
+            keep.add(t);
+          }
+        }
+        if (keep.length == tokens.length) continue;
+        if (keep.isEmpty) {
+          await box.delete(k);
+        } else {
+          data['tokens'] = keep;
+          data['quantity'] = keep.length;
+          final updated = Map<String, dynamic>.from(v)
+            ..['data'] = data
+            ..['enqueuedAt'] = DateTime.now().toIso8601String();
+          await box.put(k, updated);
+        }
+      }
+    } catch (e) {
+      debugPrint('[SyncService] withdrawQueuedFoodTokens: $e');
+    }
+    return taken;
+  }
 
   /// Adds [amount] to a cloud stock quantity exactly once per [txId]. The increment and a
   /// marker document `inventory_applied_tx/{txId}` are committed in ONE batch (atomic), so a
@@ -5294,6 +5387,19 @@ class SyncService {
     await batch.commit();
     // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
     if (amount < 0) unawaited(StockFloor.repair(docRef.path));
+  }
+
+  /// True if [id] is already listed in the day document's [field] (e.g. 'appliedBatches').
+  /// Reads from the server, never the offline cache; throws if the server can't be reached,
+  /// so the caller's item is retried instead of guessing (a wrong "no" counted twice).
+  Future<bool> _dayDocListHas(CloudDoc dayDocRef, String field, String? id) async {
+    if (id == null || id.isEmpty) return false;
+    final snap = await dayDocRef
+        .get(const GetOptions(source: Source.server))
+        .timeout(const Duration(seconds: 10));
+    if (!snap.exists) return false;
+    final list = snap.data()?[field];
+    return list is List && list.any((e) => e.toString() == id);
   }
 
   /// Marks the local record a queued action came from as synced, when the action names it

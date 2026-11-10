@@ -5601,6 +5601,22 @@ class LocalStorageService {
   /// Sanitizes branchId so writes NEVER target 'all', 'global', 'unknown', UIDs, or CNIC branch documents.
   /// Automatically consolidates any legacy Karachi branch duplicates ('karachi_1', 'karachi_2') into 'karachi'.
   /// Falls back to the user's active session branch or [fallback] (default: 'karachi').
+  /// Like [sanitizeBranchId], but returns null instead of falling back to 'karachi' when
+  /// neither [branchId] nor the signed-in user's branch is actually a Karachi branch. Used
+  /// before writing branch data: a PC whose branch could not be worked out used to write its
+  /// food tokens into Karachi's cloud data, and its own branch showed nothing.
+  static String? sanitizeBranchIdStrict(String? branchId) {
+    final s = sanitizeBranchId(branchId);
+    if (s != 'karachi') return s;
+    bool isKarachi(String? v) {
+      final r = (v ?? '').toLowerCase().trim();
+      return r.contains('karachi') || r == 'khi' || r.startsWith('khi_') || r.startsWith('khi-') ||
+          r == 'saddar' || r == 'haji_camp' || r == 'haji' || r.contains('kapay');
+    }
+    if (isKarachi(branchId) || isKarachi(getActiveUserBranchId())) return 'karachi';
+    return null;
+  }
+
   static String sanitizeBranchId(String? branchId, {String fallback = 'karachi'}) {
     final raw = (branchId ?? '').trim().toLowerCase();
     if (raw.contains('karachi') || raw == 'khi' || raw == 'saddar' || raw == 'haji_camp' || raw == 'haji') {
@@ -9654,23 +9670,28 @@ class LocalStorageService {
   // STOCK
   // ════════════════════════════════════════════════════════════════════════════
 
+  /// A stock quantity as a number; text ("12") is parsed, anything else is 0.
+  static double _qtyOf(dynamic q) =>
+      q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
+
   static Future<void> saveAllLocalStockItems(
       List<Map<String, dynamic>> items) async {
     final box = Hive.box(stockBox);
     final sBox = Hive.box(syncBox);
 
-    final pendingDeltas = <String, double>{};
+    // Stock changes still queued for upload are not in the downloaded cloud figures yet.
+    // They are added back here ONLY (downloadInventory used to add them too, so a refresh
+    // subtracted every pending dispense twice). Dispense/restock deltas come from the same
+    // reader the hourly upload uses, which also finds ids nested under 'data'.
+    final pendingDeltas = <String, double>{
+      for (final e in HourlyDispensarySync.pendingStockChanges().entries)
+        if (e.value != 0) e.key: e.value,
+    };
     for (final key in sBox.keys) {
       final val = sBox.get(key);
       if (val is Map) {
         final type = val['type'];
-        if (type == 'update_inventory') {
-          final medId = val['inventoryId']?.toString();
-          final delta = (val['delta'] as num?)?.toDouble() ?? 0.0;
-          if (medId != null && delta != 0) {
-            pendingDeltas[medId] = (pendingDeltas[medId] ?? 0.0) + delta;
-          }
-        } else if (type == 'add_inventory_stock') {
+        if (type == 'add_inventory_stock') {
           final medId = val['medicineId']?.toString();
           final qty = (val['quantity'] as num?)?.toDouble() ?? 0.0;
           if (medId != null && qty > 0) {
@@ -9711,8 +9732,9 @@ class LocalStorageService {
       downloadedIds.add(id);
 
       if (pendingDeltas.containsKey(id)) {
-        final downloadedQty = (item['quantity'] ?? 0) as num;
-        item['quantity'] = (downloadedQty.toDouble() + pendingDeltas[id]!).clamp(0.0, double.infinity);
+        final rawDl = item['quantity'];
+        final downloadedQty = rawDl is num ? rawDl.toDouble() : double.tryParse(rawDl?.toString() ?? '') ?? 0.0;
+        item['quantity'] = (downloadedQty + pendingDeltas[id]!).clamp(0.0, double.infinity);
         debugPrint('[LocalStorage] Re-applied pending local delta of ${pendingDeltas[id]} to downloaded stock of $id');
       } else if (currentLocalItems.containsKey(id)) {
         final localItem = currentLocalItems[id] as Map<String, dynamic>;
@@ -9728,14 +9750,13 @@ class LocalStorageService {
             if (localItem['lastUpdated'] != null) item['lastUpdated'] = localItem['lastUpdated'];
           }
         } else if (localItem['quantity'] != null &&
-            (item['quantity'] == null || ((item['quantity'] as num) == 0 && (localItem['quantity'] as num) > 0))) {
+            (item['quantity'] == null || (_qtyOf(item['quantity']) == 0 && _qtyOf(localItem['quantity']) > 0))) {
           // Avoid wiping non-zero local stock with zero remote stock if timestamps are missing
           item['quantity'] = localItem['quantity'];
         }
-      } else {
-        final rawQty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
-        item['quantity'] = rawQty.clamp(0.0, double.infinity);
       }
+      // Stock is never below 0, and a quantity stored as text is read as a number.
+      item['quantity'] = _qtyOf(item['quantity']).clamp(0.0, double.infinity);
       updatedMap['stock:$id'] = item;
       updatedMap[id] = item;
     }
@@ -9770,8 +9791,7 @@ class LocalStorageService {
       if (item['name'] != null) item['name'] = MasterProformaService.cleanBrandToFormula(item['name'].toString());
       if (item['formula'] != null) item['formula'] = MasterProformaService.cleanBrandToFormula(item['formula'].toString());
     }
-    final rawQty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
-    item['quantity'] = rawQty.clamp(0.0, double.infinity);
+    item['quantity'] = _qtyOf(item['quantity']).clamp(0.0, double.infinity);
     final activeCamp = CampSessionService.getActiveCamp();
     if (activeCamp != null && activeCamp.isNotEmpty) {
       item['dispensaryId'] = item['dispensaryId'] ?? activeCamp;
@@ -9794,8 +9814,7 @@ class LocalStorageService {
       if (normalised['name'] != null) normalised['name'] = MasterProformaService.cleanBrandToFormula(normalised['name'].toString());
       if (normalised['formula'] != null) normalised['formula'] = MasterProformaService.cleanBrandToFormula(normalised['formula'].toString());
     }
-    final rawQty = (normalised['quantity'] as num?)?.toDouble() ?? 0.0;
-    normalised['quantity']   = rawQty.clamp(0.0, double.infinity);
+    normalised['quantity']   = _qtyOf(normalised['quantity']).clamp(0.0, double.infinity);
     final activeCamp = CampSessionService.getActiveCamp();
     final explicitCamp = (normalised['dispensaryId'] ?? normalised['campId'] ?? normalised['dispensaryTag'])
       ?.toString()
@@ -9860,8 +9879,8 @@ class LocalStorageService {
     if (raw == null) return;
     final item = Map<String, dynamic>.from(raw as Map);
 
-    final currentQty = (item['quantity'] ?? 0) as num;
-    item['quantity'] = (currentQty.toDouble() + delta).clamp(0.0, double.infinity);
+    final currentQty = _qtyOf(item['quantity']);
+    item['quantity'] = (currentQty + delta).clamp(0.0, double.infinity);
     item['updatedAt'] = DateTime.now().toIso8601String();
     await box.put(targetKey, sanitize(item));
     final rawId = (item['id'] ?? item['medicineId'] ?? id).toString();
@@ -11068,16 +11087,7 @@ class LocalStorageService {
             return d;
           }).toList();
           // Stock changes still waiting in this PC's queue (uploaded hourly, see
-          // HourlyDispensarySync) are not in the cloud figures yet; take them off again so
-          // local stock does not jump back up until the next upload.
-          final pending = HourlyDispensarySync.pendingStockChanges();
-          if (pending.isNotEmpty) {
-            for (final d in items) {
-              final change = pending[d['id']?.toString()];
-              final q = d['quantity'];
-              if (change != null && q is num) d['quantity'] = q + change;
-            }
-          }
+          // HourlyDispensarySync) are re-applied inside saveAllLocalStockItems — once.
           await saveAllLocalStockItems(items);
 
           Timestamp? maxTs;

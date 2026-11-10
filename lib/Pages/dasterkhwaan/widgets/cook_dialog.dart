@@ -1428,15 +1428,23 @@ class _IngredientRowState extends State<_IngredientRow> {
   }
 
   void _updateMaxQty(String name) {
+    _stockUnit = null;
     if (name.isEmpty) { _maxQty = double.infinity; return; }
     try {
       final item = widget.allStockItems.firstWhere(
           (s) => s.name.toLowerCase() == name.toLowerCase());
       _maxQty = item.quantity;
+      // The amount is deducted from this stock item as typed, so it must be in the item's
+      // own unit ("500 gram" against rice kept in kg used to deduct 500 kg).
+      _stockUnit = item.unit;
+      _unit = item.unit;
     } catch (_) {
       _maxQty = double.infinity;
     }
   }
+
+  /// Unit of the selected stock item; while set, the unit dropdown is locked to it.
+  String? _stockUnit;
 
   void _notify() {
     widget.onChanged({'name': _selectedName, 'qty': _qtyCtrl.text, 'unit': _unit});
@@ -1646,6 +1654,8 @@ class _IngredientRowState extends State<_IngredientRow> {
           SizedBox(
             width: 68,
             child: DropdownButtonFormField<String>(
+              // Rebuilt when the unit changes (initialValue is only read once).
+              key: ValueKey('unit_${_stockUnit ?? ''}_$_unit'),
               initialValue: _unit,
               isDense: true,
               decoration: kInputDeco('', Icons.straighten, context).copyWith(
@@ -1653,15 +1663,18 @@ class _IngredientRowState extends State<_IngredientRow> {
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
               ),
-              items: ['kg', 'gram', 'liter', 'piece', 'packet']
+              items: <String>{'kg', 'gram', 'liter', 'piece', 'packet', _unit}
                   .map((u) => DropdownMenuItem(
                       value: u,
                       child: Text(u, style: const TextStyle(fontSize: 12))))
                   .toList(),
-              onChanged: (v) {
-                setState(() => _unit = v!);
-                _notify();
-              },
+              // Locked to the stock item's unit once an item from stock is chosen.
+              onChanged: _stockUnit != null
+                  ? null
+                  : (v) {
+                      setState(() => _unit = v!);
+                      _notify();
+                    },
             ),
           ),
           const SizedBox(width: 4),

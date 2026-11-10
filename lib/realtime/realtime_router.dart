@@ -30,6 +30,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 
 import '../services/local_storage_service.dart';
+import '../services/pre_login_security_service.dart';
 import '../services/camp_session_service.dart';
 import '../services/sync_service.dart';
 import '../services/finance_local_storage.dart';
@@ -1661,10 +1662,17 @@ Serial: ${data['serial'] ?? 'N/A'}
           if (kDebugMode) print('✅ DASTERKHWAAN TOKENS REVERSED via LAN → ${tokenIds.length} tokens');
         } else {
           final tokensList = List<dynamic>.from(data['tokens'] as List? ?? []);
+          final myDevice = await PreLoginSecurityService.getDeviceId();
           for (final t in tokensList) {
             if (t is Map) {
               final tMap = Map<String, dynamic>.from(t);
               final tid = tMap['id']?.toString() ?? 'dst_${DateTime.now().microsecondsSinceEpoch}';
+              // This PC's own tokens coming back (e.g. a catch-up after a reconnect, when the
+              // echo filter by connection id no longer matches): keep our own record. Marking
+              // it lanReceived made this PC treat its own tokens as another PC's, so they were
+              // never uploaded.
+              final origin = (tMap['originDevice'] ?? '').toString();
+              if (origin.isNotEmpty && origin == myDevice) continue;
               // The issuing PC uploads this token; mark the copy so no backfill here re-uploads it.
               tMap['lanReceived'] = true;
               await tokenBox.put(tid, LocalStorageService.sanitize(tMap));

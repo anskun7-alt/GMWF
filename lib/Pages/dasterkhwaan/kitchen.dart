@@ -694,10 +694,12 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
       final nowIso = DateTime.now().toIso8601String();
       final tokensList = <Map<String, dynamic>>[];
       final originDevice = await PreLoginSecurityService.getDeviceId();
+      final devTag = SyncService.foodTokenDeviceTag(originDevice);
 
       for (int i = 0; i < quantity; i++) {
         final num = startNum + i;
-        final tid = 'dst_${_branchId}_${today}_$num';
+        // Device tag in the id so two PCs never overwrite each other's token; 'number' unchanged.
+        final tid = 'dst_${_branchId}_${today}_${num}_$devTag';
         tokensList.add({
           'id': tid,
           'localId': tid,
@@ -753,63 +755,11 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
         }
       }
 
-      // ── STEP 3: Hybrid Write (Direct Firestore write if online, Sync queue fallback if offline) ───
-      bool directWriteSucceeded = false;
-      try {
-        if (_branchId != null && _branchId!.isNotEmpty && LocalStorageService.isValidBranchId(_branchId)) {
-          final batch = FirebaseFirestore.instance.batch();
-          for (final t in tokensList) {
-            final tid = t['id'].toString();
-            final fsToken = {
-              'number': t['number'] ?? 1,
-              'session': t['session'] ?? _selectedSession,
-              'time': t['time'] != null
-                  ? Timestamp.fromDate(DateTime.tryParse(t['time'].toString()) ?? DateTime.now())
-                  : FieldValue.serverTimestamp(),
-              'issuedBy': t['issuedBy'] ?? _username,
-              'localId': tid,
-              'branchId': _branchId,
-              'dateKey': today,
-              'pricePerToken': _pricePerToken,
-              'syncStatus': 'synced',
-              'synced': true,
-            };
-            batch.set(_tokensCol(today).doc(tid), fsToken, SetOptions(merge: true));
-          }
-
-          final dayUpdate = <String, dynamic>{
-            'totalTokens': FieldValue.increment(quantity),
-            'session_${_selectedSession}_total': FieldValue.increment(quantity),
-            'appliedBatches': FieldValue.arrayUnion([batchId]),
-            'lastUpdated': FieldValue.serverTimestamp(),
-            'date': today,
-            'dateKey': today,
-            'branchId': _branchId,
-          };
-          batch.set(_dayDoc(today), dayUpdate, SetOptions(merge: true));
-          await batch.commit().timeout(const Duration(seconds: 6));
-          directWriteSucceeded = true;
-
-          // Update local Hive tokens to synced status immediately
-          try {
-            final box = await LocalStorageService.openBoxSafe(LocalStorageService.dasterkhwaanTokensBox);
-            for (final t in tokensList) {
-              final tid = t['id'].toString();
-              final loc = box.get(tid);
-              if (loc is Map) {
-                await box.put(tid, Map<String, dynamic>.from(loc)
-                  ..['syncStatus'] = 'synced'
-                  ..['synced'] = true);
-              }
-            }
-          } catch (_) {}
-          debugPrint('[Kitchen] ✅ Direct Firestore write succeeded for batch $batchId');
-        }
-      } catch (e) {
-        debugPrint('[Kitchen] Direct Firestore write failed/offline ($e) -> Falling back to Sync queue');
-      }
-
-      if (!directWriteSucceeded) {
+      // ── STEP 3: Upload through the cloud queue ─────────────────────────
+      // Always queued and sent at once (urgent), like the Office Boy screen. The direct SDK
+      // batch with a 6 s timeout could "time out" yet still be sent later by the SDK while the
+      // queue sent the same batch, counting it twice.
+      {
         try {
           if (_branchId != null && _branchId!.isNotEmpty) {
             SyncService().start(_branchId!);
@@ -1051,7 +1001,8 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
         }
       } catch (_) {}
 
-      final revBatchId = 'dst_rev_${_branchId}_${today}_${voidIds.join('_')}';
+      // Short, unique id (joining every token id made keys longer than Hive's 255-char limit).
+      final revBatchId = 'dst_rev_${_branchId}_${today}_${DateTime.now().millisecondsSinceEpoch}_${voidIds.length}';
 
       // ── STEP 2: Send over LAN (if connected) ────────────────────────
       final isLanConnected = RealtimeManager().isConnected;
@@ -1075,36 +1026,20 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
         } catch (_) {}
       }
 
-      // ── STEP 3: Hybrid Void Write ───
-      bool directVoidSucceeded = false;
+      // ── STEP 3: Reverse in the cloud through the queue ──────────────────
+      // Tokens still waiting in this PC's queue are taken out of it; only the rest get a cloud
+      // reversal (same as the Office Boy screen).
       try {
-        if (_branchId != null && _branchId!.isNotEmpty && LocalStorageService.isValidBranchId(_branchId)) {
-          final batch = FirebaseFirestore.instance.batch();
-          for (final tid in voidIds) {
-            batch.delete(_tokensCol(today).doc(tid));
+        final withdrawn = await SyncService.withdrawQueuedFoodTokens(voidIds);
+        final cloudIds = voidIds.where((id) => !withdrawn.contains(id)).toList();
+        if (cloudIds.isNotEmpty) {
+          final cloudSessionCounts = <String, int>{};
+          for (final t in tokensToVoid) {
+            final id = t['id']?.toString() ?? t['localId']?.toString() ?? '';
+            if (!cloudIds.contains(id)) continue;
+            final s = _kitchenNormalizeSession(t['session'] as String?);
+            cloudSessionCounts[s] = (cloudSessionCounts[s] ?? 0) + 1;
           }
-
-          final dayUpdate = <String, dynamic>{
-            'totalTokens': FieldValue.increment(-confirmQty),
-            'reversedBatchIds': FieldValue.arrayUnion([revBatchId]),
-            'lastUpdated': FieldValue.serverTimestamp(),
-          };
-          sessionCounts.forEach((s, count) {
-            if (count > 0) {
-              dayUpdate['session_${s}_total'] = FieldValue.increment(-count);
-            }
-          });
-          batch.set(_dayDoc(today), dayUpdate, SetOptions(merge: true));
-          await batch.commit().timeout(const Duration(seconds: 6));
-          directVoidSucceeded = true;
-          debugPrint('[Kitchen] ✅ Direct Firestore reversal write succeeded for $revBatchId');
-        }
-      } catch (e) {
-        debugPrint('[Kitchen] Direct Firestore reversal failed/offline ($e) -> Falling back to Sync queue');
-      }
-
-      if (!directVoidSucceeded) {
-        try {
           await LocalStorageService.enqueueSync({
             'type': 'reverse_dasterkhwan_tokens',
             'entityId': revBatchId,
@@ -1114,16 +1049,16 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
             'data': {
               'branchId': _branchId,
               'dateKey': today,
-              'quantity': confirmQty,
-              'tokenIds': voidIds,
-              'sessionCounts': sessionCounts,
+              'quantity': cloudIds.length,
+              'tokenIds': cloudIds,
+              'sessionCounts': cloudSessionCounts,
               'batchId': revBatchId,
             },
           });
           SyncService().triggerUpload(urgent: true);
-        } catch (e) {
-          debugPrint('[Kitchen] Sync reverse enqueue error: $e');
         }
+      } catch (e) {
+        debugPrint('[Kitchen] Sync reverse enqueue error: $e');
       }
 
       if (!mounted) return;

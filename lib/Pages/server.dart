@@ -76,6 +76,7 @@ import 'madrassa/utils/madrassa_local_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../services/sync_service.dart';
 import '../services/stock_floor.dart';
+import '../services/pre_login_security_service.dart';
 import '../services/quota_service.dart';
 import '../services/cloud/cloud_db.dart';
 import '../services/cloud/lan_firestore_gate.dart';
@@ -6438,9 +6439,14 @@ class ServerSyncManager {
                 await tBox.delete(id.toString());
               }
             } else if (tokensList.isNotEmpty) {
+              final myDevice = await PreLoginSecurityService.getDeviceId();
               for (final t in tokensList) {
                 if (t is Map) {
                   final tMap = Map<String, dynamic>.from(t);
+                  // Tokens this server PC issued itself (Office Boy on the server PC): keep its
+                  // own record, never mark it as another PC's copy (it would never upload).
+                  final origin = (tMap['originDevice'] ?? '').toString();
+                  if (origin.isNotEmpty && origin == myDevice) continue;
                   final tid = tMap['id']?.toString() ?? 'dst_${msgBranch}_${DateTime.now().microsecondsSinceEpoch}';
                   tMap['branchId'] ??= msgBranch;
                   tMap['lanReceived'] = true;

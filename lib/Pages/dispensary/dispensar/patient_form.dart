@@ -754,6 +754,7 @@ class _PatientFormState extends State<PatientForm> {
     final patientSerial = widget.queueEntry['serial']?.toString() ?? widget.queueEntry['id']?.toString() ?? serial;
     final patientCampId = widget.queueEntry['campId']?.toString() ?? widget.queueEntry['dispensaryId']?.toString() ?? CampSessionService.getActiveCamp();
     final List<Map<String, dynamic>> allDeductedBatches = [];
+    final Map<String, double> queuedByMedicine = {};
 
     for (final med in medicines) {
       if (med is! Map) continue;
@@ -1020,25 +1021,54 @@ class _PatientFormState extends State<PatientForm> {
           }
         }
 
-        // Enqueue offline/server sync for each affected batch (enqueueSync delegates when a LAN client is linked to a LAN server)
+        // Queued once per medicine after the loop: the queue key is per token + medicine, so
+        // two lines for the same medicine (two prescription lines, or two passes over one
+        // batch) used to overwrite each other and the cloud got only one of the deductions.
         for (final ded in medDeductions) {
-          await LocalStorageService.enqueueSync({
-            'type': 'update_inventory',
-            'branchId': branchId,
-            'medicineId': ded['medicineId'],
-            'inventoryId': ded['medicineId'],
-            'delta': ded['delta'],
-            'campId': patientCampId,
-            'dispensaryId': patientCampId,
-            'serial': patientSerial,
-          });
+          final id = ded['medicineId']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          final d = (ded['delta'] as num?)?.toDouble() ?? 0.0;
+          queuedByMedicine[id] = (queuedByMedicine[id] ?? 0.0) + d;
         }
       } catch (e) {
         debugPrint('[PatientForm] Hive stock decrement failed $rawMedicineId: $e');
       }
     }
 
-    return allDeductedBatches;
+    // Enqueue offline/server sync once per affected medicine (enqueueSync delegates when a
+    // LAN client is linked to a LAN server).
+    for (final e in queuedByMedicine.entries) {
+      if (e.value == 0) continue;
+      try {
+        await LocalStorageService.enqueueSync({
+          'type': 'update_inventory',
+          'branchId': branchId,
+          'medicineId': e.key,
+          'inventoryId': e.key,
+          'delta': e.value,
+          'campId': patientCampId,
+          'dispensaryId': patientCampId,
+          'serial': patientSerial,
+        });
+      } catch (err) {
+        debugPrint('[PatientForm] Stock queue failed ${e.key}: $err');
+      }
+    }
+
+    // The same per-medicine totals go to the LAN server (its once-only claim is also per
+    // token + medicine, so a second line for the same medicine was dropped there too).
+    final merged = <String, Map<String, dynamic>>{};
+    for (final b in allDeductedBatches) {
+      final id = b['medicineId']?.toString() ?? '';
+      final d = (b['delta'] as num?)?.toDouble() ?? 0.0;
+      final prev = merged[id];
+      if (prev == null) {
+        merged[id] = Map<String, dynamic>.from(b)..['delta'] = d;
+      } else {
+        prev['delta'] = ((prev['delta'] as num).toDouble()) + d;
+      }
+    }
+    return merged.values.where((b) => (b['delta'] as num) != 0).toList();
   }
 
   // Build-time copy of the syringe list. Scanning the whole stock box on every

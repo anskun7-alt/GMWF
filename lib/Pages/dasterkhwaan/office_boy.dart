@@ -525,11 +525,14 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         _showSnack('Enter a valid quantity', isError: true);
         return;
       }
-      _branchId = LocalStorageService.sanitizeBranchId(_branchId);
-      if (_branchId == null || !LocalStorageService.isValidBranchId(_branchId)) {
-        _showSnack('Branch not found!', isError: true);
+      // Strict: never fall back to Karachi for a PC whose branch is unknown (its tokens went
+      // into Karachi's cloud data and its own branch showed nothing).
+      final strictBranch = LocalStorageService.sanitizeBranchIdStrict(_branchId);
+      if (strictBranch == null || !LocalStorageService.isValidBranchId(strictBranch)) {
+        _showSnack('Branch not set for this user — tokens not issued. Please log in again or set the branch.', isError: true);
         return;
       }
+      _branchId = strictBranch;
       HapticFeedback.mediumImpact();
 
       // 1. Calculate next sequential start number
@@ -554,10 +557,13 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
       // Marks the PC that issued these tokens: only it uploads them (see
       // SyncService.isFoodTokenOwnedHere); LAN copies on other PCs are never re-uploaded.
       final originDevice = await PreLoginSecurityService.getDeviceId();
+      final devTag = SyncService.foodTokenDeviceTag(originDevice);
 
       for (int i = 0; i < quantity; i++) {
         final num = startNum + i;
-        final tid = 'dst_${_branchId}_${today}_$num';
+        // Device tag in the id: two PCs issuing the same number no longer overwrite each
+        // other's token in the cloud. 'number' (what staff see) is unchanged.
+        final tid = 'dst_${_branchId}_${today}_${num}_$devTag';
         tokensList.add({
           'id': tid,
           'localId': tid,
@@ -613,71 +619,13 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         }
       }
 
-      // ── STEP 3: Hybrid Write (Direct Firestore write if online, Sync queue fallback if offline) ───
-      bool directWriteSucceeded = false;
-      try {
-        if (_branchId != null && _branchId!.isNotEmpty && LocalStorageService.isValidBranchId(_branchId)) {
-          final dayUpdate = <String, dynamic>{
-            'totalTokens': FieldValue.increment(quantity),
-            'session_${_selectedSession}_total': FieldValue.increment(quantity),
-            'appliedBatches': FieldValue.arrayUnion([batchId]),
-            'lastUpdated': FieldValue.serverTimestamp(),
-            'date': today,
-            'dateKey': today,
-            'branchId': _branchId,
-          };
-          // 1. Prioritize updating the day summary document first (1 fast write)
-          // so HQ Manager and Dashboard instantly see updated counts even on slow connections.
-          await _dayDoc.set(dayUpdate, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
-          directWriteSucceeded = true;
-
-          // 2. Write individual token docs (best effort; if interrupted or quota-tight, Sync queue handles remainder)
-          try {
-            final batch = FirebaseFirestore.instance.batch();
-            for (final t in tokensList) {
-              final tid = t['id'].toString();
-              final fsToken = {
-                'number': t['number'] ?? 1,
-                'session': t['session'] ?? _selectedSession,
-                'time': t['time'] != null
-                    ? Timestamp.fromDate(DateTime.tryParse(t['time'].toString()) ?? DateTime.now())
-                    : FieldValue.serverTimestamp(),
-                'issuedBy': t['issuedBy'] ?? _effectiveUserName,
-                'localId': tid,
-                'branchId': _branchId,
-                'dateKey': today,
-                'pricePerToken': _pricePerToken,
-                'syncStatus': 'synced',
-                'synced': true,
-              };
-              batch.set(_tokensCol.doc(tid), fsToken, SetOptions(merge: true));
-            }
-            await batch.commit().timeout(const Duration(seconds: 6));
-
-            // Update local Hive tokens to synced status immediately
-            try {
-              final tokenBox = await _getTokensBox();
-              for (final t in tokensList) {
-                final tid = t['id'].toString();
-                final loc = tokenBox.get(tid);
-                if (loc is Map) {
-                  await tokenBox.put(tid, Map<String, dynamic>.from(loc)
-                    ..['syncStatus'] = 'synced'
-                    ..['synced'] = true);
-                }
-              }
-            } catch (_) {}
-          } catch (tokErr) {
-            debugPrint('[OfficeBoy] Individual tokens batch write deferred: $tokErr');
-          }
-          debugPrint('[OfficeBoy] ✅ Direct Firestore write succeeded for batch $batchId');
-        }
-      } catch (e) {
-        debugPrint('[OfficeBoy] Direct Firestore write failed/offline ($e) -> Falling back to Sync queue');
-      }
-
-      // If direct write didn't succeed (offline, network error, or timeout), enqueue in syncBox
-      if (!directWriteSucceeded) {
+      // ── STEP 3: Upload through the cloud queue ─────────────────────────
+      // Always queued and sent at once (urgent). This used to be a direct Firestore SDK write
+      // with 4–6 s timeouts: on Windows a "timed out" SDK write could still be sent later
+      // while the queue sent it too (count doubled), and when the day total landed but the
+      // token docs timed out nothing was queued, so the tokens never reached the cloud.
+      // The queue retries until written and marks the tokens synced only then.
+      {
         try {
           if (_branchId != null && _branchId!.isNotEmpty) {
             SyncService().start(_branchId!);
@@ -892,7 +840,8 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         }
       } catch (_) {}
 
-      final revBatchId = 'dst_rev_${_branchId}_${today}_${voidIds.join('_')}';
+      // Short, unique id (joining every token id made keys longer than Hive's 255-char limit).
+      final revBatchId = 'dst_rev_${_branchId}_${today}_${DateTime.now().millisecondsSinceEpoch}_${voidIds.length}';
 
       // ── STEP 2: Send over LAN (if connected) ────────────────────────
       final isLanConnected = RealtimeManager().isConnected;
@@ -916,46 +865,21 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
         } catch (_) {}
       }
 
-      // ── STEP 3: Hybrid Void Write (Direct Firestore delete if online, Sync queue fallback if offline) ───
-      bool directVoidSucceeded = false;
+      // ── STEP 3: Reverse in the cloud through the queue ──────────────────
+      // Tokens whose issue is still waiting in this PC's queue are simply taken out of it
+      // (they never reached the cloud). Only the rest get a cloud reversal, sent at once.
+      // This used to be a direct SDK write with short timeouts (see _generateTokens).
       try {
-        if (_branchId != null && _branchId!.isNotEmpty && LocalStorageService.isValidBranchId(_branchId)) {
-          final batch = FirebaseFirestore.instance.batch();
-          for (final tid in voidIds) {
-            batch.delete(_tokensCol.doc(tid));
+        final withdrawn = await SyncService.withdrawQueuedFoodTokens(voidIds);
+        final cloudIds = voidIds.where((id) => !withdrawn.contains(id)).toList();
+        if (cloudIds.isNotEmpty) {
+          final cloudSessionCounts = <String, int>{};
+          for (final t in tokensToVoid) {
+            final id = t['id']?.toString() ?? t['localId']?.toString() ?? '';
+            if (!cloudIds.contains(id)) continue;
+            final s = (t['session'] ?? 'lunch').toString().toLowerCase();
+            cloudSessionCounts[s] = (cloudSessionCounts[s] ?? 0) + 1;
           }
-
-          final dayUpdate = <String, dynamic>{
-            'totalTokens': FieldValue.increment(-confirmQty),
-            'reversedBatchIds': FieldValue.arrayUnion([revBatchId]),
-            'lastUpdated': FieldValue.serverTimestamp(),
-          };
-          sessionCounts.forEach((s, cnt) {
-            if (cnt > 0) {
-              dayUpdate['session_${s}_total'] = FieldValue.increment(-cnt);
-            }
-          });
-          // Update summary first so HQ Manager reflects reversal immediately
-          await _dayDoc.set(dayUpdate, SetOptions(merge: true)).timeout(const Duration(seconds: 4));
-          directVoidSucceeded = true;
-
-          try {
-            final batch = FirebaseFirestore.instance.batch();
-            for (final tid in voidIds) {
-              batch.delete(_tokensCol.doc(tid));
-            }
-            await batch.commit().timeout(const Duration(seconds: 6));
-          } catch (delErr) {
-            debugPrint('[OfficeBoy] Individual token delete deferred: $delErr');
-          }
-          debugPrint('[OfficeBoy] ✅ Direct Firestore reversal write succeeded for $revBatchId');
-        }
-      } catch (e) {
-        debugPrint('[OfficeBoy] Direct Firestore reversal failed/offline ($e) -> Falling back to Sync queue');
-      }
-
-      if (!directVoidSucceeded) {
-        try {
           await LocalStorageService.enqueueSync({
             'type': 'reverse_dasterkhwan_tokens',
             'entityId': revBatchId,
@@ -965,14 +889,16 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
             'data': {
               'branchId': _branchId,
               'dateKey': today,
-              'quantity': confirmQty,
-              'tokenIds': voidIds,
-              'sessionCounts': sessionCounts,
+              'quantity': cloudIds.length,
+              'tokenIds': cloudIds,
+              'sessionCounts': cloudSessionCounts,
               'batchId': revBatchId,
             },
           });
           SyncService().triggerUpload(urgent: true);
-        } catch (_) {}
+        }
+      } catch (e) {
+        debugPrint('[OfficeBoy] Reversal queue error: $e');
       }
 
       if (!mounted) return;
