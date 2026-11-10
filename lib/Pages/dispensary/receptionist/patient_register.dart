@@ -14,6 +14,7 @@ import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/utils/formatters.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 
 class PatientRegisterPage extends StatefulWidget {
   final String branchId;
@@ -56,10 +57,7 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
   // Bumped to replay the guardian notice's attention shake.
   int     _guardianNoticePulse = 0;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   final _nameNode        = FocusNode();
   final _cnicNode        = FocusNode();
@@ -1136,7 +1134,7 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
                               Expanded(child: RadioListTile<String>(
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
-                                title: Text(_isKarachi ? 'PKR 20 Token' : 'Zakat',
+                                title: Text(_isKarachi ? '${BranchLabels.karachiZakatLabel} Token' : 'Zakat',
                                     style: TextStyle(
                                         color: _isDark ? SoftPalette.gray50 : SoftPalette.teal700,
                                         fontSize: fontSize)),
@@ -1148,7 +1146,7 @@ class PatientRegisterPageState extends State<PatientRegisterPage> {
                               Expanded(child: RadioListTile<String>(
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
-                                title: Text(_isKarachi ? 'PKR 100 (Disabled)' : 'Non-Zakat',
+                                title: Text(_isKarachi ? '${BranchLabels.karachiNonZakatLabel} (Disabled)' : 'Non-Zakat',
                                     style: TextStyle(
                                         color: _isKarachi ? SoftPalette.gray350 : (_isDark ? SoftPalette.gray50 : SoftPalette.teal700),
                                         fontSize: fontSize)),

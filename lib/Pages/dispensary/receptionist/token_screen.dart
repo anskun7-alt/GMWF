@@ -23,6 +23,7 @@ import 'package:gmwf/utils/formatters.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
 import 'package:gmwf/services/cloud_messaging_service.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 
 class TokenScreen extends StatefulWidget {
   final String branchId;
@@ -117,10 +118,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
   static const Color _teal  = SoftPalette.teal600;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   @override
   void initState() {
@@ -1544,7 +1542,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         } else {
           AppToast.showSnackBar(context, SnackBar(
             content: Text(
-                '✅ Token $serial issued to $patientName! [$queueType]'),
+                '✅ Token $serial issued to $patientName! [${BranchLabels.text(queueType, widget.branchId)}]'),
             backgroundColor: SoftPalette.green400,
             duration: const Duration(seconds: 3),
           ));
@@ -1786,10 +1784,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                           _radioGroup(
                             'Status',
                             _isKarachi
-                                ? ['PKR 20', 'GMWF']
+                                ? [BranchLabels.karachiZakatLabel, 'GMWF']
                                 : ['Zakat', 'Non-Zakat', 'GMWF'],
-                            (_isKarachi && (selectedStatus == 'Zakat' || selectedStatus == '20')) ? 'PKR 20' : selectedStatus,
-                            (v) => setStateDialog(() => selectedStatus = (v == 'PKR 20') ? 'Zakat' : v),
+                            (_isKarachi && (selectedStatus == 'Zakat' || selectedStatus == '20')) ? BranchLabels.karachiZakatLabel : selectedStatus,
+                            (v) => setStateDialog(() => selectedStatus = (v == BranchLabels.karachiZakatLabel) ? 'Zakat' : v),
                           ),
                           const SizedBox(height: 14),
                           _radioGroup('Gender', ['Male', 'Female', 'Other'],
@@ -2688,7 +2686,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                 () {
                                   final q = _resolveQueueType(_patientData!['status'] as String?);
                                   if (_isKarachi) {
-                                    if (q.toLowerCase() == 'zakat' || q.toLowerCase() == 'non-zakat') return 'PKR 20';
+                                    if (q.toLowerCase() == 'zakat' || q.toLowerCase() == 'non-zakat') return BranchLabels.karachiZakatLabel;
                                     if (q.toLowerCase() == 'gmwf') return 'GMWF';
                                   }
                                   return q;

@@ -21,6 +21,7 @@ import 'branches_register.dart';
 import 'dispensary/patient_detail_screen.dart';
 import '../services/local_storage_service.dart';
 import '../services/branch_record_service.dart';
+import '../utils/branch_labels.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -458,12 +459,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         setModalState(() {});
                         setState(() => _currentPage = 1);
                       }, t),
-                      _buildModalChip("Zakat", typeFilter == 'zakat', () {
+                      _buildModalChip(BranchLabels.zakat(_selectedBranchId), typeFilter == 'zakat', () {
                         ref.read(branchTypeFilterProvider.notifier).state = 'zakat';
                         setModalState(() {});
                         setState(() => _currentPage = 1);
                       }, t),
-                      _buildModalChip("Non-Zakat", typeFilter == 'non-zakat', () {
+                      _buildModalChip(BranchLabels.nonZakat(_selectedBranchId), typeFilter == 'non-zakat', () {
                         ref.read(branchTypeFilterProvider.notifier).state = 'non-zakat';
                         setModalState(() {});
                         setState(() => _currentPage = 1);
@@ -1040,8 +1041,8 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     badgeColor: SoftPalette.indigo500,
                     badgeIcon: Icons.people_alt_rounded,
                     subItems: [
-                      {'label': 'Zakat (Rs 20)', 'val': NumberFormat('#,###').format(zakatTokens)},
-                      {'label': 'Non-Zakat (Rs 100)', 'val': NumberFormat('#,###').format(nonZakatTokens)},
+                      {'label': BranchLabels.isKarachiBranch(branchId) ? BranchLabels.karachiZakatLabel : 'Zakat (Rs 20)', 'val': NumberFormat('#,###').format(zakatTokens)},
+                      {'label': BranchLabels.isKarachiBranch(branchId) ? BranchLabels.karachiNonZakatLabel : 'Non-Zakat (Rs 100)', 'val': NumberFormat('#,###').format(nonZakatTokens)},
                       {'label': 'GMWF (Free)', 'val': NumberFormat('#,###').format(gmwfTokens)},
                     ],
                     t: t,
@@ -1057,8 +1058,8 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     badgeColor: SoftPalette.teal500,
                     badgeIcon: Icons.account_balance_wallet_rounded,
                     subItems: [
-                      {'label': 'Zakat Rec.', 'val': 'Rs $fmtZakat'},
-                      {'label': 'Non-Zakat Rec.', 'val': 'Rs $fmtNonZakat'},
+                      {'label': BranchLabels.text('Zakat Rec.', branchId), 'val': 'Rs $fmtZakat'},
+                      {'label': BranchLabels.text('Non-Zakat Rec.', branchId), 'val': 'Rs $fmtNonZakat'},
                       {'label': 'Free Tokens', 'val': 'Rs 0'},
                     ],
                     t: t,
@@ -2373,7 +2374,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 Text("Queue Category", style: TextStyle(fontSize: 12, color: t.textSecondary)),
-                                Text(type.toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: t.accent)),
+                                Text(BranchLabels.text(type.toUpperCase(), branchId), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: t.accent)),
                               ],
                             ),
                           ],
@@ -2874,7 +2875,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       border: Border.all(color: typeColor.withValues(alpha: 0.3)),
                     ),
                     child: Text(
-                      type.toUpperCase(),
+                      BranchLabels.text(type.toUpperCase(), branchId),
                       style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: typeColor),
                     ),
                   ),
@@ -3192,7 +3193,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           border: Border.all(color: typeColor.withValues(alpha: 0.25)),
                         ),
                         child: Text(
-                          type.toUpperCase(),
+                          BranchLabels.text(type.toUpperCase(), branchId),
                           style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: typeColor, letterSpacing: 0.3),
                         ),
                       ),

@@ -13,6 +13,7 @@ import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'dispense_queue.dart';
 
 class PatientList extends StatefulWidget {
@@ -51,7 +52,7 @@ class _PatientListState extends State<PatientList> {
     return Theme.of(context).brightness == Brightness.dark;
   }
 
-  bool get _isKarachi => widget.branchId.toLowerCase().contains('karachi') || widget.branchId.toLowerCase().contains('khi');
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   final ScrollController _scroll = ScrollController();
   final TextEditingController _searchCtrl = TextEditingController();
@@ -851,7 +852,7 @@ class _PatientListState extends State<PatientList> {
         displayType = 'GMWF';
       } else {
         badgeColor = SoftPalette.emerald550;
-        displayType = 'PKR 20';
+        displayType = BranchLabels.karachiZakatLabel;
       }
     } else {
       switch (queueTypeRaw) {

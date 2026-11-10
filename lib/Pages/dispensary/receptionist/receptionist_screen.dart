@@ -4,6 +4,7 @@ import 'package:gmwf/utils/perf_trace.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:gmwf/utils/token_order.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
@@ -125,10 +126,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
   late TabController _mobileTabController;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   bool get _isDark {
     try {
@@ -1358,7 +1356,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
       final cards = [
         _compactSummaryCard(
-          _isKarachi ? 'PKR 20' : 'Zakat',
+          BranchLabels.zakat(widget.branchId),
           zakat,
           'PKR $zakatAmount',
           SoftPalette.emerald550, // Solid Emerald Green
@@ -1366,7 +1364,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           isMobile: isMobile,
         ),
         _compactSummaryCard(
-          _isKarachi ? 'PKR 100' : 'Non-Zakat',
+          BranchLabels.nonZakat(widget.branchId),
           nonZakat,
           _isKarachi && nonZakat == 0 ? 'Disabled 🔒' : 'PKR $nonZakatAmount',
           SoftPalette.emerald550,
@@ -1428,6 +1426,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       date: DateFormat('d MMM yyyy').format(DateTime.now()),
       shift: _selectedSessionFilter,
       username: (_username?.isNotEmpty == true) ? _username! : widget.receptionistName,
+      isKarachi: _isKarachi,
     ));
   }
 
@@ -1632,13 +1631,13 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         if (_isKarachi) {
           if (effectiveQueueType == 'zakat') {
             badgeColor = SoftPalette.green400;
-            displayType = 'PKR 20';
+            displayType = BranchLabels.karachiZakatLabel;
           } else if (effectiveQueueType == 'gmwf') {
             badgeColor = SoftPalette.orange350;
             displayType = 'GMWF';
           } else {
             badgeColor = SoftPalette.green400;
-            displayType = 'PKR 20';
+            displayType = BranchLabels.karachiZakatLabel;
           }
         } else {
           switch (queueTypeRaw) {

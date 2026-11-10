@@ -19,7 +19,28 @@ void main() {
     expect(type('10'), '1+0');
     expect(type('101'), '1+0+1');
     expect(type('111'), '1+1+1');
-    expect(type('9999'), '9+9+9'); // max 3 doses: Morning+Evening+Night
+  });
+  test('typing into a full box starts a new timing (max 3 doses)', () {
+    expect(type('1019'), '9');
+    expect(type('101100'), '1+0+0');
+  });
+  // The dialog opens pre-filled with 1+0+1. Typing over it must not keep 1+0+1.
+  String typeOver(String start, String typed, {bool atStart = false}) {
+    var cur = _v(start);
+    for (final ch in typed.split('')) {
+      cur = f.formatEditUpdate(cur, _v(atStart ? ch + cur.text : cur.text + ch));
+    }
+    return cur.text;
+  }
+  test('typing over the pre-filled 1+0+1 replaces it', () {
+    expect(typeOver('1+0+1', '100'), '1+0+0');
+    expect(typeOver('1+0+1', '001'), '0+0+1');
+    expect(typeOver('1+0+1', '010'), '0+1+0');
+    expect(typeOver('1+0+1', '1'), '1'); // saved as 1+0+0 by resolveCanonicalTiming
+    expect(typeOver('1+0+1', '1', atStart: true), '1');
+  });
+  test('pasting a timing into a full box replaces it', () {
+    expect(f.formatEditUpdate(_v('1+0+1'), _v('1+0+11+0+0')).text, '1+0+0');
   });
   test('typed + is ignored (no doubles)', () {
     expect(type('1+0+1'), '1+0+1');

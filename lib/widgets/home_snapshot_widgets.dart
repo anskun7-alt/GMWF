@@ -31,6 +31,7 @@ import '../pages/madrassa/utils/madrassa_local_storage.dart';
 import '../pages/users.dart';
 import '../providers/branches_providers.dart';
 import 'app_skeleton.dart';
+import '../utils/branch_labels.dart';
 
 // ════════════════════════════════════════════════════════════════════════
 // 1. Compact stat tile w/ "vs yesterday" delta
@@ -504,9 +505,9 @@ class HomePatientDonutCard extends StatelessWidget {
             ]),
           );
           final legend = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _flatLegendRow(total == 0 ? SoftPalette.gray300 : t.zakat, 'Zakat', s.zakat, zPct),
+            _flatLegendRow(total == 0 ? SoftPalette.gray300 : t.zakat, BranchLabels.zakat(), s.zakat, zPct),
             const SizedBox(height: 10),
-            _flatLegendRow(total == 0 ? SoftPalette.gray300 : t.nonZakat, 'Non-Zakat', s.nonZakat, nPct),
+            _flatLegendRow(total == 0 ? SoftPalette.gray300 : t.nonZakat, BranchLabels.nonZakat(), s.nonZakat, nPct),
             const SizedBox(height: 10),
             _flatLegendRow(total == 0 ? SoftPalette.gray300 : t.gmwf, 'GMWF', s.gmwf, gPct),
           ]);
@@ -1468,8 +1469,8 @@ class HomePatientsByCategoryDonut extends StatelessWidget {
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                _donutLegendItem('Zakat', s.zakat, total, SoftPalette.emerald350, Icons.assignment_ind_rounded, isDark),
-                                _donutLegendItem('Non-Zakat', s.nonZakat, total, SoftPalette.blue500, Icons.badge_rounded, isDark),
+                                _donutLegendItem(BranchLabels.zakat(), s.zakat, total, SoftPalette.emerald350, Icons.assignment_ind_rounded, isDark),
+                                _donutLegendItem(BranchLabels.nonZakat(), s.nonZakat, total, SoftPalette.blue500, Icons.badge_rounded, isDark),
                                 _donutLegendItem('GMWF', s.gmwf, total, SoftPalette.amber300, Icons.child_care_rounded, isDark),
                               ],
                             ),
@@ -1842,7 +1843,7 @@ class HomeRecentPatientsTable extends StatelessWidget {
             ...tokens.take(4).map((a) {
               final match = RegExp(r'Patient: ([^\(]+)\s*\(([^)]+)\)').firstMatch(a.subtitle);
               final pName = match?.group(1)?.trim() ?? 'Patient';
-              final category = match?.group(2)?.trim() ?? 'ZAKAT';
+              final category = BranchLabels.text(match?.group(2)?.trim() ?? 'ZAKAT');
               
               final hash = a.id.hashCode.abs() % 10000;
               final pId = 'P-${hash.toString().padLeft(5, '0')}';
@@ -4820,13 +4821,13 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                                 color: SoftPalette.violet500,
                               ),
                               HomeStatTile(
-                                label: 'Zakat Patients',
+                                label: BranchLabels.text('Zakat Patients', filter.branchId),
                                 value: fmtNum(activeStats.zakat),
                                 icon: Icons.assignment_ind_rounded,
                                 color: SoftPalette.orange400,
                               ),
                               HomeStatTile(
-                                label: 'Non-Zakat Patients',
+                                label: BranchLabels.text('Non-Zakat Patients', filter.branchId),
                                 value: fmtNum(activeStats.nonZakat),
                                 icon: Icons.badge_rounded,
                                 color: SoftPalette.cyan350,
@@ -5370,7 +5371,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                 ),
               ),
               Text(
-                'Zakat: $zakat | Non-Zakat: $nonZakat | GMWF: $gmwf',
+                BranchLabels.text('Zakat: $zakat | Non-Zakat: $nonZakat | GMWF: $gmwf'),
                 style: TextStyle(
                   color: badgeColor,
                   fontSize: 10.5,

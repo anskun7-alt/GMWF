@@ -18,6 +18,7 @@ import '../realtime/realtime_events.dart';
 import '../utils/formatters.dart';
 import '../widgets/global_module_wrapper.dart';
 import '../design/design_system.dart';
+import '../utils/branch_labels.dart';
 
 class RequestUtils {
   static String getTitle(String type, String patient) {
@@ -1500,6 +1501,9 @@ class _StableRequestTabState extends State<_StableRequestTab>
         if (v == true || v.toString().toLowerCase() == 'true') return 'Adult';
         if (v == false || v.toString().toLowerCase() == 'false') return 'Child';
       }
+      if (key == 'status' || key == 'queueType') {
+        return BranchLabels.text(v.toString().trim(), widget.branchId);
+      }
       return v.toString().trim();
     }
 
@@ -1863,7 +1867,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
         const SizedBox(height: 6),
         Text("Token Serial: $tokenSerial", style: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87)),
         Text("Patient ID: $patientId", style: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87)),
-        Text("Queue: $queueType", style: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87)),
+        Text("Queue: ${BranchLabels.text(queueType, data['branchId']?.toString() ?? widget.branchId)}", style: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87)),
       ]),
     );
   }
@@ -2145,14 +2149,14 @@ class _StableRequestTabState extends State<_StableRequestTab>
               ),
               Row(children: [
                 Expanded(child: RadioListTile<String>(
-                    title: Text("Zakat", style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87, fontSize: 12)),
+                    title: Text(BranchLabels.zakat(widget.branchId), style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87, fontSize: 12)),
                     value: "Zakat",
                     groupValue: selectedStatus,
                     activeColor: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
                     onChanged: (v) =>
                         setState(() => selectedStatus = v!))),
                 Expanded(child: RadioListTile<String>(
-                    title: Text("Non-Zakat", style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87, fontSize: 12)),
+                    title: Text(BranchLabels.nonZakat(widget.branchId), style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87, fontSize: 12)),
                     value: "Non-Zakat",
                     groupValue: selectedStatus,
                     activeColor: isDark ? SoftPalette.teal300 : SoftPalette.teal550,

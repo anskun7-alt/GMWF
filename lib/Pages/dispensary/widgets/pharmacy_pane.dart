@@ -13,6 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import '../receptionist/token_tally.dart';
 
 // WhatsApp-style green from the eye-comfort palette (no hard-coded colours):
@@ -251,11 +252,11 @@ class TodayCollectionStrip extends StatelessWidget {
               reverse: true,
               child: Row(
                 children: [
-                  chip(isKarachi ? 'PKR 20' : 'Zakat', tally.zakat, 'PKR ${money.format(tally.zakatAmount)}',
+                  chip(isKarachi ? BranchLabels.karachiZakatLabel : 'Zakat', tally.zakat, 'PKR ${money.format(tally.zakatAmount)}',
                       c.success, c.successBg),
                   const SizedBox(width: 6),
                   chip(
-                    isKarachi ? 'PKR 100' : 'Non-Zakat',
+                    isKarachi ? BranchLabels.karachiNonZakatLabel : 'Non-Zakat',
                     tally.nonZakat,
                     isKarachi && tally.nonZakat == 0 ? 'Disabled' : 'PKR ${money.format(tally.nonZakatAmount)}',
                     c.info,

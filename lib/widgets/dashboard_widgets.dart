@@ -21,6 +21,7 @@ import '../services/branch_record_service.dart';
 import '../pages/donations/donations_shared.dart' as don;
 import '../theme/role_theme_provider.dart';
 import '../design/design_system.dart';
+import '../utils/branch_labels.dart';
 
 
 // ── Design System Tokens ──────────────────────────────────────────────────────
@@ -1457,10 +1458,10 @@ class FinancialSourcesRow extends StatelessWidget {
         LayoutBuilder(builder: (_, c) {
           final isWide = c.maxWidth > 480;
           final items = [
-            _SrcTile(color: t.zakat, label: 'Zakat',
+            _SrcTile(color: t.zakat, label: BranchLabels.zakat(),
                 count: s.zakat, revenue: s.zakat * 20,
                 rateLabel: '@ PKR 20', total: total),
-            _SrcTile(color: t.nonZakat, label: 'Non-Zakat',
+            _SrcTile(color: t.nonZakat, label: BranchLabels.nonZakat(),
                 count: s.nonZakat, revenue: s.nonZakat * 100,
                 rateLabel: '@ PKR 100', total: total),
             _SrcTile(color: t.gmwf, label: 'GMWF',
@@ -1859,8 +1860,8 @@ class _BranchPerformanceTableState extends State<BranchPerformanceTable> {
               _headerCell('Food Rev', 'dasterkhwaanRevenue', flex: 2, sortable: false),
               _headerCell('Total Rev', 'revenue', flex: 2),
             ] else if (widget.selectedTab == 'dispensary') ...[
-              _headerCell('Zakat P.', 'zakat', flex: 2),
-              _headerCell('Non-Zakat', 'nonZakat', flex: 2),
+              _headerCell(BranchLabels.text('Zakat P.'), 'zakat', flex: 2),
+              _headerCell(BranchLabels.nonZakat(), 'nonZakat', flex: 2),
               _headerCell('GMWF P.', 'gmwf', flex: 2),
               _headerCell('Revenue', 'dispensaryRevenue', flex: 2),
             ] else if (widget.selectedTab == 'tokens') ...[
@@ -2127,9 +2128,9 @@ class _BranchDetailPanel extends StatelessWidget {
           Text('Clinical Breakdown:', style: TextStyle(color: context.adapt(DS.neutral), fontSize: 11, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           Row(children: [
-            _detailChip(t.zakat, 'Zakat Patients', s.zakat, 'PKR ${fmtNum(s.zakat * 20)}'),
+            _detailChip(t.zakat, BranchLabels.text('Zakat Patients', branchId), s.zakat, 'PKR ${fmtNum(s.zakat * 20)}'),
             const SizedBox(width: DS.s1),
-            _detailChip(t.nonZakat, 'Non-Zakat', s.nonZakat, 'PKR ${fmtNum(s.nonZakat * 100)}'),
+            _detailChip(t.nonZakat, BranchLabels.nonZakat(branchId), s.nonZakat, 'PKR ${fmtNum(s.nonZakat * 100)}'),
             const SizedBox(width: DS.s1),
             _detailChip(t.gmwf, 'GMWF', s.gmwf, 'Free'),
           ]),
@@ -2209,9 +2210,9 @@ class _BranchDetailPanel extends StatelessWidget {
       color: context.adapt(DS.blueMuted).withValues(alpha: 0.25),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          _detailChip(t.zakat, 'Zakat', s.zakat, 'PKR ${fmtNum(s.zakat * 20)}'),
+          _detailChip(t.zakat, BranchLabels.zakat(branchId), s.zakat, 'PKR ${fmtNum(s.zakat * 20)}'),
           const SizedBox(width: DS.s1),
-          _detailChip(t.nonZakat, 'Non-Zakat', s.nonZakat, 'PKR ${fmtNum(s.nonZakat * 100)}'),
+          _detailChip(t.nonZakat, BranchLabels.nonZakat(branchId), s.nonZakat, 'PKR ${fmtNum(s.nonZakat * 100)}'),
           const SizedBox(width: DS.s1),
           _detailChip(t.gmwf, 'GMWF', s.gmwf, 'Free'),
         ]),
@@ -2636,9 +2637,9 @@ class PatientDistributionCard extends StatelessWidget {
             );
 
             final legend = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              _legendItem(context, t.zakat, 'Zakat', s.zakat, zPct, 'PKR ${fmtNum(s.zakat * 20)}', '@ PKR 20'),
+              _legendItem(context, t.zakat, BranchLabels.zakat(), s.zakat, zPct, 'PKR ${fmtNum(s.zakat * 20)}', '@ PKR 20'),
               const SizedBox(height: DS.s1 + 4),
-              _legendItem(context, t.nonZakat, 'Non-Zakat', s.nonZakat, nPct, 'PKR ${fmtNum(s.nonZakat * 100)}', '@ PKR 100'),
+              _legendItem(context, t.nonZakat, BranchLabels.nonZakat(), s.nonZakat, nPct, 'PKR ${fmtNum(s.nonZakat * 100)}', '@ PKR 100'),
               const SizedBox(height: DS.s1 + 4),
               _legendItem(context, t.gmwf, 'GMWF', s.gmwf, gPct, 'Free', 'No charge'),
             ]);
@@ -3432,8 +3433,8 @@ class DashboardFilterDialog extends StatelessWidget {
                     runSpacing: 8,
                     children: [
                       _typeChip(context, 'All Patients', null, filter.patientType, DS.neutral),
-                      _typeChip(context, 'Zakat', 'zakat', filter.patientType, DS.zakat),
-                      _typeChip(context, 'Non-Zakat', 'non-zakat', filter.patientType, DS.nonZakat),
+                      _typeChip(context, BranchLabels.zakat(filter.branchId), 'zakat', filter.patientType, DS.zakat),
+                      _typeChip(context, BranchLabels.nonZakat(filter.branchId), 'non-zakat', filter.patientType, DS.nonZakat),
                       _typeChip(context, 'GMWF', 'gmwf', filter.patientType, DS.gmwf),
                     ],
                   ),

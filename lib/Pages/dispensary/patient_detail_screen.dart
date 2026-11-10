@@ -16,6 +16,7 @@ import 'package:gmwf/theme/app_theme.dart';
 import 'package:gmwf/widgets/app_back_button.dart';
 import 'package:gmwf/widgets/app_skeleton.dart';
 import 'package:gmwf/utils/formatters.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
 
 class PatientDetailScreen extends StatefulWidget {
@@ -308,7 +309,8 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                       items: const ['N/A', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'],
                       onChanged: (v) => setS(() => _selectedBloodGroup = v)),
                   _editDropdown(t: t, value: _selectedStatus, label: 'Status', icon: Icons.mosque_rounded,
-                      items: const ['Zakat', 'Non-Zakat', 'GMWF'], onChanged: (v) => setS(() => _selectedStatus = v)),
+                      items: const ['Zakat', 'Non-Zakat', 'GMWF'], onChanged: (v) => setS(() => _selectedStatus = v),
+                      labelOf: (s) => BranchLabels.text(s, widget.branchId)),
                 ])),
               ),
             ),
@@ -691,7 +693,7 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                         border: Border.all(color: statusColor.withValues(alpha: 0.3)),
                       ),
                       child: Text(
-                        status,
+                        BranchLabels.text(status, widget.branchId),
                         style: TextStyle(
                           fontSize: 10.5,
                           fontWeight: FontWeight.w800,
@@ -1230,7 +1232,8 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   }
 
   Widget _editDropdown({required RoleThemeData t, required String? value, required String label,
-      required IconData icon, required List<String> items, required Function(String?) onChanged}) {
+      required IconData icon, required List<String> items, required Function(String?) onChanged,
+      String Function(String)? labelOf}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: DropdownButtonFormField<String>(
@@ -1245,7 +1248,7 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
           enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.bgRule)),
           focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: t.accent, width: 2)),
         ),
-        items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, style: TextStyle(fontSize: 14, color: t.textPrimary)))).toList(),
+        items: items.map((e) => DropdownMenuItem(value: e, child: Text(labelOf?.call(e) ?? e, style: TextStyle(fontSize: 14, color: t.textPrimary)))).toList(),
         onChanged: onChanged,
         validator: (v) => v == null ? 'Select $label' : null,
       ),

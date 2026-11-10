@@ -4,6 +4,7 @@ import 'package:gmwf/services/cloud/cloud_db.dart';
 import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:gmwf/utils/token_order.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'dart:async';
@@ -381,10 +382,7 @@ class _PatientQueueState extends State<PatientQueue> {
 
   bool _isOnline = true;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   // ── Pricing: base PKR per day per queue type ───────────────────────────────
   Map<String, int> get _baseDayPrice => {
@@ -1698,7 +1696,7 @@ class _PatientQueueState extends State<PatientQueue> {
             pricePerDay > 0
                 ? 'Day-1 fee (PKR $pricePerDay) collected at token desk.'
                     '${selectedDays > 1 ? ' Extra PKR ${(selectedDays - 1) * pricePerDay} will be charged.' : ''}'
-                : 'No charge for $queueType patients.',
+                : 'No charge for ${BranchLabels.text(queueType, widget.branchId)} patients.',
             style: TextStyle(
                 fontSize: 11,
                 color: context.adapt(SoftPalette.gray500),

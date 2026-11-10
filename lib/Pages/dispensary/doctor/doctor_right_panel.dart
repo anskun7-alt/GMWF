@@ -21,6 +21,7 @@ import 'package:gmwf/services/prescription_template_service.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/Pages/dispensary/dispensar/patient_form_helper.dart';
 
 class DoctorRightPanel extends StatefulWidget {
@@ -109,10 +110,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
   static const Color _dosePillBorder = SoftPalette.emerald350;
   static const Color _dosePillText   = SoftPalette.emerald600;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   // Base price per day per queue type
   Map<String, int> get _baseDayPrice => {
@@ -1359,7 +1357,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                                     final pVitals = (pData?['vitals'] is Map) ? Map<String, dynamic>.from(pData!['vitals']) : {};
                                     final pAge = (pVitals['age'] ?? pData?['age'] ?? '').toString().trim();
                                     final pGender = (pVitals['gender'] ?? pData?['gender'] ?? '').toString().trim();
-                                    final qLabel = widget.queueType.isNotEmpty ? widget.queueType.toUpperCase() : (pData?['category'] ?? '').toString().trim().toUpperCase();
+                                    final qLabel = BranchLabels.text(
+                                        widget.queueType.isNotEmpty ? widget.queueType.toUpperCase() : (pData?['category'] ?? '').toString().trim().toUpperCase(),
+                                        widget.branchId);
 
                                     return Container(
                                       margin: const EdgeInsets.only(top: 6),
@@ -4588,7 +4588,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               const Divider(height: 24),
               // Section 1: Pricing Breakdown
               Text(
-                '💰 Token Charges Breakdown (${widget.queueType.toUpperCase()} Patients):',
+                '💰 Token Charges Breakdown (${BranchLabels.text(widget.queueType.toUpperCase(), widget.branchId)} Patients):',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w700,

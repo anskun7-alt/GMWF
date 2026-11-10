@@ -34,6 +34,7 @@ import 'package:gmwf/services/prescription_template_service.dart';
 import 'package:gmwf/services/auto_update_service.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 
 class DoctorScreen extends StatefulWidget {
   final String branchId;
@@ -105,10 +106,7 @@ class _DoctorScreenState extends State<DoctorScreen>
 
   late TabController _tabController;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   bool get _canApproveRequests => LocalStorageService.isDoctorInventoryApprovalAllowed(widget.branchId);
 
@@ -924,7 +922,9 @@ class _DoctorScreenState extends State<DoctorScreen>
             'displayName': item.trim(),
             'type': 'Tablet',
             'dosage': '1',
-            'timing': 'BD',
+            // Old record kept only the name; its timing is unknown. Once a day, as for an
+            // empty timing box (never a silent twice a day) — the doctor edits it if needed.
+            'timing': '1+0+0',
             'quantity': 1,
             '_repeat': true,
           });

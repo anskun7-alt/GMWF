@@ -167,6 +167,11 @@ class PatientFormHelper {
     return parts.length > 3 && parts[3] > 0 ? parts.sublist(0, 4) : parts.sublist(0, 3);
   }
 
+  /// Urdu names of the timing slots, matching the doctor's "Morning+Evening+Night" box:
+  /// 3 slots -> صبح / شام / رات. Four doses a day (1+1+1+1) -> صبح / دوپہر / شام / رات.
+  static List<String> urduSlotLabels(int slotCount) =>
+      slotCount > 3 ? const ['صبح', 'دوپہر', 'شام', 'رات'] : const ['صبح', 'شام', 'رات'];
+
   static int totalPerDay(String timing) =>
       parseTiming(timing).reduce((a, b) => a + b);
 
@@ -295,16 +300,11 @@ class PatientFormHelper {
       }
     }
 
-    List<String> periods = [];
-    if (parts[0] > 0) {
-      periods.add('${parts[0]} $spoonPrefix$unitUrdu صبح');
-    }
-    if (parts[1] > 0) {
-      periods.add('${parts[1]} $spoonPrefix$unitUrdu دوپہر');
-    }
-    if (parts[2] > 0) {
-      periods.add('${parts[2]} $spoonPrefix$unitUrdu شام');
-    }
+    final labels = urduSlotLabels(parts.length);
+    final periods = <String>[
+      for (var i = 0; i < parts.length; i++)
+        if (parts[i] > 0) '${parts[i]} $spoonPrefix$unitUrdu ${labels[i]}',
+    ];
     if (periods.isNotEmpty) return periods.join(' - ');
 
     final q = quantity is num ? quantity.toInt() : (int.tryParse(quantity.toString()) ?? 1);

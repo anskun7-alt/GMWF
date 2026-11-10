@@ -4,6 +4,8 @@
 // "Today's collection" strip): Zakat = PKR 20 x days, Non-Zakat = PKR 100 x days,
 // GMWF = free. Karachi branches have no Non-Zakat; those count as Zakat.
 
+import 'package:gmwf/utils/branch_labels.dart';
+
 class TokenTally {
   final int zakat;
   final int nonZakat;
@@ -95,7 +97,10 @@ String buildCollectionSummary({
   required String date,
   String? shift,
   required String username,
+  bool isKarachi = false,
 }) {
+  final zakatLabel = isKarachi ? BranchLabels.karachiZakatLabel : 'Zakat';
+  final nonZakatLabel = isKarachi ? BranchLabels.karachiNonZakatLabel : 'Non-Zakat';
   String fmt(int n) {
     final s = n.abs().toString();
     final b = StringBuffer();
@@ -117,8 +122,8 @@ String buildCollectionSummary({
     'Patients: ${tally.total} | Amount: PKR ${fmt(tally.totalAmount)}',
   ];
   final parts = <String>[
-    if (tally.zakat > 0) 'Zakat ${tally.zakat} (PKR ${fmt(tally.zakatAmount)})',
-    if (tally.nonZakat > 0) 'Non-Zakat ${tally.nonZakat} (PKR ${fmt(tally.nonZakatAmount)})',
+    if (tally.zakat > 0) '$zakatLabel ${tally.zakat} (PKR ${fmt(tally.zakatAmount)})',
+    if (tally.nonZakat > 0) '$nonZakatLabel ${tally.nonZakat} (PKR ${fmt(tally.nonZakatAmount)})',
     if (tally.gmwf > 0) 'GMWF ${tally.gmwf}',
   ];
   if (parts.isNotEmpty) lines.add(parts.join(' · '));

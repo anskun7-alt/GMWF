@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/tools/firestore_structure_sanitizer.dart';
 import '../../constants/colors.dart';
 
@@ -4458,7 +4459,7 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      "Zakat: $zakatCount | Non-Zakat: $nonZakatCount | Others: $otherCount",
+                      BranchLabels.text("Zakat: $zakatCount | Non-Zakat: $nonZakatCount | Others: $otherCount"),
                       style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.gray500),
                     ),
                   ],

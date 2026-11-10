@@ -27,6 +27,7 @@ import 'package:gmwf/theme/app_theme.dart';
 import 'package:gmwf/theme/role_theme_provider.dart';
 import 'package:gmwf/widgets/file_action_helper.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/utils/branch_labels.dart';
 
 class PatientForm extends StatefulWidget {
   final String branchId;
@@ -64,10 +65,7 @@ class _PatientFormState extends State<PatientForm> {
   bool _doctorUpdatedLive = false;
   String? _doctorLiveUpdateSummary;
 
-  bool get _isKarachi {
-    final b = widget.branchId.toLowerCase().trim();
-    return b.contains('karachi') || b.contains('haji') || b.contains('saddar') || b.contains('kapaya');
-  }
+  bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   // ─── Queue-type normaliser ────────────────────────────────────────────────
   String _normaliseQueueType(String? raw) {
@@ -4121,11 +4119,11 @@ class _PatientFormState extends State<PatientForm> {
     } else if (queueType == 'non-zakat') {
       qColor = SoftPalette.blue550;
       qBg = SoftPalette.blue500A10;
-      qLabel = 'Non-Zakat';
+      qLabel = BranchLabels.nonZakat(widget.branchId);
     } else {
       qColor = SoftPalette.green550;
       qBg = SoftPalette.green100m;
-      qLabel = 'Zakat';
+      qLabel = BranchLabels.zakat(widget.branchId);
     }
 
     // Vitals extraction:
@@ -4767,12 +4765,11 @@ class _PatientFormState extends State<PatientForm> {
             if (isInj) {
               timingUrdu = 'ایک خوراک';
             } else if (parts[0] > 0 || parts[1] > 0 || parts[2] > 0 || (parts.length > 3 && parts[3] > 0)) {
-              List<String> times = [];
-              if (parts[0] > 0) times.add('${parts[0]} صبح');
-              if (parts[1] > 0) times.add('${parts[1]} دوپہر');
-              if (parts[2] > 0) times.add('${parts[2]} شام');
-              if (parts.length > 3 && parts[3] > 0) times.add('${parts[3]} رات');
-              timingUrdu = times.join(' • ');
+              final labels = PatientFormHelper.urduSlotLabels(parts.length);
+              timingUrdu = [
+                for (var i = 0; i < parts.length; i++)
+                  if (parts[i] > 0) '${parts[i]} ${labels[i]}',
+              ].join(' • ');
             } else {
               timingUrdu = PatientFormHelper.buildUrduDosageLine(item);
             }
@@ -5388,7 +5385,7 @@ class _PatientPrintOptionsSheetState extends State<_PatientPrintOptionsSheet> {
                       children: [
                         _infoSummary('Serial Token', '#${widget.serial}'),
                         Container(width: 1, height: 24, color: context.adapt(SoftPalette.teal150)),
-                        _infoSummary('Queue Type', widget.queueType.toUpperCase()),
+                        _infoSummary('Queue Type', BranchLabels.text(widget.queueType.toUpperCase(), widget.branchId)),
                       ],
                     ),
                   ],

@@ -196,8 +196,28 @@ class DoseTimingInputFormatter extends TextInputFormatter {
     if (newValue.text.length < oldValue.text.length && digits == oldDigits && digits.isNotEmpty) {
       digits = digits.substring(0, digits.length - 1);
     }
-    if (digits.length > maxDoses) digits = digits.substring(0, maxDoses);
+    if (digits.length > maxDoses) {
+      // The box was already full (e.g. the pre-filled "1+0+1"). Whatever was just typed or
+      // pasted starts a new timing — never silently dropped, or the old timing gets saved.
+      final inserted = _insertedText(oldValue.text, newValue.text).replaceAll(RegExp(r'[^0-9]'), '');
+      if (inserted.isNotEmpty) digits = inserted;
+      if (digits.length > maxDoses) digits = digits.substring(0, maxDoses);
+    }
     final text = digits.split('').join('+');
     return TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
+  }
+
+  /// The part of [newText] that is not in [oldText] (common prefix and suffix removed).
+  static String _insertedText(String oldText, String newText) {
+    var p = 0;
+    while (p < oldText.length && p < newText.length && oldText[p] == newText[p]) {
+      p++;
+    }
+    var s = 0;
+    while (s < oldText.length - p && s < newText.length - p &&
+        oldText[oldText.length - 1 - s] == newText[newText.length - 1 - s]) {
+      s++;
+    }
+    return newText.substring(p, newText.length - s);
   }
 }

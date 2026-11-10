@@ -26,6 +26,7 @@ import '../widgets/app_back_button.dart';
 import '../widgets/device_badge_widget.dart';
 import '../utils/formatters.dart';
 import '../utils/debounced_box_listenable.dart';
+import '../utils/branch_labels.dart';
 import '../services/user_module_access_service.dart';
 import '../services/device_info_service.dart';
 import '../services/finance_local_storage.dart';
@@ -777,6 +778,9 @@ class _UsersScreenState extends State<UsersScreen>
   }
 
   Widget _buildPatientFilters(RoleThemeData t) {
+    final tabBranchId = (_tabController != null && _branches.isNotEmpty && _tabController!.index < _branches.length)
+        ? _branches[_tabController!.index]['id']?.toString()
+        : widget.branchId;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       // Status chips
       SingleChildScrollView(
@@ -784,9 +788,9 @@ class _UsersScreenState extends State<UsersScreen>
         child: Row(children: [
           _chip(t, 'All Status', _filterStatus == null, () => setState(() => _filterStatus = null)),
           const SizedBox(width: 6),
-          _chip(t, 'Zakat', _filterStatus == 'Zakat', () => setState(() => _filterStatus = _filterStatus == 'Zakat' ? null : 'Zakat')),
+          _chip(t, BranchLabels.zakat(tabBranchId), _filterStatus == 'Zakat', () => setState(() => _filterStatus = _filterStatus == 'Zakat' ? null : 'Zakat')),
           const SizedBox(width: 6),
-          _chip(t, 'Non-Zakat', _filterStatus == 'Non-Zakat', () => setState(() => _filterStatus = _filterStatus == 'Non-Zakat' ? null : 'Non-Zakat')),
+          _chip(t, BranchLabels.nonZakat(tabBranchId), _filterStatus == 'Non-Zakat', () => setState(() => _filterStatus = _filterStatus == 'Non-Zakat' ? null : 'Non-Zakat')),
           const SizedBox(width: 6),
           _chip(t, 'GMWF', _filterStatus == 'GMWF', () => setState(() => _filterStatus = _filterStatus == 'GMWF' ? null : 'GMWF')),
         ]),
@@ -1617,7 +1621,7 @@ class _UsersScreenState extends State<UsersScreen>
         ? (data['name'] ?? 'Unknown').toString()
         : resolveUserDisplayName(data, fallback: 'Unknown');
     final subtitle = widget.isPatientMode
-        ? '${data['gender'] ?? 'N/A'} · ${data['age']?.toString() ?? '?'} yrs · ${data['status'] ?? ''}'
+        ? '${data['gender'] ?? 'N/A'} · ${data['age']?.toString() ?? '?'} yrs · ${BranchLabels.text((data['status'] ?? '').toString(), branchId)}'
         : ((data['role'] as String? ?? 'N/A').toLowerCase() == 'madrassa parent' ? 'GUARDIAN' : (data['role'] as String? ?? 'N/A').toUpperCase());
 
     final initials = name.trim().isEmpty ? '?' :

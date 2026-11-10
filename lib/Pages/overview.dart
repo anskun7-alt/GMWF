@@ -15,6 +15,7 @@ import 'donations/donations_shared.dart' as don;
 import 'donations/global_audit_trail.dart';
 import '../services/donations_local_storage.dart';
 import '../services/local_storage_service.dart';
+import '../utils/branch_labels.dart';
 
 class OverviewScreen extends StatefulWidget {
   final String username;
@@ -466,7 +467,7 @@ class _OverviewScreenState extends State<OverviewScreen>
             children: [
               Expanded(
                 child: ActionableKPICard(
-                  label: 'Zakat Patients',
+                  label: BranchLabels.text('Zakat Patients', dashboardController.value.branchId),
                   value: fmtNum(s.zakat),
                   icon: Icons.assignment_ind_rounded,
                   color: t.zakat,
@@ -476,7 +477,7 @@ class _OverviewScreenState extends State<OverviewScreen>
               const SizedBox(width: DS.s2),
               Expanded(
                 child: ActionableKPICard(
-                  label: 'Non-Zakat Patients',
+                  label: BranchLabels.text('Non-Zakat Patients', dashboardController.value.branchId),
                   value: fmtNum(s.nonZakat),
                   icon: Icons.badge_rounded,
                   color: t.nonZakat,
