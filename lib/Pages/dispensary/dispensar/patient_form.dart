@@ -745,6 +745,23 @@ class _PatientFormState extends State<PatientForm> {
     return autoCount;
   }
 
+  /// Partial name match between a stock record's name and a prescribed medicine's name
+  /// (exact name / formula matches are checked separately). Used to find every batch of the
+  /// same medicine, so it stays loose — but never matches:
+  ///  • an empty name (it is "contained" in every name, so it matched every medicine);
+  ///  • a combination medicine ("A + B") against a single one ("A"): Amoxicillin matched
+  ///    Amoxicillin + Clavulanic acid and deducted the wrong stock;
+  ///  • very short names (≤ 3 letters), which are contained in too many others.
+  static bool _looseNameMatch(String stockName, String targetName) {
+    if (stockName.isEmpty || targetName.isEmpty) return false;
+    if (stockName == targetName) return true;
+    bool isCombo(String s) => s.contains('+') || s.contains(' with ') || s.contains(' & ');
+    if (isCombo(stockName) || isCombo(targetName)) return false;
+    final shorter = stockName.length <= targetName.length ? stockName : targetName;
+    if (shorter.length <= 3) return false;
+    return stockName.contains(targetName) || targetName.contains(stockName);
+  }
+
   Future<List<Map<String, dynamic>>> _deductInventoryLocally(
       String branchId, String serial, List<dynamic> medicines, int days) async {
     final activeCamp = widget.queueEntry['campId']?.toString() ??
@@ -828,7 +845,7 @@ class _PatientFormState extends State<PatientForm> {
             isMatch = true;
           } else if (targetName.isNotEmpty &&
               (vName == targetName || (vFormula.isNotEmpty && vFormula == targetFormula) ||
-               vName.contains(targetName) || targetName.contains(vName))) {
+               _looseNameMatch(vName, targetName))) {
             final typeMatch = targetType.isEmpty || vType.isEmpty || vType == targetType ||
                 (targetType.contains('tab') && vType.contains('tab')) ||
                 (targetType.contains('cap') && vType.contains('cap')) ||
@@ -871,7 +888,7 @@ class _PatientFormState extends State<PatientForm> {
               isMatch = true;
             } else if (targetName.isNotEmpty &&
                 (vName == targetName || (vFormula.isNotEmpty && vFormula == targetFormula) ||
-                 vName.contains(targetName) || targetName.contains(vName))) {
+                 _looseNameMatch(vName, targetName))) {
               final typeMatch = targetType.isEmpty || vType.isEmpty || vType == targetType ||
                   (targetType.contains('tab') && vType.contains('tab')) ||
                   (targetType.contains('cap') && vType.contains('cap')) ||
@@ -899,10 +916,16 @@ class _PatientFormState extends State<PatientForm> {
         }
         final dedupedBatches = uniqueBatches.values.toList();
 
-        // Sort matching batches by expiry date ascending (FEFO: earliest first)
+        // Sort matching batches by expiry date ascending (FEFO: earliest first) — but batches
+        // already past expiry go last: they are not handed out while a good batch exists, so
+        // deducting them first left expired stock "used up" and good stock counted as unsold.
+        final todayStart = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
         dedupedBatches.sort((a, b) {
           final expA = MasterProformaService.parseExpiryDate(a['expiryDate'] ?? a['expiry'], (a['id'] ?? a['medicineId'])?.toString());
           final expB = MasterProformaService.parseExpiryDate(b['expiryDate'] ?? b['expiry'], (b['id'] ?? b['medicineId'])?.toString());
+          final aExpired = expA.isBefore(todayStart);
+          final bExpired = expB.isBefore(todayStart);
+          if (aExpired != bExpired) return aExpired ? 1 : -1;
           return expA.compareTo(expB);
         });
 
@@ -1525,7 +1548,7 @@ class _PatientFormState extends State<PatientForm> {
           isMatch = true;
         } else if (targetName.isNotEmpty &&
             (vName == targetName || (vFormula.isNotEmpty && vFormula == targetFormula) ||
-             vName.contains(targetName) || targetName.contains(vName))) {
+             _looseNameMatch(vName, targetName))) {
           final typeMatch = targetType.isEmpty || vType.isEmpty || vType == targetType ||
               (targetType.contains('tab') && vType.contains('tab')) ||
               (targetType.contains('cap') && vType.contains('cap')) ||
@@ -1571,7 +1594,7 @@ class _PatientFormState extends State<PatientForm> {
             isMatch = true;
           } else if (targetName.isNotEmpty &&
               (vName == targetName || (vFormula.isNotEmpty && vFormula == targetFormula) ||
-               vName.contains(targetName) || targetName.contains(vName))) {
+               _looseNameMatch(vName, targetName))) {
             final typeMatch = targetType.isEmpty || vType.isEmpty || vType == targetType ||
                 (targetType.contains('tab') && vType.contains('tab')) ||
                 (targetType.contains('cap') && vType.contains('cap')) ||

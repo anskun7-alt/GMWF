@@ -971,7 +971,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     if (_debounceRebuildTimer?.isActive ?? false) return;
     _debounceRebuildTimer = Timer(const Duration(milliseconds: 120), () {
       if (mounted) {
-        _cachedFilteredTokens = null;
+        // The filtered list is not thrown away here: its key changes whenever the entries
+        // box changes, so an event that changed nothing no longer forces a full re-filter.
         setState(() {});
       }
     });
@@ -984,10 +985,16 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   List<Map<String, dynamic>> _getFilteredTodayTokens() {
     if (!Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) return [];
     final now = DateTime.now();
-    final filterKey = '$_selectedSessionFilter|$_selectedCampFilter|${Hive.box(lss.LocalStorageService.entriesBox).length}';
+    // The key includes the entries "generation" (bumped on every put/delete, local or LAN): an
+    // edited token keeps the box size the same, so the old size-only key could not tell, and
+    // the cache was only trusted for 1.2 s — every rebuild re-filtered all of today's entries
+    // (×3 builders per event in the perf log). Still re-filtered at least every 5 s, so the
+    // session/date roll-over is picked up as before.
+    final filterKey = '$_selectedSessionFilter|$_selectedCampFilter|'
+        '${Hive.box(lss.LocalStorageService.entriesBox).length}|${lss.LocalStorageService.entriesGeneration}';
     if (_cachedFilteredTokens != null &&
         _cachedTokensTime != null &&
-        now.difference(_cachedTokensTime!).inMilliseconds < 1200 &&
+        now.difference(_cachedTokensTime!).inMilliseconds < 5000 &&
         _cachedTokensFilter == filterKey) {
       return _cachedFilteredTokens!;
     }

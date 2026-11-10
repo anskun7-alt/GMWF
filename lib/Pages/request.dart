@@ -3009,7 +3009,10 @@ class _StableRequestTabState extends State<_StableRequestTab>
     final branchRef = FirebaseFirestore.instance
         .collection('branches')
         .doc(widget.branchId);
-    final inventory = branchRef.collection('inventory');
+    // The collection dispensing deducts from (Karachi camps: inventory_haji / inventory_saddar);
+    // approvals used to add to plain 'inventory', so for Karachi the two drifted apart.
+    final inventory = branchRef.collection(
+        CampSessionService.getCampInventoryPath(branchId: widget.branchId, campId: campId));
     final warehouse  = branchRef.collection('warehouse');
     final batch      = FirebaseFirestore.instance.batch();
 
@@ -3075,10 +3078,9 @@ class _StableRequestTabState extends State<_StableRequestTab>
       }
 
       if (warehouseSnap.exists) {
-        final dataMap = warehouseSnap.data() ?? {};
-        final curQty  = _safeInt(dataMap['quantity']);
         batch.update(warehouse.doc(warehouseId), {
-          'quantity':      curQty + qty,
+          // Increment: "read, then write read+qty" lost any change made in between.
+          'quantity':      FieldValue.increment(qty),
           'formula':       formula,
           'formula_lower': formulaLower,
         });
@@ -3111,12 +3113,14 @@ class _StableRequestTabState extends State<_StableRequestTab>
         fullInventoryData['dose'] = dose;
       }
 
-      if (existingQuery.docs.isNotEmpty) {
+      final isExistingMedicine = existingQuery.docs.isNotEmpty;
+      if (isExistingMedicine) {
         final existingDoc = existingQuery.docs.first;
-        final dataMap     = existingDoc.data() as Map<String, dynamic>? ?? {};
-        final curQty      = _safeInt(dataMap['quantity']);
+        // Details only. The quantity is NOT written here: it goes up as "+qty" through the
+        // stock queue below (like the proforma restock), applied once per operation. Writing
+        // "cloud quantity read a moment ago + qty" lost any dispense made in between, and the
+        // LAN server then overwrote the cloud with its own figure.
         batch.update(existingDoc.reference, {
-          'quantity':       curQty + qty,
           'formula':        formula,
           'formula_lower':  formulaLower,
           'classification': classification,
@@ -3155,11 +3159,34 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'updatedAt': DateTime.now().toIso8601String(),
       };
       LocalStorageService.saveLocalInventoryItem(localItem);
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.saveStockItem,
-        'branchId': widget.branchId,
-        'data': localItem,
-      });
+      if (isExistingMedicine) {
+        // Same as the proforma restock: other PCs and the LAN server apply "+qty" once
+        // (_quantityDelta + _opId), and the cloud gets the increment through the stock queue
+        // (a LAN desk hands it to the server; the server PC or a standalone PC uploads it).
+        final opId = 'approve_${localId}_${DateTime.now().microsecondsSinceEpoch}';
+        RealtimeManager().sendMessage({
+          'event_type': RealtimeEvents.saveStockItem,
+          'branchId': widget.branchId,
+          'data': {...localItem, '_quantityDelta': qty, '_opId': opId},
+        });
+        await LocalStorageService.enqueueSync({
+          'type': 'add_inventory_stock',
+          'branchId': widget.branchId,
+          'medicineId': localId,
+          'quantity': qty,
+          'campId': campId,
+          'dispensaryId': campId,
+          'txId': opId,
+          'data': localItem,
+        });
+      } else {
+        // A new medicine is created in the cloud with its full quantity by the batch below.
+        RealtimeManager().sendMessage({
+          'event_type': RealtimeEvents.saveStockItem,
+          'branchId': widget.branchId,
+          'data': localItem,
+        });
+      }
 
       operationCount++;
     }

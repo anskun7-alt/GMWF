@@ -2739,10 +2739,29 @@ class LocalStorageService {
     return !realWorkFields.any(has);
   }
 
+  static String? _lastBloatPurgeSig;
+  static DateTime? _lastBloatPurgeAt;
+
   static Future<int> purgeBloatedSyncQueue({bool force = false}) async {
     final bool hasBloat = (Hive.isBoxOpen(syncBox) && Hive.box(syncBox).length > 20) ||
         (Hive.isBoxOpen('server_sync_queue') && Hive.box('server_sync_queue').length > 20) ||
         (Hive.isBoxOpen(deadLetterQueueBox) && Hive.box(deadLetterQueueBox).length > 20);
+
+    // A "bloated" queue skipped the 20-minute cooldown, so on a desk holding hundreds of items
+    // it can never send (e.g. 567 on the Haji Camp desk) the whole queue was copied and checked
+    // on every upload pass (every 30–45 s). If nothing in the three queues changed since the
+    // last run and it was under 5 minutes ago, running again would give the same result.
+    if (!force && hasBloat) {
+      int len(String name) => Hive.isBoxOpen(name) ? Hive.box(name).length : -1;
+      final sig = '${len(syncBox)}|${len('server_sync_queue')}|${len(deadLetterQueueBox)}';
+      final last = _lastBloatPurgeAt;
+      if (sig == _lastBloatPurgeSig && last != null &&
+          DateTime.now().difference(last) < const Duration(minutes: 5)) {
+        return 0;
+      }
+      _lastBloatPurgeSig = sig;
+      _lastBloatPurgeAt = DateTime.now();
+    }
 
     if (!force && !hasBloat) {
       try {
@@ -3058,6 +3077,12 @@ class LocalStorageService {
       } catch (e) {
         debugPrint('[SyncQueue] Error purging $boxName: $e');
       }
+    }
+    // Remember the sizes AFTER this run, so the next pass skips only if nothing changed since.
+    if (!force && hasBloat) {
+      int len(String name) => Hive.isBoxOpen(name) ? Hive.box(name).length : -1;
+      _lastBloatPurgeSig = '${len(syncBox)}|${len('server_sync_queue')}|${len(deadLetterQueueBox)}';
+      _lastBloatPurgeAt = DateTime.now();
     }
     return totalPurged;
   }
@@ -7520,7 +7545,12 @@ class LocalStorageService {
     return fresh;
   }
 
+  /// Goes up by one on every change to the entries box (local or from LAN). Screens use it to
+  /// know whether a list they filtered from the entries is still current.
+  static int entriesGeneration = 0;
+
   static void _onEntriesChanged(BoxEvent event) {
+    entriesGeneration++;
     _localEntriesCache.clear();
     _serialScanCache.clear();
     if (_branchEntries.isEmpty) return;
