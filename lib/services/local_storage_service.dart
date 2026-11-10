@@ -3172,6 +3172,31 @@ class LocalStorageService {
   }
 
   /// True if action belongs to dispensary clinic operations
+  /// True when a local attendance day record is already in the cloud. One test for every
+  /// attendance sweep. The old tests also required `synced == true` and `lastSyncedAt`, which
+  /// records downloaded from the cloud never have (and the LAN server left `pendingSync` set),
+  /// so already-uploaded records were queued again on every sweep: the "flood".
+  ///  • a new punch sets syncStatus 'pending' → not uploaded;
+  ///  • uploaded, downloaded or server-marked records carry syncStatus 'synced' → uploaded.
+  static bool isAttendanceUploaded(Map rec) {
+    final status = rec['syncStatus']?.toString();
+    if (status == 'pending') return false;
+    if (status == 'synced') return rec['synced'] != false;
+    return rec['synced'] == true && rec['pendingSync'] != true;
+  }
+
+  /// True when [key] is an extra copy of an attendance record that downloads file under the
+  /// PIN or a second employee id ('{pin}_{date}'), while the real record is '{employeeId}_{date}'.
+  /// Those copies are never uploaded on their own (the real record is). Only a copy whose real
+  /// record exists in [box] counts, so a record stored under any other key is still uploaded.
+  static bool isAttendanceAliasKey(dynamic key, Map rec, Box box) {
+    final empId = (rec['employeeId'] ?? '').toString().trim();
+    final date = (rec['date'] ?? rec['dateKey'] ?? '').toString().trim();
+    if (empId.isEmpty || date.isEmpty) return false;
+    final realKey = '${empId}_$date';
+    return key.toString() != realKey && box.containsKey(realKey);
+  }
+
   static bool isDispensaryActionType(String type) {
     final t = type.toLowerCase().trim();
     return t == 'save_entry' ||

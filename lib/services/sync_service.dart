@@ -740,15 +740,23 @@ class SyncService {
         // which could be true before Firestore ever confirmed the upload.
         // We detect these as synced==true AND lastSyncedAt==null, and reset
         // them to pending so _enqueueMissingAttendance below can re-upload them.
+        // Once per PC, not every session, and only records this PC marked synced itself
+        // (synced == true but syncStatus not 'synced'). It used to run on every start and also
+        // matched every record downloaded from the cloud (syncStatus 'synced', no lastSyncedAt),
+        // flipping them back to pending so they were all uploaded again — part of the flood.
         try {
-          if (Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
+          final healFlags = Hive.isBoxOpen('app_flags') ? Hive.box('app_flags') : null;
+          final healDone = healFlags?.get('attendance_false_sync_heal_v2_done') == true;
+          if (!healDone && Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
             final aBox = Hive.box(LocalStorageService.attendanceBox);
             int healedCount = 0;
             for (final key in aBox.keys) {
               final raw = aBox.get(key);
               if (raw is Map &&
                   raw['lastSyncedAt'] == null &&
-                  (raw['synced'] == true || raw['syncStatus'] == 'synced')) {
+                  raw['synced'] == true &&
+                  raw['syncStatus'] != 'synced' &&
+                  raw['punches'] is List && (raw['punches'] as List).isNotEmpty) {
                 await aBox.put(key, Map<String, dynamic>.from(raw)
                   ..['synced'] = false
                   ..['syncStatus'] = 'pending'
@@ -759,6 +767,7 @@ class SyncService {
             if (healedCount > 0) {
               Logger().d('[SyncService] 🩹 Healed $healedCount falsely-synced attendance records → re-queuing for upload');
             }
+            await healFlags?.put('attendance_false_sync_heal_v2_done', true);
           }
         } catch (e) {
           Logger().d('[SyncService] Attendance heal notice: $e');
@@ -1404,8 +1413,10 @@ class SyncService {
         if (raw == null || raw is! Map) continue;
         final data = Map<String, dynamic>.from(raw);
 
-        final isSynced = (data['synced'] == true && data['syncStatus'] == 'synced') && data['pendingSync'] != true && data['lastSyncedAt'] != null;
-        if (isSynced) continue;
+        // One shared test (see LocalStorageService.isAttendanceUploaded): downloaded and
+        // server-marked records no longer look "unsynced" and get queued again every sweep.
+        if (LocalStorageService.isAttendanceUploaded(data)) continue;
+        if (LocalStorageService.isAttendanceAliasKey(key, data, attBox)) continue;
 
         final flagsBox = Hive.isBoxOpen('app_flags') ? Hive.box('app_flags') : null;
         final flagSynced = flagsBox?.get('attendance_synced_$key') == true;
@@ -1423,6 +1434,8 @@ class SyncService {
 
         final targetBranch = _cleanBranch(data['branchId'] ?? branchId);
 
+        // No forceUpload: a backfill must go through the queue's checks (skip if already
+        // queued, keep retry state). 'pendingSync' only marks it as a real pending record.
         await LocalStorageService.enqueueSync({
           'backlog': true, // backfill: uses the backlog share of the daily quota
           'type': 'save_attendance_record',
@@ -1432,7 +1445,6 @@ class SyncService {
           'localKey': key,
           'data': data,
           'pendingSync': true,
-          'forceUpload': true,
         });
         alreadyQueued.add(queueKey);
         queued++;

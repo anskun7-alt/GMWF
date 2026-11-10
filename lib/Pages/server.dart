@@ -1216,7 +1216,7 @@ exit 0
         debugPrint('[Server] SyncService upload note: $e');
       }
       await ZkTecoNetworkService.syncAllDevices();
-      final pushedCount = await ZkTecoNetworkService.syncAllRecordedAttendanceToFirestore();
+      final pushedCount = await ZkTecoNetworkService.syncAllRecordedAttendanceToFirestore(manual: true);
       if (pushedCount > 0) {
         _addLog('✅ Uploaded $pushedCount attendance records to Cloud Firestore');
       }
@@ -8158,8 +8158,15 @@ class ServerSyncManager {
     }
   }
 
+  /// Attendance sweep: at most every 30 minutes (it ran at server start and on every desk
+  /// catch-up, 5 min apart at most).
+  DateTime? _lastAttendanceSweepAt;
+
   Future<void> _enqueueMissingAttendance() async {
     if (!_backfillCooledDown('attendance')) return;
+    final lastSweep = _lastAttendanceSweepAt;
+    if (lastSweep != null && DateTime.now().difference(lastSweep) < const Duration(minutes: 30)) return;
+    _lastAttendanceSweepAt = DateTime.now();
     try {
       if (!Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.attendanceBox);
@@ -8181,8 +8188,9 @@ class ServerSyncManager {
         if (raw == null || raw is! Map) continue;
         final data = Map<String, dynamic>.from(raw);
 
-        final isSynced = (data['synced'] == true && data['syncStatus'] == 'synced') && data['pendingSync'] != true && data['lastSyncedAt'] != null;
-        if (isSynced) continue;
+        // Shared test: downloaded / already-marked records are not queued again.
+        if (LocalStorageService.isAttendanceUploaded(data)) continue;
+        if (LocalStorageService.isAttendanceAliasKey(key, data, attBox)) continue;
 
         final flagsBox = Hive.isBoxOpen('app_flags') ? Hive.box('app_flags') : null;
         final flagSynced = flagsBox?.get('attendance_synced_$key') == true;
@@ -8198,19 +8206,19 @@ class ServerSyncManager {
         final queueKey = '${employeeId}_$dateStr';
         if (alreadyQueued.contains(queueKey)) continue;
 
-        final targetKey = 'sync_${branchId}_att_$queueKey';
-        await syncBox.put(targetKey, {
+        // Through the normal queue (same 'sync_att_' key as every other attendance upload, so
+        // one item per employee-day; skipped if already queued). It used to write its own
+        // 'sync_{branch}_att_' key straight into the box: a second copy of the same day that
+        // could upload after a newer one and overwrite the newer punches in the cloud.
+        await LocalStorageService.enqueueSync({
+          'backlog': true,
           'type': 'save_attendance_record',
           'branchId': branchId,
           'date': dateStr,
           'employeeId': employeeId,
           'localKey': key,
           'data': data,
-          'createdAt': DateTime.now().toIso8601String(),
-          'attempts': 0,
-          'status': 'pending',
           'pendingSync': true,
-          'forceUpload': true,
         });
         alreadyQueued.add(queueKey);
         queued++;
@@ -9369,6 +9377,7 @@ class ServerSyncManager {
               final updated = Map<String, dynamic>.from(localRecord)
                 ..['synced'] = true
                 ..['syncStatus'] = 'synced'
+                ..['pendingSync'] = false // left true, the sweeps saw it as still pending
                 ..['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
               await aBox.put(hKey, updated);
             }

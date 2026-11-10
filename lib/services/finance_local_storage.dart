@@ -4427,6 +4427,15 @@ class FinanceLocalStorage {
         final existingUpdate = updates[rKey] is Map ? Map<String, dynamic>.from(updates[rKey] as Map) : null;
         final merged = mergeAttendanceRecordMaps(existingUpdate, mergeAttendanceRecordMaps(existingLocal, record));
         final sanitized = _sanitize(merged ?? record);
+        // A record that came from the cloud (and has no local punches waiting) IS uploaded:
+        // say so fully. With only syncStatus set, the attendance sweeps took it for unsynced
+        // and queued every downloaded day for upload again.
+        if (!isPending) {
+          sanitized['syncStatus'] = 'synced';
+          sanitized['synced'] = true;
+          sanitized['pendingSync'] = false;
+          sanitized['lastSyncedAt'] ??= DateTime.now().toUtc().toIso8601String();
+        }
         updates[rKey] = sanitized;
 
         if (empId != null && empId.isNotEmpty && empId != employeeId) {

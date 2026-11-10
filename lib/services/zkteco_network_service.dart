@@ -10,6 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
+import 'cloud/sync_log.dart';
 import 'package:uuid/uuid.dart';
 import '../models/biometric_device_config.dart';
 import '../models/biometric_credential.dart';
@@ -539,6 +540,14 @@ class ZkTecoNetworkService {
 
     final int timeDriftSeconds = isLiveEvent ? rawDifference : 0;
     final bool hasSignificantDrift = isLiveEvent && timeDriftSeconds.abs() > 180; // > 3 minutes drift on live punch
+    // Remembered for the attendance self-check (a device whose clock is a day off files every
+    // punch under the wrong date). Only live punches measure it; one small local write.
+    if (isLiveEvent && Hive.isBoxOpen('app_flags')) {
+      final f = Hive.box('app_flags');
+      if (f.get('zk_last_drift_$deviceIp') != timeDriftSeconds) {
+        unawaited(f.put('zk_last_drift_$deviceIp', timeDriftSeconds));
+      }
+    }
 
     String formatDrift(int sec, bool isLive) {
       if (!isLive) return 'Historical Sync';
@@ -1943,16 +1952,33 @@ class ZkTecoNetworkService {
     }
   }
 
-  /// Scans all local attendance records and pushes them directly to Cloud Firestore.
-  static Future<int> syncAllRecordedAttendanceToFirestore() async {
+  static DateTime? _lastFullAttendanceSweepAt;
+
+  /// Queues every local attendance record that is not in the cloud yet.
+  ///
+  /// It runs on its own (app start, Attendance / Employee Management tab, PIN remap) at most
+  /// once every 30 minutes; [manual] (the server's sync button) always runs. It used to run
+  /// on every tab open, re-queue every record that didn't look "synced" (which included every
+  /// record downloaded from the cloud), bypass the queue's checks (forceUpload) and force an
+  /// upload that ignored the backlog budget — the queue flood.
+  static Future<int> syncAllRecordedAttendanceToFirestore({bool manual = false}) async {
     int syncedCount = 0;
+    final last = _lastFullAttendanceSweepAt;
+    if (!manual && last != null && DateTime.now().difference(last) < const Duration(minutes: 30)) {
+      return 0;
+    }
+    _lastFullAttendanceSweepAt = DateTime.now();
     try {
       if (!Hive.isBoxOpen(LocalStorageService.attendanceBox)) {
         await LocalStorageService.openBoxSafe(LocalStorageService.attendanceBox);
       }
       final box = Hive.box(LocalStorageService.attendanceBox);
+      final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
-      for (final key in box.keys) {
+      var scanned = 0;
+      for (final key in box.keys.toList()) {
+        // Breathe every 200 records: a full scan of a big box on the UI thread froze screens.
+        if (++scanned % 200 == 0) await Future.delayed(Duration.zero);
         final val = box.get(key);
         if (val is! Map) continue;
         final record = Map<String, dynamic>.from(val);
@@ -1965,10 +1991,14 @@ class ZkTecoNetworkService {
             : 'karachi';
 
         if (employeeId.isEmpty || dateStr.isEmpty) continue;
-        final isAlreadySynced = (record['synced'] == true && record['syncStatus'] == 'synced') && record['lastSyncedAt'] != null;
-        if (isAlreadySynced) continue;
+        // One shared "already in the cloud" test (downloaded records count as uploaded), and
+        // extra copies filed under a PIN are not uploaded on their own.
+        if (LocalStorageService.isAttendanceUploaded(record)) continue;
+        if (LocalStorageService.isAttendanceAliasKey(key, record, box)) continue;
 
         try {
+          // Through the queue's checks (no forceUpload). Past days are backlog: they use the
+          // backlog share of the daily quota and are skipped if already queued.
           await LocalStorageService.enqueueSync({
             'type': 'save_attendance_record',
             'branchId': effectiveBranch,
@@ -1977,7 +2007,7 @@ class ZkTecoNetworkService {
             'localKey': key,
             'data': record,
             'pendingSync': true,
-            'forceUpload': true,
+            if (dateStr != todayStr) 'backlog': true,
           });
           syncedCount++;
         } catch (e) {
@@ -1985,8 +2015,10 @@ class ZkTecoNetworkService {
         }
       }
       if (syncedCount > 0) {
-        await SyncService().triggerUpload(force: true);
-        debugPrint('[ZkTecoNetworkService] Enqueued $syncedCount historical/pending attendance records for direct Firestore upload.');
+        // Normal upload (not forced): a forced pass ignored the backlog budget.
+        unawaited(SyncService().triggerUpload());
+        SyncLog.write('📋 Attendance sweep: $syncedCount day record(s) not in the cloud were queued'
+            '${manual ? ' (manual)' : ''}');
       }
     } catch (e) {
       debugPrint('[ZkTecoNetworkService] syncAllRecordedAttendanceToFirestore error: $e');

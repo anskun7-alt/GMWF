@@ -34,6 +34,7 @@ import 'services/donations_local_storage.dart';
 import 'services/camp_session_service.dart';
 import 'services/offline_auth_service.dart' as offline_auth;
 import 'services/zkteco_network_service.dart';
+import 'services/attendance_self_check.dart';
 import 'services/python_runner_service.dart';
 import 'realtime/realtime_router.dart';
 import 'services/cloud_messaging_service.dart';
@@ -318,6 +319,8 @@ Future<void> main() async {
         unawaited(BackgroundSyncService.init(backgroundSyncDispatcher));
 
         if (!kIsWeb) {
+          // Read-only attendance report in gmwf_sync.log (3 min after start, then hourly).
+          AttendanceSelfCheck.start();
           unawaited(ZkTecoNetworkService.startServer().catchError((e) {
             debugPrint('[Init] ZKTeco background server start error: $e');
             return false;
