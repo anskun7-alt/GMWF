@@ -3,6 +3,7 @@
 import 'package:gmwf/utils/perf_trace.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/pages/dispensary/widgets/tab_visibility.dart';
 import 'package:gmwf/utils/token_order.dart';
 import 'package:gmwf/utils/branch_labels.dart';
 import 'dart:async';
@@ -2087,13 +2088,19 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     );
   }
 
+  // VisibleListenableBuilder: on the Hybrid desk this screen stays alive in a hidden tab, and
+  // every token save rebuilt (and re-filtered) all its lists there too — the multi-second
+  // freezes in the perf log. Hidden, it keeps its last build and rebuilds once when shown.
+  // When the tab is on screen it behaves exactly like the ValueListenableBuilder it replaces.
   Widget _buildWithEntriesListenable(Widget Function(BuildContext, Box?, Widget?) builder) {
     if (Hive.isBoxOpen(lss.LocalStorageService.entriesBox)) {
       final box = Hive.box(lss.LocalStorageService.entriesBox);
       if (box.isOpen) {
-        return ValueListenableBuilder<Box>(
-          valueListenable: DebouncedBoxListenable.shared(box),
-          builder: (ctx, b, w) {
+        final listenable = DebouncedBoxListenable.shared(box);
+        return VisibleListenableBuilder(
+          listenable: listenable,
+          builder: (ctx) {
+            final b = listenable.value;
             try {
               if (!b.isOpen) {
                 return const Center(
@@ -2103,7 +2110,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                   ),
                 );
               }
-              return PerfTrace.measure('receptionist list/summary build (${b.length} entries)', () => builder(ctx, b, w), thresholdMs: 30);
+              return PerfTrace.measure('receptionist list/summary build (${b.length} entries)', () => builder(ctx, b, null), thresholdMs: 30);
             } catch (e) {
               return const Center(
                 child: Padding(
@@ -2120,9 +2127,11 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       future: lss.LocalStorageService.ensureBoxOpen(lss.LocalStorageService.entriesBox),
       builder: (context, snapshot) {
         if (snapshot.hasData && snapshot.data != null && snapshot.data!.isOpen) {
-          return ValueListenableBuilder<Box>(
-            valueListenable: DebouncedBoxListenable.shared(snapshot.data!),
-            builder: (ctx, b, w) {
+          final listenable = DebouncedBoxListenable.shared(snapshot.data!);
+          return VisibleListenableBuilder(
+            listenable: listenable,
+            builder: (ctx) {
+              final b = listenable.value;
               try {
                 if (!b.isOpen) {
                   return const Center(
@@ -2132,7 +2141,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                     ),
                   );
                 }
-                return builder(ctx, b, w);
+                return builder(ctx, b, null);
               } catch (e) {
                 return const Center(
                   child: Padding(

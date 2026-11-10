@@ -1,6 +1,7 @@
 // lib/pages/office/finance_page.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gmwf/design/design_system.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
@@ -94,23 +95,28 @@ class _FinancePageState extends State<FinancePage> {
     if (Hive.isBoxOpen(LocalStorageService.syncBox)) {
       _syncBox = Hive.box(LocalStorageService.syncBox);
       _updateSyncCount();
-      _syncBox.listenable().addListener(_updateSyncCount);
+      _syncListenable = _syncBox.listenable()..addListener(_updateSyncCount);
     } else {
       LocalStorageService.ensureBoxOpen(LocalStorageService.syncBox).then((box) {
         if (!mounted) return;
         _syncBox = box;
         _updateSyncCount();
-        _syncBox.listenable().addListener(_updateSyncCount);
+        _syncListenable = _syncBox.listenable()..addListener(_updateSyncCount);
       });
     }
     FinanceLedgerStorage.initEngine();
     _loadBranches();
   }
 
+  // Kept so dispose() removes the listener from the same listenable (a fresh one removed
+  // nothing, and every sync-queue write kept calling into this disposed page).
+  ValueListenable<Box>? _syncListenable;
+
   @override
   void dispose() {
     try {
-      _syncBox.listenable().removeListener(_updateSyncCount);
+      _syncListenable?.removeListener(_updateSyncCount);
+      _syncListenable = null;
     } catch (_) {}
     super.dispose();
   }

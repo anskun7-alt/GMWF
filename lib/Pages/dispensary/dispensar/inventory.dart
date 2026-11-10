@@ -1,6 +1,7 @@
 // lib/pages/dispensary/dispensar/inventory.dart
 
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -326,13 +327,16 @@ class _InventoryPageState extends State<InventoryPage>
     }
 
     // Cache database loading
+    // Kept so dispose() removes the listener from the same listenable (a fresh one removed
+    // nothing, leaking a stock-box watcher each time this screen was opened).
     if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-      Hive.box(LocalStorageService.stockBox).listenable().addListener(_debouncedLoadDataFromHive);
+      _stockListenable = Hive.box(LocalStorageService.stockBox).listenable()
+        ..addListener(_debouncedLoadDataFromHive);
       _loadDataFromHive();
     } else {
       LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
         if (mounted && box.isOpen) {
-          box.listenable().addListener(_debouncedLoadDataFromHive);
+          _stockListenable = box.listenable()..addListener(_debouncedLoadDataFromHive);
           _loadDataFromHive();
         }
       });
@@ -499,9 +503,8 @@ class _InventoryPageState extends State<InventoryPage>
     CampSessionService.activeCampNotifier.removeListener(_onActiveCampChanged);
     RealtimeManager.isLanHealthyNotifier.removeListener(_onLanHealthChanged);
     try {
-      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        Hive.box(LocalStorageService.stockBox).listenable().removeListener(_debouncedLoadDataFromHive);
-      }
+      _stockListenable?.removeListener(_debouncedLoadDataFromHive);
+      _stockListenable = null;
     } catch (_) {}
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -528,6 +531,7 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Timer? _debounceLoadTimer;
+  ValueListenable<Box>? _stockListenable;
 
   void _debouncedLoadDataFromHive() {
     _debounceLoadTimer?.cancel();

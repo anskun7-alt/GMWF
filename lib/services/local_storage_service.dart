@@ -7522,6 +7522,7 @@ class LocalStorageService {
 
   static void _onEntriesChanged(BoxEvent event) {
     _localEntriesCache.clear();
+    _serialScanCache.clear();
     if (_branchEntries.isEmpty) return;
     final key = event.key;
     final val = event.deleted ? null : event.value;
@@ -12584,6 +12585,10 @@ class LocalStorageService {
   ///
   /// [offlineSlot] 0: the shared online sequence (only numbers below [offlineBandSize] count).
   /// [offlineSlot] N: this desk's own offline block N*1000+1 ... N*1000+999.
+  /// Highest token number found by the last entries scan, per counter (see
+  /// getNextLocalSerialSequence). Cleared on every entries-box change.
+  static final Map<String, ({int maxSeq, int entriesLen, DateTime at})> _serialScanCache = {};
+
   static Future<int> getNextLocalSerialSequence(
     String branchId,
     String dateKey, {
@@ -12620,24 +12625,41 @@ class LocalStorageService {
       return nextSeq > bandHigh ? bandHigh : nextSeq;
     }
 
-    final entries = getLocalEntries(branchId, dispensaryId: activeCamp, filterByCamp: true)
-        .where((m) {
-          final mDk = (m['dateKey'] as String?)?.replaceAll(RegExp(r'[^0-9]'), '') ?? '';
-          return mDk == cleanDateKey;
-        });
+    // The scan below goes over every local entry (~1 s on a busy day) and the screen asked for
+    // this estimate on every LAN event. For the ESTIMATE only (increment == false), the scanned
+    // highest number is remembered until the entries box changes (any put/delete, local or
+    // from LAN, clears it), the box size changes, or 30 s pass. An issued number
+    // (increment == true) always scans fresh.
+    final scanKey = '$counterKey|${activeCamp ?? ''}|${(session ?? '').toLowerCase().trim()}';
+    final entriesLen = Hive.isBoxOpen(entriesBox) ? Hive.box(entriesBox).length : -1;
+    final cached = increment ? null : _serialScanCache[scanKey];
+    int maxSeq;
+    if (cached != null &&
+        cached.entriesLen == entriesLen &&
+        DateTime.now().difference(cached.at) < const Duration(seconds: 30)) {
+      maxSeq = cached.maxSeq > savedSeq ? cached.maxSeq : (savedSeq > 0 ? savedSeq : bandLow);
+    } else {
+      final entries = getLocalEntries(branchId, dispensaryId: activeCamp, filterByCamp: true)
+          .where((m) {
+            final mDk = (m['dateKey'] as String?)?.replaceAll(RegExp(r'[^0-9]'), '') ?? '';
+            return mDk == cleanDateKey;
+          });
 
-    int maxSeq = savedSeq > 0 ? savedSeq : bandLow;
-    for (final m in entries) {
-      final s = (m['serial'] ?? '').toString().trim().toUpperCase();
-      if (s.isEmpty) continue;
-      final mSess = (m['session'] ?? '').toString().toLowerCase().trim();
-      final hasMatchingPrefix = s.startsWith('$cleanDateKey$sessionLetter-');
-      final isMatchingSession = mSess.isNotEmpty && (mSess == (session ?? '').toLowerCase().trim() ||
-          CampSessionService.getSessionLetter(mSess) == sessionLetter);
-      if (hasMatchingPrefix || isMatchingSession) {
-        final seq = parseSequenceFromSerial(s);
-        if (inBand(seq) && seq > maxSeq) maxSeq = seq;
+      var scanned = bandLow;
+      for (final m in entries) {
+        final s = (m['serial'] ?? '').toString().trim().toUpperCase();
+        if (s.isEmpty) continue;
+        final mSess = (m['session'] ?? '').toString().toLowerCase().trim();
+        final hasMatchingPrefix = s.startsWith('$cleanDateKey$sessionLetter-');
+        final isMatchingSession = mSess.isNotEmpty && (mSess == (session ?? '').toLowerCase().trim() ||
+            CampSessionService.getSessionLetter(mSess) == sessionLetter);
+        if (hasMatchingPrefix || isMatchingSession) {
+          final seq = parseSequenceFromSerial(s);
+          if (inBand(seq) && seq > scanned) scanned = seq;
+        }
       }
+      _serialScanCache[scanKey] = (maxSeq: scanned, entriesLen: entriesLen, at: DateTime.now());
+      maxSeq = scanned > savedSeq ? scanned : (savedSeq > 0 ? savedSeq : bandLow);
     }
 
     // [atLeast]: a number the LAN server issued, so this desk's own count continues after it.

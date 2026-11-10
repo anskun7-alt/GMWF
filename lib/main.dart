@@ -156,6 +156,10 @@ bool _isIgnoredTransientError(String errStr) {
       lower.contains('networkmanager::startlisten') ||
       lower.contains('widgetinspector') ||
       lower.contains('websocketchannelexception') ||
+      // Thrown inside the web_socket_channel package when a LAN socket closes with code 1001
+      // ("going away"). Harmless; it was the most frequent entry in the crash log (263×) and
+      // each one also wrote the crash marker and a Sentry event.
+      lower.contains('close code must be 1000') ||
       lower.contains('socketexception') ||
       lower.contains('refused the network connection') ||
       lower.contains('connection refused') ||

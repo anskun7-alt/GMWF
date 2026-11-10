@@ -1,6 +1,7 @@
 // lib/pages/dispensary/doctor/doctor_right_panel.dart (updated)
 
 import 'dart:async';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -176,16 +177,22 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
 
         _realtimeSub = RealtimeManager().messageStream.listen(_handleRealtimeUpdate);
 
+    // The listenable is kept so dispose() removes the listener from the SAME object: each
+    // listenable() call makes a new one, so removing from a fresh one removed nothing and
+    // every patient opened leaked a stock-box watcher (plus this whole panel).
     if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-      Hive.box(LocalStorageService.stockBox).listenable().addListener(_debouncedStockBoxReload);
+      _stockListenable = Hive.box(LocalStorageService.stockBox).listenable()
+        ..addListener(_debouncedStockBoxReload);
     } else {
       LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
         if (mounted && box.isOpen) {
-          box.listenable().addListener(_debouncedStockBoxReload);
+          _stockListenable = box.listenable()..addListener(_debouncedStockBoxReload);
         }
       });
     }
   }
+
+  ValueListenable<Box>? _stockListenable;
 
   int _resolveDaysOfMedicine() {
     final existing = widget.selectedPatientData?['prescription'];
@@ -841,9 +848,8 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     _activeDialogSetState = null;
     _stockBoxDebounce?.cancel();
     try {
-      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        Hive.box(LocalStorageService.stockBox).listenable().removeListener(_debouncedStockBoxReload);
-      }
+      _stockListenable?.removeListener(_debouncedStockBoxReload);
+      _stockListenable = null;
     } catch (_) {}
     _realtimeSub?.cancel();
     _searchFocusNode.dispose();

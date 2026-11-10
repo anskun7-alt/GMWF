@@ -3,6 +3,7 @@
 import 'package:gmwf/services/cloud/cloud_db.dart';
 import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/pages/dispensary/widgets/tab_visibility.dart';
 import 'package:gmwf/utils/token_order.dart';
 import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
@@ -3447,9 +3448,13 @@ class _PatientQueueState extends State<PatientQueue> {
     if (Hive.isBoxOpen(LocalStorageService.entriesBox)) {
       final box = Hive.box(LocalStorageService.entriesBox);
       if (box.isOpen) {
-        return ValueListenableBuilder<Box>(
-          valueListenable: DebouncedBoxListenable.shared(box),
-          builder: (context, box, _) => _buildQueueContent(context),
+        // Visible-only rebuilds: on the Hybrid desk this queue stays alive in a hidden tab and
+        // rebuilt on every token save. Hidden, it keeps its last build and rebuilds once when
+        // shown (the next-patient auto-select then runs as the doctor tab opens, not while the
+        // desk is on another tab). On screen it behaves exactly as before.
+        return VisibleListenableBuilder(
+          listenable: DebouncedBoxListenable.shared(box),
+          builder: (context) => _buildQueueContent(context),
         );
       }
     }
@@ -3457,9 +3462,9 @@ class _PatientQueueState extends State<PatientQueue> {
       future: LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox),
       builder: (context, snapshot) {
         if (snapshot.hasData && snapshot.data != null && snapshot.data!.isOpen) {
-          return ValueListenableBuilder<Box>(
-            valueListenable: DebouncedBoxListenable.shared(snapshot.data!),
-            builder: (context, box, _) => _buildQueueContent(context),
+          return VisibleListenableBuilder(
+            listenable: DebouncedBoxListenable.shared(snapshot.data!),
+            builder: (context) => _buildQueueContent(context),
           );
         }
         return Center(

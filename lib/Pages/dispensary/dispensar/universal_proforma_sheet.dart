@@ -1,6 +1,7 @@
 // lib/pages/dispensary/dispensar/universal_proforma_sheet.dart
 
 import 'dart:async';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
@@ -112,20 +113,22 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     });
   }
 
+  ValueListenable<Box>? _stockListenable;
+
   @override
   void initState() {
     super.initState();
     _loadProformaData();
     _searchCtrl.addListener(_filterData);
 
-        if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-      Hive.box(LocalStorageService.stockBox)
-          .listenable()
-          .addListener(_debouncedReloadProforma);
+    // Kept so dispose() removes the listener from the same listenable (see doctor panel).
+    if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+      _stockListenable = Hive.box(LocalStorageService.stockBox).listenable()
+        ..addListener(_debouncedReloadProforma);
     } else {
       LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox).then((box) {
         if (mounted && box.isOpen) {
-          box.listenable().addListener(_debouncedReloadProforma);
+          _stockListenable = box.listenable()..addListener(_debouncedReloadProforma);
           _loadProformaData();
         }
       });
@@ -147,11 +150,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     _realtimeSub?.cancel();
     _stockDebounce?.cancel();
     try {
-      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        Hive.box(LocalStorageService.stockBox)
-            .listenable()
-            .removeListener(_debouncedReloadProforma);
-      }
+      _stockListenable?.removeListener(_debouncedReloadProforma);
+      _stockListenable = null;
     } catch (_) {}
     _searchCtrl.removeListener(_filterData);
     _searchCtrl.dispose();

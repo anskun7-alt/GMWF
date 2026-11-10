@@ -76,6 +76,8 @@ class HomeRouter extends StatefulWidget {
 }
 
 class _HomeRouterState extends State<HomeRouter> {
+  /// uid|role|branch last sent to Sentry (tagging runs only when it changes).
+  static String? _lastSentryTag;
   late Future<Map<String, dynamic>?> _userDataFuture;
   StreamSubscription? _revokeListener;
   Timer? _periodicUpdateTimer;
@@ -1706,20 +1708,25 @@ class _HomeRouterState extends State<HomeRouter> {
         debugPrint(
             "HomeRouter -> Role: $role | Branch: $branchId | UID: $uid | Name: $userName");
 
-        // ✅ DevOps: Tag the Sentry session for remote debugging
-        try {
-          Sentry.configureScope((scope) {
-            scope.setTag("branch", branchId);
-            scope.setTag("role", role);
-            scope.setUser(SentryUser(
-              id: uid,
-              username: userName,
-              email: data['email'],
-            ));
-            scope.setContexts("user_data", data);
-          });
-        } catch (e) {
-          debugPrint("Sentry tagging error: $e");
+        // ✅ DevOps: Tag the Sentry session for remote debugging — once per user/role/branch,
+        // not on every rebuild of this screen (it ran on each one and copied the user data).
+        final sentryTag = '$uid|$role|$branchId';
+        if (sentryTag != _lastSentryTag) {
+          _lastSentryTag = sentryTag;
+          try {
+            Sentry.configureScope((scope) {
+              scope.setTag("branch", branchId);
+              scope.setTag("role", role);
+              scope.setUser(SentryUser(
+                id: uid,
+                username: userName,
+                email: data['email'],
+              ));
+              scope.setContexts("user_data", data);
+            });
+          } catch (e) {
+            debugPrint("Sentry tagging error: $e");
+          }
         }
 
         // Hybrid Routing Logic:
