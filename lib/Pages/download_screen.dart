@@ -10,11 +10,13 @@ import 'package:excel/excel.dart' as xl;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../services/local_storage_service.dart';
 import '../services/finance_local_storage.dart';
+import '../services/donations_local_storage.dart';
 import 'school/utils/school_local_storage.dart';
 import '../theme/role_theme_provider.dart';
 import '../theme/app_theme.dart';
@@ -141,13 +143,31 @@ class _DownloadScreenState extends State<DownloadScreen>
       }
       return;
     }
-    // ── Global roles: fetch all branches ─────────────────────────────────
+    // ── Global roles: check local Hive branches first (instant, 0 reads) ──
+    final localBranches = LocalStorageService.getLocalBranchesList();
+    if (localBranches.isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _availableBranches.clear();
+          _availableBranches.add({'id': 'all', 'name': 'All Branches'});
+          _availableBranches.addAll(localBranches.map((b) => {'id': b['id'].toString(), 'name': b['name'].toString()}));
+          _isLoadingBranches = false;
+        });
+      }
+      return;
+    }
+
+    // Fallback: fetch from Firestore if local cache is completely empty
     try {
       final snap = await FirebaseFirestore.instance.collection('branches').get();
-      final list = snap.docs.map((d) {
+      final list = <Map<String, String>>[];
+      final localBranchesBox = Hive.box(LocalStorageService.branchesBox);
+      for (final d in snap.docs) {
         final data = d.data();
-        return {'id': d.id, 'name': (data['name'] ?? d.id).toString()};
-      }).toList();
+        final name = (data['name'] ?? d.id).toString();
+        list.add({'id': d.id, 'name': name});
+        await localBranchesBox.put('branch:${d.id}', {'id': d.id, 'name': name});
+      }
       
       if (mounted) {
         setState(() {
@@ -307,6 +327,7 @@ class _DownloadScreenState extends State<DownloadScreen>
     return results;
   }
 
+  // ignore: unused_element
   void _addUniqueRecords(List<Map<String, dynamic>> targetList, List<Map<String, dynamic>> sourceList, String idKey) {
     final existingIds = targetList.map((e) => (e[idKey] ?? e['id'] ?? e['key'] ?? '').toString()).toSet();
     for (final item in sourceList) {
@@ -410,315 +431,469 @@ class _DownloadScreenState extends State<DownloadScreen>
 
       // ── 1. DISPENSARY ──
       if (hasDispensary) {
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('patients').get();
-          for (final doc in snap.docs) {
-            final data = doc.data(); data['patientId'] = doc.id; data['branchId'] = bid;
-            final sanitized = _sanitizeForJson(data);
-            if (_isDateInRange(sanitized['registrationDate'] ?? sanitized['createdAt'])) {
-              allPatients.add(sanitized); patients++;
-            }
+        // A. Patients: Local Hive first (instant, 0 reads)
+        final localPatients = LocalStorageService.getAllLocalPatients(branchId: bid);
+        for (final p in localPatients) {
+          final sanitized = _sanitizeForJson(p);
+          if (_isDateInRange(sanitized['registrationDate'] ?? sanitized['createdAt'])) {
+            allPatients.add(sanitized);
+            patients++;
           }
-        } catch (_) {}
+        }
+        // Remote fallback only if local box is completely empty for this branch
+        if (allPatients.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('patients').limit(1000).get();
+            for (final doc in snap.docs) {
+              final data = doc.data(); data['patientId'] = doc.id; data['branchId'] = bid;
+              final sanitized = _sanitizeForJson(data);
+              if (_isDateInRange(sanitized['registrationDate'] ?? sanitized['createdAt'])) {
+                allPatients.add(sanitized); patients++;
+              }
+            }
+          } catch (_) {}
+        }
 
-        try {
-          if (_dateMode == DateFilterMode.allTime) {
-            final snap = await db.collection('branches').doc(bid).collection('serials').get();
-            for (final dateDoc in snap.docs) {
-              for (final type in ['zakat', 'non-zakat', 'gmwf']) {
-                final qSnap = await dateDoc.reference.collection(type).get();
-                for (final doc in qSnap.docs) {
-                  final d = doc.data();
-                  d['serial'] = doc.id; d['date'] = dateDoc.id; d['queueType'] = type; d['branchId'] = bid;
-                  allTokens.add(_sanitizeForJson(d)); tokens++;
+        // B. Tokens: Local Hive entries first (instant, 0 reads)
+        final localEntries = LocalStorageService.getLocalEntries(bid);
+        for (final t in localEntries) {
+          final d = Map<String, dynamic>.from(t);
+          d['branchId'] = bid;
+          final dateStr = (d['dateKey'] ?? d['date'] ?? d['createdAt'] ?? '').toString();
+          if (_isDateInRange(dateStr)) {
+            allTokens.add(_sanitizeForJson(d));
+            tokens++;
+          }
+        }
+        // Remote fallback only if local box had 0 tokens
+        if (allTokens.isEmpty) {
+          try {
+            if (_dateMode == DateFilterMode.allTime) {
+              final snap = await db.collection('branches').doc(bid).collection('serials').limit(45).get();
+              for (final dateDoc in snap.docs) {
+                for (final type in ['zakat', 'non-zakat', 'gmwf']) {
+                  final qSnap = await dateDoc.reference.collection(type).limit(300).get();
+                  for (final doc in qSnap.docs) {
+                    final d = doc.data();
+                    d['serial'] = doc.id; d['date'] = dateDoc.id; d['queueType'] = type; d['branchId'] = bid;
+                    allTokens.add(_sanitizeForJson(d)); tokens++;
+                  }
+                }
+              }
+            } else {
+              await Future.wait(dsLegacyKeys.map((key) async {
+                final dateDoc = db.collection('branches').doc(bid).collection('serials').doc(key);
+                await Future.wait(['zakat', 'non-zakat', 'gmwf'].map((type) async {
+                  try {
+                    final qSnap = await dateDoc.collection(type).limit(300).get();
+                    for (final doc in qSnap.docs) {
+                      final d = doc.data();
+                      d['serial'] = doc.id; d['date'] = key; d['queueType'] = type; d['branchId'] = bid;
+                      allTokens.add(_sanitizeForJson(d)); tokens++;
+                    }
+                  } catch (_) {}
+                }));
+              }));
+            }
+          } catch (_) {}
+        }
+
+        // C. Prescriptions: Local Hive first
+        final localPrescriptions = _getHiveData(LocalStorageService.prescriptionsBox, bid);
+        for (final p in localPrescriptions) {
+          final sanitized = _sanitizeForJson(p);
+          if (_isDateInRange(sanitized['date'] ?? sanitized['createdAt'])) {
+            allPrescriptions.add(sanitized);
+            prescriptions++;
+          }
+        }
+        if (allPrescriptions.isEmpty) {
+          try {
+            final patientSnap = await db.collection('branches').doc(bid).collection('prescriptions').limit(150).get();
+            for (final pDoc in patientSnap.docs) {
+              final prescSnap = await pDoc.reference.collection('prescriptions').limit(100).get();
+              for (final doc in prescSnap.docs) {
+                final data = doc.data();
+                data['prescriptionId'] = doc.id; data['patientCnic'] = pDoc.id; data['branchId'] = bid;
+                final sanitized = _sanitizeForJson(data);
+                if (_isDateInRange(sanitized['date'] ?? sanitized['createdAt'])) {
+                  allPrescriptions.add(sanitized); prescriptions++;
                 }
               }
             }
-          } else {
-            await Future.wait(dsLegacyKeys.map((key) async {
-              final dateDoc = db.collection('branches').doc(bid).collection('serials').doc(key);
-              await Future.wait(['zakat', 'non-zakat', 'gmwf'].map((type) async {
-                try {
-                  final qSnap = await dateDoc.collection(type).get();
-                  for (final doc in qSnap.docs) {
-                    final d = doc.data();
-                    d['serial'] = doc.id; d['date'] = key; d['queueType'] = type; d['branchId'] = bid;
-                    allTokens.add(_sanitizeForJson(d)); tokens++;
-                  }
-                } catch (_) {}
-              }));
-            }));
-          }
-        } catch (_) {}
+          } catch (_) {}
+        }
 
-        try {
-          final patientSnap = await db.collection('branches').doc(bid).collection('prescriptions').get();
-          for (final pDoc in patientSnap.docs) {
-            final prescSnap = await pDoc.reference.collection('prescriptions').get();
-            for (final doc in prescSnap.docs) {
-              final data = doc.data();
-              data['prescriptionId'] = doc.id; data['patientCnic'] = pDoc.id; data['branchId'] = bid;
-              final sanitized = _sanitizeForJson(data);
-              if (_isDateInRange(sanitized['date'] ?? sanitized['createdAt'])) {
-                allPrescriptions.add(sanitized); prescriptions++;
+        // D. Inventory: Local Hive stockBox first
+        if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
+          final sBox = Hive.box(LocalStorageService.stockBox);
+          for (final key in sBox.keys) {
+            final val = sBox.get(key);
+            if (val is Map) {
+              final d = Map<String, dynamic>.from(val);
+              final itemBranch = (d['branchId'] ?? '').toString().toLowerCase().trim();
+              if (itemBranch.isEmpty || itemBranch == bid.toLowerCase().trim() || bid == 'all') {
+                d['itemId'] = key.toString();
+                d['branchId'] = bid;
+                allDispensary.add(_sanitizeForJson(d));
+                dispensary++;
               }
             }
           }
-        } catch (_) {}
-
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('inventory').get();
-          for (final doc in snap.docs) {
-            final data = doc.data(); data['itemId'] = doc.id; data['branchId'] = bid;
-            allDispensary.add(_sanitizeForJson(data)); dispensary++;
-          }
-        } catch (_) {}
+        }
+        if (allDispensary.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('inventory').limit(1000).get();
+            for (final doc in snap.docs) {
+              final data = doc.data(); data['itemId'] = doc.id; data['branchId'] = bid;
+              allDispensary.add(_sanitizeForJson(data)); dispensary++;
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 2. DASTERKHWAAN & FOOD STOCK ──
       if (hasDasterkhwaan) {
-        try {
-          if (_dateMode == DateFilterMode.allTime) {
-            final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan').get();
-            for (final dateDoc in snap.docs) {
-              final qSnap = await dateDoc.reference.collection('tokens').get();
-              for (final doc in qSnap.docs) {
-                final d = doc.data();
-                d['id'] = doc.id; d['date'] = dateDoc.id; d['branchId'] = bid;
-                allFood.add(_sanitizeForJson(d)); food++;
-              }
-            }
-          } else {
-            await Future.wait(dsDashKeys.map((key) async {
-              try {
-                final qSnap = await db.collection('branches').doc(bid).collection('dasterkhwaan').doc(key).collection('tokens').get();
+        // Food tokens: Local Hive first
+        final localFood = _getHiveData(LocalStorageService.dasterkhwaanTokensBox, bid);
+        for (final d in localFood) {
+          if (_isDateInRange(d['date'] ?? d['createdAt'] ?? d['timestamp'])) {
+            allFood.add(d);
+            food++;
+          }
+        }
+        if (allFood.isEmpty) {
+          try {
+            if (_dateMode == DateFilterMode.allTime) {
+              final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan').limit(45).get();
+              for (final dateDoc in snap.docs) {
+                final qSnap = await dateDoc.reference.collection('tokens').limit(300).get();
                 for (final doc in qSnap.docs) {
-                  final d = doc.data(); d['id'] = doc.id; d['date'] = key; d['branchId'] = bid;
+                  final d = doc.data();
+                  d['id'] = doc.id; d['date'] = dateDoc.id; d['branchId'] = bid;
                   allFood.add(_sanitizeForJson(d)); food++;
                 }
-              } catch (_) {}
-            }));
-          }
-        } catch (_) {}
-
-        // Food Stock Inventory
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan_stock').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allFoodStock.add(_sanitizeForJson(d)); foodStock++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allFoodStock, _getHiveData('dasterkhwaan_stock', bid), 'id');
-        foodStock = allFoodStock.length;
-
-        // Food Stock Deduction Logs
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan_stock_logs').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            if (_isDateInRange(d['timestamp'] ?? d['date'])) {
-              allFoodLogs.add(_sanitizeForJson(d)); foodLogs++;
+              }
+            } else {
+              await Future.wait(dsDashKeys.map((key) async {
+                try {
+                  final qSnap = await db.collection('branches').doc(bid).collection('dasterkhwaan').doc(key).collection('tokens').limit(300).get();
+                  for (final doc in qSnap.docs) {
+                    final d = doc.data(); d['id'] = doc.id; d['date'] = key; d['branchId'] = bid;
+                    allFood.add(_sanitizeForJson(d)); food++;
+                  }
+                } catch (_) {}
+              }));
             }
+          } catch (_) {}
+        }
+
+        // Food Stock Inventory: Local Hive first
+        final localFoodStock = _getHiveData('dasterkhwaan_stock', bid);
+        allFoodStock.addAll(localFoodStock);
+        foodStock = allFoodStock.length;
+        if (allFoodStock.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan_stock').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allFoodStock.add(_sanitizeForJson(d)); foodStock++;
+            }
+          } catch (_) {}
+        }
+
+        // Food Stock Deduction Logs: Local Hive first
+        final localFoodLogs = _getHiveData('dasterkhwaan_stock_logs', bid);
+        for (final d in localFoodLogs) {
+          if (_isDateInRange(d['timestamp'] ?? d['date'])) {
+            allFoodLogs.add(d);
+            foodLogs++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allFoodLogs, _getHiveData('dasterkhwaan_stock_logs', bid), 'id');
-        foodLogs = allFoodLogs.length;
+        }
+        if (allFoodLogs.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('dasterkhwaan_stock_logs').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              if (_isDateInRange(d['timestamp'] ?? d['date'])) {
+                allFoodLogs.add(_sanitizeForJson(d)); foodLogs++;
+              }
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 3. MADRASSA MODULE ──
       if (hasMadrassa) {
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('madrassa_students').get();
-          for (final doc in snap.docs) {
-            final data = doc.data(); data['studentId'] = doc.id; data['branchId'] = bid;
-            allMadrassaStudents.add(_sanitizeForJson(data)); madrassaS++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allMadrassaStudents, _getHiveData(LocalStorageService.madrassaStudentsBox, bid), 'studentId');
+        // Students: Local Hive first
+        final localMadrassaS = _getHiveData(LocalStorageService.madrassaStudentsBox, bid);
+        allMadrassaStudents.addAll(localMadrassaS);
         madrassaS = allMadrassaStudents.length;
-
-        try {
-          if (_dateMode == DateFilterMode.allTime) {
-            final snap = await db.collection('branches').doc(bid).collection('madrassa_daily_logs').get();
+        if (allMadrassaStudents.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('madrassa_students').limit(500).get();
             for (final doc in snap.docs) {
-              final d = doc.data(); d['date'] = doc.id; d['branchId'] = bid;
-              allMadrassaLogs.add(_sanitizeForJson(d)); madrassaL++;
+              final data = doc.data(); data['studentId'] = doc.id; data['branchId'] = bid;
+              allMadrassaStudents.add(_sanitizeForJson(data)); madrassaS++;
             }
-          } else {
-            await Future.wait(dsDashKeys.map((key) async {
-              try {
-                final doc = await db.collection('branches').doc(bid).collection('madrassa_daily_logs').doc(key).get();
-                if (doc.exists) {
-                  final d = doc.data() as Map<String, dynamic>; d['date'] = doc.id; d['branchId'] = bid;
-                  allMadrassaLogs.add(_sanitizeForJson(d)); madrassaL++;
-                }
-              } catch (_) {}
-            }));
+          } catch (_) {}
+        }
+
+        // Daily Logs: Local Hive first
+        final localMadrassaLogs = _getHiveData(LocalStorageService.madrassaLogsBox, bid);
+        for (final d in localMadrassaLogs) {
+          if (_isDateInRange(d['date'] ?? d['dateKey'])) {
+            allMadrassaLogs.add(d);
+            madrassaL++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allMadrassaLogs, _getHiveData(LocalStorageService.madrassaLogsBox, bid), 'date');
-        madrassaL = allMadrassaLogs.length;
+        }
+        if (allMadrassaLogs.isEmpty) {
+          try {
+            if (_dateMode == DateFilterMode.allTime) {
+              final snap = await db.collection('branches').doc(bid).collection('madrassa_daily_logs').limit(60).get();
+              for (final doc in snap.docs) {
+                final d = doc.data(); d['date'] = doc.id; d['branchId'] = bid;
+                allMadrassaLogs.add(_sanitizeForJson(d)); madrassaL++;
+              }
+            } else {
+              await Future.wait(dsDashKeys.map((key) async {
+                try {
+                  final doc = await db.collection('branches').doc(bid).collection('madrassa_daily_logs').doc(key).get();
+                  if (doc.exists) {
+                    final d = doc.data() as Map<String, dynamic>; d['date'] = doc.id; d['branchId'] = bid;
+                    allMadrassaLogs.add(_sanitizeForJson(d)); madrassaL++;
+                  }
+                } catch (_) {}
+              }));
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 4. SCHOOL SYSTEM (TWT) ──
       if (hasSchool) {
-        // Students
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_students').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allSchoolStudents.add(_sanitizeForJson(d)); schoolS++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolStudents, SchoolLocalStorage.getAllStudentsCached(bid), 'id');
+        // Students: Local first
+        final localSchoolS = SchoolLocalStorage.getAllStudentsCached(bid);
+        allSchoolStudents.addAll(localSchoolS.map((e) => _sanitizeForJson(Map<String, dynamic>.from(e))));
         schoolS = allSchoolStudents.length;
+        if (allSchoolStudents.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_students').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allSchoolStudents.add(_sanitizeForJson(d)); schoolS++;
+            }
+          } catch (_) {}
+        }
 
-        // Teachers
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_teachers').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allSchoolTeachers.add(_sanitizeForJson(d)); schoolT++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolTeachers, SchoolLocalStorage.getAllTeachersCached(bid), 'id');
+        // Teachers: Local first
+        final localSchoolT = SchoolLocalStorage.getAllTeachersCached(bid);
+        allSchoolTeachers.addAll(localSchoolT.map((e) => _sanitizeForJson(Map<String, dynamic>.from(e))));
         schoolT = allSchoolTeachers.length;
-
-        // Attendance Logs
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_logs').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['dateKey'] = doc.id; d['branchId'] = bid;
-            if (_isDateInRange(doc.id)) {
-              allSchoolLogs.add(_sanitizeForJson(d)); schoolLogs++;
+        if (allSchoolTeachers.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_teachers').limit(200).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allSchoolTeachers.add(_sanitizeForJson(d)); schoolT++;
             }
-          }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolLogs, _getHiveData(LocalStorageService.schoolLogsBox, bid), 'dateKey');
-        schoolLogs = allSchoolLogs.length;
+          } catch (_) {}
+        }
 
-        // Books
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_books').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allSchoolBooks.add(_sanitizeForJson(d)); schoolBooks++;
+        // Attendance Logs: Local first
+        final localSchoolLogs = _getHiveData(LocalStorageService.schoolLogsBox, bid);
+        for (final d in localSchoolLogs) {
+          if (_isDateInRange(d['dateKey'] ?? d['date'] ?? d['id'])) {
+            allSchoolLogs.add(d);
+            schoolLogs++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolBooks, SchoolLocalStorage.getAllBooksCached(bid), 'id');
+        }
+        if (allSchoolLogs.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_logs').limit(200).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['dateKey'] = doc.id; d['branchId'] = bid;
+              if (_isDateInRange(doc.id)) {
+                allSchoolLogs.add(_sanitizeForJson(d)); schoolLogs++;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // Books: Local first
+        allSchoolBooks.addAll(SchoolLocalStorage.getAllBooksCached(bid).map((e) => _sanitizeForJson(Map<String, dynamic>.from(e))));
         schoolBooks = allSchoolBooks.length;
-
-        // Book Loans
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_book_loans').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allSchoolBookLoans.add(_sanitizeForJson(d)); schoolLoans++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolBookLoans, SchoolLocalStorage.getAllBookLoansCached(bid), 'id');
-        schoolLoans = allSchoolBookLoans.length;
-
-        // Grades
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_grades').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allSchoolGrades.add(_sanitizeForJson(d)); schoolGrades++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolGrades, SchoolLocalStorage.getAllGradesCached(bid), 'id');
-        schoolGrades = allSchoolGrades.length;
-
-        // Audit Logs
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('school_audit_logs').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            if (_isDateInRange(d['timestamp'])) {
-              allSchoolAudit.add(_sanitizeForJson(d)); schoolAudit++;
+        if (allSchoolBooks.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_books').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allSchoolBooks.add(_sanitizeForJson(d)); schoolBooks++;
             }
+          } catch (_) {}
+        }
+
+        // Book Loans: Local first
+        allSchoolBookLoans.addAll(SchoolLocalStorage.getAllBookLoansCached(bid).map((e) => _sanitizeForJson(Map<String, dynamic>.from(e))));
+        schoolLoans = allSchoolBookLoans.length;
+        if (allSchoolBookLoans.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_book_loans').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allSchoolBookLoans.add(_sanitizeForJson(d)); schoolLoans++;
+            }
+          } catch (_) {}
+        }
+
+        // Grades: Local first
+        allSchoolGrades.addAll(SchoolLocalStorage.getAllGradesCached(bid).map((e) => _sanitizeForJson(Map<String, dynamic>.from(e))));
+        schoolGrades = allSchoolGrades.length;
+        if (allSchoolGrades.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_grades').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allSchoolGrades.add(_sanitizeForJson(d)); schoolGrades++;
+            }
+          } catch (_) {}
+        }
+
+        // Audit Logs: Local first
+        final localSchoolAudit = SchoolLocalStorage.getAuditLogsCached(bid);
+        for (final a in localSchoolAudit) {
+          final d = _sanitizeForJson(Map<String, dynamic>.from(a));
+          if (_isDateInRange(d['timestamp'])) {
+            allSchoolAudit.add(d);
+            schoolAudit++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allSchoolAudit, SchoolLocalStorage.getAuditLogsCached(bid), 'id');
-        schoolAudit = allSchoolAudit.length;
+        }
+        if (allSchoolAudit.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('school_audit_logs').limit(300).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              if (_isDateInRange(d['timestamp'])) {
+                allSchoolAudit.add(_sanitizeForJson(d)); schoolAudit++;
+              }
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 5. DONATIONS & CREDIT LEDGER ──
       if (hasDonations) {
-        try {
-          Query q = db.collection('branches').doc(bid).collection('donations');
-          if (_dateMode != DateFilterMode.allTime) {
-            q = q.where('date', isGreaterThanOrEqualTo: dsDashKeys.first).where('date', isLessThanOrEqualTo: dsDashKeys.last);
+        // Donations: Local Hive first
+        final localDons = DonationsLocalStorage.getAllDonations(bid);
+        for (final d in localDons) {
+          final m = _sanitizeForJson(d.toMap());
+          m['branchId'] = bid;
+          final dateStr = (m['date'] ?? m['createdAt'] ?? '').toString();
+          if (_isDateInRange(dateStr)) {
+            allDonations.add(m);
+            donations++;
           }
-          final snap = await q.get();
-          for (final doc in snap.docs) {
-            if (doc.id == 'credit_ledger') continue;
-            final d = doc.data() as Map<String, dynamic>; d['id'] = doc.id; d['branchId'] = bid;
-            allDonations.add(_sanitizeForJson(d)); donations++;
-          }
-        } catch (_) {}
+        }
+        if (allDonations.isEmpty) {
+          try {
+            Query q = db.collection('branches').doc(bid).collection('donations');
+            if (_dateMode != DateFilterMode.allTime) {
+              q = q.where('date', isGreaterThanOrEqualTo: dsDashKeys.first).where('date', isLessThanOrEqualTo: dsDashKeys.last);
+            }
+            final snap = await q.limit(500).get();
+            for (final doc in snap.docs) {
+              if (doc.id == 'credit_ledger') continue;
+              final d = doc.data() as Map<String, dynamic>; d['id'] = doc.id; d['branchId'] = bid;
+              allDonations.add(_sanitizeForJson(d)); donations++;
+            }
+          } catch (_) {}
+        }
 
-        try {
-          Query q = db.collection('branches').doc(bid).collection('creditLedger');
-          if (_dateMode != DateFilterMode.allTime) {
-            q = q.where('date', isGreaterThanOrEqualTo: dsDashKeys.first).where('date', isLessThanOrEqualTo: dsDashKeys.last);
+        // Credit Ledger: Local first
+        final localCredits = _getHiveData('creditLedger', bid);
+        for (final c in localCredits) {
+          if (_isDateInRange(c['date'] ?? c['createdAt'])) {
+            allCredits.add(c);
+            credits++;
           }
-          final snap = await q.get();
-          for (final doc in snap.docs) {
-            final d = doc.data() as Map<String, dynamic>; d['id'] = doc.id; d['branchId'] = bid;
-            allCredits.add(_sanitizeForJson(d)); credits++;
-          }
-        } catch (_) {}
+        }
+        if (allCredits.isEmpty) {
+          try {
+            Query q = db.collection('branches').doc(bid).collection('creditLedger');
+            if (_dateMode != DateFilterMode.allTime) {
+              q = q.where('date', isGreaterThanOrEqualTo: dsDashKeys.first).where('date', isLessThanOrEqualTo: dsDashKeys.last);
+            }
+            final snap = await q.limit(300).get();
+            for (final doc in snap.docs) {
+              final d = doc.data() as Map<String, dynamic>; d['id'] = doc.id; d['branchId'] = bid;
+              allCredits.add(_sanitizeForJson(d)); credits++;
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 6. OFFICE BOY MODULE ──
       if (hasOfficeBoy) {
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('office_boy_tasks').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allOfficeBoyTasks.add(_sanitizeForJson(d)); obTasks++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allOfficeBoyTasks, _getHiveData('office_boy_tasks', bid), 'id');
+        final localObTasks = _getHiveData('office_boy_tasks', bid);
+        allOfficeBoyTasks.addAll(localObTasks);
         obTasks = allOfficeBoyTasks.length;
+        if (allOfficeBoyTasks.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('office_boy_tasks').limit(300).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allOfficeBoyTasks.add(_sanitizeForJson(d)); obTasks++;
+            }
+          } catch (_) {}
+        }
 
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('office_boy_logs').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allOfficeBoyLogs.add(_sanitizeForJson(d)); obLogs++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allOfficeBoyLogs, _getHiveData('office_boy_logs', bid), 'id');
+        final localObLogs = _getHiveData('office_boy_logs', bid);
+        allOfficeBoyLogs.addAll(localObLogs);
         obLogs = allOfficeBoyLogs.length;
+        if (allOfficeBoyLogs.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('office_boy_logs').limit(300).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allOfficeBoyLogs.add(_sanitizeForJson(d)); obLogs++;
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 7. FINANCE & EXPENSES ──
       if (hasFinance) {
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('finance_loans').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            allFinanceLoans.add(_sanitizeForJson(d)); financeLoans++;
-          }
-        } catch (_) {}
-        _addUniqueRecords(allFinanceLoans, _getHiveData(LocalStorageService.financeLoansBox, bid), 'id');
+        final localLoans = _getHiveData(LocalStorageService.financeLoansBox, bid);
+        allFinanceLoans.addAll(localLoans);
         financeLoans = allFinanceLoans.length;
-
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('expenses').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            if (_isDateInRange(d['date'] ?? d['timestamp'])) {
-              allExpenses.add(_sanitizeForJson(d)); expenses++;
+        if (allFinanceLoans.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('finance_loans').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              allFinanceLoans.add(_sanitizeForJson(d)); financeLoans++;
             }
+          } catch (_) {}
+        }
+
+        final localExp = _getHiveData(LocalStorageService.expensesBox, bid);
+        for (final e in localExp) {
+          if (_isDateInRange(e['date'] ?? e['timestamp'])) {
+            allExpenses.add(e);
+            expenses++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allExpenses, _getHiveData(LocalStorageService.expensesBox, bid), 'id');
-        expenses = allExpenses.length;
+        }
+        if (allExpenses.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('expenses').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              if (_isDateInRange(d['date'] ?? d['timestamp'])) {
+                allExpenses.add(_sanitizeForJson(d)); expenses++;
+              }
+            }
+          } catch (_) {}
+        }
       }
 
       // ── 8. HR & PAYROLL ──
@@ -743,7 +918,7 @@ class _DownloadScreenState extends State<DownloadScreen>
 
         // B. Query Firestore if online
         try {
-          final snap = await db.collection('branches').doc(bid).collection('employees').get().timeout(const Duration(seconds: 4));
+          final snap = await db.collection('branches').doc(bid).collection('employees').limit(300).get().timeout(const Duration(seconds: 4));
           for (final doc in snap.docs) {
             final d = doc.data();
             d['id'] = doc.id;
@@ -765,16 +940,24 @@ class _DownloadScreenState extends State<DownloadScreen>
         }
         employees = allEmployees.length;
 
-        try {
-          final snap = await db.collection('branches').doc(bid).collection('salary_history').get();
-          for (final doc in snap.docs) {
-            final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
-            if (_isDateInRange(d['month'] ?? d['date'])) {
-              allSalaryHistory.add(_sanitizeForJson(d)); salaryHistory++;
-            }
+        final localSalary = _getHiveData(LocalStorageService.salaryHistoryBox, bid);
+        for (final s in localSalary) {
+          if (_isDateInRange(s['month'] ?? s['date'])) {
+            allSalaryHistory.add(s);
+            salaryHistory++;
           }
-        } catch (_) {}
-        _addUniqueRecords(allSalaryHistory, _getHiveData(LocalStorageService.salaryHistoryBox, bid), 'id');
+        }
+        if (allSalaryHistory.isEmpty) {
+          try {
+            final snap = await db.collection('branches').doc(bid).collection('salary_history').limit(500).get();
+            for (final doc in snap.docs) {
+              final d = doc.data(); d['id'] = doc.id; d['branchId'] = bid;
+              if (_isDateInRange(d['month'] ?? d['date'])) {
+                allSalaryHistory.add(_sanitizeForJson(d)); salaryHistory++;
+              }
+            }
+          } catch (_) {}
+        }
         salaryHistory = allSalaryHistory.length;
       }
 
@@ -1187,7 +1370,8 @@ class _DownloadScreenState extends State<DownloadScreen>
 
     return Scaffold(
       backgroundColor: t.bg,
-      appBar: _buildAppBar(t),
+      // Inside the executive shell its header already names the page.
+      appBar: HomeModuleHost.isModuleRoot(context) ? null : _buildAppBar(t),
       body: FadeTransition(
         opacity: _cardFade,
         child: Center(

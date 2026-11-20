@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:convert';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
@@ -225,7 +226,7 @@ class _ServerDataViewerState extends State<ServerDataViewer> {
               ],
             ),
       body: ValueListenableBuilder(
-        valueListenable: Hive.box(LocalStorageService.entriesBox).listenable(),
+        valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.entriesBox)),
         builder: (context, Box box, _) {
           List<Map<String, dynamic>> allEntries = LocalStorageService.getLocalEntries(widget.branchId);
           if (_selectedCategory == 'failed_outbox') {

@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/design_system.dart';
@@ -372,10 +373,10 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
     return Scaffold(
       backgroundColor: context.adapt(ExecTokens.canvasBg),
       body: ValueListenableBuilder(
-        valueListenable: FinanceLocalStorage.employeesBox.listenable(),
+        valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.employeesBox),
         builder: (ctx, Box empBox, _) {
           return ValueListenableBuilder(
-            valueListenable: FinanceLocalStorage.attendanceBox.listenable(),
+            valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.attendanceBox),
             builder: (ctx, Box attBox, _) {
               // 1. Fetch active employees
               final allEmployees = FinanceLocalStorage.getEmployees(widget.branchId).where((e) {
@@ -1499,7 +1500,7 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
     if (!Hive.isBoxOpen(LocalStorageService.unmappedPunchesBox)) return const SizedBox.shrink();
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.unmappedPunchesBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.unmappedPunchesBox)),
       builder: (context, box, _) {
         final unmappedList = ZkTecoNetworkService.getUnmappedPunches();
         if (unmappedList.isEmpty) return const SizedBox.shrink();
@@ -1554,7 +1555,7 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
     if (!Hive.isBoxOpen(LocalStorageService.financeHolidaysBox)) return const SizedBox.shrink();
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.financeHolidaysBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.financeHolidaysBox)),
       builder: (context, _, _) {
         final hol = FinanceLocalStorage.getHolidayForDate(
           branchId: widget.branchId,
@@ -1663,7 +1664,7 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
     if (!Hive.isBoxOpen(LocalStorageService.crossBranchPunchesBox)) return const SizedBox.shrink();
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.crossBranchPunchesBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.crossBranchPunchesBox)),
       builder: (context, box, _) {
         final pendingList = ZkTecoNetworkService.getPendingCrossBranchPunches(
           branchId: widget.branchId,

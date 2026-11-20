@@ -11,6 +11,7 @@ import 'dart:math' as math;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/components/decorative_image.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:intl/intl.dart';
@@ -858,11 +859,12 @@ class _LanguagePickerScreen extends StatelessWidget {
       valueListenable: appSettingsBox.listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
         final isDark = box.get('is_dark_mode', defaultValue: false) == true;
-        final bg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
+        final brand = Theme.of(context).colorScheme.primary;
+        final bg = Theme.of(context).scaffoldBackgroundColor;
+        final cardBg = Theme.of(context).cardColor;
         final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
         final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-        final border = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+        final border = Theme.of(context).dividerColor.withValues(alpha: isDark ? 0.5 : 0.7);
 
         return Scaffold(
           backgroundColor: bg,
@@ -870,13 +872,10 @@ class _LanguagePickerScreen extends StatelessWidget {
             child: Container(
               constraints: const BoxConstraints(maxWidth: 420),
               margin: const EdgeInsets.all(32),
-              padding: const EdgeInsets.all(40),
+              padding: const EdgeInsets.all(36),
               decoration: BoxDecoration(
                 color: cardBg,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDark ? 0.3 : 0.08), blurRadius: 32, offset: const Offset(0, 8)),
-                ],
+                borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: border),
               ),
               child: Column(
@@ -884,13 +883,13 @@ class _LanguagePickerScreen extends StatelessWidget {
                 children: [
                   // Icon
                   Container(
-                    width: 72,
-                    height: 72,
+                    width: 68,
+                    height: 68,
                     decoration: BoxDecoration(
-                      color: context.adapt(SoftPalette.teal600).withValues(alpha: 0.15),
+                      color: brand.withValues(alpha: 0.12),
                       shape: BoxShape.circle,
                     ),
-                    child: Icon(Icons.language_rounded, size: 38, color: context.adapt(SoftPalette.teal600)),
+                    child: Icon(Icons.language_rounded, size: 34, color: brand),
                   ),
                   const SizedBox(height: 24),
                   // App Title
@@ -920,10 +919,10 @@ class _LanguagePickerScreen extends StatelessWidget {
                     child: ElevatedButton(
                       onPressed: () => onSelect('en'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.teal600,
+                        backgroundColor: brand,
                         foregroundColor: SoftPalette.gray50,
                         padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         elevation: 0,
                       ),
                       child: const Text('English', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -1079,18 +1078,21 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
       valueListenable: UserThemeService.listenable(),
       builder: (context, Box box, _) {
         final isDark = UserThemeService.isDarkMode();
-        final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final appBarBg = isDark ? SoftPalette.slate800 : SoftPalette.teal600;
-        final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
+        final accentColor = Theme.of(context).colorScheme.primary;
+        final scaffoldBg = Theme.of(context).scaffoldBackgroundColor;
+        final cardBg = Theme.of(context).cardColor;
+        final appBarBg = isDark ? cardBg : accentColor;
         final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
         final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-        final dividerColor = isDark ? SoftPalette.slate700 : SoftPalette.slate100;
+        final dividerColor = Theme.of(context).dividerColor.withValues(alpha: isDark ? 0.5 : 0.7);
         final progressTrack = isDark ? SoftPalette.slate700 : SoftPalette.slate100;
-        const accentColor = SoftPalette.teal600;
 
+        // Inside the executive shell its header already shows the title, sync
+        // and dark mode, so this bar would be a second header: leave it out.
+        final hosted = HomeModuleHost.isModuleRoot(context);
         return Scaffold(
           backgroundColor: scaffoldBg,
-          appBar: AppBar(
+          appBar: hosted ? null : AppBar(
             backgroundColor: appBarBg,
             elevation: 0,
             titleSpacing: 12,
@@ -1227,10 +1229,7 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                           decoration: BoxDecoration(
                             color: cardBg,
                             borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                            boxShadow: [
-                              BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.03), blurRadius: 8, offset: const Offset(0, 2)),
-                            ],
+                            border: Border.all(color: dividerColor),
                           ),
                           child: TextField(
                             controller: _searchCtrl,
@@ -1261,13 +1260,48 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                       builder: (context, Box box, _) {
                         final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
                         final Map<String, dynamic> todayLogData = MadrassaLocalStorage.getDailyLogCached(branchId, todayStr) ?? {};
-                        final logsDocs = <Map<String, dynamic>>[];
+                        final normBranch = MadrassaLocalStorage.normalizeBranch(branchId);
+                        final branchPrefix = '${normBranch}_';
+
+                        // Pre-collect only the student IDs visible in this guardian view
+                        // so we aggregate Hive logs in a single O(branchDays) pass instead
+                        // of O(students * allHiveLogs) Map allocations on the UI thread.
+                        final Set<String> targetIds = {};
+                        for (final dynamic doc in filteredDocs) {
+                          final sid = (doc is Map ? (doc['id'] ?? doc['studentId']) : doc.id)?.toString() ?? '';
+                          if (sid.isNotEmpty) targetIds.add(sid);
+                        }
+                        final Map<String, int> maxLogLinesByStudent = {};
+                        final Map<String, int> sumSabakByStudent = {};
+                        final Map<String, int> prevCumulativeByStudent = {};
+
                         for (final key in box.keys) {
+                          final keyStr = key.toString();
+                          if (normBranch.isNotEmpty &&
+                              normBranch != 'all' &&
+                              !keyStr.startsWith(branchPrefix)) {
+                            continue;
+                          }
                           final val = box.get(key);
-                          if (val is Map) {
-                            final m = Map<String, dynamic>.from(val);
-                            m['id'] = key.toString();
-                            logsDocs.add(m);
+                          if (val is! Map) continue;
+                          final isTodayKey = keyStr == todayStr || keyStr.endsWith('_$todayStr');
+                          for (final sid in targetIds) {
+                            final sLog = val[sid];
+                            if (sLog is! Map) continue;
+                            final sL = (sLog['sabakLines'] as num?)?.toInt() ??
+                                int.tryParse(sLog['sabakLines']?.toString() ?? '');
+                            if (sL != null && sL > 0) {
+                              sumSabakByStudent[sid] = (sumSabakByStudent[sid] ?? 0) + sL;
+                            }
+                            final cL = (sLog['currentLines'] as num?)?.toInt() ??
+                                int.tryParse(sLog['currentLines']?.toString() ?? '');
+                            if (cL != null) {
+                              final prevMax = maxLogLinesByStudent[sid] ?? 0;
+                              if (cL > prevMax) maxLogLinesByStudent[sid] = cL;
+                              if (!isTodayKey && !prevCumulativeByStudent.containsKey(sid)) {
+                                prevCumulativeByStudent[sid] = cL;
+                              }
+                            }
                           }
                         }
 
@@ -1297,18 +1331,8 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                                       d['studentPhotoBase64'])
                                   ?.toString();
 
-                              int maxLogLines = 0;
-                              int sumSabakLogs = 0;
-                              for (var logDoc in logsDocs) {
-                                final map = logDoc;
-                                final sLog = map[studentId] is Map ? Map<String, dynamic>.from(map[studentId] as Map) : null;
-                                if (sLog != null) {
-                                  final sL = (sLog['sabakLines'] as num?)?.toInt() ?? int.tryParse(sLog['sabakLines']?.toString() ?? '');
-                                  if (sL != null && sL > 0) sumSabakLogs += sL;
-                                  final cL = (sLog['currentLines'] as num?)?.toInt() ?? int.tryParse(sLog['currentLines']?.toString() ?? '');
-                                  if (cL != null && cL > maxLogLines) maxLogLines = cL;
-                                }
-                              }
+                              final int maxLogLines = maxLogLinesByStudent[studentId] ?? 0;
+                              final int sumSabakLogs = sumSabakByStudent[studentId] ?? 0;
                               final currentLinesProfile = int.tryParse(d['currentLines']?.toString() ?? '0') ?? 0;
                               final currentLines = [currentLinesProfile, maxLogLines, sumSabakLogs].reduce(math.max);
                               final prevLines = int.tryParse(d['prevHifzLines']?.toString() ?? '0') ?? 0;
@@ -1331,19 +1355,7 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                                   sabakDelta = (todayStudentLog['sabakLines'] as num?)?.toInt() ?? 0;
                                 } else if (todayStudentLog.containsKey('currentLines')) {
                                   final todayCumulativeLines = todayStudentLog['currentLines'] as int? ?? currentLines;
-                                  int prevCumulativeLines = -1;
-                                  for (var logDoc in logsDocs) {
-                                    if (logDoc['id'] == todayStr) continue;
-                                    final map = logDoc;
-                                    final sLog = map[studentId] is Map ? Map<String, dynamic>.from(map[studentId] as Map) : null;
-                                    if (sLog != null && sLog.containsKey('currentLines')) {
-                                      prevCumulativeLines = sLog['currentLines'] as int? ?? 0;
-                                      break;
-                                    }
-                                  }
-                                  if (prevCumulativeLines == -1) {
-                                    prevCumulativeLines = prevLines;
-                                  }
+                                  final prevCumulativeLines = prevCumulativeByStudent[studentId] ?? prevLines;
                                   sabakDelta = (todayCumulativeLines - prevCumulativeLines).clamp(0, 8640);
                                 }
                               }
@@ -1402,11 +1414,8 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                                 padding: const EdgeInsets.all(16),
                                 decoration: BoxDecoration(
                                   color: cardBg,
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                                  boxShadow: [
-                                    BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04), blurRadius: 8, offset: const Offset(0, 2)),
-                                  ],
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(color: dividerColor),
                                 ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1416,10 +1425,10 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
                                       children: [
                                         CircleAvatar(
                                           radius: 24,
-                                          backgroundColor: accentColor.withValues(alpha: 0.1),
+                                          backgroundColor: accentColor.withValues(alpha: 0.12),
                                           backgroundImage: (photoUrl != null && photoUrl.isNotEmpty) ? NetworkImage(photoUrl) : null,
                                           child: (photoUrl == null || photoUrl.isEmpty)
-                                              ? Text(name.isNotEmpty ? name[0] : 'S', style: const TextStyle(color: accentColor, fontWeight: FontWeight.bold, fontSize: 18))
+                                              ? Text(name.isNotEmpty ? name[0] : 'S', style: TextStyle(color: accentColor, fontWeight: FontWeight.bold, fontSize: 18))
                                               : null,
                                         ),
                                         const SizedBox(width: 16),

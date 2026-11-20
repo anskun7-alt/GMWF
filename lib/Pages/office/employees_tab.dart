@@ -1,5 +1,6 @@
 // lib/pages/office/employees_tab.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/design_system.dart';
 import 'package:flutter/services.dart';
@@ -260,7 +261,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
         return Scaffold(
           backgroundColor: t.bg,
           body: ValueListenableBuilder(
-            valueListenable: FinanceLocalStorage.employeesBox.listenable(),
+            valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.employeesBox),
             builder: (context, Box box, _) {
               final query = _searchCtrl.text.trim().toLowerCase();
               final list = FinanceLocalStorage.getEmployees(widget.branchId).where((emp) {

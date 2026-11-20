@@ -1,21 +1,38 @@
 // lib/pages/school/views/school_grading_view.dart
+//
+// School Grading & Report Cards (School ERP plan §3.6, Phase 5).
+// Rebuilt on the desktop ERP kit (gmwf_ui + SchoolErp):
+//   • Marks entry  — class/section (A–D)/subject/exam/term grid, live % & grade,
+//                    strict marks <= total validation, Excel auto-fill, single
+//                    exam-level attachment (stored once, never copied per student).
+//   • Report cards — ranked term results table + detail panel with subject
+//                    breakdown, bimonthly compulsory event flags, and real
+//                    printable PDF report cards (single or whole class).
 
 import 'dart:convert';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:file_picker/file_picker.dart';
+
 import 'package:excel/excel.dart' as xl;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import '../../../services/image_upload_service.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+
+import '../../../services/local_storage_service.dart';
+import '../../../utils/debounced_box_listenable.dart';
+import '../constants/school_constants.dart';
+import '../events/school_event_service.dart';
+import '../grades/grade_report_pdf.dart';
+import '../grades/grade_rules.dart';
+import '../grades/school_grade_service.dart';
 import '../models/school_grade.dart';
 import '../models/school_student.dart';
-import '../theme/school_theme.dart';
-import '../utils/school_local_storage.dart';
+import '../students/school_student_service.dart';
 import '../utils/school_auth_helper.dart';
-import '../constants/school_constants.dart';
-import '../../../design/design_system.dart';
+import '../utils/school_local_storage.dart';
+import '../widgets/erp/school_erp.dart';
+import 'school_student_management_view.dart' show StudentAvatar;
 
 class SchoolGradingView extends StatefulWidget {
   final String branchId;
@@ -33,25 +50,32 @@ class SchoolGradingView extends StatefulWidget {
   State<SchoolGradingView> createState() => _SchoolGradingViewState();
 }
 
+enum _GradingTab { marks, reports }
+
 class _SchoolGradingViewState extends State<SchoolGradingView> {
-  String _selectedGrade = '9th';
-  String _selectedSection = 'A';
+  late final Future<void> _ready = SchoolLocalStorage.ensureBoxesOpen();
+
+  _GradingTab _tab = _GradingTab.marks;
+  String _selectedGrade = SchoolConstants.grades.first;
+  String _selectedSection = SchoolConstants.sections.first;
+  String _reportSection = 'All';
   String _selectedSubject = 'Mathematics';
-  String _selectedExamType = 'Midterm';
-  String _selectedTerm = 'Term 1';
-  double _defaultTotalMarks = 100.0;
+  String _selectedExamType = GradeRules.examTypes[2]; // Midterm
+  String _selectedTerm = GradeRules.terms.first;
+  String _reportExamFilter = 'All';
+  double _totalMarks = 100.0;
+  bool _isSaving = false;
+  bool _isPrinting = false;
+  String? _selectedReportStudentId;
 
-  String? _attachmentUrl;
-  String? _attachmentName;
-  String? _attachmentType;
-
+  late final TextEditingController _totalMarksCtrl = TextEditingController(text: '100');
+  final TextEditingController _reportSearchCtrl = TextEditingController();
   final Map<String, TextEditingController> _marksCtrls = {};
   final Map<String, TextEditingController> _remarksCtrls = {};
-  bool _isSaving = false;
+  Map<String, String> _rowErrors = const {};
 
   List<String> _grades = SchoolConstants.grades;
-  final List<String> _sections = ['A', 'B', 'C'];
-  List<String> _subjects = [
+  List<String> _subjects = const [
     'Mathematics',
     'English',
     'Urdu',
@@ -69,10 +93,11 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
     'Social Studies',
     'Nazra Quran',
   ];
-  final List<String> _examTypes = ['Quiz', 'Assignment', 'Midterm', 'Final'];
-  final List<String> _terms = ['Term 1', 'Term 2', 'Final Term'];
 
   bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+  bool get _canEnter => SchoolAuthHelper.isAdminOrPrincipal(widget.userRole) || _isTeacher;
+
+  String _ck(String studentId) => '$studentId|$_selectedGrade|$_selectedSection|$_selectedSubject|$_selectedExamType|$_selectedTerm';
 
   @override
   void initState() {
@@ -86,28 +111,19 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
     if (oldWidget.userRole != widget.userRole ||
         oldWidget.userName != widget.userName ||
         oldWidget.branchId != widget.branchId) {
+      _selectedReportStudentId = null;
+      _rowErrors = const {};
       _initTeacherFilters();
     }
   }
 
   void _initTeacherFilters() {
     if (_isTeacher) {
-      final assignedGrades = SchoolAuthHelper.getTeacherAssignedGrades(
-        widget.branchId,
-        widget.userRole,
-        widget.userName,
-      );
-      final assignedSubjects = SchoolAuthHelper.getTeacherAssignedSubjects(
-        widget.branchId,
-        widget.userRole,
-        widget.userName,
-      );
-
-      if (assignedGrades.isNotEmpty) {
-        _grades = assignedGrades;
-        if (!_grades.contains(_selectedGrade)) {
-          _selectedGrade = _grades.first;
-        }
+      final assignedGrades = SchoolAuthHelper.getTeacherAssignedGrades(widget.branchId, widget.userRole, widget.userName);
+      final assignedSubjects = SchoolAuthHelper.getTeacherAssignedSubjects(widget.branchId, widget.userRole, widget.userName);
+      _grades = assignedGrades;
+      if (_grades.isNotEmpty && !_grades.contains(_selectedGrade)) {
+        _selectedGrade = _grades.first;
       }
       if (assignedSubjects.isNotEmpty) {
         _subjects = assignedSubjects;
@@ -122,6 +138,8 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
 
   @override
   void dispose() {
+    _totalMarksCtrl.dispose();
+    _reportSearchCtrl.dispose();
     for (final c in _marksCtrls.values) {
       c.dispose();
     }
@@ -131,175 +149,43 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (_isTeacher && _grades.isEmpty) {
-      return const SchoolAccessDenied(
-        title: 'Grading Access Restricted',
-        message: 'You have not been assigned any classes for grade entry. Teachers can only enter and view grades for their assigned classes and subjects. Please contact your Principal or Admin.',
-      );
-    }
-    final isAdmin = !widget.userRole.toLowerCase().contains('teacher') ||
-        widget.userRole.toLowerCase().contains('admin') ||
-        widget.userRole.toLowerCase().contains('principal');
-
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: SchoolLocalStorage.streamStudentsCached(widget.branchId),
-      builder: (context, studentSnapshot) {
-        final rawStudents = studentSnapshot.data ?? [];
-        final enrolledStudents = rawStudents
-            .map((m) => SchoolStudent.fromMap(m['id'] ?? '', m))
-            .where((s) => s.grade == _selectedGrade && (s.section == _selectedSection || _selectedSection == 'All'))
-            .toList();
-
-        return Column(
-          children: [
-            // Filter & Controls Bar with Attach Excel/PDF button
-            _buildFilterBar(enrolledStudents),
-
-            // Dynamic Main View Content
-            Expanded(
-              child: StreamBuilder<List<Map<String, dynamic>>>(
-                stream: SchoolLocalStorage.streamGradesCached(widget.branchId),
-                builder: (context, gradeSnapshot) {
-                  final rawGrades = gradeSnapshot.data ?? [];
-                  final allGrades = rawGrades.map((m) => SchoolGrade.fromMap(m['id'] ?? '', m)).toList();
-
-                  // Filter grades matching current class, subject, exam type, term
-                  final currentExamGrades = allGrades.where((g) =>
-                      g.grade == _selectedGrade &&
-                      g.subject == _selectedSubject &&
-                      g.examType == _selectedExamType &&
-                      g.term == _selectedTerm).toList();
-
-                  final gradeMap = {for (var g in currentExamGrades) g.studentId: g};
-
-                  // KPI Summary Data
-                  double classTotalPercentage = 0;
-                  int gradedCount = 0;
-                  double highestScore = 0;
-                  double lowestScore = 100;
-                  int passCount = 0;
-
-                  for (final g in currentExamGrades) {
-                    if (g.totalMarks > 0) {
-                      final pct = g.percentage;
-                      classTotalPercentage += pct;
-                      gradedCount++;
-                      if (pct > highestScore) highestScore = pct;
-                      if (pct < lowestScore) lowestScore = pct;
-                      if (pct >= 50) passCount++;
-                    }
-                  }
-                  final classAvg = gradedCount > 0 ? classTotalPercentage / gradedCount : 0.0;
-                  final passRate = gradedCount > 0 ? (passCount / gradedCount) * 100 : 0.0;
-
-                  return Column(
-                    children: [
-                      // Overview KPI Header Bar
-                      _buildKPIHeader(
-                        classAvg: classAvg,
-                        gradedCount: gradedCount,
-                        totalStudents: enrolledStudents.length,
-                        highestScore: gradedCount > 0 ? highestScore : 0,
-                        passRate: passRate,
-                      ),
-
-                      // Tabular Student Marks List
-                      Expanded(
-                        child: enrolledStudents.isEmpty
-                            ? _buildEmptyState()
-                            : ListView.separated(
-                                padding: const EdgeInsets.all(16),
-                                itemCount: enrolledStudents.length,
-                                separatorBuilder: (_, __) => const SizedBox(height: 10),
-                                itemBuilder: (context, index) {
-                                  final student = enrolledStudents[index];
-                                  final existingGrade = gradeMap[student.id];
-
-                                  return _buildStudentGradeRow(
-                                    student: student,
-                                    existingGrade: existingGrade,
-                                    isAdmin: isAdmin,
-                                    allGrades: allGrades,
-                                  );
-                                },
-                              ),
-                      ),
-
-                      // Batch Save Footer Action Bar
-                      if (enrolledStudents.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: context.adapt(SoftPalette.gray50),
-                            border: Border(top: BorderSide(color: context.adapt(SoftPalette.slate150))),
-                          ),
-                          child: Row(
-                            children: [
-                              Text(
-                                'Subject: $_selectedSubject • Exam: $_selectedExamType ($_selectedTerm)',
-                                style: TextStyle(fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate700)),
-                              ),
-                              const Spacer(),
-                              ElevatedButton.icon(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: SchoolTheme.accent,
-                                  foregroundColor: SoftPalette.gray50,
-                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                                  shape: RoundedRectangleBorder(borderRadius: SchoolTheme.radius12),
-                                ),
-                                icon: _isSaving
-                                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50))
-                                    : const Icon(Icons.save_rounded, size: 18),
-                                label: Text(_isSaving ? 'Saving Marks…' : 'Save Class Marks'),
-                                onPressed: _isSaving ? null : () => _saveAllMarks(enrolledStudents, gradeMap),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  );
-                },
-              ),
-            ),
-          ],
-        );
-      },
-    );
+  Color _letterColor(BuildContext context, String letter) {
+    final c = context.comfort;
+    return switch (letter) {
+      'A+' || 'A' => c.success,
+      'B' => c.info,
+      'C' || 'D' => c.warning,
+      'F' => c.danger,
+      _ => c.textMuted,
+    };
   }
 
-  Future<void> _pickAndProcessAttachment(List<SchoolStudent> enrolledStudents) async {
+  Future<void> _pickAttachment(List<SchoolStudent> students) async {
     try {
       final fileResult = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['xlsx', 'xls', 'csv', 'pdf', 'png', 'jpg', 'jpeg'],
         withData: true,
       );
-
       if (fileResult == null || fileResult.files.isEmpty) return;
-
       final file = fileResult.files.first;
-      final fileName = file.name;
-      final ext = file.extension?.toLowerCase() ?? '';
-
+      final ext = (file.extension ?? '').toLowerCase();
       Uint8List? bytes = file.bytes;
       if (bytes == null && file.path != null) {
         bytes = await File(file.path!).readAsBytes();
       }
       if (bytes == null) return;
 
-      final b64 = base64Encode(bytes);
       final mime = ext == 'pdf'
           ? 'application/pdf'
           : (['xlsx', 'xls', 'csv'].contains(ext)
               ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
               : 'image/jpeg');
-      final dataUri = 'data:$mime;base64,$b64';
+      final dataUri = 'data:$mime;base64,${base64Encode(bytes)}';
+      final fileType = ['xlsx', 'xls', 'csv'].contains(ext) ? 'excel' : (ext == 'pdf' ? 'pdf' : 'image');
 
-      int autoFilledCount = 0;
-
-      if (['xlsx', 'xls'].contains(ext)) {
+      var autoFilled = 0;
+      if (ext == 'xlsx' || ext == 'xls') {
         try {
           final excel = xl.Excel.decodeBytes(bytes);
           for (final table in excel.tables.keys) {
@@ -307,19 +193,21 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
             if (sheet == null) continue;
             for (final row in sheet.rows) {
               if (row.isEmpty) continue;
-              final rowVals = row.map((cell) => cell?.value?.toString().trim() ?? '').toList();
-              for (final student in enrolledStudents) {
-                final rollMatch = rowVals.any((v) => v.isNotEmpty && (v == student.rollNo || v == 'Roll: ${student.rollNo}'));
-                final nameMatch = rowVals.any((v) => v.isNotEmpty && v.toLowerCase() == student.name.toLowerCase());
-                if (rollMatch || nameMatch) {
-                  for (final val in rowVals) {
-                    final d = double.tryParse(val);
-                    if (d != null && d >= 0 && d <= 1000) {
-                      _marksCtrls[student.id] ??= TextEditingController();
-                      _marksCtrls[student.id]!.text = d.toStringAsFixed(d.truncateToDouble() == d ? 0 : 1);
-                      autoFilledCount++;
-                      break;
-                    }
+              final vals = row.map((cell) => cell?.value?.toString().trim() ?? '').toList();
+              for (final s in students) {
+                final match = vals.any((v) =>
+                    v.isNotEmpty &&
+                    (v == s.rollNo ||
+                        v.toLowerCase() == s.admissionNo.toLowerCase() ||
+                        v.toLowerCase() == s.name.toLowerCase()));
+                if (!match) continue;
+                for (final v in vals.reversed) {
+                  final d = double.tryParse(v);
+                  if (d != null && d >= 0 && d <= _totalMarks) {
+                    final ctrl = _marksCtrls.putIfAbsent(_ck(s.id), TextEditingController.new);
+                    ctrl.text = GradeRules.formatMark(d);
+                    autoFilled++;
+                    break;
                   }
                 }
               }
@@ -330,672 +218,881 @@ class _SchoolGradingViewState extends State<SchoolGradingView> {
         }
       }
 
-      setState(() {
-        _attachmentUrl = dataUri;
-        _attachmentName = fileName;
-        _attachmentType = ['xlsx', 'xls', 'csv'].contains(ext) ? 'excel' : (ext == 'pdf' ? 'pdf' : 'image');
-      });
-
-      if (mounted) {
-        final msg = autoFilledCount > 0
-            ? '✓ Excel parsed: Auto-filled $autoFilledCount student grades & attached $fileName'
-            : '✓ Document attached: $fileName';
-        AppToast.showSnackBar(context, 
-          SnackBar(
-            content: Text(msg),
-            backgroundColor: SoftPalette.teal500,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        AppToast.showSnackBar(context, 
-          SnackBar(
-            content: Text('Failed to attach document: $e'),
-            backgroundColor: SoftPalette.red500,
-          ),
-        );
-      }
-    }
-  }
-
-  Widget _buildFilterBar(List<SchoolStudent> enrolledStudents) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      color: context.adapt(SoftPalette.gray50),
-      child: Wrap(
-        spacing: 12,
-        runSpacing: 10,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          // Class Dropdown
-          DropdownButton<String>(
-            value: _selectedGrade,
-            underline: const SizedBox.shrink(),
-            icon: Icon(Icons.keyboard_arrow_down_rounded, color: context.adapt(SchoolTheme.primary)),
-            items: _grades.map((g) => DropdownMenuItem(value: g, child: Text('Class: $g'))).toList(),
-            onChanged: (val) {
-              if (val != null) setState(() => _selectedGrade = val);
-            },
-          ),
-
-          // Section Dropdown
-          DropdownButton<String>(
-            value: _selectedSection,
-            underline: const SizedBox.shrink(),
-            items: _sections.map((s) => DropdownMenuItem(value: s, child: Text('Section: $s'))).toList(),
-            onChanged: (val) {
-              if (val != null) setState(() => _selectedSection = val);
-            },
-          ),
-
-          // Subject Dropdown
-          DropdownButton<String>(
-            value: _selectedSubject,
-            underline: const SizedBox.shrink(),
-            items: _subjects.map((sub) => DropdownMenuItem(value: sub, child: Text(sub))).toList(),
-            onChanged: (val) {
-              if (val != null) setState(() => _selectedSubject = val);
-            },
-          ),
-
-          // Exam Type Dropdown
-          DropdownButton<String>(
-            value: _selectedExamType,
-            underline: const SizedBox.shrink(),
-            items: _examTypes.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-            onChanged: (val) {
-              if (val != null) setState(() => _selectedExamType = val);
-            },
-          ),
-
-          // Term Dropdown
-          DropdownButton<String>(
-            value: _selectedTerm,
-            underline: const SizedBox.shrink(),
-            items: _terms.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-            onChanged: (val) {
-              if (val != null) setState(() => _selectedTerm = val);
-            },
-          ),
-
-          // Max Total Marks Input
-          SizedBox(
-            width: 130,
-            child: TextField(
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: const InputDecoration(
-                labelText: 'Total Marks',
-                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                isDense: true,
-              ),
-              controller: TextEditingController(text: _defaultTotalMarks.toStringAsFixed(0)),
-              onChanged: (val) {
-                final d = double.tryParse(val);
-                if (d != null && d > 0) _defaultTotalMarks = d;
-              },
-            ),
-          ),
-
-          // Attach Excel / PDF Action Button
-          if (_attachmentName == null)
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: context.adapt(SchoolTheme.primary),
-                side: BorderSide(color: context.adapt(SchoolTheme.primary)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-              icon: const Icon(Icons.attach_file_rounded, size: 16),
-              label: const Text('Attach Excel / PDF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-              onPressed: () => _pickAndProcessAttachment(enrolledStudents),
-            )
-          else
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: context.adapt(SchoolTheme.primaryLight),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: context.adapt(SchoolTheme.primary).withValues(alpha: 0.3)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _attachmentType == 'excel'
-                        ? Icons.table_chart_rounded
-                        : (_attachmentType == 'pdf' ? Icons.picture_as_pdf_rounded : Icons.insert_drive_file_rounded),
-                    size: 16,
-                    color: context.adapt(SchoolTheme.primary),
-                  ),
-                  const SizedBox(width: 6),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 140),
-                    child: Text(
-                      _attachmentName!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SchoolTheme.primary)),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  InkWell(
-                    onTap: () => setState(() {
-                      _attachmentUrl = null;
-                      _attachmentName = null;
-                      _attachmentType = null;
-                    }),
-                    child: const Icon(Icons.close_rounded, size: 16, color: SoftPalette.red400),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildKPIHeader({
-    required double classAvg,
-    required int gradedCount,
-    required int totalStudents,
-    required double highestScore,
-    required double passRate,
-  }) {
-    final isMobile = GBreakpoint.isMobile(context);
-    final avgColor = SchoolTheme.getLetterGradeColor(
-      classAvg >= 90 ? 'A+' : (classAvg >= 80 ? 'A' : (classAvg >= 70 ? 'B' : (classAvg >= 60 ? 'C' : 'F'))),
-    );
-
-    final tiles = [
-      _buildKPITileContent(
-        label: 'Class Average',
-        value: '${classAvg.toStringAsFixed(1)}%',
-        valueColor: avgColor,
-        icon: Icons.insights_rounded,
-      ),
-      _buildKPITileContent(
-        label: 'Graded',
-        value: '$gradedCount / $totalStudents',
-        valueColor: context.adapt(SchoolTheme.primary),
-        icon: Icons.how_to_reg_rounded,
-      ),
-      _buildKPITileContent(
-        label: 'Highest Score',
-        value: '${highestScore.toStringAsFixed(1)}%',
-        valueColor: SchoolTheme.accent,
-        icon: Icons.emoji_events_rounded,
-      ),
-      _buildKPITileContent(
-        label: 'Pass Rate',
-        value: '${passRate.toStringAsFixed(1)}%',
-        valueColor: passRate >= 70 ? SchoolTheme.accent : SchoolTheme.statusLeave,
-        icon: Icons.grade_rounded,
-      ),
-    ];
-
-    if (isMobile) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        color: context.adapt(SoftPalette.gray50),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final cardWidth = (constraints.maxWidth - 10) / 2;
-            return Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: tiles.map((t) => SizedBox(width: cardWidth, child: t)).toList(),
-            );
-          },
-        ),
-      );
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      color: context.adapt(SoftPalette.gray50),
-      child: Row(
-        children: tiles.map((t) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: t))).toList(),
-      ),
-    );
-  }
-
-  Widget _buildKPITileContent({
-    required String label,
-    required String value,
-    required Color valueColor,
-    required IconData icon,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: context.adapt(SoftPalette.gray50),
-        borderRadius: SchoolTheme.radius12,
-        border: Border.all(color: context.adapt(SoftPalette.slate150)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: valueColor.withValues(alpha: 0.1),
-              borderRadius: SchoolTheme.radius8,
-            ),
-            child: Icon(icon, color: valueColor, size: 18),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(label, style: TextStyle(fontSize: 11, color: context.adapt(SoftPalette.slate550)), overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: valueColor),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStudentGradeRow({
-    required SchoolStudent student,
-    required SchoolGrade? existingGrade,
-    required bool isAdmin,
-    required List<SchoolGrade> allGrades,
-  }) {
-    _marksCtrls.putIfAbsent(
-      student.id,
-      () => TextEditingController(text: existingGrade != null ? existingGrade.marksObtained.toStringAsFixed(1) : ''),
-    );
-    _remarksCtrls.putIfAbsent(
-      student.id,
-      () => TextEditingController(text: existingGrade?.remarks ?? ''),
-    );
-
-    final marksText = _marksCtrls[student.id]!.text;
-    final marksNum = double.tryParse(marksText) ?? (existingGrade?.marksObtained ?? 0.0);
-    final totalMarks = existingGrade?.totalMarks ?? _defaultTotalMarks;
-    final pct = totalMarks > 0 ? (marksNum / totalMarks) * 100 : 0.0;
-
-    String tempLetter = 'F';
-    if (pct >= 90) {
-      tempLetter = 'A+';
-    } else if (pct >= 80) {
-      tempLetter = 'A';
-    } else if (pct >= 70) {
-      tempLetter = 'B';
-    } else if (pct >= 60) {
-      tempLetter = 'C';
-    } else if (pct >= 50) {
-      tempLetter = 'D';
-    }
-
-    final letterColor = SchoolTheme.getLetterGradeColor(tempLetter);
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.adapt(SoftPalette.gray50),
-        borderRadius: SchoolTheme.radius14,
-        border: Border.all(color: context.adapt(SoftPalette.gray100)),
-      ),
-      child: Row(
-        children: [
-          // Student Photo Avatar
-          Builder(
-            builder: (context) {
-              final bytes = ImageUploadService.decodeBase64ToBytes(student.photoUrl);
-              if (bytes != null && bytes.isNotEmpty) {
-                return CircleAvatar(
-                  radius: 20,
-                  backgroundColor: context.adapt(SchoolTheme.primary).withValues(alpha: 0.1),
-                  backgroundImage: MemoryImage(bytes),
-                );
-              } else if (student.photoUrl.startsWith('http')) {
-                return CircleAvatar(
-                  radius: 20,
-                  backgroundColor: context.adapt(SchoolTheme.primary).withValues(alpha: 0.1),
-                  backgroundImage: NetworkImage(student.photoUrl),
-                );
-              }
-              return CircleAvatar(
-                radius: 20,
-                backgroundColor: context.adapt(SchoolTheme.primary).withValues(alpha: 0.1),
-                child: Text(
-                  student.rollNo.isNotEmpty ? student.rollNo : '0',
-                  style: TextStyle(color: context.adapt(SchoolTheme.primary), fontWeight: FontWeight.bold, fontSize: 13),
-                ),
-              );
-            },
-          ),
-          const SizedBox(width: 14),
-
-          // Student Name & Roll
-          Expanded(
-            flex: 3,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  student.name,
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: context.adapt(SoftPalette.slate900)),
-                ),
-                Text(
-                  'Guardian: ${student.guardianName}',
-                  style: TextStyle(color: context.adapt(SoftPalette.gray500), fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-
-          // Marks Input Box
-          SizedBox(
-            width: 110,
-            child: TextField(
-              controller: _marksCtrls[student.id],
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                labelText: 'Marks / $totalMarks',
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                isDense: true,
-              ),
-              onChanged: (_) => setState(() {}),
-            ),
-          ),
-          const SizedBox(width: 12),
-
-          // Calculated Percentage & Letter Badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: letterColor.withValues(alpha: 0.12),
-              borderRadius: SchoolTheme.radius8,
-              border: Border.all(color: letterColor.withValues(alpha: 0.3)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '${pct.toStringAsFixed(1)}%',
-                  style: TextStyle(color: letterColor, fontWeight: FontWeight.bold, fontSize: 13),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: letterColor,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    tempLetter,
-                    style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-
-          // Remarks Input
-          Expanded(
-            flex: 2,
-            child: TextField(
-              controller: _remarksCtrls[student.id],
-              decoration: const InputDecoration(
-                hintText: 'Optional remarks…',
-                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                isDense: true,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-
-          // Report Card Icon Action
-          IconButton(
-            tooltip: 'Generate Report Card',
-            icon: Icon(Icons.assignment_ind_rounded, color: context.adapt(SchoolTheme.primary)),
-            onPressed: () => _openReportCardDialog(student, allGrades),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.school_rounded, size: 64, color: context.adapt(SoftPalette.gray150)),
-          const SizedBox(height: 12),
-          Text(
-            'No students enrolled in Class $_selectedGrade (Section $_selectedSection)',
-            style: TextStyle(color: context.adapt(SoftPalette.gray350), fontSize: 15, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Select another grade/section or enroll new students first.',
-            style: TextStyle(color: context.adapt(SoftPalette.gray350)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _saveAllMarks(
-    List<SchoolStudent> students,
-    Map<String, SchoolGrade> existingGradesMap,
-  ) async {
-    setState(() => _isSaving = true);
-    int savedCount = 0;
-
-    for (final s in students) {
-      final text = _marksCtrls[s.id]?.text.trim() ?? '';
-      if (text.isEmpty) continue;
-
-      final marksObtained = double.tryParse(text) ?? 0.0;
-      final remarks = _remarksCtrls[s.id]?.text.trim() ?? '';
-      final gradeId = existingGradesMap[s.id]?.id ??
-          'GRD-${s.id}-${_selectedSubject.replaceAll(' ', '')}-$_selectedExamType-${DateTime.now().millisecondsSinceEpoch}';
-
-      final gradeObj = SchoolGrade(
-        id: gradeId,
-        studentId: s.id,
-        studentName: s.name,
-        rollNo: s.rollNo,
-        grade: s.grade,
-        section: s.section,
+      // Store ONCE in `school_grade_attachments` (never copied onto every student row).
+      await SchoolGradeService.saveAttachment(
+        branchId: widget.branchId,
+        grade: _selectedGrade,
+        section: _selectedSection,
         subject: _selectedSubject,
         examType: _selectedExamType,
         term: _selectedTerm,
-        marksObtained: marksObtained,
-        totalMarks: _defaultTotalMarks,
-        date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
-        enteredBy: widget.userName,
-        remarks: remarks,
-        attachmentUrl: _attachmentUrl ?? existingGradesMap[s.id]?.attachmentUrl ?? '',
-        attachmentName: _attachmentName ?? existingGradesMap[s.id]?.attachmentName ?? '',
-        attachmentType: _attachmentType ?? existingGradesMap[s.id]?.attachmentType ?? '',
-        branchId: widget.branchId,
+        fileName: file.name,
+        fileType: fileType,
+        dataUri: dataUri,
+        editorName: widget.userName,
+        userRole: widget.userRole,
       );
 
-      await SchoolLocalStorage.saveGrade(
-        branchId: widget.branchId,
-        gradeId: gradeId,
-        gradeData: gradeObj.toMap(),
+      if (!mounted) return;
+      setState(() {});
+      AppFeedback.success(
+        context,
+        autoFilled > 0
+            ? 'Attached ${file.name} and auto-filled $autoFilled student marks. Review and save.'
+            : 'Attached ${file.name} once for this exam.',
       );
-      savedCount++;
-    }
-
-    // Log Audit Event
-    await SchoolLocalStorage.logAudit(
-      branchId: widget.branchId,
-      action: 'GRADE_ENTRY_BATCH',
-      user: widget.userName,
-      details: 'Recorded $savedCount marks for Class $_selectedGrade ($_selectedSubject • $_selectedExamType)',
-    );
-
-    setState(() => _isSaving = false);
-
-    if (mounted) {
-      AppToast.showSnackBar(context, 
-        SnackBar(
-          content: Text('Successfully saved marks for $savedCount students in Class $_selectedGrade!'),
-          backgroundColor: SchoolTheme.accent,
-        ),
-      );
+    } catch (e) {
+      if (mounted) AppFeedback.error(context, e is SchoolGradeException ? e.message : 'Could not attach file: $e');
     }
   }
 
-  void _openReportCardDialog(SchoolStudent student, List<SchoolGrade> allGrades) {
-    final studentGrades = allGrades.where((g) => g.studentId == student.id && g.term == _selectedTerm).toList();
+  Future<void> _removeAttachment(SchoolGradeAttachment att) async {
+    try {
+      await SchoolGradeService.removeAttachment(
+        branchId: widget.branchId,
+        attachmentId: att.id,
+        grade: _selectedGrade,
+        subject: _selectedSubject,
+        editorName: widget.userName,
+        userRole: widget.userRole,
+      );
+      if (mounted) {
+        setState(() {});
+        AppFeedback.success(context, 'Attachment removed');
+      }
+    } catch (e) {
+      if (mounted) AppFeedback.error(context, e is SchoolGradeException ? e.message : '$e');
+    }
+  }
 
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: SchoolTheme.radius16),
-        title: Row(
-          children: [
-            Icon(Icons.school_rounded, color: context.adapt(SchoolTheme.primary)),
-            const SizedBox(width: 10),
-            Text('Academic Report Card — ${student.name}'),
-          ],
+  Future<void> _saveAllMarks(List<SchoolStudent> students, SchoolGradeAttachment? attachment) async {
+    final total = double.tryParse(_totalMarksCtrl.text.trim()) ?? _totalMarks;
+    if (total <= 0) {
+      AppFeedback.error(context, 'Total marks must be greater than 0.');
+      return;
+    }
+
+    final parseErrors = <String, String>{};
+    final entries = <GradeEntryInput>[];
+    for (final s in students) {
+      final text = _marksCtrls[_ck(s.id)]?.text.trim() ?? '';
+      if (text.isEmpty) continue;
+      final m = double.tryParse(text);
+      final err = GradeRules.validateMark(obtained: m, totalMarks: total);
+      if (err != null) {
+        parseErrors[s.id] = err;
+      } else {
+        entries.add(GradeEntryInput(
+          student: s,
+          marksObtained: m!,
+          remarks: _remarksCtrls[_ck(s.id)]?.text.trim() ?? '',
+        ));
+      }
+    }
+
+    if (parseErrors.isNotEmpty) {
+      setState(() => _rowErrors = parseErrors);
+      AppFeedback.error(context, 'Fix ${parseErrors.length} invalid mark${parseErrors.length == 1 ? '' : 's'} (0 to ${GradeRules.formatMark(total)}).');
+      return;
+    }
+    if (entries.isEmpty) {
+      AppFeedback.error(context, 'Enter marks for at least one student before saving.');
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _rowErrors = const {};
+    });
+    try {
+      final count = await SchoolGradeService.saveBatch(
+        branchId: widget.branchId,
+        grade: _selectedGrade,
+        section: _selectedSection,
+        subject: _selectedSubject,
+        examType: _selectedExamType,
+        term: _selectedTerm,
+        totalMarks: total,
+        entries: entries,
+        editorName: widget.userName,
+        userRole: widget.userRole,
+        attachment: attachment,
+      );
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      AppFeedback.success(context, 'Saved marks for $count ${count == 1 ? 'student' : 'students'} ($_selectedSubject · $_selectedExamType)');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        if (e is SchoolGradeException) _rowErrors = e.studentErrors;
+      });
+      AppFeedback.error(context, e is SchoolGradeException ? e.message : 'Save failed: $e');
+    }
+  }
+
+  Future<void> _printSingleReport(StudentTermReport report) async {
+    setState(() => _isPrinting = true);
+    try {
+      final branchName = LocalStorageService.getBranchName(widget.branchId);
+      await SchoolReportCardPdf.printSingle(report: report, branchName: branchName);
+    } catch (e) {
+      if (mounted) AppFeedback.error(context, 'Could not print report card: $e');
+    } finally {
+      if (mounted) setState(() => _isPrinting = false);
+    }
+  }
+
+  Future<void> _printClassReports(List<StudentTermReport> reports) async {
+    final withGrades = reports.where((r) => r.hasGrades).toList();
+    if (withGrades.isEmpty) {
+      AppFeedback.error(context, 'No graded students in this view to print.');
+      return;
+    }
+    setState(() => _isPrinting = true);
+    try {
+      final branchName = LocalStorageService.getBranchName(widget.branchId);
+      await SchoolReportCardPdf.printBatch(
+        reports: withGrades,
+        branchName: branchName,
+        title: 'ReportCards-Class-$_selectedGrade-${_reportSection == 'All' ? 'All' : _reportSection}-${GradeRules.slug(_selectedTerm)}',
+      );
+    } catch (e) {
+      if (mounted) AppFeedback.error(context, 'Could not print class reports: $e');
+    } finally {
+      if (mounted) setState(() => _isPrinting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_canEnter || (_isTeacher && _grades.isEmpty)) {
+      return const SchoolErpPage(
+        breadcrumbs: ['School', 'Academics'],
+        title: 'Grades & reports',
+        icon: GIcons.exam,
+        child: AppEmptyState(
+          icon: GIcons.lock,
+          title: 'No classes assigned for grading',
+          subtitle: 'Teachers can enter and view grades only for their assigned classes and subjects. Ask the Principal to assign your classes.',
         ),
-        content: SizedBox(
-          width: 600,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header Summary Card
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: context.adapt(SchoolTheme.primaryLight),
-                  borderRadius: SchoolTheme.radius12,
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Roll No: ${student.rollNo} • Grade: ${student.grade} (${student.section})',
-                            style: TextStyle(fontWeight: FontWeight.bold, color: context.adapt(SchoolTheme.primaryDark))),
-                        Text('Guardian: ${student.guardianName} • Term: $_selectedTerm',
-                            style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.slate600))),
-                      ],
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: SchoolTheme.primaryDark,
-                        borderRadius: SchoolTheme.radius8,
-                      ),
-                      child: const Text('OFFICIAL EXAM REPORT',
-                          style: TextStyle(color: SoftPalette.gray50, fontSize: 10, fontWeight: FontWeight.bold)),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
+      );
+    }
 
-              // Subject Grades Table
-              studentGrades.isEmpty
-                  ? Padding(
-                      padding: EdgeInsets.all(20),
-                      child: Center(child: Text('No exam grades recorded yet for this term.', style: TextStyle(color: context.adapt(SoftPalette.gray350)))),
-                    )
-                  : Table(
-                      border: TableBorder.all(color: context.adapt(SoftPalette.gray150), borderRadius: SchoolTheme.radius8),
-                      columnWidths: const {
-                        0: FlexColumnWidth(3),
-                        1: FlexColumnWidth(2),
-                        2: FlexColumnWidth(2),
-                        3: FlexColumnWidth(2),
-                        4: FlexColumnWidth(2),
-                      },
-                      children: [
-                        TableRow(
-                          decoration: BoxDecoration(color: context.adapt(SoftPalette.gray100)),
-                          children: const [
-                            Padding(padding: EdgeInsets.all(8), child: Text('Subject', style: TextStyle(fontWeight: FontWeight.bold))),
-                            Padding(padding: EdgeInsets.all(8), child: Text('Marks', style: TextStyle(fontWeight: FontWeight.bold))),
-                            Padding(padding: EdgeInsets.all(8), child: Text('Total', style: TextStyle(fontWeight: FontWeight.bold))),
-                            Padding(padding: EdgeInsets.all(8), child: Text('Grade', style: TextStyle(fontWeight: FontWeight.bold))),
-                            Padding(padding: EdgeInsets.all(8), child: Text('GPA', style: TextStyle(fontWeight: FontWeight.bold))),
-                          ],
-                        ),
-                        ...studentGrades.map((g) => TableRow(
-                              children: [
-                                Padding(padding: const EdgeInsets.all(8), child: Text(g.subject)),
-                                Padding(padding: const EdgeInsets.all(8), child: Text(g.marksObtained.toStringAsFixed(1))),
-                                Padding(padding: const EdgeInsets.all(8), child: Text(g.totalMarks.toStringAsFixed(0))),
-                                Padding(
-                                  padding: const EdgeInsets.all(8),
-                                  child: Text(
-                                    g.letterGrade,
-                                    style: TextStyle(
-                                      color: SchoolTheme.getLetterGradeColor(g.letterGrade),
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                Padding(padding: const EdgeInsets.all(8), child: Text(g.gpaPoint.toStringAsFixed(1))),
-                              ],
-                            )),
-                      ],
-                    ),
+    return FutureBuilder<void>(
+      future: _ready,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+        final boxes = SchoolGradeService.watchedBoxes
+            .where(Hive.isBoxOpen)
+            .map((b) => DebouncedBoxListenable.shared(Hive.box(b)))
+            .toList();
+        return ListenableBuilder(listenable: Listenable.merge(boxes), builder: (context, _) => _build(context));
+      },
+    );
+  }
 
-              // Attached Marksheet / Exam Document
-              if (studentGrades.any((g) => g.attachmentName.isNotEmpty)) ...[
-                const SizedBox(height: 14),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: context.adapt(SchoolTheme.primaryLight),
-                    borderRadius: SchoolTheme.radius8,
-                    border: Border.all(color: context.adapt(SchoolTheme.primary).withValues(alpha: 0.2)),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.attach_file_rounded, color: context.adapt(SchoolTheme.primary), size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Attached Marksheet / Exam File: ${studentGrades.firstWhere((g) => g.attachmentName.isNotEmpty).attachmentName}',
-                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SchoolTheme.primary)),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ],
+  Widget _build(BuildContext context) {
+    final roster = SchoolStudentService.roster(widget.branchId);
+    final allGrades = SchoolGradeService.allGrades(widget.branchId);
+    final allEvents = SchoolEventService.all(widget.branchId);
+
+    final activeStudents = roster.students.where((s) => s.isActive).toList();
+    final marksStudents = activeStudents
+        .where((s) => s.grade == _selectedGrade && s.section == _selectedSection)
+        .toList()
+      ..sort((a, b) {
+        final ra = int.tryParse(a.rollNo) ?? 99999;
+        final rb = int.tryParse(b.rollNo) ?? 99999;
+        return ra != rb ? ra.compareTo(rb) : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+
+    final examGrades = allGrades
+        .where((g) =>
+            g.grade == _selectedGrade &&
+            g.section == _selectedSection &&
+            g.subject == _selectedSubject &&
+            g.examType == _selectedExamType &&
+            g.term == _selectedTerm)
+        .toList();
+    final gradeByStudent = {for (final g in examGrades) g.studentId: g};
+
+    final attachment = SchoolGradeService.attachmentFor(
+      branchId: widget.branchId,
+      grade: _selectedGrade,
+      section: _selectedSection,
+      subject: _selectedSubject,
+      examType: _selectedExamType,
+      term: _selectedTerm,
+    );
+
+    final reportStudents = activeStudents
+        .where((s) => s.grade == _selectedGrade && (_reportSection == 'All' || s.section == _reportSection))
+        .toList();
+    final reports = GradeRules.buildTermReports(
+      students: reportStudents,
+      allGrades: allGrades,
+      allEvents: allEvents,
+      term: _selectedTerm,
+      examTypeFilter: _reportExamFilter,
+    );
+
+    final body = switch (_tab) {
+      _GradingTab.marks => _buildMarksTab(context, marksStudents, examGrades, gradeByStudent, attachment),
+      _GradingTab.reports => _buildReportsTab(context, reports),
+    };
+
+    return SchoolErpPage(
+      breadcrumbs: const ['School', 'Academics'],
+      title: 'Grades & reports',
+      subtitle: 'Class marks entry, exam attachments and printable report cards',
+      icon: GIcons.exam,
+      actions: [
+        if (_tab == _GradingTab.marks) ...[
+          OutlinedButton.icon(
+            onPressed: _isSaving ? null : () => _pickAttachment(marksStudents),
+            icon: const Icon(GIcons.upload, size: 16),
+            label: Text(attachment == null ? 'Attach Excel / PDF' : 'Replace file'),
           ),
+          FilledButton.icon(
+            onPressed: _isSaving || marksStudents.isEmpty ? null : () => _saveAllMarks(marksStudents, attachment),
+            icon: _isSaving
+                ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: context.comfort.onBrand))
+                : const Icon(GIcons.save, size: 16),
+            label: Text(_isSaving ? 'Saving…' : 'Save class marks'),
+          ),
+        ] else
+          FilledButton.icon(
+            onPressed: _isPrinting ? null : () => _printClassReports(reports),
+            icon: const Icon(GIcons.print, size: 16),
+            label: Text(_isPrinting ? 'Preparing PDF…' : 'Print class reports'),
+          ),
+      ],
+      tabs: SchoolErpTabs(
+        labels: const ['Marks entry', 'Report cards'],
+        icons: const [GIcons.edit, GIcons.report],
+        counts: [marksStudents.length, reports.where((r) => r.hasGrades).length],
+        selected: _tab.index,
+        onChanged: (i) => setState(() => _tab = _GradingTab.values[i]),
+      ),
+      child: body,
+    );
+  }
+
+  Widget _buildMarksTab(
+    BuildContext context,
+    List<SchoolStudent> students,
+    List<SchoolGrade> examGrades,
+    Map<String, SchoolGrade> gradeByStudent,
+    SchoolGradeAttachment? attachment,
+  ) {
+    final c = context.comfort;
+    final stats = GradeRules.summarizeExam(totalStudents: students.length, examGrades: examGrades);
+
+    final toolbar = SchoolErpToolbar(
+      filters: [
+        SchoolErpFilter<String>(
+          label: 'Class',
+          value: _selectedGrade,
+          width: 125,
+          options: {for (final g in _grades) g: 'Class $g'},
+          onChanged: (v) => setState(() {
+            _selectedGrade = v;
+            _rowErrors = const {};
+          }),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(backgroundColor: SchoolTheme.primary, foregroundColor: SoftPalette.gray50),
-            icon: const Icon(Icons.print_rounded, size: 16),
-            label: const Text('Print Report Card'),
-            onPressed: () {
-              Navigator.pop(ctx);
-              AppToast.showSnackBar(context, 
-                const SnackBar(content: Text('Preparing printable report card PDF…')),
-              );
+        SchoolErpFilter<String>(
+          label: 'Section',
+          value: _selectedSection,
+          width: 112,
+          options: {for (final s in SchoolConstants.sections) s: 'Sec $s'},
+          onChanged: (v) => setState(() {
+            _selectedSection = v;
+            _rowErrors = const {};
+          }),
+        ),
+        SchoolErpFilter<String>(
+          label: 'Subject',
+          value: _selectedSubject,
+          width: 175,
+          options: {for (final sub in _subjects) sub: sub},
+          onChanged: (v) => setState(() {
+            _selectedSubject = v;
+            _rowErrors = const {};
+          }),
+        ),
+        SchoolErpFilter<String>(
+          label: 'Exam',
+          value: _selectedExamType,
+          width: 130,
+          options: {for (final e in GradeRules.examTypes) e: e},
+          onChanged: (v) => setState(() {
+            _selectedExamType = v;
+            _rowErrors = const {};
+          }),
+        ),
+        SchoolErpFilter<String>(
+          label: 'Term',
+          value: _selectedTerm,
+          width: 125,
+          options: {for (final t in GradeRules.terms) t: t},
+          onChanged: (v) => setState(() {
+            _selectedTerm = v;
+            _rowErrors = const {};
+          }),
+        ),
+        SizedBox(
+          width: 112,
+          height: 38,
+          child: TextField(
+            controller: _totalMarksCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            style: GText.body2(c.textPrimary),
+            decoration: const InputDecoration(
+              isDense: true,
+              labelText: 'Total marks',
+              contentPadding: EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: 8),
+            ),
+            onChanged: (v) {
+              final d = double.tryParse(v);
+              if (d != null && d > 0) setState(() => _totalMarks = d);
             },
           ),
-        ],
+        ),
+      ],
+      trailing: [
+        if (attachment != null)
+          AppChip(
+            label: attachment.fileName,
+            icon: GIcons.layers,
+            state: AppChipState.info,
+            onTap: () => _removeAttachment(attachment),
+          ),
+      ],
+    );
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SchoolErpStatStrip([
+        SchoolErpStat(
+          label: 'Class average',
+          value: stats.gradedCount == 0 ? '—' : '${stats.averagePct.toStringAsFixed(1)}%',
+          color: stats.gradedCount == 0 ? c.textMuted : _letterColor(context, GradeRules.letterOf(stats.averagePct)),
+          icon: GIcons.chart,
+        ),
+        SchoolErpStat(
+          label: 'Graded',
+          value: '${stats.gradedCount} / ${stats.totalStudents}',
+          color: c.brand,
+          icon: GIcons.checklist,
+        ),
+        SchoolErpStat(
+          label: 'Highest',
+          value: stats.gradedCount == 0 ? '—' : '${stats.highestPct.toStringAsFixed(1)}%',
+          color: c.success,
+          icon: GIcons.star,
+        ),
+        SchoolErpStat(
+          label: 'Pass rate (≥50%)',
+          value: stats.gradedCount == 0 ? '—' : '${stats.passRate.toStringAsFixed(1)}%',
+          color: stats.gradedCount == 0 ? c.textMuted : (stats.passRate >= 70 ? c.success : c.warning),
+          icon: GIcons.checkCircle,
+        ),
+      ]),
+      const SizedBox(height: Gsp.sp3),
+      Expanded(
+        child: SchoolErpCard(
+          toolbar: toolbar,
+          footer: students.isEmpty
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Gsp.sp4, vertical: Gsp.sp2 + 2),
+                  child: Row(children: [
+                    Expanded(
+                      child: Text(
+                        'Class $_selectedGrade-$_selectedSection · $_selectedSubject · $_selectedExamType ($_selectedTerm)'
+                        '${attachment != null ? ' · File: ${attachment.fileName} (click chip to remove)' : ''}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GText.caption(c.textMuted),
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    FilledButton.icon(
+                      onPressed: _isSaving ? null : () => _saveAllMarks(students, attachment),
+                      icon: const Icon(GIcons.save, size: 16),
+                      label: Text(_isSaving ? 'Saving…' : 'Save class marks'),
+                    ),
+                  ]),
+                ),
+          child: students.isEmpty
+              ? AppEmptyState(
+                  icon: GIcons.student,
+                  title: 'No active students in Class $_selectedGrade-$_selectedSection',
+                  subtitle: 'Pick another class or section, or admit students first.',
+                  compact: true,
+                )
+              : Column(children: [
+                  // Table header
+                  Container(
+                    height: SchoolErp.headerHeight,
+                    color: c.surfaceSunken,
+                    padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3),
+                    child: Row(children: [
+                      SizedBox(width: 56, child: Text('ROLL', style: GText.overline(c.textMuted))),
+                      const SizedBox(width: Gsp.sp3),
+                      Expanded(flex: 4, child: Text('STUDENT', style: GText.overline(c.textMuted))),
+                      const SizedBox(width: Gsp.sp3),
+                      SizedBox(width: 132, child: Text('MARKS / ${GradeRules.formatMark(_totalMarks)}', style: GText.overline(c.textMuted))),
+                      const SizedBox(width: Gsp.sp3),
+                      SizedBox(width: 108, child: Text('RESULT', style: GText.overline(c.textMuted))),
+                      const SizedBox(width: Gsp.sp3),
+                      Expanded(flex: 3, child: Text('REMARKS', style: GText.overline(c.textMuted))),
+                      const SizedBox(width: Gsp.sp2),
+                      SizedBox(width: 40, child: Text('CARD', textAlign: TextAlign.center, style: GText.overline(c.textMuted))),
+                    ]),
+                  ),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: students.length,
+                      separatorBuilder: (_, _) => Divider(height: 1, color: c.border),
+                      itemBuilder: (context, i) {
+                        final s = students[i];
+                        final existing = gradeByStudent[s.id];
+                        final key = _ck(s.id);
+                        final marksCtrl = _marksCtrls.putIfAbsent(
+                          key,
+                          () => TextEditingController(text: existing != null ? GradeRules.formatMark(existing.marksObtained) : ''),
+                        );
+                        final remarksCtrl = _remarksCtrls.putIfAbsent(
+                          key,
+                          () => TextEditingController(text: existing?.remarks ?? ''),
+                        );
+                        final rawText = marksCtrl.text.trim();
+                        final parsed = double.tryParse(rawText);
+                        final total = existing?.totalMarks ?? _totalMarks;
+                        final hasVal = rawText.isNotEmpty && parsed != null;
+                        final pct = hasVal ? GradeRules.percentageOf(parsed, total) : 0.0;
+                        final letter = hasVal ? GradeRules.letterOf(pct) : '—';
+                        final rowErr = _rowErrors[s.id] ?? (rawText.isNotEmpty ? GradeRules.validateMark(obtained: parsed, totalMarks: _totalMarks) : null);
+                        final lc = _letterColor(context, letter);
+
+                        return Container(
+                          color: rowErr != null
+                              ? c.dangerBg.withValues(alpha: 0.4)
+                              : (i.isOdd ? c.surfaceSunken.withValues(alpha: 0.35) : c.surface),
+                          padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+                          child: Row(children: [
+                            SizedBox(width: 56, child: SchoolErpCell.mono(context, s.rollNo)),
+                            const SizedBox(width: Gsp.sp3),
+                            Expanded(
+                              flex: 4,
+                              child: SchoolErpCell.primary(
+                                context,
+                                s.name,
+                                sub: '${s.admissionNo} · ${s.guardianName}',
+                                leading: StudentAvatar(student: s, size: 28),
+                              ),
+                            ),
+                            const SizedBox(width: Gsp.sp3),
+                            SizedBox(
+                              width: 132,
+                              child: TextField(
+                                controller: marksCtrl,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                style: GText.body2Bold(c.textPrimary),
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  hintText: '0–${GradeRules.formatMark(_totalMarks)}',
+                                  errorText: rowErr,
+                                  errorMaxLines: 1,
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: Gsp.sp2 + 2, vertical: 8),
+                                ),
+                                onChanged: (_) => setState(() {
+                                  if (_rowErrors.containsKey(s.id)) {
+                                    _rowErrors = Map<String, String>.from(_rowErrors)..remove(s.id);
+                                  }
+                                }),
+                              ),
+                            ),
+                            const SizedBox(width: Gsp.sp3),
+                            SizedBox(
+                              width: 108,
+                              child: hasVal
+                                  ? Row(mainAxisSize: MainAxisSize.min, children: [
+                                      Text('${pct.toStringAsFixed(0)}%', style: GText.label(lc)),
+                                      const SizedBox(width: Gsp.sp1 + 2),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(color: lc.withValues(alpha: 0.14), borderRadius: Gr.chip),
+                                        child: Text(letter, style: GText.caption(lc).copyWith(fontWeight: FontWeight.w700)),
+                                      ),
+                                    ])
+                                  : Text('—', style: GText.caption(c.textMuted)),
+                            ),
+                            const SizedBox(width: Gsp.sp3),
+                            Expanded(
+                              flex: 3,
+                              child: TextField(
+                                controller: remarksCtrl,
+                                style: GText.body2(c.textPrimary),
+                                decoration: const InputDecoration(
+                                  isDense: true,
+                                  hintText: 'Remarks (optional)',
+                                  contentPadding: EdgeInsets.symmetric(horizontal: Gsp.sp2 + 2, vertical: 8),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Gsp.sp2),
+                            SizedBox(
+                              width: 40,
+                              child: IconButton(
+                                tooltip: 'Open report card',
+                                icon: Icon(GIcons.report, size: 18, color: c.brand),
+                                onPressed: () => setState(() {
+                                  _reportSection = _selectedSection;
+                                  _selectedReportStudentId = s.id;
+                                  _tab = _GradingTab.reports;
+                                }),
+                              ),
+                            ),
+                          ]),
+                        );
+                      },
+                    ),
+                  ),
+                ]),
+        ),
       ),
+    ]);
+  }
+
+  Widget _buildReportsTab(BuildContext context, List<StudentTermReport> reports) {
+    final c = context.comfort;
+    final q = _reportSearchCtrl.text.trim().toLowerCase();
+    final filtered = reports.where((r) {
+      if (q.isEmpty) return true;
+      return r.student.name.toLowerCase().contains(q) ||
+          r.student.admissionNo.toLowerCase().contains(q) ||
+          r.student.rollNo.toLowerCase() == q;
+    }).toList();
+
+    final graded = reports.where((r) => r.hasGrades).toList();
+    final passed = graded.where((r) => r.passed).length;
+    final avgPct = graded.isEmpty ? 0.0 : graded.fold<double>(0, (a, r) => a + r.percentage) / graded.length;
+    final flaggedEvents = reports.where((r) => r.events.hasAbsences).length;
+
+    StudentTermReport? selected;
+    for (final r in reports) {
+      if (r.student.id == _selectedReportStudentId) selected = r;
+    }
+
+    final table = SchoolErpTable<StudentTermReport>(
+      rows: filtered,
+      rowKey: (r) => r.student.id,
+      selectedKey: _selectedReportStudentId,
+      onRowTap: (r) {
+        if (SchoolErp.wide(context)) {
+          setState(() => _selectedReportStudentId = r.student.id);
+        } else {
+          showModalBottomSheet<void>(
+            context: context,
+            isScrollControlled: true,
+            useSafeArea: true,
+            builder: (_) => SizedBox(
+              height: MediaQuery.sizeOf(context).height * 0.88,
+              child: _ReportCardPanel(
+                report: r,
+                printing: _isPrinting,
+                onPrint: () => _printSingleReport(r),
+              ),
+            ),
+          );
+        }
+      },
+      minWidth: 780,
+      empty: AppEmptyState(
+        icon: GIcons.report,
+        title: 'No students in Class $_selectedGrade${_reportSection == 'All' ? '' : '-$_reportSection'}',
+        subtitle: 'Select another class or enter marks in the Marks entry tab.',
+        compact: true,
+      ),
+      columns: [
+        SchoolErpColumn(
+          label: 'Rank',
+          width: 62,
+          numeric: true,
+          sortValue: (r) => r.rank ?? 99999,
+          cell: (r) => SchoolErpCell.mono(context, r.rank == null ? '—' : '#${r.rank}'),
+        ),
+        SchoolErpColumn(
+          label: 'Roll',
+          width: 58,
+          numeric: true,
+          sortValue: (r) => int.tryParse(r.student.rollNo) ?? 99999,
+          cell: (r) => SchoolErpCell.mono(context, r.student.rollNo),
+        ),
+        SchoolErpColumn(
+          label: 'Student',
+          flex: 4,
+          sortValue: (r) => r.student.name.toLowerCase(),
+          cell: (r) => SchoolErpCell.primary(
+            context,
+            r.student.name,
+            sub: '${r.student.grade}-${r.student.section} · ${r.student.admissionNo}',
+            leading: StudentAvatar(student: r.student, size: 28),
+          ),
+        ),
+        SchoolErpColumn(
+          label: 'Subjects',
+          width: 82,
+          numeric: true,
+          sortValue: (r) => r.grades.length,
+          cell: (r) => SchoolErpCell.mono(context, '${r.grades.length}'),
+        ),
+        SchoolErpColumn(
+          label: 'Score',
+          width: 112,
+          numeric: true,
+          sortValue: (r) => r.percentage,
+          cell: (r) => SchoolErpCell.mono(
+            context,
+            r.hasGrades ? '${GradeRules.formatMark(r.totalObtained)} / ${GradeRules.formatMark(r.totalPossible)}' : '—',
+          ),
+        ),
+        SchoolErpColumn(
+          label: '% / Grade',
+          width: 110,
+          sortValue: (r) => r.percentage,
+          cell: (r) => r.hasGrades
+              ? AppChip(
+                  label: '${r.percentage.toStringAsFixed(1)}% · ${r.letterGrade}',
+                  state: r.passed ? AppChipState.active : AppChipState.danger,
+                )
+              : SchoolErpCell.text(context, 'Not graded', muted: true),
+        ),
+        SchoolErpColumn(
+          label: 'Events',
+          width: 108,
+          sortValue: (r) => r.events.absent,
+          cell: (r) => r.events.totalHeld == 0
+              ? SchoolErpCell.text(context, '—', muted: true)
+              : r.events.hasAbsences
+                  ? AppChip(label: '${r.events.absent} missed', state: AppChipState.danger, icon: GIcons.warning)
+                  : AppChip(label: '${r.events.attended}/${r.events.totalHeld} ok', state: AppChipState.active),
+        ),
+      ],
+    );
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SchoolErpStatStrip([
+        SchoolErpStat(label: 'Graded students', value: '${graded.length} / ${reports.length}', icon: GIcons.student),
+        SchoolErpStat(
+          label: 'Term average',
+          value: graded.isEmpty ? '—' : '${avgPct.toStringAsFixed(1)}%',
+          color: graded.isEmpty ? c.textMuted : _letterColor(context, GradeRules.letterOf(avgPct)),
+          icon: GIcons.chart,
+        ),
+        SchoolErpStat(
+          label: 'Passing',
+          value: graded.isEmpty ? '—' : '$passed / ${graded.length}',
+          color: c.success,
+          icon: GIcons.checkCircle,
+        ),
+        SchoolErpStat(
+          label: 'Event absences',
+          value: GFormat.count(flaggedEvents),
+          color: flaggedEvents > 0 ? c.danger : c.success,
+          icon: GIcons.event,
+          caption: 'Flagged on reports',
+        ),
+      ]),
+      const SizedBox(height: Gsp.sp3),
+      Expanded(
+        child: SchoolErpMasterDetail(
+          master: SchoolErpCard(
+            toolbar: SchoolErpToolbar(
+              search: _reportSearchCtrl,
+              searchHint: 'Search student, roll or adm. no',
+              onSearch: (_) => setState(() {}),
+              filters: [
+                SchoolErpFilter<String>(
+                  label: 'Class',
+                  value: _selectedGrade,
+                  width: 125,
+                  options: {for (final g in _grades) g: 'Class $g'},
+                  onChanged: (v) => setState(() {
+                    _selectedGrade = v;
+                    _selectedReportStudentId = null;
+                  }),
+                ),
+                SchoolErpFilter<String>(
+                  label: 'Section',
+                  value: _reportSection,
+                  width: 112,
+                  options: {'All': 'All', for (final s in SchoolConstants.sections) s: 'Sec $s'},
+                  onChanged: (v) => setState(() => _reportSection = v),
+                ),
+                SchoolErpFilter<String>(
+                  label: 'Term',
+                  value: _selectedTerm,
+                  width: 125,
+                  options: {for (final t in GradeRules.terms) t: t},
+                  onChanged: (v) => setState(() => _selectedTerm = v),
+                ),
+                SchoolErpFilter<String>(
+                  label: 'Exam',
+                  value: _reportExamFilter,
+                  width: 125,
+                  options: {'All': 'All exams', for (final e in GradeRules.examTypes) e: e},
+                  onChanged: (v) => setState(() => _reportExamFilter = v),
+                ),
+              ],
+            ),
+            child: table,
+          ),
+          detail: selected == null
+              ? null
+              : _ReportCardPanel(
+                  report: selected,
+                  printing: _isPrinting,
+                  onPrint: () => _printSingleReport(selected!),
+                  onClose: () => setState(() => _selectedReportStudentId = null),
+                ),
+        ),
+      ),
+    ]);
+  }
+}
+
+class _ReportCardPanel extends StatelessWidget {
+  const _ReportCardPanel({
+    required this.report,
+    required this.printing,
+    required this.onPrint,
+    this.onClose,
+  });
+
+  final StudentTermReport report;
+  final bool printing;
+  final VoidCallback onPrint;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    final s = report.student;
+    final ev = report.events;
+
+    return SchoolErpDetailPanel(
+      onClose: onClose,
+      leading: StudentAvatar(student: s, size: 52),
+      title: s.name,
+      subtitle: '${s.admissionNo} · Class ${s.grade}-${s.section} · Roll ${s.rollNo}',
+      chips: [
+        AppChip(label: report.term, state: AppChipState.info, icon: GIcons.exam),
+        if (report.hasGrades)
+          AppChip(
+            label: '${report.percentage.toStringAsFixed(1)}% (${report.letterGrade})',
+            state: report.passed ? AppChipState.active : AppChipState.danger,
+          ),
+        if (report.rank != null) AppChip(label: 'Rank #${report.rank} of ${report.classSize}', state: AppChipState.neutral),
+      ],
+      actions: [
+        FilledButton.icon(
+          onPressed: printing ? null : onPrint,
+          icon: const Icon(GIcons.print, size: 16),
+          label: Text(printing ? 'Preparing PDF…' : 'Print report card'),
+        ),
+      ],
+      children: [
+        SchoolErpFacts(title: 'Summary', facts: [
+          ('Father', s.guardianName),
+          ('Session', s.academicYear.isEmpty ? '—' : s.academicYear),
+          ('Total marks', report.hasGrades ? '${GradeRules.formatMark(report.totalObtained)} / ${GradeRules.formatMark(report.totalPossible)}' : 'No marks yet'),
+          ('GPA', report.hasGrades ? report.gpa.toStringAsFixed(2) : '—'),
+        ]),
+        Padding(
+          padding: const EdgeInsets.only(top: Gsp.sp4, bottom: Gsp.sp2),
+          child: Text('SUBJECTS (${report.grades.length})', style: GText.overline(c.textMuted)),
+        ),
+        if (report.grades.isEmpty)
+          Text('No grades recorded for ${report.term} yet.', style: GText.body2(c.textMuted))
+        else
+          Container(
+            decoration: BoxDecoration(borderRadius: SchoolErp.radius, border: Border.all(color: c.border)),
+            clipBehavior: Clip.antiAlias,
+            child: Column(children: [
+              Container(
+                color: c.surfaceSunken,
+                padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+                child: Row(children: [
+                  Expanded(flex: 4, child: Text('SUBJECT', style: GText.overline(c.textMuted))),
+                  SizedBox(width: 68, child: Text('MARKS', textAlign: TextAlign.end, style: GText.overline(c.textMuted))),
+                  SizedBox(width: 52, child: Text('GRADE', textAlign: TextAlign.end, style: GText.overline(c.textMuted))),
+                ]),
+              ),
+              for (final g in report.grades)
+                Container(
+                  decoration: BoxDecoration(border: Border(top: BorderSide(color: c.border))),
+                  padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+                  child: Row(children: [
+                    Expanded(
+                      flex: 4,
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(g.subject, style: GText.body2Bold(c.textPrimary)),
+                        Text(
+                          '${g.examType}${g.remarks.isEmpty ? '' : ' · ${g.remarks}'}',
+                          style: GText.caption(c.textMuted),
+                        ),
+                      ]),
+                    ),
+                    SizedBox(
+                      width: 68,
+                      child: Text(
+                        '${GradeRules.formatMark(g.marksObtained)}/${GradeRules.formatMark(g.totalMarks)}',
+                        textAlign: TextAlign.end,
+                        style: GText.caption(c.textPrimary),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 52,
+                      child: Text(
+                        g.letterGrade,
+                        textAlign: TextAlign.end,
+                        style: GText.label(g.percentage >= GradeRules.passPercent ? c.success : c.danger),
+                      ),
+                    ),
+                  ]),
+                ),
+            ]),
+          ),
+        Padding(
+          padding: const EdgeInsets.only(top: Gsp.sp4, bottom: Gsp.sp2),
+          child: Text('BIMONTHLY EVENTS (REPORT ONLY)', style: GText.overline(c.textMuted)),
+        ),
+        if (ev.totalHeld == 0)
+          Text('No compulsory events recorded yet.', style: GText.body2(c.textMuted))
+        else
+          Container(
+            padding: const EdgeInsets.all(Gsp.sp3),
+            decoration: BoxDecoration(
+              color: ev.hasAbsences ? c.dangerBg : c.successBg,
+              borderRadius: SchoolErp.radius,
+              border: Border.all(color: (ev.hasAbsences ? c.danger : c.success).withValues(alpha: 0.35)),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                'Attended ${ev.attended} of ${ev.totalHeld} events${ev.excused > 0 ? ' (${ev.excused} excused)' : ''}',
+                style: GText.body2Bold(ev.hasAbsences ? c.danger : c.success),
+              ),
+              if (ev.missedEvents.isNotEmpty) ...[
+                const SizedBox(height: Gsp.sp1),
+                for (final m in ev.missedEvents)
+                  Text('• Missed: ${m.title} (${m.date})', style: GText.caption(c.danger)),
+              ],
+            ]),
+          ),
+      ],
     );
   }
 }

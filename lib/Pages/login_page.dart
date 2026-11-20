@@ -6,6 +6,9 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GComfortColorsContext;
+// ignore: depend_on_referenced_packages
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:gmwf/design/components/decorative_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -44,7 +47,6 @@ class _LoginPageState extends State<LoginPage> {
   /// Plain-words description of the current sign-in step, shown on the button.
   String _loginStep     = 'Signing in';
   bool _obscurePassword = true;
-  bool _loginHover      = false;
   bool _isOnline        = true;
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
@@ -78,6 +80,14 @@ class _LoginPageState extends State<LoginPage> {
           );
         }
         precacheImage(const AssetImage('assets/logo/gmwf-1.webp'), context);
+        precacheImage(
+          const ResizeImage(AssetImage('assets/images/islamic_pattern.webp'), width: 900),
+          context,
+        );
+        precacheImage(
+          const ResizeImage(AssetImage('assets/images/login_hero_3d.png'), width: 900),
+          context,
+        );
         UpdateDialogWidget.showUpdateDialogIfNeeded(context);
       }
     });
@@ -1647,9 +1657,28 @@ class _LoginPageState extends State<LoginPage> {
       };
     }
 
-    // 1. Live Firestore queries FIRST when online
+    // 1. Fast path: Check local Hive storage first (instant, 0 Firestore reads)
     try {
-      final knownBranches = _getAllBranchIds();
+      final inputPrefix = inputLower.contains('@') ? inputLower.split('@').first : inputLower;
+      Map<String, dynamic>? local = LocalStorageService.getLocalUserByUid(uid) ??
+          LocalStorageService.findLocalUser(uid) ??
+          (userEmail.isNotEmpty ? LocalStorageService.findLocalUser(userEmail) : null) ??
+          LocalStorageService.findLocalUser(inputLower) ??
+          LocalStorageService.findLocalUser(inputPrefix);
+
+      if (local != null) {
+        final r = _resolveRoleFromMap(local);
+        if (r.isNotEmpty && r != 'unknown' && r != 'unassigned') {
+          local['role'] = r;
+          local['uid'] = uid;
+          local['email'] = user.email ?? local['email'];
+          return local;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Targeted Firestore queries on root /users and collectionGroup fallback (at most 2-4 targeted reads)
+    try {
       final parallelQueries = <Future<Map<String, dynamic>?>>[
         // Top-level users by UID
         FirebaseFirestore.instance
@@ -1673,32 +1702,7 @@ class _LoginPageState extends State<LoginPage> {
           return null;
         }).catchError((_) => null),
 
-        // Direct branch queries by UID for all branches (No composite index required!)
-        for (final b in knownBranches)
-          FirebaseFirestore.instance
-              .collection('branches')
-              .doc(b)
-              .collection('users')
-              .doc(uid)
-              .get()
-              .then((doc) {
-            if (doc.exists && doc.data() != null) {
-              final d = doc.data()!;
-              final resolvedRole = _resolveRoleFromMap(d);
-              return {
-                ...d,
-                'uid': uid,
-                'email': user.email ?? d['email'],
-                'username': d['username'] ?? inputUsername.split('@').first.toLowerCase(),
-                'role': resolvedRole,
-                'branchId': d['branchId'] ?? b,
-                'name': d['name'] ?? d['username'] ?? inputUsername.split('@').first,
-              };
-            }
-            return null;
-          }).catchError((_) => null),
-
-        // collectionGroup('users') by UID
+        // collectionGroup('users') by UID (covers all branches in a single query)
         FirebaseFirestore.instance
             .collectionGroup('users')
             .where('uid', isEqualTo: uid)
@@ -1748,35 +1752,6 @@ class _LoginPageState extends State<LoginPage> {
             return null;
           }).catchError((_) => null),
         );
-
-        // Branch subcollections by email
-        for (final b in knownBranches) {
-          parallelQueries.add(
-            FirebaseFirestore.instance
-                .collection('branches')
-                .doc(b)
-                .collection('users')
-                .where('email', isEqualTo: userEmail)
-                .limit(1)
-                .get()
-                .then((snap) {
-              if (snap.docs.isNotEmpty) {
-                final doc = snap.docs.first;
-                final d = doc.data();
-                return {
-                  ...d,
-                  'uid': d['uid'] ?? uid,
-                  'email': user.email ?? d['email'],
-                  'username': d['username'] ?? inputUsername.split('@').first.toLowerCase(),
-                  'role': _resolveRoleFromMap(d),
-                  'branchId': d['branchId'] ?? b,
-                  'name': d['name'] ?? d['username'] ?? inputUsername.split('@').first,
-                };
-              }
-              return null;
-            }).catchError((_) => null),
-          );
-        }
 
         parallelQueries.add(
           FirebaseFirestore.instance
@@ -1830,34 +1805,31 @@ class _LoginPageState extends State<LoginPage> {
           }).catchError((_) => null),
         );
 
-        // Branch subcollections by usernameLower
-        for (final b in knownBranches) {
-          parallelQueries.add(
-            FirebaseFirestore.instance
-                .collection('branches')
-                .doc(b)
-                .collection('users')
-                .where('usernameLower', isEqualTo: inputLower)
-                .limit(1)
-                .get()
-                .then((snap) {
-              if (snap.docs.isNotEmpty) {
-                final doc = snap.docs.first;
-                final d = doc.data();
-                return {
-                  ...d,
-                  'uid': d['uid'] ?? uid,
-                  'email': user.email ?? d['email'],
-                  'username': d['username'] ?? inputUsername.split('@').first.toLowerCase(),
-                  'role': _resolveRoleFromMap(d),
-                  'branchId': d['branchId'] ?? b,
-                  'name': d['name'] ?? d['username'] ?? inputUsername.split('@').first,
-                };
-              }
-              return null;
-            }).catchError((_) => null),
-          );
-        }
+        parallelQueries.add(
+          FirebaseFirestore.instance
+              .collectionGroup('users')
+              .where('usernameLower', isEqualTo: inputLower)
+              .limit(1)
+              .get()
+              .then((snap) {
+            if (snap.docs.isNotEmpty) {
+              final doc = snap.docs.first;
+              final d = doc.data();
+              final pathParts = doc.reference.path.split('/');
+              final branchId = d['branchId'] ?? (pathParts.length >= 2 ? pathParts[1] : 'unknown');
+              return {
+                ...d,
+                'uid': d['uid'] ?? uid,
+                'email': user.email ?? d['email'],
+                'username': d['username'] ?? inputUsername.split('@').first.toLowerCase(),
+                'role': _resolveRoleFromMap(d),
+                'branchId': branchId,
+                'name': d['name'] ?? d['username'] ?? inputUsername.split('@').first,
+              };
+            }
+            return null;
+          }).catchError((_) => null),
+        );
       }
 
       // Per-query cap: a slow/hanging query is dropped instead of discarding every answer
@@ -2709,108 +2681,59 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final s = MediaQuery.sizeOf(context);
-    final isDesktopScreen = s.width >= 900;
-    final patternW = isDesktopScreen ? 600.0 : (s.width * 0.75).clamp(240.0, 420.0);
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    final cacheW = isDesktopScreen ? 800 : (patternW * dpr).toInt().clamp(240, 500);
 
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.teal900 : SoftPalette.green100t,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       resizeToAvoidBottomInset: true,
-      body: Stack(
-        children: [
-          // ── Islamic Arch Frame Pattern (2.webp) on LEFT SIDE ────────────────
-          Positioned(
-            top: 0,
-            bottom: 0,
-            left: 0,
-            width: patternW,
-            child: Opacity(
-              opacity: isDark ? 0.35 : 0.22,
-              child: GDecorativeImage.asset(
-                'assets/images/2.webp',
-                fit: BoxFit.fitHeight,
-                alignment: Alignment.topLeft,
-                gaplessPlayback: true,
-                cacheWidth: cacheW, // responsive decode width — instant render on mobile
-                errorBuilder: (_, _, _) => const SizedBox.shrink(),
-              ),
-            ),
-          ),
-
-
-          // ── Islamic Geometric Vector Pattern Overlay ──────────────────────
-          Positioned.fill(
-            child: CustomPaint(
-              painter: IslamicPatternPainter(
-                color: isDark
-                    ? SoftPalette.emerald350.withValues(alpha: 0.04)
-                    : SoftPalette.emerald500.withValues(alpha: 0.03),
-              ),
-            ),
-          ),
-
-          // ── Ambient Background Glows ────────────────────────────────────────
-          Positioned(
-            top: -100,
-            left: -100,
-            child: Container(
-              width: 350,
-              height: 350,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isDark
-                    ? SoftPalette.emerald350.withValues(alpha: 0.12)
-                    : SoftPalette.emerald500.withValues(alpha: 0.08),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -100,
-            right: -100,
-            child: Container(
-              width: 400,
-              height: 400,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isDark
-                    ? SoftPalette.emerald550.withValues(alpha: 0.15)
-                    : SoftPalette.emerald350.withValues(alpha: 0.08),
-              ),
-            ),
-          ),
-
-          // ── Main Content Container ──────────────────────────────────────────
-          SafeArea(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final isDesktop = constraints.maxWidth >= 900;
-
-                return Column(
-                  children: [
-                    Expanded(
-                      child: Center(
-                        child: SingleChildScrollView(
-                          controller: _scrollController,
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: isDesktop ? 1040 : 460,
-                            ),
-                            child: isDesktop
-                                ? _buildDesktopLayout(context, isDark)
-                                : _buildMobileLayout(context, isDark),
-                          ),
-                        ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isDesktop = constraints.maxWidth >= 900;
+            if (isDesktop) {
+              return _buildDesktopLayout(context, isDark);
+            }
+            return Column(
+              children: [
+                _buildMobileTopBar(context),
+                Expanded(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 460),
+                        child: _buildMobileLayout(context, isDark),
                       ),
                     ),
+                  ),
+                ),
+                _buildBottomProgramsBar(false, isDark),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 
-                    // ── Bottom Programs Bar ─────────────────────────────────
-                    _buildBottomProgramsBar(isDesktop, isDark),
-                  ],
-                );
-              },
+  Widget _buildMobileTopBar(BuildContext context) {
+    final brand = Theme.of(context).colorScheme.primary;
+    final barBg = Color.lerp(brand, Colors.black, 0.62)!;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+      color: barBg,
+      child: Row(
+        children: [
+          _buildLogoWidget(height: 26),
+          const SizedBox(width: 10),
+          const Text(
+            'GMWF',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
             ),
           ),
         ],
@@ -2818,169 +2741,416 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  // ── Desktop 2-Column Layout ───────────────────────────────────────────────
+  // ── Desktop Split-Screen Layout ───────────────────────────────────────────
   Widget _buildDesktopLayout(BuildContext context, bool isDark) {
-    final titleMain = isDark ? SoftPalette.gray50 : SoftPalette.emerald700;
-    final titleAccent = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final subtitleColor = isDark ? SoftPalette.slate350 : SoftPalette.slate700;
+    final brand = Theme.of(context).colorScheme.primary;
+    final panelTop = Color.lerp(brand, Colors.black, 0.56)!;
+    final panelBottom = Color.lerp(brand, Colors.black, 0.78)!;
+    final accentHighlight = Color.lerp(brand, Colors.white, 0.45)!;
+    const goldAccent = Color(0xFFD4A843);
 
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ── Left Hero Side (Displays Logo ONCE) ─────────────────────────────
+        // ── Left Rich Brand Panel (50%) ─────────────────────────────────────
         Expanded(
-          flex: 5,
-          child: Padding(
-            padding: const EdgeInsets.only(right: 48.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
+          flex: 50,
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [panelTop, panelBottom],
+              ),
+            ),
+            child: Stack(
               children: [
-                _buildLogoWidget(height: 110),
-                const SizedBox(height: 36),
-                RichText(
-                  text: TextSpan(
-                    style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold, height: 1.2, fontFamily: 'Roboto'),
-                    children: [
-                      TextSpan(text: "One Platform.\n", style: TextStyle(color: titleMain)),
-                      TextSpan(text: "All Operation.", style: TextStyle(color: titleAccent)),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  "A unified digital system to manage welfare, education, healthcare and more.",
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: subtitleColor,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 32),
-                Container(
-                  height: 2,
-                  width: 120,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(1),
-                    gradient: LinearGradient(
-                      colors: [
-                        isDark ? SoftPalette.emerald350 : SoftPalette.emerald500,
-                        Colors.transparent,
-                      ],
+                // Subtle Islamic geometric texture across the green panel
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    child: IgnorePointer(
+                      child: Image.asset(
+                        'assets/images/islamic_pattern.webp',
+                        fit: BoxFit.cover,
+                        cacheWidth: 900,
+                        filterQuality: FilterQuality.low,
+                        gaplessPlayback: true,
+                        color: Color.lerp(brand, Colors.white, 0.28)!
+                            .withValues(alpha: 0.085),
+                        colorBlendMode: BlendMode.srcIn,
+                      ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 32),
-                Row(
-                  children: [
-                    _buildFeatureItem(Icons.shield_outlined, "Secure Access", isDark),
-                    const SizedBox(width: 24),
-                    _buildFeatureItem(Icons.people_outline, "Role Based", isDark),
-                    const SizedBox(width: 24),
-                    _buildFeatureItem(Icons.bar_chart_rounded, "Real-time Sync", isDark),
-                  ],
+                // Subtle emerald radial illumination behind the 3D illustration
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: RadialGradient(
+                        center: const Alignment(0.0, 0.16),
+                        radius: 0.62,
+                        colors: [
+                          Color.lerp(brand, SoftPalette.emerald500, 0.35)!
+                              .withValues(alpha: 0.18),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.0, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+                // Subtle GMWF watermark crest on right edge
+                Positioned(
+                  right: -60,
+                  top: 70,
+                  child: IgnorePointer(
+                    child: Opacity(
+                      opacity: 0.05,
+                      child: SizedBox(
+                        height: 300,
+                        child: GDecorativeImage.asset(
+                          'assets/logo/gmwf-1.webp',
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Main Left Panel Content
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 44,
+                    vertical: 28,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Brand Header
+                      Row(
+                        children: [
+                          _buildLogoWidget(height: 50),
+                          const SizedBox(width: 14),
+                          Container(
+                            width: 1.2,
+                            height: 34,
+                            color: Colors.white.withValues(alpha: 0.28),
+                          ),
+                          const SizedBox(width: 14),
+                          const Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'GMWF',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.8,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'EMPLOYEE PORTAL',
+                                style: TextStyle(
+                                  color: goldAccent,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 1.8,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 22),
+
+                      // Editorial Headline
+                      RichText(
+                        text: TextSpan(
+                          style: const TextStyle(
+                            fontSize: 34,
+                            fontWeight: FontWeight.bold,
+                            height: 1.15,
+                            fontFamily: 'Roboto',
+                          ),
+                          children: [
+                            const TextSpan(
+                              text: 'One Platform.\n',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            TextSpan(
+                              text: 'All Operations.',
+                              style: TextStyle(color: accentHighlight),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'A unified digital system to manage welfare, education, healthcare and more.',
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          color: Colors.white.withValues(alpha: 0.78),
+                          height: 1.45,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        width: 42,
+                        height: 2.5,
+                        decoration: BoxDecoration(
+                          color: goldAccent,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+
+                      // Center 3D Isometric Hero PNG
+                      Expanded(
+                        child: Center(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Image.asset(
+                              'assets/images/login_hero_3d.png',
+                              fit: BoxFit.contain,
+                              cacheWidth: 900,
+                              gaplessPlayback: true,
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      // 3 Glassmorphism Trust Cards
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildGlassFeatureTile(
+                              LucideIcons.shieldCheck,
+                              'Secure Access',
+                              'Protected and reliable access',
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: _buildGlassFeatureTile(
+                              LucideIcons.users,
+                              'Role Based',
+                              'Access based on your role',
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: _buildGlassFeatureTile(
+                              LucideIcons.refreshCw,
+                              'Real-time Sync',
+                              'Live updates across systems',
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Bottom-left Platform Version
+                      Text(
+                        'GMWF Management Platform  •  v${AutoUpdateService.resolvedVersion}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.white.withValues(alpha: 0.5),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
           ),
         ),
 
-        // ── Right Glass Form Card ───────────────────────────────────────────
+        // ── Right Auth Panel (50%) ──────────────────────────────────────────
         Expanded(
-          flex: 5,
-          child: _buildFormCard(context, showHeader: true, isDark: isDark),
+          flex: 50,
+          child: Container(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            child: Stack(
+              children: [
+                Center(
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 24,
+                    ),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 510),
+                      child: _buildFormCard(
+                        context,
+                        showHeader: true,
+                        isDark: isDark,
+                        embedProgramsBar: true,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ],
     );
   }
 
+  Widget _buildGlassFeatureTile(IconData icon, String title, String subtitle) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.07),
+        ),
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: Colors.white, size: 16),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.65),
+              fontSize: 9.5,
+              height: 1.25,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Mobile Single-Column Layout ───────────────────────────────────────────
   Widget _buildMobileLayout(BuildContext context, bool isDark) {
-    final titleMain = isDark ? SoftPalette.gray50 : SoftPalette.emerald700;
-    final titleAccent = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
+    final brand = Theme.of(context).colorScheme.primary;
+    final titleMain = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
     final subtitleColor = isDark ? SoftPalette.slate350 : SoftPalette.slate600;
-    final badgeColor = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
+    final badgeColor = brand;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const SizedBox(height: 4),
-        // Top Logo
-        Center(child: _buildLogoWidget(height: 72)),
-        const SizedBox(height: 10),
-
         // Tagline Badge
-        Text(
-          "GMWF EMPLOYEE PORTAL",
-          style: TextStyle(
-            fontSize: 10.5,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.5,
-            color: badgeColor,
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 18,
+              child: Divider(color: const Color(0xFFD4A843).withValues(alpha: 0.7), thickness: 1.5),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                "GMWF EMPLOYEE PORTAL",
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.5,
+                  color: badgeColor,
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 18,
+              child: Divider(color: const Color(0xFFD4A843).withValues(alpha: 0.7), thickness: 1.5),
+            ),
+          ],
         ),
         const SizedBox(height: 4),
 
         // Header Title
-        RichText(
+        Text(
+          "Welcome Back",
           textAlign: TextAlign.center,
-          text: TextSpan(
-            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, fontFamily: 'Roboto'),
-            children: [
-              TextSpan(text: "Welcome ", style: TextStyle(color: titleMain)),
-              TextSpan(text: "Back", style: TextStyle(color: titleAccent)),
-            ],
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+            color: titleMain,
+            fontFamily: 'Roboto',
           ),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 2),
 
         // Subtitle
         Text(
           "Sign in to access your employee account",
-          style: TextStyle(fontSize: 12.5, color: subtitleColor),
+          style: TextStyle(fontSize: 12, color: subtitleColor),
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 6),
 
-        // White Form Card
+        // Compact 3D Hero Illustration PNG
+        SizedBox(
+          height: 112,
+          child: Image.asset(
+            'assets/images/login_hero_3d.png',
+            fit: BoxFit.contain,
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // Form Card
         _buildFormCard(context, showHeader: false, isDark: isDark),
       ],
     );
   }
 
   // ── Form Glass Card ───────────────────────────────────────────────────────
-  Widget _buildFormCard(BuildContext context, {required bool showHeader, required bool isDark}) {
-    final cardBg = isDark
-        ? SoftPalette.teal900.withValues(alpha: 0.95)
-        : SoftPalette.gray50;
-    final cardBorder = isDark
-        ? SoftPalette.emerald350.withValues(alpha: 0.3)
-        : SoftPalette.gray50;
-    final cardShadow = isDark
-        ? SoftPalette.gray900.withValues(alpha: 0.4)
-        : SoftPalette.emerald550.withValues(alpha: 0.08);
-    final badgeColor = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final badgeDivider = isDark ? SoftPalette.emerald550 : SoftPalette.emerald150;
-    final titleMain = isDark ? SoftPalette.gray50 : SoftPalette.emerald700;
-    final titleAccent = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final subtitleColor = isDark ? SoftPalette.slate350 : SoftPalette.slate600;
+  Widget _buildFormCard(
+    BuildContext context, {
+    required bool showHeader,
+    required bool isDark,
+    bool embedProgramsBar = false,
+  }) {
+    final c = context.comfort;
+    final cardBg = c.surface;
+    final cardBorder = c.border;
+    final cardShadow = c.brand.withValues(alpha: isDark ? 0.25 : 0.08);
+    final badgeColor = c.brand;
+    final badgeDivider = c.border;
+    final titleMain = c.textPrimary;
+    final titleAccent = c.brand;
+    final subtitleColor = c.textSecondary;
 
-    final inputLabelColor = isDark ? SoftPalette.emerald150 : SoftPalette.emerald700;
-    final inputFill = isDark ? SoftPalette.teal900 : SoftPalette.gray50;
-    final inputBorder = isDark ? SoftPalette.emerald750 : SoftPalette.slate150;
-    final inputFocusBorder = isDark ? SoftPalette.emerald350 : SoftPalette.emerald500;
-    final inputTextColor = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
-    final inputHintColor = isDark ? SoftPalette.slate600 : SoftPalette.slate350;
-    final inputIconColor = isDark ? SoftPalette.emerald350 : SoftPalette.emerald500;
-
-    final btnGradientColors = isDark
-        ? [SoftPalette.emerald350, SoftPalette.emerald500]
-        : [SoftPalette.emerald500, SoftPalette.emerald550];
+    final inputLabelColor = c.textPrimary;
+    final inputFill = c.surfaceSunken;
+    final inputBorder = c.border;
+    final inputFocusBorder = c.brand;
+    final inputTextColor = c.textPrimary;
+    final inputHintColor = c.textMuted;
+    final inputIconColor = c.brand;
 
     return Container(
       padding: EdgeInsets.symmetric(
-        horizontal: showHeader ? 36 : 20,
-        vertical: showHeader ? 36 : 20,
+        horizontal: showHeader ? 36 : 18,
+        vertical: showHeader ? 32 : 14,
       ),
       decoration: BoxDecoration(
         color: cardBg,
@@ -3111,7 +3281,7 @@ class _LoginPageState extends State<LoginPage> {
             ),
           ),
 
-          const SizedBox(height: 14),
+          SizedBox(height: showHeader ? 14 : 10),
 
           // Password Field
           Text(
@@ -3156,28 +3326,23 @@ class _LoginPageState extends State<LoginPage> {
             ),
           ),
 
-          const SizedBox(height: 20),
+          SizedBox(height: showHeader ? 20 : 14),
 
           // Sign In Button
-          MouseRegion(
-            onEnter: (_) => setState(() => _loginHover = true),
-            onExit:  (_) => setState(() => _loginHover = false),
-            child: Container(
-              height: 48,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                gradient: LinearGradient(
-                  colors: btnGradientColors,
+          Container(
+            height: showHeader ? 48 : 44,
+            decoration: BoxDecoration(
+              color: c.brand,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: c.brand.withValues(alpha: 0.22),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: btnGradientColors.first.withValues(alpha: _loginHover ? 0.4 : 0.25),
-                    blurRadius: _loginHover ? 16 : 8,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: ElevatedButton(
+              ],
+            ),
+            child: ElevatedButton(
                 onPressed: _loading ? null : _login,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.transparent,
@@ -3220,7 +3385,6 @@ class _LoginPageState extends State<LoginPage> {
                         ],
                       ),
               ),
-            ),
           ),
 
           if (_loading) ...[
@@ -3269,30 +3433,26 @@ class _LoginPageState extends State<LoginPage> {
             ],
           ),
 
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(child: Divider(color: inputBorder)),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Icon(Icons.shield_outlined, size: 13, color: badgeColor),
-              ),
-              Expanded(child: Divider(color: inputBorder)),
-            ],
-          ),
-          const SizedBox(height: 10),
-
-          // Platform Version
-          Center(
-            child: Text(
-              "GMWF Management Platform  •  v${AutoUpdateService.resolvedVersion}",
-              style: TextStyle(
-                fontSize: 11,
-                color: isDark ? SoftPalette.slate600 : SoftPalette.slate550,
-                fontWeight: FontWeight.w500,
+          SizedBox(height: showHeader ? 14 : 10),
+          if (embedProgramsBar) ...[
+            Divider(color: inputBorder, height: 1),
+            const SizedBox(height: 12),
+            _buildBottomProgramsBar(true, isDark, embeddedInCard: true),
+          ] else ...[
+            Divider(color: inputBorder, height: 1),
+            const SizedBox(height: 10),
+            // Platform Version on Mobile
+            Center(
+              child: Text(
+                "GMWF Management Platform  •  v${AutoUpdateService.resolvedVersion}",
+                style: TextStyle(
+                  fontSize: 11,
+                  color: isDark ? SoftPalette.slate600 : SoftPalette.slate550,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -3343,114 +3503,105 @@ class _LoginPageState extends State<LoginPage> {
           ).show(context);
         }
       },
-      child: Hero(
-        tag: 'gmwf_app_logo',
-        child: Image.asset(
-          "assets/logo/gmwf-1.webp",
-          height: height,
-          fit: BoxFit.contain,
-          errorBuilder: (_, _, _) => const Icon(
-            Icons.local_pharmacy_rounded,
-            size: 80,
-            color: SoftPalette.emerald350,
-          ),
+      child: Image.asset(
+        "assets/logo/gmwf-1.webp",
+        height: height,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => const Icon(
+          Icons.local_pharmacy_rounded,
+          size: 80,
+          color: SoftPalette.emerald350,
         ),
       ),
-    );
-  }
-
-  // ── Feature Item Pill ─────────────────────────────────────────────────────
-  Widget _buildFeatureItem(IconData icon, String title, bool isDark) {
-    final bg = isDark ? SoftPalette.teal900 : SoftPalette.gray50;
-    final border = isDark ? SoftPalette.emerald750 : SoftPalette.emerald150;
-    final iconColor = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final textColor = isDark ? SoftPalette.slate350 : SoftPalette.slate800;
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: border),
-            boxShadow: isDark
-                ? null
-                : [
-                    BoxShadow(
-                      color: SoftPalette.emerald500.withValues(alpha: 0.08),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-          ),
-          child: Icon(icon, color: iconColor, size: 22),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          title,
-          style: TextStyle(fontSize: 12, color: textColor, fontWeight: FontWeight.w500),
-        ),
-      ],
     );
   }
 
   // ── Bottom Programs Bar ───────────────────────────────────────────────────
-  Widget _buildBottomProgramsBar(bool isDesktop, bool isDark) {
+  Widget _buildBottomProgramsBar(
+    bool isDesktop,
+    bool isDark, {
+    bool embeddedInCard = false,
+  }) {
+    final brand = Theme.of(context).colorScheme.primary;
     final items = [
-      {'icon': Icons.soup_kitchen_outlined, 'title': 'GMWF FREE', 'sub': 'DASTERKHAWAAN'},
-      {'icon': Icons.shopping_bag_outlined, 'title': 'GMWF FREE', 'sub': 'RATION'},
-      {'icon': Icons.checkroom_outlined, 'title': 'GMWF FREE', 'sub': 'LIBAAS'},
-      {'icon': Icons.medical_services_outlined, 'title': 'GMWF FREE', 'sub': 'DISPENSARY'},
-      {'icon': Icons.menu_book_outlined, 'title': 'GMWF FREE', 'sub': 'MADRASSA'},
+      {'icon': LucideIcons.wheat, 'title': 'GMWF FREE', 'sub': 'DASTERKHAWAAN'},
+      {'icon': LucideIcons.wheat, 'title': 'GMWF FREE', 'sub': 'RATION'},
+      {'icon': LucideIcons.shirt, 'title': 'GMWF FREE', 'sub': 'LIBAAS'},
+      {'icon': LucideIcons.stethoscope, 'title': 'GMWF FREE', 'sub': 'DISPENSARY'},
+      {'icon': LucideIcons.bookOpen, 'title': 'GMWF FREE', 'sub': 'MADRASSA'},
+      {'icon': LucideIcons.graduationCap, 'title': 'GMWF', 'sub': 'SCHOOL'},
     ];
 
-    final bg = isDark
-        ? SoftPalette.teal900.withValues(alpha: 0.95)
-        : SoftPalette.green100t.withValues(alpha: 0.95);
-    final border = isDark ? SoftPalette.emerald750 : SoftPalette.emerald150m;
-    final iconColor = isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final textColor = isDark ? SoftPalette.slate350 : SoftPalette.emerald700;
+    final bg = embeddedInCard
+        ? Colors.transparent
+        : (isDark
+            ? Theme.of(context).cardColor.withValues(alpha: 0.95)
+            : SoftPalette.green100t.withValues(alpha: 0.95));
+    final border = isDark
+        ? brand.withValues(alpha: 0.25)
+        : brand.withValues(alpha: 0.16);
+    final iconColor = brand;
+    final textColor = isDark ? SoftPalette.slate350 : SoftPalette.slate800;
 
     return Container(
       width: double.infinity,
-      decoration: BoxDecoration(
-        color: bg,
-        border: Border(top: BorderSide(color: border, width: 1)),
+      decoration: embeddedInCard
+          ? null
+          : BoxDecoration(
+              color: bg,
+              border: Border(top: BorderSide(color: border, width: 1)),
+            ),
+      padding: EdgeInsets.symmetric(
+        vertical: embeddedInCard ? 4 : 6,
+        horizontal: embeddedInCard ? 0 : 4,
       ),
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
       child: IntrinsicHeight(
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: List.generate(items.length * 2 - 1, (index) {
             if (index.isOdd) {
               return VerticalDivider(
-                color: isDark ? SoftPalette.emerald750 : SoftPalette.emerald150m,
+                color: isDark
+                    ? brand.withValues(alpha: 0.25)
+                    : brand.withValues(alpha: 0.16),
                 width: 1,
                 thickness: 1,
                 indent: 2,
                 endIndent: 2,
               );
             }
-            final itemIndex = index ~/ 2;
-            final item = items[itemIndex];
+            final item = items[index ~/ 2];
+            final label = embeddedInCard
+                ? (item['sub'] as String)
+                : '${item['title']}\n${item['sub']}';
             return Expanded(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 1),
+                padding: const EdgeInsets.symmetric(horizontal: 3),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(item['icon'] as IconData, size: 20, color: iconColor),
+                    Icon(
+                      item['icon'] as IconData,
+                      size: embeddedInCard ? 17 : 18,
+                      color: iconColor,
+                    ),
                     const SizedBox(height: 3),
-                    Text(
-                      '${item['title']}\n${item['sub']}',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 8,
-                        fontWeight: FontWeight.bold,
-                        height: 1.15,
-                        letterSpacing: 0.1,
-                        color: textColor,
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        embeddedInCard
+                            ? (label[0] + label.substring(1).toLowerCase())
+                            : label,
+                        textAlign: TextAlign.center,
+                        maxLines: embeddedInCard ? 1 : 2,
+                        style: TextStyle(
+                          fontSize: embeddedInCard ? 10 : 8,
+                          fontWeight: FontWeight.w700,
+                          height: 1.15,
+                          letterSpacing: 0.1,
+                          color: textColor,
+                        ),
                       ),
                     ),
                   ],

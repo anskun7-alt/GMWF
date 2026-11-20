@@ -1,10 +1,13 @@
 // lib/pages/school/views/school_about_view.dart
+//
+// About Taleem o Tarbiyat School System (Phase 6: migrated to gmwf_ui tokens,
+// GLogo, GText and GIcons).
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import '../../../theme/role_theme_provider.dart';
-import '../../../theme/app_theme.dart';
-import '../../../design/design_system.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+
+import '../../../services/local_storage_service.dart';
+import '../widgets/erp/school_erp.dart';
 
 class SchoolAboutView extends StatelessWidget {
   final String branchId;
@@ -18,338 +21,163 @@ class SchoolAboutView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = RoleThemeScope.dataOf(context);
-    final isMobile = GBreakpoint.isMobile(context);
+    final c = context.comfort;
+    final mobile = GBreakpoint.isMobile(context);
+    final campus = branchName ?? LocalStorageService.getBranchName(branchId);
+
+    final features = const [
+      (GIcons.attendance, 'Daily log & PTM', 'Six-rule daily tracking, holidays, PTM and bimonthly events'),
+      (GIcons.library, 'Library inventory', 'Catalogue, covers, loans, members and overdue tracking'),
+      (GIcons.exam, 'Grades & reports', 'Class marks entry, exam attachments and printable report cards'),
+      (GIcons.fees, 'Deduction fee engine', 'Per-month config, month close, append-only payments and receipts'),
+      (GIcons.sync, 'Offline-first sync', 'Instant local Hive saves with LAN & Firestore conflict merging'),
+      (GIcons.audit, 'Audit trail', 'Role-gated operations with before/after change history'),
+    ];
 
     return SingleChildScrollView(
-      padding: EdgeInsets.all(isMobile ? 16 : 28),
+      padding: EdgeInsets.all(mobile ? Gsp.sp4 : Gsp.sp6),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // ── Hero Banner with Dual Branding ───────────────────────────────
+          // Header banner
           Container(
-            width: double.infinity,
-            padding: EdgeInsets.all(isMobile ? 20 : 32),
+            padding: EdgeInsets.all(mobile ? Gsp.sp4 : Gsp.sp6),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [SoftPalette.slate900, SoftPalette.sky700, SoftPalette.sky550],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: [
-                BoxShadow(
-                  color: SoftPalette.gray900.withValues(alpha: 0.15),
-                  blurRadius: 20,
-                  offset: const Offset(0, 8),
-                ),
-              ],
+              color: c.brand,
+              borderRadius: Gr.card,
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    // GMWF Logo
-                    Container(
-                      width: 52,
-                      height: 52,
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: SoftPalette.gray50,
-                        borderRadius: BorderRadius.circular(14),
-                        boxShadow: [
-                          BoxShadow(
-                            color: SoftPalette.gray900.withValues(alpha: 0.1),
-                            blurRadius: 8,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
-                    ),
-                    const SizedBox(width: 14),
-                    const Text('•', style: TextStyle(color: SoftPalette.gray50A38, fontSize: 24)),
-                    const SizedBox(width: 14),
-
-                    // TWT Official Logo
-                    Container(
-                      width: 52,
-                      height: 52,
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: SoftPalette.gray50,
-                        borderRadius: BorderRadius.circular(14),
-                        boxShadow: [
-                          BoxShadow(
-                            color: SoftPalette.gray900.withValues(alpha: 0.1),
-                            blurRadius: 8,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Image.asset(
-                        'assets/logo/twt.webp',
-                        fit: BoxFit.contain,
-                        errorBuilder: (ctx, error, stackTrace) => const Icon(Icons.school_rounded, color: SoftPalette.blue700),
-                      ),
-                    ),
-                    const Spacer(),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: SoftPalette.gray50.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.2)),
-                      ),
-                      child: const Text(
-                        'GMWF Project',
-                        style: TextStyle(
-                          color: SoftPalette.gray50,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Taleem-wa-Tarbiyat School System',
-                  style: TextStyle(
-                    color: SoftPalette.gray50,
-                    fontSize: 26,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'A Prestigious Educational Initiative by Gulzar Madina Welfare Foundation (GMWF)',
-                  style: TextStyle(
-                    color: SoftPalette.gray50.withValues(alpha: 0.85),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  padding: const EdgeInsets.all(Gsp.sp1),
+                  decoration: BoxDecoration(color: c.surface, borderRadius: Gr.button),
+                  child: const GLogo(GBrand.gmwf, size: 42),
+                ),
+                const SizedBox(width: Gsp.sp3),
+                Container(
+                  width: 50,
+                  height: 50,
+                  padding: const EdgeInsets.all(Gsp.sp1),
+                  decoration: BoxDecoration(color: c.surface, borderRadius: Gr.button),
+                  child: Image.asset(
+                    'assets/logo/twt.webp',
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) => Icon(GIcons.student, color: c.brand),
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp1),
                   decoration: BoxDecoration(
-                    color: SoftPalette.gray50.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(12),
+                    color: c.onBrand.withValues(alpha: 0.14),
+                    borderRadius: Gr.chip,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.location_on_rounded, color: SoftPalette.sky350, size: 16),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Campus Branch: ${branchName ?? branchId.toUpperCase()}',
-                        style: const TextStyle(
-                          color: SoftPalette.slate150,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
+                  child: Text('GMWF Project', style: GText.label(c.onBrand)),
                 ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 28),
-
-          // ── Vision & Mission Section ─────────────────────────────────────
-          Text(
-            'About the Institution',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
-              color: t.textPrimary,
-              letterSpacing: -0.3,
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: _InfoCard(
-                  t: t,
-                  title: 'Our Vision',
-                  icon: Icons.visibility_rounded,
-                  iconColor: context.adapt(SoftPalette.sky700),
-                  content: 'To foster intellectual excellence, religious values, and moral discipline (Tarbiyat) in every student, providing an inclusive learning environment backed by charitable welfare support.',
-                ),
-              ),
-              if (!isMobile) const SizedBox(width: 16),
-              if (!isMobile)
-                Expanded(
-                  child: _InfoCard(
-                    t: t,
-                    title: 'Our Mission',
-                    icon: Icons.track_changes_rounded,
-                    iconColor: SoftPalette.teal500,
-                    content: 'Delivering holistic secular and Islamic education with state-of-the-art campus digitization, continuous teacher training, merit scholarships, and well-equipped digital libraries.',
-                  ),
-                ),
-            ],
-          ),
-
-          if (isMobile) ...[
-            const SizedBox(height: 12),
-            _InfoCard(
-              t: t,
-              title: 'Our Mission',
-              icon: Icons.track_changes_rounded,
-              iconColor: SoftPalette.teal500,
-              content: 'Delivering holistic secular and Islamic education with state-of-the-art campus digitization, continuous teacher training, merit scholarships, and well-equipped digital libraries.',
-            ),
-          ],
-
-          const SizedBox(height: 28),
-
-          // ── Digital Campus Highlights ────────────────────────────────────
-          Text(
-            'Integrated Campus Modules',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
-              color: t.textPrimary,
-              letterSpacing: -0.3,
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              _FeatureTile(t: t, icon: Icons.how_to_reg_rounded, title: 'Live Attendance', subtitle: 'Students & Faculty log with instant offline caching'),
-              _FeatureTile(t: t, icon: Icons.local_library_rounded, title: 'Library Management', subtitle: 'Track book registry, active loans & returns'),
-              _FeatureTile(t: t, icon: Icons.grade_rounded, title: 'Grading & Exams', subtitle: 'Class-wise marksheets & performance metrics'),
-              _FeatureTile(t: t, icon: Icons.payments_rounded, title: 'Fee Management', subtitle: 'Voucher tracking, waivers & financial records'),
-              _FeatureTile(t: t, icon: Icons.sync_rounded, title: 'LAN & Cloud Sync', subtitle: 'Dual-path offline local server & Firestore sync'),
-              _FeatureTile(t: t, icon: Icons.security_rounded, title: 'Audit Trail', subtitle: 'Role-based action auditing and security logs'),
-            ],
-          ),
-
-          const SizedBox(height: 32),
-
-          // ── Legal & Copyright Statement ──────────────────────────────────
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: t.bgCard,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: t.bgRule),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.verified_user_rounded, color: t.accent, size: 20),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Legal & Data Integrity Notice',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w800,
-                        color: t.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Taleem-wa-Tarbiyat School System (TWT) is owned, managed, and financially patronized by Gulzar Madina Welfare Foundation (GMWF).\n\n'
-                  'All educational data, student records, examination archives, faculty profiles, and institutional information are securely encrypted and protected under GMWF IT governance policies.\n\n'
-                  '© ${DateTime.now().year} Gulzar Madina Welfare Foundation (GMWF). All Rights Reserved.',
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.6,
-                    color: t.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 40),
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoCard extends StatelessWidget {
-  final RoleThemeData t;
-  final String title;
-  final IconData icon;
-  final Color iconColor;
-  final String content;
-
-  const _InfoCard({
-    required this.t,
-    required this.title,
-    required this.icon,
-    required this.iconColor,
-    required this.content,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: t.bgCard,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: t.bgRule),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: 0.02),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: iconColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(icon, color: iconColor, size: 20),
-              ),
-              const SizedBox(width: 10),
+              ]),
+              const SizedBox(height: Gsp.sp4),
+              Text('Taleem o Tarbiyat School System', style: GText.h2(c.onBrand)),
+              const SizedBox(height: Gsp.sp1),
               Text(
-                title,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w800,
-                  color: t.textPrimary,
-                ),
+                'An educational initiative of Gulzar Madina Welfare Foundation',
+                style: GText.body2(c.onBrand.withValues(alpha: 0.88)),
               ),
+              const SizedBox(height: Gsp.sp3),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(GIcons.location, color: c.onBrand.withValues(alpha: 0.9), size: GIconSize.sm),
+                const SizedBox(width: Gsp.sp2),
+                Text('Campus branch: $campus', style: GText.label(c.onBrand)),
+              ]),
+            ]),
+          ),
+          const SizedBox(height: Gsp.sp5),
+
+          // Vision & Mission
+          Text('About the institution', style: GText.h3(c.textPrimary)),
+          const SizedBox(height: Gsp.sp3),
+          LayoutBuilder(builder: (context, box) {
+            final cards = [
+              _AboutCard(
+                title: 'Our vision',
+                icon: GIcons.visibility,
+                color: c.brand,
+                body: 'To foster academic excellence, Islamic values, and moral discipline (Tarbiyat) in every student through an inclusive environment backed by welfare support.',
+              ),
+              _AboutCard(
+                title: 'Our mission',
+                icon: GIcons.star,
+                color: c.accentStrong,
+                body: 'Delivering holistic education with reliable campus digitization, parent cooperation through the fee-deduction programme, and well-equipped school libraries.',
+              ),
+            ];
+            if (box.maxWidth < 720) {
+              return Column(children: [cards[0], const SizedBox(height: Gsp.sp3), cards[1]]);
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: cards[0]),
+                const SizedBox(width: Gsp.sp4),
+                Expanded(child: cards[1]),
+              ],
+            );
+          }),
+          const SizedBox(height: Gsp.sp5),
+
+          // Modules
+          Text('Integrated ERP modules', style: GText.h3(c.textPrimary)),
+          const SizedBox(height: Gsp.sp3),
+          Wrap(
+            spacing: Gsp.sp3,
+            runSpacing: Gsp.sp3,
+            children: [
+              for (final f in features)
+                Container(
+                  width: mobile ? double.infinity : 290,
+                  padding: const EdgeInsets.all(Gsp.sp4),
+                  decoration: BoxDecoration(
+                    color: c.surface,
+                    borderRadius: SchoolErp.radius,
+                    border: Border.all(color: c.border),
+                  ),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    GModuleTile(icon: f.$1, size: 36),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(f.$2, style: GText.body2Bold(c.textPrimary)),
+                        const SizedBox(height: 2),
+                        Text(f.$3, style: GText.caption(c.textMuted)),
+                      ]),
+                    ),
+                  ]),
+                ),
             ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            content,
-            style: TextStyle(
-              fontSize: 13,
-              height: 1.5,
-              color: t.textSecondary,
+          const SizedBox(height: Gsp.sp5),
+
+          // Governance notice
+          Container(
+            padding: const EdgeInsets.all(Gsp.sp4),
+            decoration: BoxDecoration(
+              color: c.surface,
+              borderRadius: SchoolErp.radius,
+              border: Border.all(color: c.border),
             ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(GIcons.shield, color: c.brand, size: GIconSize.sm),
+                const SizedBox(width: Gsp.sp2),
+                Text('Data governance & ownership', style: GText.body1Bold(c.textPrimary)),
+              ]),
+              const SizedBox(height: Gsp.sp2),
+              Text(
+                'Taleem o Tarbiyat School System is managed and supported by Gulzar Madina Welfare Foundation (GMWF). '
+                'Student, attendance, examination, library and fee records are governed under GMWF IT policies.\n'
+                '© ${DateTime.now().year} Gulzar Madina Welfare Foundation. All rights reserved.',
+                style: GText.caption(c.textSecondary),
+              ),
+            ]),
           ),
         ],
       ),
@@ -357,68 +185,36 @@ class _InfoCard extends StatelessWidget {
   }
 }
 
-class _FeatureTile extends StatelessWidget {
-  final RoleThemeData t;
-  final IconData icon;
+class _AboutCard extends StatelessWidget {
+  const _AboutCard({required this.title, required this.icon, required this.color, required this.body});
   final String title;
-  final String subtitle;
-
-  const _FeatureTile({
-    required this.t,
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
+  final IconData icon;
+  final Color color;
+  final String body;
 
   @override
   Widget build(BuildContext context) {
-    final isMobile = GBreakpoint.isMobile(context);
+    final c = context.comfort;
     return Container(
-      width: isMobile ? double.infinity : 280,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(Gsp.sp4),
       decoration: BoxDecoration(
-        color: t.bgCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: t.bgRule),
+        color: c.surface,
+        borderRadius: SchoolErp.radius,
+        border: Border.all(color: c.border),
       ),
-      child: Row(
-        children: [
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
           Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: t.accent.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: t.accent, size: 20),
+            padding: const EdgeInsets.all(Gsp.sp2),
+            decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: Gr.button),
+            child: Icon(icon, color: color, size: GIconSize.sm),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    color: t.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: t.textTertiary,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+          const SizedBox(width: Gsp.sp2 + 2),
+          Text(title, style: GText.body1Bold(c.textPrimary)),
+        ]),
+        const SizedBox(height: Gsp.sp2 + 2),
+        Text(body, style: GText.body2(c.textSecondary)),
+      ]),
     );
   }
 }

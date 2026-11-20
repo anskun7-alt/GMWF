@@ -85,94 +85,147 @@ class NexusOverviewView extends StatelessWidget {
     this.queuedSyncCount = 0,
   });
 
+  (String, String) _splitLanMetric(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return ('Active', 'Local LAN gateway • Port 53281');
+    for (final sep in ['·', '•', ' - ']) {
+      if (trimmed.contains(sep)) {
+        final parts = trimmed.split(sep).map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+        if (parts.length >= 2) {
+          return (parts.first, '${parts.sublist(1).join(' · ')} • Port 53281');
+        }
+      }
+    }
+    return (trimmed, 'Local LAN gateway • Port 53281');
+  }
+
   @override
   Widget build(BuildContext context) {
+    final (lanPrimary, lanSecondary) = _splitLanMetric(lanThroughput);
+
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // ── Heading & Refresh ──────────────────────────────────────────
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.start,
+          // ── Page Header + Compact Maintenance Actions ──────────────────
+          Wrap(
+            spacing: 16,
+            runSpacing: 12,
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Server Overview',
-                    style: GoogleFonts.inter(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: NexusColors.textMain,
-                      letterSpacing: -0.5,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Server Overview',
+                        style: GoogleFonts.inter(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                          color: NexusColors.textMain,
+                          letterSpacing: -0.4,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: NexusColors.successMuted,
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: NexusColors.success,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              'Live',
+                              style: GoogleFonts.inter(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: NexusColors.success,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 3),
+                  const SizedBox(height: 2),
                   Text(
-                    'Monitor your infrastructure, devices and system activity in real time.',
+                    'Monitor infrastructure health, connected desks, and cloud sync in real time.',
                     style: GoogleFonts.inter(
-                      fontSize: 13,
+                      fontSize: 12.5,
                       fontWeight: FontWeight.w400,
                       color: NexusColors.textSecondary,
                     ),
                   ),
                 ],
               ),
-              Row(
+
+              // Compact Maintenance Tools (non-duplicated with top bar)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  Text(
-                    'Updated live',
-                    style: GoogleFonts.inter(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w500,
-                      color: NexusColors.textSecondary,
+                  if (onRepairDatabase != null)
+                    _CompactToolButton(
+                      icon: Icons.healing_rounded,
+                      label: 'Repair & Deduplicate',
+                      iconColor: NexusColors.success,
+                      onTap: onRepairDatabase,
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    onPressed: onRefresh,
-                    icon: const Icon(Icons.refresh_rounded, size: 14),
-                    label: Text(
-                      'Refresh',
-                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
+                  if (onStressTest != null)
+                    _CompactToolButton(
+                      icon: Icons.bolt_rounded,
+                      label: 'Benchmark',
+                      iconColor: NexusColors.warning,
+                      onTap: onStressTest,
                     ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: NexusColors.textMain,
-                      side: BorderSide(color: NexusColors.cardBorder),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  if (onOpenQueueDialog != null)
+                    _CompactToolButton(
+                      icon: Icons.format_list_bulleted_rounded,
+                      label: queuedSyncCount > 0 ? 'Outbox ($queuedSyncCount)' : 'Outbox',
+                      iconColor: queuedSyncCount > 0 ? NexusColors.warning : NexusColors.primary,
+                      highlighted: queuedSyncCount > 0,
+                      onTap: onOpenQueueDialog,
                     ),
-                  ),
                 ],
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 18),
 
           // ── Critical Operational Alert: Firewall Missing Rule ─────────
           if (firewallMissing) ...[
             Container(
               margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               decoration: BoxDecoration(
                 color: NexusColors.warningMuted,
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: NexusColors.warningBorder),
-                boxShadow: const [
-                  BoxShadow(color: Color(0x08D97706), blurRadius: 8, offset: Offset(0, 2)),
-                ],
               ),
               child: Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.all(10),
+                    padding: const EdgeInsets.all(9),
                     decoration: BoxDecoration(
-                      color: NexusColors.warning.withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+                      color: NexusColors.warning.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(Icons.shield_outlined, color: NexusColors.warning, size: 22),
+                    child: Icon(Icons.shield_outlined, color: NexusColors.warning, size: 20),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -182,17 +235,17 @@ class NexusOverviewView extends StatelessWidget {
                         Text(
                           'Windows Firewall is blocking port 53281',
                           style: GoogleFonts.inter(
-                            fontSize: 14,
+                            fontSize: 13.5,
                             fontWeight: FontWeight.w700,
                             color: NexusColors.textMain,
                           ),
                         ),
-                        const SizedBox(height: 3),
+                        const SizedBox(height: 2),
                         Text(
                           'Other PCs on this network cannot connect until the port is allowed. '
                           'Click the button and choose "Yes" on the Windows permission prompt.',
                           style: GoogleFonts.inter(
-                            fontSize: 12.5,
+                            fontSize: 12,
                             color: NexusColors.textSecondary,
                           ),
                         ),
@@ -202,9 +255,9 @@ class NexusOverviewView extends StatelessWidget {
                   const SizedBox(width: 12),
                   ElevatedButton.icon(
                     onPressed: onFixFirewall,
-                    icon: const Icon(Icons.auto_fix_high_rounded, size: 15),
+                    icon: const Icon(Icons.auto_fix_high_rounded, size: 14),
                     label: Text(
-                      'Fix Firewall (Open Port)',
+                      'Fix Firewall',
                       style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700),
                     ),
                     style: ElevatedButton.styleFrom(
@@ -220,87 +273,7 @@ class NexusOverviewView extends StatelessWidget {
             ),
           ],
 
-          // ── Operational Quick Diagnostics & Actions Ribbon ────────────
-          Container(
-            margin: const EdgeInsets.only(bottom: 20),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: NexusColors.cardBg,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: NexusColors.cardBorder),
-              boxShadow: const [
-                BoxShadow(color: Color(0x05000000), blurRadius: 6, offset: Offset(0, 2)),
-              ],
-            ),
-            child: Wrap(
-              spacing: 12,
-              runSpacing: 10,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              alignment: WrapAlignment.spaceBetween,
-              children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.build_circle_outlined, size: 16, color: NexusColors.primary),
-                    const SizedBox(width: 8),
-                    Text(
-                      'System Diagnostics & Quick Actions:',
-                      style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600, color: NexusColors.textMain),
-                    ),
-                  ],
-                ),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: onTriggerCatchUp,
-                      icon: Icon(Icons.cloud_sync_rounded, size: 14, color: NexusColors.primary),
-                      label: Text('Force Cloud Sync', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: NexusColors.textMain)),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: NexusColors.cardBorder),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                      ),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: onRepairDatabase,
-                      icon: Icon(Icons.healing_rounded, size: 14, color: NexusColors.success),
-                      label: Text('Repair & Deduplicate', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: NexusColors.textMain)),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: NexusColors.cardBorder),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                      ),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: onStressTest,
-                      icon: Icon(Icons.bolt_rounded, size: 14, color: NexusColors.warning),
-                      label: Text('Pressure Benchmark', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: NexusColors.textMain)),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: NexusColors.cardBorder),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                      ),
-                    ),
-                    if (onOpenQueueDialog != null)
-                      OutlinedButton.icon(
-                        onPressed: onOpenQueueDialog,
-                        icon: Icon(Icons.format_list_bulleted_rounded, size: 14, color: NexusColors.primary),
-                        label: Text('Inspect Outbox ($queuedSyncCount)', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: NexusColors.textMain)),
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(color: NexusColors.cardBorder),
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          // ── 4 Overview Metric Cards ────────────────────────────────────
+          // ── 4 Overview Metric Cards (Zero duplication with telemetry below) ──
           LayoutBuilder(
             builder: (context, constraints) {
               final isDesktop = constraints.maxWidth >= 900;
@@ -327,29 +300,37 @@ class NexusOverviewView extends StatelessWidget {
                   iconBgColor: NexusColors.successMuted,
                 ),
                 NexusMetricCard(
-                  label: 'CPU Utilization',
-                  value: cpuKnown ? '${(cpuPercent * 100).toStringAsFixed(0)}%' : 'Measuring…',
-                  subtext: cpuKnown ? '$cpuStatus load' : 'Querying hardware telemetry…',
-                  icon: Icons.memory_rounded,
-                  iconColor: NexusColors.primary,
-                  iconBgColor: NexusColors.primaryMuted,
+                  label: 'Sync Outbox',
+                  value: queuedSyncCount.toString(),
+                  subtext: queuedSyncCount > 0
+                      ? 'Pending records waiting for cloud sync'
+                      : 'All records synced to cloud',
+                  icon: queuedSyncCount > 0 ? Icons.pending_actions_rounded : Icons.cloud_done_rounded,
+                  iconColor: queuedSyncCount > 0 ? NexusColors.warning : NexusColors.success,
+                  iconBgColor: queuedSyncCount > 0 ? NexusColors.warningMuted : NexusColors.successMuted,
+                  trendText: queuedSyncCount > 0 ? 'Inspect' : 'Up to date',
+                  isTrendPositive: queuedSyncCount == 0,
+                  highlightAccent: queuedSyncCount > 0,
+                  onTap: onOpenQueueDialog,
                 ),
                 NexusMetricCard(
-                  label: 'Memory Usage',
-                  value: ramKnown ? '${usedRamGb.toStringAsFixed(1)} / ${totalRamGb.toStringAsFixed(1)} GB' : '${appProcessRamMb.toStringAsFixed(0)} MB',
-                  subtext: ramKnown ? '${(ramPercent * 100).toStringAsFixed(0)}% utilized' : 'GMWF app footprint',
-                  icon: Icons.storage_rounded,
-                  iconColor: NexusColors.diskAccent,
-                  iconBgColor: NexusColors.primaryMuted,
+                  label: 'LAN Throughput',
+                  value: lanPrimary,
+                  subtext: lanSecondary,
+                  icon: Icons.wifi_tethering_rounded,
+                  iconColor: NexusColors.networkAccent,
+                  iconBgColor: NexusColors.networkAccent.withValues(alpha: 0.12),
                 ),
               ];
 
               if (isDesktop) {
                 return Row(
-                  children: cards.map((c) => Expanded(child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: c,
-                  ))).toList(),
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 14),
+                      Expanded(child: cards[i]),
+                    ],
+                  ],
                 );
               } else if (isTablet) {
                 return Column(
@@ -373,17 +354,19 @@ class NexusOverviewView extends StatelessWidget {
                 );
               } else {
                 return Column(
-                  children: cards.map((c) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: c,
-                  )).toList(),
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(height: 10),
+                      cards[i],
+                    ],
+                  ],
                 );
               }
             },
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
-          // ── Two Column: Server Performance (Left) + Resource Allocation (Right)
+          // ── Two Column: Server Performance (Left) + System Resources (Right)
           LayoutBuilder(
             builder: (context, constraints) {
               final isTwoColumn = constraints.maxWidth >= 900;
@@ -432,14 +415,14 @@ class NexusOverviewView extends StatelessWidget {
               }
             },
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
           // ── Connected Devices Section ──────────────────────────────────
           NexusDevicesTable(
             devices: devices,
             onViewAll: onViewAllDevices,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
           // ── System Activity and Logs Preview ───────────────────────────
           NexusActivityStream(
@@ -454,8 +437,58 @@ class NexusOverviewView extends StatelessWidget {
   }
 }
 
+class _CompactToolButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color iconColor;
+  final bool highlighted;
+  final VoidCallback? onTap;
+
+  const _CompactToolButton({
+    required this.icon,
+    required this.label,
+    required this.iconColor,
+    this.highlighted = false,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 11),
+        decoration: BoxDecoration(
+          color: highlighted ? iconColor.withValues(alpha: 0.09) : NexusColors.cardBg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: highlighted ? iconColor.withValues(alpha: 0.35) : NexusColors.cardBorder,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: iconColor),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: GoogleFonts.inter(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: highlighted ? iconColor : NexusColors.textMain,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Connected Devices View (Tab 1)
+// 2. Connected Devices View (Tab 2)
 // ─────────────────────────────────────────────────────────────────────────────
 class NexusDevicesView extends StatefulWidget {
   final List<NexusDeviceItem> devices;
@@ -498,33 +531,28 @@ class _NexusDevicesViewState extends State<NexusDevicesView> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Connected Devices',
-                    style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w700, color: NexusColors.textMain),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    'Manage all LAN nodes, workstations, and local network peripherals.',
-                    style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary),
-                  ),
-                ],
-              ),
-            ],
+          Text(
+            'Connected Devices',
+            style: GoogleFonts.inter(
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              color: NexusColors.textMain,
+              letterSpacing: -0.4,
+            ),
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 2),
+          Text(
+            'Manage all LAN nodes, workstations, and local network peripherals.',
+            style: GoogleFonts.inter(fontSize: 12.5, color: NexusColors.textSecondary),
+          ),
+          const SizedBox(height: 16),
 
           // Search & Filter Toolbar
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: NexusColors.cardBg,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(color: NexusColors.cardBorder),
             ),
             child: Row(
@@ -535,33 +563,22 @@ class _NexusDevicesViewState extends State<NexusDevicesView> {
                     style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
                     decoration: InputDecoration(
                       hintText: 'Search by device name, IP address, or role…',
-                      hintStyle: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary),
-                      prefixIcon: Icon(Icons.search_rounded, size: 18, color: NexusColors.textSecondary),
+                      hintStyle: GoogleFonts.inter(fontSize: 12.5, color: NexusColors.textSecondary),
+                      prefixIcon: Icon(Icons.search_rounded, size: 17, color: NexusColors.textSecondary),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 34),
                       border: InputBorder.none,
                       isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
                     ),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Row(
                   children: ['All', 'Online', 'Idle', 'Offline'].map((f) {
-                    final sel = f == _filter;
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 6),
-                      child: ChoiceChip(
-                        label: Text(f),
-                        selected: sel,
-                        onSelected: (_) => setState(() => _filter = f),
-                        selectedColor: NexusColors.primaryMuted,
-                        backgroundColor: NexusColors.mainBg,
-                        labelStyle: GoogleFonts.inter(
-                          fontSize: 11.5,
-                          fontWeight: sel ? FontWeight.w600 : FontWeight.w500,
-                          color: sel ? NexusColors.primary : NexusColors.textSecondary,
-                        ),
-                        side: BorderSide(color: sel ? NexusColors.primary : NexusColors.cardBorder),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                      ),
+                    return _NexusFilterPill(
+                      label: f,
+                      selected: f == _filter,
+                      onTap: () => setState(() => _filter = f),
                     );
                   }).toList(),
                 ),
@@ -572,7 +589,7 @@ class _NexusDevicesViewState extends State<NexusDevicesView> {
 
           // Main Table
           NexusDevicesTable(devices: filtered),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
           // Peripheral Hardware Scanner
           widget.hardwareStatusWidget,
@@ -584,7 +601,7 @@ class _NexusDevicesViewState extends State<NexusDevicesView> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. System Logs View (Tab 4)
+// 3. System Logs View (Tab 7)
 // ─────────────────────────────────────────────────────────────────────────────
 class NexusLogsView extends StatefulWidget {
   final List<String> rawLogs;
@@ -631,58 +648,55 @@ class _NexusLogsViewState extends State<NexusLogsView> {
                 children: [
                   Text(
                     'System Logs',
-                    style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w700, color: NexusColors.textMain),
+                    style: GoogleFonts.inter(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: NexusColors.textMain,
+                      letterSpacing: -0.4,
+                    ),
                   ),
-                  const SizedBox(height: 3),
+                  const SizedBox(height: 2),
                   Text(
                     'Inspect, search, and audit all live server transactions and events.',
-                    style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary),
+                    style: GoogleFonts.inter(fontSize: 12.5, color: NexusColors.textSecondary),
                   ),
                 ],
               ),
               Row(
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: () {
+                  _CompactToolButton(
+                    icon: Icons.copy_rounded,
+                    label: 'Export Logs',
+                    iconColor: NexusColors.primary,
+                    onTap: () {
                       final allText = widget.rawLogs.join('\n');
                       Clipboard.setData(ClipboardData(text: allText));
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text('All logs copied to clipboard'), duration: Duration(seconds: 2)),
                       );
                     },
-                    icon: const Icon(Icons.copy_rounded, size: 14),
-                    label: Text('Export Logs', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: NexusColors.textMain,
-                      side: BorderSide(color: NexusColors.cardBorder),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    ),
                   ),
                   if (widget.onClearLogs != null) ...[
                     const SizedBox(width: 8),
-                    OutlinedButton.icon(
-                      onPressed: widget.onClearLogs,
-                      icon: const Icon(Icons.clear_all_rounded, size: 14),
-                      label: Text('Clear', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: NexusColors.error,
-                        side: BorderSide(color: NexusColors.cardBorder),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
+                    _CompactToolButton(
+                      icon: Icons.clear_all_rounded,
+                      label: 'Clear',
+                      iconColor: NexusColors.error,
+                      onTap: widget.onClearLogs,
                     ),
                   ],
                 ],
               ),
             ],
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 16),
 
           // Search & Filter Toolbar
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: NexusColors.cardBg,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(color: NexusColors.cardBorder),
             ),
             child: Row(
@@ -693,21 +707,23 @@ class _NexusLogsViewState extends State<NexusLogsView> {
                     style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
                     decoration: InputDecoration(
                       hintText: 'Search logs by keywords, serial, IP, or event type…',
-                      hintStyle: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary),
-                      prefixIcon: Icon(Icons.search_rounded, size: 18, color: NexusColors.textSecondary),
+                      hintStyle: GoogleFonts.inter(fontSize: 12.5, color: NexusColors.textSecondary),
+                      prefixIcon: Icon(Icons.search_rounded, size: 17, color: NexusColors.textSecondary),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 34),
                       border: InputBorder.none,
                       isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
                     ),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Row(
                   children: [
-                    _filterChip('All', null),
-                    _filterChip('INFO', NexusLogSeverity.info),
-                    _filterChip('SYSTEM', NexusLogSeverity.system),
-                    _filterChip('WARN', NexusLogSeverity.warn),
-                    _filterChip('ERROR', NexusLogSeverity.error),
+                    _NexusFilterPill(label: 'All', selected: _severityFilter == null, onTap: () => setState(() => _severityFilter = null)),
+                    _NexusFilterPill(label: 'INFO', selected: _severityFilter == NexusLogSeverity.info, onTap: () => setState(() => _severityFilter = NexusLogSeverity.info)),
+                    _NexusFilterPill(label: 'SYSTEM', selected: _severityFilter == NexusLogSeverity.system, onTap: () => setState(() => _severityFilter = NexusLogSeverity.system)),
+                    _NexusFilterPill(label: 'WARN', selected: _severityFilter == NexusLogSeverity.warn, onTap: () => setState(() => _severityFilter = NexusLogSeverity.warn)),
+                    _NexusFilterPill(label: 'ERROR', selected: _severityFilter == NexusLogSeverity.error, onTap: () => setState(() => _severityFilter = NexusLogSeverity.error)),
                   ],
                 ),
               ],
@@ -732,8 +748,14 @@ class _NexusLogsViewState extends State<NexusLogsView> {
                 : ListView.separated(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(vertical: 6),
                     itemCount: parsed.length,
-                    separatorBuilder: (context, i) => Divider(color: NexusColors.cardBorder, height: 1),
+                    separatorBuilder: (context, i) => Divider(
+                      color: NexusColors.cardBorder.withValues(alpha: 0.7),
+                      height: 1,
+                      indent: 18,
+                      endIndent: 18,
+                    ),
                     itemBuilder: (context, i) {
                       final log = parsed[i];
                       final (badgeBg, badgeColor, badgeLabel) = switch (log.severity) {
@@ -744,19 +766,23 @@ class _NexusLogsViewState extends State<NexusLogsView> {
                       };
 
                       return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
                         child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                              decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(5)),
-                              child: Text(
-                                badgeLabel,
-                                style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: badgeColor),
+                            SizedBox(
+                              width: 58,
+                              child: Container(
+                                alignment: Alignment.center,
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(5)),
+                                child: Text(
+                                  badgeLabel,
+                                  style: GoogleFonts.inter(fontSize: 9.5, fontWeight: FontWeight.w700, letterSpacing: 0.4, color: badgeColor),
+                                ),
                               ),
                             ),
-                            const SizedBox(width: 14),
+                            const SizedBox(width: 12),
                             Expanded(
                               child: Text(
                                 log.detail,
@@ -766,7 +792,7 @@ class _NexusLogsViewState extends State<NexusLogsView> {
                             const SizedBox(width: 12),
                             Text(
                               log.timestamp,
-                              style: GoogleFonts.inter(fontSize: 11, color: NexusColors.textSecondary),
+                              style: GoogleFonts.firaCode(fontSize: 11, color: NexusColors.textSecondary),
                             ),
                           ],
                         ),
@@ -779,24 +805,44 @@ class _NexusLogsViewState extends State<NexusLogsView> {
       ),
     );
   }
+}
 
-  Widget _filterChip(String label, NexusLogSeverity? severity) {
-    final sel = _severityFilter == severity;
+class _NexusFilterPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _NexusFilterPill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(left: 6),
-      child: ChoiceChip(
-        label: Text(label),
-        selected: sel,
-        onSelected: (_) => setState(() => _severityFilter = severity),
-        selectedColor: NexusColors.primaryMuted,
-        backgroundColor: NexusColors.mainBg,
-        labelStyle: GoogleFonts.inter(
-          fontSize: 11.5,
-          fontWeight: sel ? FontWeight.w600 : FontWeight.w500,
-          color: sel ? NexusColors.primary : NexusColors.textSecondary,
+      padding: const EdgeInsets.only(left: 5),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+          decoration: BoxDecoration(
+            color: selected ? NexusColors.primary : NexusColors.mainBg,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected ? NexusColors.primary : NexusColors.cardBorder,
+            ),
+          ),
+          child: Text(
+            label,
+            style: GoogleFonts.inter(
+              fontSize: 11.5,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              color: selected ? NexusColors.onPrimary : NexusColors.textSecondary,
+            ),
+          ),
         ),
-        side: BorderSide(color: sel ? NexusColors.primary : NexusColors.cardBorder),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
       ),
     );
   }

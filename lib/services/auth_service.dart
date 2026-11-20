@@ -178,20 +178,22 @@ class AuthService {
         'deletedAt': FieldValue.serverTimestamp(),
       };
 
+      final batch = firestore.batch();
       if (cleanUid.isNotEmpty) {
-        await firestore.collection('deleted_auth_users').doc(cleanUid).set(tombstone, SetOptions(merge: true)).catchError((_) {});
-        await firestore.collection('users').doc(cleanUid).set(tombstone, SetOptions(merge: true)).catchError((_) {});
+        batch.set(firestore.collection('deleted_auth_users').doc(cleanUid), tombstone, SetOptions(merge: true));
+        batch.set(firestore.collection('users').doc(cleanUid), tombstone, SetOptions(merge: true));
         if (branchId.isNotEmpty && branchId != 'all') {
-          await firestore.collection('branches').doc(branchId).collection('users').doc(cleanUid).set(tombstone, SetOptions(merge: true)).catchError((_) {});
+          batch.set(firestore.collection('branches').doc(branchId).collection('users').doc(cleanUid), tombstone, SetOptions(merge: true));
         }
       }
 
       if (cleanUsername.isNotEmpty) {
-        await firestore.collection('users').doc(cleanUsername).delete().catchError((_) {});
+        batch.delete(firestore.collection('users').doc(cleanUsername));
       }
       if (cleanEmail.isNotEmpty) {
-        await firestore.collection('users').doc(cleanEmail).delete().catchError((_) {});
+        batch.delete(firestore.collection('users').doc(cleanEmail));
       }
+      await batch.commit().catchError((_) {});
     } catch (e) {
       debugPrint('[AuthService] Firestore tombstone write notice: $e');
     }
@@ -524,42 +526,52 @@ class AuthService {
         return user;
       }
 
-      Map<String, dynamic>? data;
-      try {
-        final userDoc = await _firestore.collection('users').doc(user.uid).get().timeout(const Duration(seconds: 8));
-        if (userDoc.exists && userDoc.data() != null) {
-          data = userDoc.data();
-        }
-      } catch (_) {}
-
-      if (data == null && user.email != null) {
-        try {
-          final qSnap = await _firestore.collection('users').where('email', isEqualTo: user.email!.toLowerCase()).limit(1).get().timeout(const Duration(seconds: 8));
-          if (qSnap.docs.isNotEmpty) {
-            data = qSnap.docs.first.data();
-          }
-        } catch (_) {}
-      }
+      // Fast path: Check local Hive cache first (instant, 0 Firestore reads)
+      Map<String, dynamic>? data = LocalStorageService.findLocalUser(user.uid) ??
+          (user.email != null ? LocalStorageService.findLocalUser(user.email!) : null);
 
       if (data == null) {
+        // Step 1: Canonical root /users/{uid} (1 targeted read)
         try {
-          final qSnap = await _firestore.collectionGroup('users').where('uid', isEqualTo: user.uid).limit(1).get().timeout(const Duration(seconds: 8));
-          if (qSnap.docs.isNotEmpty) {
-            data = qSnap.docs.first.data();
+          final userDoc = await _firestore.collection('users').doc(user.uid).get().timeout(const Duration(seconds: 8));
+          if (userDoc.exists && userDoc.data() != null) {
+            data = userDoc.data();
           }
         } catch (_) {}
-      }
 
-      if (data == null && user.email != null) {
-        try {
-          final qSnap = await _firestore.collectionGroup('users').where('email', isEqualTo: user.email!.toLowerCase()).limit(1).get().timeout(const Duration(seconds: 8));
-          if (qSnap.docs.isNotEmpty) {
-            data = qSnap.docs.first.data();
-          }
-        } catch (_) {}
-      }
+        // Step 2: Email index in root /users (1 targeted query with limit 1)
+        if (data == null && user.email != null) {
+          try {
+            final qSnap = await _firestore.collection('users').where('email', isEqualTo: user.email!.toLowerCase()).limit(1).get().timeout(const Duration(seconds: 8));
+            if (qSnap.docs.isNotEmpty) {
+              data = qSnap.docs.first.data();
+              // Backfill canonical root users/{uid} for instant future logins
+              unawaited(_firestore.collection('users').doc(user.uid).set(data, SetOptions(merge: true)).catchError((_) {}));
+            }
+          } catch (_) {}
+        }
 
-      data ??= LocalStorageService.findLocalUser(user.uid) ?? (user.email != null ? LocalStorageService.findLocalUser(user.email!) : null);
+        // Step 3: Legacy collectionGroup fallback only if not in root users
+        if (data == null) {
+          try {
+            final qSnap = await _firestore.collectionGroup('users').where('uid', isEqualTo: user.uid).limit(1).get().timeout(const Duration(seconds: 8));
+            if (qSnap.docs.isNotEmpty) {
+              data = qSnap.docs.first.data();
+              unawaited(_firestore.collection('users').doc(user.uid).set(data, SetOptions(merge: true)).catchError((_) {}));
+            }
+          } catch (_) {}
+        }
+
+        if (data == null && user.email != null) {
+          try {
+            final qSnap = await _firestore.collectionGroup('users').where('email', isEqualTo: user.email!.toLowerCase()).limit(1).get().timeout(const Duration(seconds: 8));
+            if (qSnap.docs.isNotEmpty) {
+              data = qSnap.docs.first.data();
+              unawaited(_firestore.collection('users').doc(user.uid).set(data, SetOptions(merge: true)).catchError((_) {}));
+            }
+          } catch (_) {}
+        }
+      }
 
       data ??= {
         'uid': user.uid,
@@ -653,34 +665,32 @@ class AuthService {
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final box = Hive.box('app_settings');
-        await box.delete('user_data');
-        await box.delete('currentUser');
-        await box.delete('user');
-        await box.delete('role');
-        await box.delete('auth_token');
-        await box.delete('server_authenticated');
-        await box.flush();
+        await box.deleteAll([
+          'user_data',
+          'currentUser',
+          'user',
+          'role',
+          'auth_token',
+          'server_authenticated',
+        ]);
       }
     } catch (e) {
       debugPrint('[AuthService] Hive app_settings clear error: $e');
     }
 
-    try {
-      await OfflineAuthService.clearCachedUserData();
-    } catch (e) {
-      debugPrint('[AuthService] OfflineAuthService clear error: $e');
-    }
-
-    try {
-      await CampSessionService.clearActiveCamp();
-    } catch (_) {}
-
-    // 2. Sign out from Firebase Auth
-    try {
-      await FirebaseAuth.instance.signOut().timeout(const Duration(seconds: 3));
-    } catch (e) {
-      debugPrint('[AuthService] Firebase signOut error: $e');
-    }
+    // 2. Run independent cleanup & Firebase sign-out concurrently
+    await Future.wait([
+      OfflineAuthService.clearCachedUserData().catchError((e) {
+        debugPrint('[AuthService] OfflineAuthService clear error: $e');
+      }),
+      CampSessionService.clearActiveCamp().catchError((_) {}),
+      FirebaseAuth.instance
+          .signOut()
+          .timeout(const Duration(milliseconds: 800))
+          .catchError((e) {
+        debugPrint('[AuthService] Firebase signOut error: $e');
+      }),
+    ]);
 
     // 3. Fire-and-forget background cleanup tasks
     try {
@@ -738,179 +748,7 @@ class AuthService {
   Future<Map<String, dynamic>?> _findUserByUsername(String username) async {
     final lower = username.trim().toLowerCase();
 
-    // 1. Live Firestore search across BOTH places (Root /users and Branch /branches/{b}/users)
-    try {
-      final knownBranches = <String>{'karachi', 'gujrat', 'sialkot', 'jalalpurjattan', 'rawalpindi', 'lahore', 'islamabad', 'main'};
-      try {
-        if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
-          final bBox = Hive.box(LocalStorageService.branchesBox);
-          for (final k in bBox.keys) {
-            final s = k.toString().replaceFirst('branch:', '').trim().toLowerCase();
-            if (s.isNotEmpty && !s.contains(' ') && s != 'null') knownBranches.add(s);
-          }
-        }
-      } catch (_) {}
-
-      final queries = <Future<Map<String, dynamic>?>>[
-        // Root /users collection
-        _firestore.collection('users').doc(lower).get().then((doc) {
-          if (doc.exists && doc.data() != null) {
-            final d = doc.data()!;
-            return {
-              ...d,
-              'email': d['email'] ?? '$lower@gmd.com',
-              'username': d['username'] ?? doc.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': d['branchId'] ?? 'all',
-              'uid': doc.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-
-        _firestore.collection('users').where('usernameLower', isEqualTo: lower).limit(1).get().then((snap) {
-          if (snap.docs.isNotEmpty) {
-            final d = snap.docs.first.data();
-            return {
-              ...d,
-              'email': d['email'] ?? '$lower@gmd.com',
-              'username': d['username'] ?? snap.docs.first.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': d['branchId'] ?? 'all',
-              'uid': snap.docs.first.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-
-        _firestore.collection('users').where('username', isEqualTo: username.trim()).limit(1).get().then((snap) {
-          if (snap.docs.isNotEmpty) {
-            final d = snap.docs.first.data();
-            return {
-              ...d,
-              'email': d['email'] ?? '$lower@gmd.com',
-              'username': d['username'] ?? snap.docs.first.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': d['branchId'] ?? 'all',
-              'uid': snap.docs.first.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-
-        _firestore.collection('users').where('email', isEqualTo: lower).limit(1).get().then((snap) {
-          if (snap.docs.isNotEmpty) {
-            final d = snap.docs.first.data();
-            return {
-              ...d,
-              'email': d['email'] ?? lower,
-              'username': d['username'] ?? snap.docs.first.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': d['branchId'] ?? 'all',
-              'uid': snap.docs.first.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-
-        // Branch /branches/{b}/users subcollections
-        for (final b in knownBranches) ...[
-          _firestore.collection('branches').doc(b).collection('users').doc(lower).get().then((doc) {
-            if (doc.exists && doc.data() != null) {
-              final d = doc.data()!;
-              return {
-                ...d,
-                'email': d['email'] ?? '$lower@khi.com',
-                'username': d['username'] ?? doc.id,
-                'role': d['role'] ?? 'unknown',
-                'branchId': d['branchId'] ?? b,
-                'uid': doc.id,
-              };
-            }
-            return null;
-          }).catchError((_) => null),
-
-          _firestore.collection('branches').doc(b).collection('users').where('usernameLower', isEqualTo: lower).limit(1).get().then((snap) {
-            if (snap.docs.isNotEmpty) {
-              final d = snap.docs.first.data();
-              return {
-                ...d,
-                'email': d['email'] ?? '$lower@khi.com',
-                'username': d['username'] ?? snap.docs.first.id,
-                'role': d['role'] ?? 'unknown',
-                'branchId': d['branchId'] ?? b,
-                'uid': snap.docs.first.id,
-              };
-            }
-            return null;
-          }).catchError((_) => null),
-
-          _firestore.collection('branches').doc(b).collection('users').where('email', isEqualTo: lower).limit(1).get().then((snap) {
-            if (snap.docs.isNotEmpty) {
-              final d = snap.docs.first.data();
-              return {
-                ...d,
-                'email': d['email'] ?? lower,
-                'username': d['username'] ?? snap.docs.first.id,
-                'role': d['role'] ?? 'unknown',
-                'branchId': d['branchId'] ?? b,
-                'uid': snap.docs.first.id,
-              };
-            }
-            return null;
-          }).catchError((_) => null),
-        ],
-
-        // CollectionGroup('users')
-        _firestore.collectionGroup('users').where('usernameLower', isEqualTo: lower).limit(1).get().then((snap) {
-          if (snap.docs.isNotEmpty) {
-            final doc = snap.docs.first;
-            final d = doc.data();
-            final pathParts = doc.reference.path.split('/');
-            final branchId = d['branchId'] ?? (pathParts.length >= 2 ? pathParts[1] : 'unknown');
-            return {
-              ...d,
-              'email': d['email'] ?? '$lower@gmd.com',
-              'username': d['username'] ?? doc.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': branchId,
-              'uid': doc.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-
-        _firestore.collectionGroup('users').where('email', isEqualTo: lower).limit(1).get().then((snap) {
-          if (snap.docs.isNotEmpty) {
-            final doc = snap.docs.first;
-            final d = doc.data();
-            final pathParts = doc.reference.path.split('/');
-            final branchId = d['branchId'] ?? (pathParts.length >= 2 ? pathParts[1] : 'unknown');
-            return {
-              ...d,
-              'email': d['email'] ?? lower,
-              'username': d['username'] ?? doc.id,
-              'role': d['role'] ?? 'unknown',
-              'branchId': branchId,
-              'uid': doc.id,
-            };
-          }
-          return null;
-        }).catchError((_) => null),
-      ];
-
-      final results = await Future.wait(queries).timeout(const Duration(seconds: 8));
-      for (final r in results) {
-        if (r != null && r['email'] != null && (r['email'] as String).isNotEmpty) {
-          unawaited(LocalStorageService.saveLocalUser(r));
-          return r;
-        }
-      }
-    } catch (e) {
-      debugPrint('[AuthService] Firestore username lookup notice: $e');
-    }
-
-    // 2. Fallback to local cache if offline or Firestore query had no result
+    // 1. Fast path: Check local Hive cache first (instant, 0 Firestore reads)
     try {
       final cached = LocalStorageService.findLocalUser(lower);
       if (cached != null) {
@@ -926,6 +764,96 @@ class AuthService {
         }
       }
     } catch (_) {}
+
+    // 2. Targeted query on root /users collection (bounded, at most 1-2 targeted reads)
+    try {
+      // Direct doc ID check
+      final doc = await _firestore.collection('users').doc(lower).get().timeout(const Duration(seconds: 4));
+      if (doc.exists && doc.data() != null) {
+        final d = doc.data()!;
+        final res = {
+          ...d,
+          'email': d['email'] ?? '$lower@gmd.com',
+          'username': d['username'] ?? doc.id,
+          'role': d['role'] ?? 'unknown',
+          'branchId': d['branchId'] ?? 'all',
+          'uid': doc.id,
+        };
+        unawaited(LocalStorageService.saveLocalUser(res));
+        return res;
+      }
+
+      // Username query on root /users
+      final snapUser = await _firestore.collection('users').where('usernameLower', isEqualTo: lower).limit(1).get().timeout(const Duration(seconds: 4));
+      if (snapUser.docs.isNotEmpty) {
+        final d = snapUser.docs.first.data();
+        final res = {
+          ...d,
+          'email': d['email'] ?? '$lower@gmd.com',
+          'username': d['username'] ?? snapUser.docs.first.id,
+          'role': d['role'] ?? 'unknown',
+          'branchId': d['branchId'] ?? 'all',
+          'uid': snapUser.docs.first.id,
+        };
+        unawaited(LocalStorageService.saveLocalUser(res));
+        return res;
+      }
+
+      // Email query on root /users
+      final snapEmail = await _firestore.collection('users').where('email', isEqualTo: lower).limit(1).get().timeout(const Duration(seconds: 4));
+      if (snapEmail.docs.isNotEmpty) {
+        final d = snapEmail.docs.first.data();
+        final res = {
+          ...d,
+          'email': d['email'] ?? lower,
+          'username': d['username'] ?? snapEmail.docs.first.id,
+          'role': d['role'] ?? 'unknown',
+          'branchId': d['branchId'] ?? 'all',
+          'uid': snapEmail.docs.first.id,
+        };
+        unawaited(LocalStorageService.saveLocalUser(res));
+        return res;
+      }
+
+      // 3. Fallback: Single collectionGroup('users') query automatically covers all branch subcollections
+      final snapCg = await _firestore.collectionGroup('users').where('usernameLower', isEqualTo: lower).limit(1).get().timeout(const Duration(seconds: 5));
+      if (snapCg.docs.isNotEmpty) {
+        final doc = snapCg.docs.first;
+        final d = doc.data();
+        final pathParts = doc.reference.path.split('/');
+        final branchId = d['branchId'] ?? (pathParts.length >= 2 ? pathParts[1] : 'unknown');
+        final res = {
+          ...d,
+          'email': d['email'] ?? '$lower@gmd.com',
+          'username': d['username'] ?? doc.id,
+          'role': d['role'] ?? 'unknown',
+          'branchId': branchId,
+          'uid': doc.id,
+        };
+        unawaited(LocalStorageService.saveLocalUser(res));
+        return res;
+      }
+
+      final snapCgEmail = await _firestore.collectionGroup('users').where('email', isEqualTo: lower).limit(1).get().timeout(const Duration(seconds: 5));
+      if (snapCgEmail.docs.isNotEmpty) {
+        final doc = snapCgEmail.docs.first;
+        final d = doc.data();
+        final pathParts = doc.reference.path.split('/');
+        final branchId = d['branchId'] ?? (pathParts.length >= 2 ? pathParts[1] : 'unknown');
+        final res = {
+          ...d,
+          'email': d['email'] ?? lower,
+          'username': d['username'] ?? doc.id,
+          'role': d['role'] ?? 'unknown',
+          'branchId': branchId,
+          'uid': doc.id,
+        };
+        unawaited(LocalStorageService.saveLocalUser(res));
+        return res;
+      }
+    } catch (e) {
+      debugPrint('[AuthService] Firestore username lookup notice: $e');
+    }
 
     return null;
   }

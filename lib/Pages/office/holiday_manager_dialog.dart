@@ -1,5 +1,6 @@
 // lib/pages/office/holiday_manager_dialog.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
@@ -482,7 +483,7 @@ class _HolidayManagerDialogState extends State<HolidayManagerDialog> {
 
   Widget _buildHolidaysWorkspace(RoleThemeData t, bool isNarrow) {
     return ValueListenableBuilder(
-      valueListenable: Hive.box(LocalStorageService.financeHolidaysBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.financeHolidaysBox)),
       builder: (ctx, Box box, _) {
         final allHolidays = FinanceLocalStorage.getHolidays(widget.branchId);
 

@@ -1,5 +1,6 @@
 // lib/pages/office/employee_detail_page.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -588,7 +589,7 @@ class _EmployeeDetailPageState extends State<EmployeeDetailPage> with SingleTick
     final t = RoleThemeScope.dataOf(context);
 
     return ValueListenableBuilder(
-      valueListenable: FinanceLocalStorage.employeesBox.listenable(),
+      valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.employeesBox),
       builder: (c, Box box, _) {
         final emp = FinanceLocalStorage.getEmployee(widget.employeeId);
 

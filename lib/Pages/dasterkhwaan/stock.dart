@@ -1,6 +1,8 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/components/app_toast.dart';
@@ -597,8 +599,9 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
       backgroundColor: context.adapt(_surface),
       body: CustomScrollView(
         slivers: [
-          // Header banner with goodwill & charity palette
-          SliverAppBar(
+          // Header banner with goodwill & charity palette (the executive shell
+          // already shows the module title, so it is left out there).
+          if (!HomeModuleHost.isModuleRoot(context)) SliverAppBar(
             pinned: true,
             expandedHeight: 120,
             backgroundColor: _primaryDark,
@@ -995,7 +998,7 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
     }
 
     return ValueListenableBuilder(
-      valueListenable: Hive.box(LocalStorageService.auditLogsBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.auditLogsBox)),
       builder: (context, Box box, _) {
         final normBranch = _branchId!.toLowerCase().trim();
         final List<Map<String, dynamic>> logs = [];

@@ -20,6 +20,7 @@ import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/widgets/camp_selector_chip.dart';
 import 'user_settings_dialog.dart';
 import 'widgets/connection_status_same.dart';
+import 'widgets/desk_theme.dart';
 
 import 'package:gmwf/models/patient.dart';
 import 'package:gmwf/services/firestore_service.dart';
@@ -72,7 +73,7 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
   ConnectionStatus _connectionStatus = ConnectionManager().status;
 
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
 
   StreamSubscription? _restockRealtimeSub;
   StreamSubscription? _restockFirestoreSub;
@@ -84,15 +85,9 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
   // Theme-toggle refresh of the kept-alive tab screens (see _rebuildTabsForTheme).
   final GlobalKey _tabBodyKey = GlobalKey();
   bool? _lastIsDark;
+  String? _lastThemeChoice;
   StreamSubscription? _readyCountSub;
   Timer? _readyCountDebounce;
-
-  bool get _isStockTabActive {
-    final i = _activeTabIndex;
-    if (i < 0 || i >= _tabs.length) return false;
-    final title = (_tabs[i]['title'] as String).toLowerCase();
-    return title.contains('stock') || title.contains('inventory');
-  }
 
   /// The tab that dispenses: "Dispenser", or "Pharmacy" in the all-in-one layout.
   static bool _isDispenseTab(String title) {
@@ -177,33 +172,36 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
 
   int _resolveInitialTabIndex() {
     if (_tabs.isEmpty) return 0;
-    // 1. Try in-memory static last active index
-    if (_lastActiveTabIndex != null && _lastActiveTabIndex! >= 0 && _lastActiveTabIndex! < _tabs.length) {
-      return _lastActiveTabIndex!;
-    }
-    // 2. Try in-memory static last active title
+    // 1. Try in-memory static last active title (prevents numeric index mismatch
+    //    when toggling between separate tabs and single-screen Pharmacy mode).
     if (_lastActiveTabTitle != null) {
       final idx = _tabs.indexWhere((t) => t['title'] == _lastActiveTabTitle);
       if (idx >= 0) return idx;
     }
-    // 3. Try Hive app_settings
+    // 2. Try Hive app_settings
+    String? savedTitle;
     try {
       if (Hive.isBoxOpen('app_settings')) {
-        final saved = Hive.box('app_settings').get('last_hybrid_tab_title')?.toString();
-        if (saved != null && saved.isNotEmpty) {
-          final idx = _tabs.indexWhere((t) => t['title'] == saved);
+        savedTitle = Hive.box('app_settings').get('last_hybrid_tab_title')?.toString();
+        if (savedTitle != null && savedTitle.isNotEmpty) {
+          final idx = _tabs.indexWhere((t) => t['title'] == savedTitle);
           if (idx >= 0) return idx;
         }
       }
     } catch (_) {}
-    // 4. Fallback based on role: if role has dispenser or stock, do NOT default to Receptionist
-    final r = widget.role.toLowerCase().trim();
-    if (r.contains('dis') || r.contains('dispenser') || r.contains('dispensar')) {
-      final disIdx = _tabs.indexWhere((t) =>
-          _isDispenseTab(t['title'] as String) ||
-          (t['title'] as String).toLowerCase().contains('stock') ||
-          (t['title'] as String).toLowerCase().contains('inventory'));
-      if (disIdx >= 0) return disIdx;
+    // 3. Fallback: Receptionist is the default in separate-tabs mode;
+    //    Pharmacy is the default in single-screen mode.
+    final recIdx = _tabs.indexWhere((t) => (t['title'] as String) == 'Receptionist');
+    if (recIdx >= 0) return recIdx;
+    final pharmacyIdx = _tabs.indexWhere((t) => (t['title'] as String) == 'Pharmacy');
+    if (pharmacyIdx >= 0) return pharmacyIdx;
+    final disIdx = _tabs.indexWhere((t) => _isDispenseTab(t['title'] as String));
+    if (disIdx >= 0) return disIdx;
+    // 4. Only use numeric index if no title preference existed
+    if (_lastActiveTabTitle == null && (savedTitle == null || savedTitle.isEmpty)) {
+      if (_lastActiveTabIndex != null && _lastActiveTabIndex! >= 0 && _lastActiveTabIndex! < _tabs.length) {
+        return _lastActiveTabIndex!;
+      }
     }
     return 0;
   }
@@ -341,17 +339,7 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
           dispenserId: widget.userId,
           dispenserName: name,
           isEmbedded: true,
-        ),
-      });
-    }
-    if (r.contains('dis') || r.contains('dispenser') || r.contains('dispensar') || r.contains('doc') || r.contains('inventory')) {
-      _tabs.add({
-        'title': 'Stock & Inventory',
-        'icon': Icons.inventory_2_outlined,
-        'widget': InventoryPage(
-          branchId: widget.branchId,
-          isDispenser: true,
-          isEmbedded: true,
+          showEmbeddedToolbar: false,
         ),
       });
     }
@@ -380,17 +368,18 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
       if (old != null) {
         old.removeListener(_onTabControllerChanged);
       }
-      final targetIndex = (_controllerInitialized && _tabController.index < targetLength)
-          ? _tabController.index
-          : _resolveInitialTabIndex().clamp(0, targetLength - 1);
+      final targetIndex = _resolveInitialTabIndex().clamp(0, targetLength - 1);
 
       _tabController = TabController(
         length: targetLength,
-        initialIndex: targetIndex.clamp(0, targetLength - 1),
+        initialIndex: targetIndex,
         vsync: this,
       );
       _controllerInitialized = true;
       _activeTabIndex = _tabController.index;
+      if (old != null) {
+        _saveCurrentActiveTab(_tabController.index);
+      }
       _tabController.addListener(_onTabControllerChanged);
 
       if (old != null) {
@@ -618,7 +607,7 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
         future: LocalStorageService.ensureBoxOpen('app_settings'),
         builder: (context, snapshot) {
           if (!snapshot.hasData || snapshot.data == null || !snapshot.data!.isOpen) {
-            return const Scaffold(
+            return Scaffold(
               body: Center(child: CircularProgressIndicator(color: _teal)),
             );
           }
@@ -629,7 +618,9 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
     }
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
+      valueListenable: Hive.box('app_settings').listenable(
+        keys: ['is_dark_mode', 'theme_choice', 'visual_theme'],
+      ),
       builder: (context, box, _) {
         final isDark = box.isOpen ? (box.get('is_dark_mode', defaultValue: false) == true) : false;
         return _buildThemedScaffold(context, isDark, isMobile);
@@ -655,16 +646,35 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
     if (!_isLoggingOut) {
       _syncTabController();
     }
-    if (_lastIsDark != null && _lastIsDark != isDark) {
+    final currentThemeChoice = Hive.isBoxOpen('app_settings')
+        ? Hive.box('app_settings').get('theme_choice')?.toString()
+        : null;
+    if ((_lastIsDark != null && _lastIsDark != isDark) ||
+        (_lastThemeChoice != null && _lastThemeChoice != currentThemeChoice)) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _rebuildTabsForTheme());
     }
     _lastIsDark = isDark;
+    _lastThemeChoice = currentThemeChoice;
 
     final isAllInOne = DispensaryPreferencesService.isHybridAllInOne(widget.userId);
-    final isRecDis = widget.role.toLowerCase().contains('rec') && widget.role.toLowerCase().contains('dis');
+    final rLower = widget.role.toLowerCase();
+    final isRecDis = rLower.contains('rec') && rLower.contains('dis');
+    final hasInventoryAccess = rLower.contains('dis') || rLower.contains('doc') || rLower.contains('inventory');
+
+    void openInventory() {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => InventoryPage(
+            branchId: widget.branchId,
+            isDispenser: rLower.contains('dis'),
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.emerald100t,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: GmwfAppBar(
         isFloating: false,
         title: 'Hybrid Desk – ${_resolvedName ?? widget.userName}',
@@ -686,12 +696,13 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
         onTogglePaneOrder: () {
           if (mounted) setState(() {});
         },
+        centerWidget: (!isMobile && _tabs.length > 1) ? _buildHeaderPillTabs(isDark) : null,
         extraActions: [
           CampSelectorChip(
             branchId: widget.branchId,
-            textColor: isDark ? SoftPalette.sky350 : SoftPalette.emerald600,
-            bgColor: isDark ? SoftPalette.slate700 : SoftPalette.green100m,
-            borderColor: isDark ? SoftPalette.slate600 : SoftPalette.emerald150,
+            textColor: context.comfort.brand,
+            bgColor: context.comfort.brandSoft,
+            borderColor: context.comfort.brand.withValues(alpha: 0.30),
           ),
         ],
         onTitleLongPress: () => DispensaryUserSettingsDialog.show(
@@ -709,27 +720,18 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
         onSync: _forceSync,
         onLogout: _logout,
         isLoggingOut: _isLoggingOut,
-        onInventory: () {
-          final stockIdx = _tabs.indexWhere((t) =>
-              (t['title'] as String).toLowerCase().contains('stock') ||
-              (t['title'] as String).toLowerCase().contains('inventory'));
-          if (stockIdx >= 0) {
-            _tabController.animateTo(stockIdx);
-            if (_activeTabIndex != stockIdx) {
-              setState(() => _activeTabIndex = stockIdx);
-            }
-          } else {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => InventoryPage(
-                  branchId: widget.branchId,
-                  isDispenser: widget.role.toLowerCase().contains('dis'),
-                ),
-              ),
-            );
-          }
-        },
+        deskActions: [
+          if (_shouldShowRestockAlert && _pendingRestockAlerts.isNotEmpty)
+            GmwfMenuAction(
+              id: 'restock_requests',
+              label: 'Restock Alerts (${_pendingRestockAlerts.length})',
+              icon: Icons.warning_amber_rounded,
+              badge: _pendingRestockAlerts.length,
+              onTap: openInventory,
+            ),
+        ],
+        onInventory: hasInventoryAccess ? openInventory : null,
+        inventoryBadge: (_shouldShowRestockAlert) ? _pendingRestockAlerts.length : 0,
         onUserSettings: () => DispensaryUserSettingsDialog.show(
           context,
           branchId: widget.branchId,
@@ -737,164 +739,126 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
             if (mounted) setState(() { _fetchUserNameAndConnect(); });
           },
         ),
-        bottom: (isMobile || _tabs.length <= 1)
-            ? null
-            : PreferredSize(
-                key: ValueKey('hybrid_tabbar_pref_${_tabs.length}_${_tabController.length}_${identityHashCode(_tabController)}'),
-                preferredSize: const Size.fromHeight(48),
-                child: Container(
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-                      width: 1.2,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.03),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                  child: TabBar(
-                    key: ValueKey('tabbar_${_tabs.length}_${_tabController.length}_${identityHashCode(_tabController)}'),
-                    controller: _tabController,
-                    onTap: (idx) {
-                      _saveCurrentActiveTab(idx);
-                      if (_activeTabIndex != idx) {
-                        setState(() => _activeTabIndex = idx);
-                      }
-                    },
-                    isScrollable: false,
-                    indicator: BoxDecoration(
-                      color: isDark ? SoftPalette.teal550.withValues(alpha: 0.35) : SoftPalette.green100m,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: SoftPalette.emerald350,
-                        width: 1.2,
-                      ),
-                    ),
-                    indicatorSize: TabBarIndicatorSize.tab,
-                    splashFactory: NoSplash.splashFactory,
-                    overlayColor: WidgetStateProperty.all(Colors.transparent),
-                    dividerColor: Colors.transparent,
-                    labelPadding: const EdgeInsets.symmetric(horizontal: 2),
-                    tabs: _tabs.asMap().entries.map((entry) {
-                      final idx = entry.key;
-                      final t = entry.value;
-                      final isSelected = _activeTabIndex == idx;
-                      return Tab(
-                        height: 38,
-                        child: Container(
-                          alignment: Alignment.center,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                t['icon'] as IconData,
-                                size: 18,
-                                color: isSelected
-                                    ? (isDark ? SoftPalette.emerald300 : SoftPalette.emerald550)
-                                    : (isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                t['title'] as String,
-                                style: TextStyle(
-                                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
-                                  fontSize: 14,
-                                  color: isSelected
-                                      ? (isDark ? SoftPalette.emerald300 : SoftPalette.emerald550)
-                                      : (isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                                ),
-                              ),
-                              // Patients prescribed and waiting to be dispensed.
-                              if (_readyToDispenseCount > 0 &&
-                                  _isDispenseTab(t['title'] as String)) ...[
-                                const SizedBox(width: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: SoftPalette.emerald550,
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Text(
-                                    '$_readyToDispenseCount',
-                                    style: const TextStyle(
-                                      color: SoftPalette.gray50,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                              // Restock requests belong to the inventory only.
-                              if (_shouldShowRestockAlert &&
-                                  _pendingRestockAlerts.isNotEmpty &&
-                                  ((t['title'] as String).toLowerCase().contains('stock') ||
-                                      (t['title'] as String).toLowerCase().contains('inventory'))) ...[
-                                const SizedBox(width: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: SoftPalette.red500,
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Text(
-                                    '${_pendingRestockAlerts.length}',
-                                    style: const TextStyle(
-                                      color: SoftPalette.gray50,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
+        bottom: null,
+      ),
+      body: DeskBackdrop(
+        child: Column(
+          children: [
+            Expanded(
+              child: KeyedSubtree(
+                key: ValueKey('tab_body_${_tabs.length}_${_tabController.length}_$isAllInOne'),
+                child: LazyIndexedStack(
+                  key: _tabBodyKey,
+                  index: _tabs.isEmpty ? 0 : _activeTabIndex.clamp(0, _tabs.length - 1),
+                  children: _tabs.map((t) => t['widget'] as Widget).toList(),
                 ),
               ),
-      ),
-      body: Column(
-        children: [
-          // Restock requests are shown only inside Stock & Inventory.
-          if (_isStockTabActive) _buildRestockBanner(isDark),
-          Expanded(
-            child: KeyedSubtree(
-              key: ValueKey('tab_body_${_tabs.length}_${_tabController.length}_$isAllInOne'),
-              child: LazyIndexedStack(
-                index: _tabs.isEmpty ? 0 : _activeTabIndex.clamp(0, _tabs.length - 1),
-                children: _tabs.map((t) => t['widget'] as Widget).toList(),
-              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
       bottomNavigationBar: (isMobile && _tabs.length > 1) ? _buildMobileBottomBar(isDark) : null,
     );
   }
 
+  Widget _buildHeaderPillTabs(bool isDark) {
+    final c = context.comfort;
+    final activeIndex = _tabs.isEmpty ? 0 : _activeTabIndex.clamp(0, _tabs.length - 1);
+    return Container(
+      key: ValueKey('hybrid_header_pills_${_tabs.length}_${_tabController.length}'),
+      height: 40,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: _tabs.asMap().entries.map((entry) {
+          final idx = entry.key;
+          final t = entry.value;
+          final isSelected = activeIndex == idx;
+          final title = t['title'] as String;
+          final showBadge = _readyToDispenseCount > 0 && _isDispenseTab(title);
+
+          return Padding(
+            padding: EdgeInsets.only(left: idx == 0 ? 0 : 4),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: () {
+                _saveCurrentActiveTab(idx);
+                if (_tabController.index != idx) {
+                  _tabController.animateTo(idx);
+                }
+                if (_activeTabIndex != idx) {
+                  setState(() => _activeTabIndex = idx);
+                }
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isSelected ? c.brand : Colors.transparent,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      t['icon'] as IconData,
+                      size: 16,
+                      color: isSelected ? c.onBrand : c.textSecondary,
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: isSelected ? c.onBrand : c.textSecondary,
+                      ),
+                    ),
+                    if (showBadge) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: isSelected ? c.onBrand : c.brand,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          '$_readyToDispenseCount',
+                          style: TextStyle(
+                            color: isSelected ? c.brand : c.onBrand,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
   Widget _buildMobileBottomBar(bool isDark) {
-    final activeColor = isDark ? SoftPalette.emerald300 : SoftPalette.emerald550;
-    final inactiveColor = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-    final activeBg = isDark ? SoftPalette.teal550.withValues(alpha: 0.3) : SoftPalette.green100m;
+    final c = context.comfort;
+    final activeColor = c.brand;
+    final inactiveColor = c.textMuted;
+    final activeBg = c.brandSoft;
 
     return Container(
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+        color: c.surface,
         border: Border(
           top: BorderSide(
-            color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
+            color: c.border,
             width: 1.2,
           ),
         ),
@@ -1019,6 +983,7 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
           .doc(widget.branchId)
           .collection('restock_requests')
           .where('status', isEqualTo: 'pending')
+          .limit(50)
           .snapshots()
           .listen((snap) {
         if (!mounted) return;
@@ -1038,109 +1003,5 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
         debugPrint('[HybridScreen] Restock requests stream error: $e');
       });
     } catch (_) {}
-  }
-
-  Future<void> _dismissRestockAlert(String reqId) async {
-    setState(() {
-      _pendingRestockAlerts.removeWhere((r) => r['id'] == reqId);
-    });
-    await LocalStorageService.acknowledgeRestockRequest(widget.branchId, reqId);
-  }
-
-  Widget _buildRestockBanner(bool isDark) {
-    if (!_shouldShowRestockAlert || _pendingRestockAlerts.isEmpty) return const SizedBox.shrink();
-
-    final first = _pendingRestockAlerts.first;
-    final count = _pendingRestockAlerts.length;
-    final medName = first['medicineName'] ?? first['name'] ?? 'Medicine';
-    final doctor = first['requestedBy'] ?? 'Doctor';
-    final currentQty = first['currentQty'] ?? first['quantity'] ?? '0';
-
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.orange800 : SoftPalette.yellow50m,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: SoftPalette.amber300, width: 1.2),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: 0.05),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.warning_amber_rounded, color: SoftPalette.orange400, size: 24),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  count > 1
-                      ? '⚠️ Restock Requests ($count pending): $medName and ${count - 1} more'
-                      : '⚠️ Restock Alert: $medName (Current: $currentQty)',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
-                    color: isDark ? SoftPalette.yellow150 : SoftPalette.orange600,
-                  ),
-                ),
-                Text(
-                  '$doctor requested restock from dispensary. Please restock soon.',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: isDark ? SoftPalette.slate200 : SoftPalette.orange700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          TextButton(
-            onPressed: () {
-              final stockIdx = _tabs.indexWhere((t) =>
-                  (t['title'] as String).toLowerCase().contains('stock') ||
-                  (t['title'] as String).toLowerCase().contains('inventory'));
-              if (stockIdx >= 0) {
-                _tabController.animateTo(stockIdx);
-              } else {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => InventoryPage(
-                      branchId: widget.branchId,
-                      isDispenser: true,
-                    ),
-                  ),
-                );
-              }
-            },
-            style: TextButton.styleFrom(
-              backgroundColor: SoftPalette.orange400,
-              foregroundColor: SoftPalette.gray50,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-            child: const Text('Open Inventory', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-          ),
-          const SizedBox(width: 4),
-          IconButton(
-            icon: const Icon(Icons.close, size: 18),
-            color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A54,
-            tooltip: 'Dismiss alert',
-            onPressed: () {
-              final id = first['id']?.toString();
-              if (id != null) _dismissRestockAlert(id);
-            },
-          ),
-        ],
-      ),
-    );
   }
 }

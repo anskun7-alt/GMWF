@@ -25,15 +25,21 @@ final Map<String, BranchStats> _historicalStatsCache = {};
 final Map<String, _CachedLocalBranchStats> _localStatsTTLCache = {};
 final Map<String, (DateTime, Map<String, int>)> _weeklyPatientsMemoryCache = {};
 final Map<String, Future<Map<String, TodayVsYesterday>>> _batchStatsInFlight = {};
+final Map<String, (String, Map<String, dynamic>?)> _yesterdayAuxDocCache = {};
 
-/// Called by the dashboard's refresh. It cleared only the local TTL cache, so the cloud counts
-/// (10 min for today, 6 h for past days) and frozen past-day local stats survived a refresh and
-/// a branch's fresh uploads stayed invisible.
+/// Called by the dashboard's refresh. Clears local TTL caches and today/yesterday cloud stats,
+/// while retaining immutable older historical counts (>= 2 days ago) so refresh does not
+/// trigger dozens of redundant count queries across previous days.
 void clearLocalStatsCache() {
   _localStatsTTLCache.clear();
   _historicalStatsCache.clear();
   _cloudBranchStatsCache.clear();
-  _cloudDayCountsCache.clear();
+  final now = DateTime.now();
+  final todayDmyy = DateFormat('ddMMyy').format(now);
+  final yesterdayDmyy = DateFormat('ddMMyy').format(now.subtract(const Duration(days: 1)));
+  _cloudDayCountsCache.removeWhere((key, _) {
+    return key.endsWith('|$todayDmyy') || key.endsWith('|$yesterdayDmyy');
+  });
   _cloudAuxCache.clear();
   _weeklyPatientsMemoryCache.clear();
   _batchStatsInFlight.clear();
@@ -474,6 +480,30 @@ Future<CloudQueueCount> _countQueue(CollectionReference<Map<String, dynamic>> co
   final c = CloudQueueCount();
   final all = await _countOf(col);
   if (all == 0) return c; // an empty queue costs one read
+
+  // Fast-path for small queues (<= 20 docs): reading the documents directly takes only
+  // 1 read operation and computes exact totals, completed, dispensed, evening, and extraDays
+  // without firing 5 to 11 additional count queries over the network.
+  if (all <= 20) {
+    try {
+      final snap = await col.get().timeout(_cloudQueryTimeout);
+      for (final doc in snap.docs) {
+        final m = doc.data();
+        final status = (m['status'] ?? '').toString().toLowerCase();
+        if (status == 'deleted' || status == 'void' || status == 'cancelled') continue;
+        c.total++;
+        if (status == 'completed') c.completed++;
+        if ((m['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed') c.dispensed++;
+        if ((m['session'] ?? '').toString().toLowerCase() == 'evening') c.evening++;
+        final days = (m['daysOfMedicine'] as num?)?.toInt() ?? 1;
+        if (days > 1) c.extraDays += days - 1;
+      }
+      return c;
+    } catch (_) {
+      // Fallback to count queries if direct get fails
+    }
+  }
+
   final r = await Future.wait([
     _countOf(col.where('status', whereIn: ['deleted', 'void', 'cancelled'])),
     _countOf(col.where('status', isEqualTo: 'completed')),
@@ -579,14 +609,17 @@ Future<CloudDayCounts> _fetchCloudDayCounts(String branchId, String dmyy) async 
 final Map<String, (DateTime, Future<CloudDayCounts?>)> _cloudDayCountsCache = {};
 
 /// Cloud token counts for a branch and day, shared by the stat tiles, the branch table and the
-/// Karachi camp rows. Today's counts are reused for 10 minutes, older days for 6 hours (late
-/// uploads still arrive). Concurrent callers share one fetch; a failed fetch is not cached.
+/// Karachi camp rows. Today's counts are reused for 10 minutes, yesterday for 6 hours (late
+/// uploads can arrive), and older days (immutable history) for 7 days. Concurrent callers share one fetch.
 Future<CloudDayCounts?> fetchCloudDayCountsCached(String branchId, DateTime date) {
   final dmyy = DateFormat('ddMMyy').format(date);
   final key = '${branchId.toLowerCase().trim()}|$dmyy';
   final now = DateTime.now();
   final isToday = DateFormat('ddMMyy').format(now) == dmyy;
-  final ttl = isToday ? const Duration(minutes: 10) : const Duration(hours: 6);
+  final isYesterday = DateFormat('ddMMyy').format(now.subtract(const Duration(days: 1))) == dmyy;
+  final ttl = isToday
+      ? const Duration(minutes: 10)
+      : (isYesterday ? const Duration(hours: 6) : const Duration(days: 7));
   final cached = _cloudDayCountsCache[key];
   if (cached != null && now.difference(cached.$1) < ttl) return cached.$2;
 
@@ -647,6 +680,16 @@ Future<CloudAuxCounts?> fetchCloudAuxCountsCached(List<String> branchIds) {
     }
   }
 
+  Future<Map<String, dynamic>?> yesterdayDocData(DocumentReference<Map<String, dynamic>> ref) async {
+    final cached = _yesterdayAuxDocCache[ref.path];
+    if (cached != null && cached.$1 == yesterday) {
+      return cached.$2;
+    }
+    final data = await docData(ref);
+    _yesterdayAuxDocCache[ref.path] = (yesterday, data);
+    return data;
+  }
+
   final future = () async {
     final out = CloudAuxCounts();
     final allEmpPresentKeys = <String>{};
@@ -677,11 +720,11 @@ Future<CloudAuxCounts?> fetchCloudAuxCountsCached(List<String> branchIds) {
       final r = await Future.wait<Object?>([
         empPresentKeys(),
         docData(branch.collection('madrassa_daily_logs').doc(today)),
-        docData(branch.collection('madrassa_daily_logs').doc(yesterday)),
+        yesterdayDocData(branch.collection('madrassa_daily_logs').doc(yesterday)),
         docData(branch.collection('school_attendance').doc(today)),
         docData(branch.collection('school_teacher_attendance').doc(today)),
         docData(branch.collection('madrassa_teacher_attendance').doc(today)),
-        docData(branch.collection('madrassa_teacher_attendance').doc(yesterday)),
+        yesterdayDocData(branch.collection('madrassa_teacher_attendance').doc(yesterday)),
       ]);
       allEmpPresentKeys.addAll(r[0] as Set<String>);
       out.madrassa += _countPresentEntries(r[1] as Map<String, dynamic>?);
@@ -1919,6 +1962,15 @@ class RecentActivityService {
     final idsSet = Set<String>.from(getAllBranchIds());
     if (idsSet.length <= 1) {
       try {
+        final localBranches = LocalStorageService.getLocalBranchesList();
+        for (final b in localBranches) {
+          final id = (b['id'] as String? ?? '').toLowerCase().trim();
+          if (id.isNotEmpty && id != 'all' && id != 'global') idsSet.add(id);
+        }
+      } catch (_) {}
+    }
+    if (idsSet.length <= 1) {
+      try {
         final snap = await FirebaseFirestore.instance.collection('branches').get().timeout(const Duration(seconds: 4));
         for (final doc in snap.docs) {
           final id = doc.id.toLowerCase().trim();
@@ -2237,11 +2289,16 @@ Future<Map<String, int>> fetchWeeklyPatientCounts(List<String> branchIds, {bool 
     }
   }
 
-  // Combine with the cloud counts (cached: 10 min today, 6 h older days). Weekly counts were
+  // Combine with the cloud counts (cached: 10 min today, 6 h yesterday, 7 d older days). Weekly counts were
   // local only, so HQ and any PC that didn't issue the tokens itself showed 0.
   if (includeCloud) {
     try {
+      final myBranch = (LocalStorageService.getActiveBranchId() ?? LocalStorageService.getActiveUserBranchId()).toLowerCase().trim();
       await Future.wait(branchIds.map((branchId) async {
+        final cleanB = branchId.toLowerCase().trim();
+        // If this is the local branch and local box already has weekly data, avoid querying 7 days from cloud
+        if (cleanB.isNotEmpty && cleanB == myBranch && (result[branchId] ?? 0) > 0) return;
+
         final perDay = await Future.wait([
           for (int i = 0; i < 7; i++) fetchCloudDayCountsCached(branchId, now.subtract(Duration(days: i))),
         ]);

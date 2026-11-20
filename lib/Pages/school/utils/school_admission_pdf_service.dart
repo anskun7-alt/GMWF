@@ -7,6 +7,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import '../models/school_student.dart';
 import '../../../services/image_upload_service.dart';
+import '../../../services/local_storage_service.dart';
 
 class SchoolAdmissionPdfService {
   static pw.Font? _urduFont;
@@ -44,6 +45,8 @@ class SchoolAdmissionPdfService {
     if (photoBytes != null && photoBytes.isNotEmpty) {
       studentPhoto = pw.MemoryImage(photoBytes);
     }
+
+    final branchName = LocalStorageService.getBranchName(student.branchId);
 
     doc.addPage(
       pw.Page(
@@ -96,11 +99,11 @@ class SchoolAdmissionPdfService {
                           ),
                           pw.SizedBox(height: 2),
                           pw.Text(
-                            'GULZAR MADINA WELFARE FOUNDATION GUJRAT',
+                            'GULZAR MADINA WELFARE FOUNDATION · ${branchName.toUpperCase()}',
                             style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey700),
                           ),
                           pw.Text(
-                            'گلزار مدینہ ویلفیئر فاؤنڈیشن گلزار مدینہ روڈ گجرات • Ph: 0334-4687928',
+                            'گلزار مدینہ ویلفیئر فاؤنڈیشن · $branchName',
                             textDirection: pw.TextDirection.rtl,
                             style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey800),
                           ),
@@ -184,11 +187,11 @@ class SchoolAdmissionPdfService {
                         style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold),
                       ),
                       pw.Text(
-                        'Roll / Admission No: ${student.rollNo}',
-                        style: pw.TextStyle(fontSize: 10.5, fontWeight: pw.FontWeight.bold, color: PdfColors.teal900),
+                        'Adm No: ${student.admissionNo} · Roll: ${student.rollNo}',
+                        style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: PdfColors.teal900),
                       ),
                       pw.Text(
-                        'Branch: ${student.branchId.toUpperCase()}',
+                        'Branch: $branchName',
                         style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold),
                       ),
                     ],

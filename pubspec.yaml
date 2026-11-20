@@ -2,7 +2,7 @@ name: gmwf
 description: "A dispensary management app (offline-first with Firebase)"
 publish_to: 'none'
 
-version: 1.6.4
+version: 1.6.5
 
 environment:
   sdk: ">=3.10.1 <4.0.0"
@@ -11,7 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Core UI & utilities
+  # Core UI & utilitiesre the
   cupertino_icons: ^1.0.8
   google_fonts: ^6.2.1
   font_awesome_flutter: ^10.12.0
@@ -87,6 +87,13 @@ dependencies:
   motion_tab_bar_v2: ^0.4.0
   hijri: ^3.0.1
   workmanager: ^0.10.10
+
+  # Shared GMWF design system (sibling folder). Used by the redesigned home
+  # (lib/pages/home/); other screens move over wave by wave.
+  gmwf_ui:
+    path: ../gmwf_ui
+  flutter_animate: ^4.5.2
+  animations: ^2.2.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

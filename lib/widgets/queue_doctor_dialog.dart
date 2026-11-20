@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
@@ -243,7 +244,7 @@ class _QueueDoctorDialogState extends State<QueueDoctorDialog> {
 
               // Live Queue Counts
               ValueListenableBuilder(
-                valueListenable: Hive.box(LocalStorageService.syncBox).listenable(),
+                valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.syncBox)),
                 builder: (context, Box box, _) {
                   final totalPending = box.length;
                   final typeCounts = _getTypeCounts();

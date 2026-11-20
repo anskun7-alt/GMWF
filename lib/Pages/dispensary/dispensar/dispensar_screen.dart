@@ -27,13 +27,19 @@ import 'patient_form.dart';
 import 'patient_list.dart';
 import 'dispense_queue.dart';
 import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/widgets/patient_audit_history_dialog.dart';
 import '../widgets/connection_status_same.dart';
+import '../widgets/desk_theme.dart';
 
 class DispensarScreen extends StatefulWidget {
   final String branchId;
   final String? dispenserId;
   final String? dispenserName;
   final bool isEmbedded;
+  /// Whether to show the compact top toolbar (Inventory + user settings) when
+  /// [isEmbedded] is true. Set to false when the host (e.g. Hybrid Desk)
+  /// already provides Stock & Inventory and user settings.
+  final bool showEmbeddedToolbar;
 
   /// Hybrid "Pharmacy" tab: no UI, only the dispenser's realtime work (writing
   /// prescriptions/entries/dispense events locally, keeping the open patient fresh,
@@ -54,6 +60,7 @@ class DispensarScreen extends StatefulWidget {
     this.dispenserId,
     this.dispenserName,
     this.isEmbedded = false,
+    this.showEmbeddedToolbar = true,
     this.headless = false,
     this.selectedEntry,
     this.onSelectedEntryChanged,
@@ -101,7 +108,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     });
   }
 
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
 
   StreamSubscription? _restockSub;
   List<Map<String, dynamic>> _pendingRestockAlerts = [];
@@ -364,12 +371,12 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     }
 
     // ── Handle INVENTORY events (no patient serial) ───────────────────────────
-    if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered' || type == 'inventory_stock_sync') {
+    if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered' ||
+        type == 'inventory_stock_sync' || type == 'stock_moves' || type == 'stock_snapshot' || type == 'stock_details') {
       _scheduleRefresh();
       return;
     } else if (type == RealtimeEvents.deleteStockItem || type == 'delete_stock_item') {
-      final mId = (data['id'] ?? data['medicineId'])?.toString();
-      if (mId != null) LocalStorageService.deleteLocalStockItem(mId);
+      // The router hides the batch in its own pool (stock book); only refresh here.
       _scheduleRefresh();
       return;
     } else if (type == RealtimeEvents.restockRequest || type == 'restock_request') {
@@ -812,20 +819,14 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
     final isMobile = GBreakpoint.isMobile(context);
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
+      valueListenable: Hive.box('app_settings').listenable(
+        keys: ['is_dark_mode', 'theme_choice', 'visual_theme'],
+      ),
       builder: (context, box, _) {
         final isDark = box.get('is_dark_mode', defaultValue: false) == true;
 
-        final bodyContent = Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: isDark
-                  ? const [SoftPalette.slate900, SoftPalette.slate800]
-                  : const [SoftPalette.green100m, SoftPalette.lime100m],
-            ),
-          ),
+        final bgColor = Theme.of(context).scaffoldBackgroundColor;
+        final bodyContent = DeskBackdrop(
           child: Column(
             children: [
               ClockSkewWarningBanner(branchId: widget.branchId),
@@ -837,10 +838,52 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
           ),
         );
 
-        if (widget.isEmbedded) return bodyContent;
+        // Embedded (executive shell): sync and logout live in the shell; keep
+        // Inventory and the dispensary user settings, which exist only here.
+        if (widget.isEmbedded) {
+          if (!widget.showEmbeddedToolbar) return bodyContent;
+          final fg = context.comfort.brand;
+          return Column(children: [
+            Material(
+              color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+              child: Container(
+                height: 44,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150)),
+                ),
+                child: Row(children: [
+                  const Spacer(),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(foregroundColor: fg),
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => InventoryPage(branchId: widget.branchId, isDispenser: true)),
+                    ),
+                    icon: const Icon(Icons.inventory_2_rounded, size: 18),
+                    label: const Text('Inventory'),
+                  ),
+                  IconButton(
+                    tooltip: 'Dispensary user settings',
+                    color: fg,
+                    icon: const Icon(Icons.manage_accounts_rounded, size: 20),
+                    onPressed: () => DispensaryUserSettingsDialog.show(
+                      context,
+                      branchId: widget.branchId,
+                      onUserUpdated: () {
+                        if (mounted) setState(() => _fetchDispenserName());
+                      },
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+            Expanded(child: bodyContent),
+          ]);
+        }
 
         return Scaffold(
-          backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.emerald100t,
+          backgroundColor: bgColor,
           appBar: _buildAppBar(isMobile),
           body: bodyContent,
         );
@@ -928,51 +971,121 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
 
             // Right Form Column
             Expanded(
-              child: Card(
-                elevation: 10,
-                color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(28),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: _selectedQueueEntry == null
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.medication_liquid_rounded,
-                              size: 80,
-                              color: _isDark
-                                  ? SoftPalette.slate600
-                                  : SoftPalette.gray150,
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'Select a patient to dispense medicines',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                color: _isDark
-                                    ? SoftPalette.slate350
-                                    : SoftPalette.gray500,
+              child: Builder(
+                builder: (context) {
+                  final c = context.comfort;
+                  final entry = _selectedQueueEntry;
+                  return DeskCard(
+                    accentTop: true,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+                          child: Row(
+                            children: [
+                              Icon(Icons.person_rounded, size: 17, color: c.brand),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Active Patient',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                  color: c.textPrimary,
+                                  letterSpacing: -0.2,
+                                ),
                               ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
+                              const Spacer(),
+                              if (entry != null)
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(20),
+                                  onTap: () {
+                                    final pId = (entry['patientId'] ?? entry['id'] ?? entry['cnic'] ?? '').toString();
+                                    final pName = (entry['patientName'] ?? entry['name'])?.toString();
+                                    PatientAuditHistoryDialog.show(
+                                      context,
+                                      patientId: pId,
+                                      patientName: pName,
+                                      branchId: widget.branchId,
+                                    );
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: c.brandSoft,
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(color: c.brand.withValues(alpha: 0.35)),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'Patient Details',
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w700,
+                                            color: c.brand,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Icon(Icons.arrow_forward_rounded, size: 13, color: c.brand),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
-                      )
-                    : PatientForm(
-                        key: ValueKey(_selectedQueueEntry!['serial'] ?? _selectedQueueEntry!['id']),
-                        branchId: widget.branchId,
-                        queueEntry: _selectedQueueEntry!,
-                        onDispensed: () {
-                          if (mounted) {
-                            setState(() => _selectedQueueEntry = null);
-                          }
-                        },
-                        dispenserName: _dispenserName,
-                      ),
+                        Divider(height: 1, thickness: 1, color: c.border),
+                        Expanded(
+                          child: entry == null
+                              ? Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(24),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(16),
+                                          child: Image.asset(
+                                            'assets/images/doctor_empty_medicines.jpg',
+                                            width: 140,
+                                            height: 140,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Text(
+                                          'Select a patient to dispense medicines',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                            color: _isDark
+                                                ? SoftPalette.slate350
+                                                : SoftPalette.slate600,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                              : PatientForm(
+                                  key: ValueKey(entry['serial'] ?? entry['id']),
+                                  branchId: widget.branchId,
+                                  queueEntry: entry,
+                                  onDispensed: () {
+                                    if (mounted) {
+                                      setState(() => _selectedQueueEntry = null);
+                                    }
+                                  },
+                                  dispenserName: _dispenserName,
+                                ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
           ],
@@ -993,6 +1106,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
           .doc(widget.branchId)
           .collection('restock_requests')
           .where('status', isEqualTo: 'pending')
+          .limit(50)
           .snapshots()
           .listen((snap) {
         if (!mounted) return;

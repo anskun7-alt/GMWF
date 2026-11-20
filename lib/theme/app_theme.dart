@@ -21,6 +21,8 @@ import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/colors.dart';
 import 'package:gmwf/design/tokens/shadows.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf/theme/app_visual_theme.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' as ui show GTheme, GThemeChoice, GComfortColors;
 
 enum RoleTheme {
   chairman,
@@ -72,6 +74,17 @@ class RoleThemeData {
   final Color glassTint;
   final bool isDarkCanvas;
 
+  // Sidebar & active preset surface tokens
+  final Color sidebarBg;
+  final Color sidebarBgSecondary;
+  final Color sidebarBorder;
+  final Color sidebarText;
+  final Color sidebarTextActive;
+  final Color sidebarActiveBg;
+  final Color sidebarActiveLine;
+  final bool isDarkSidebar;
+  final AppVisualTheme visualTheme;
+
   const RoleThemeData({
     required this.roleLabel,
     required this.bg,
@@ -98,11 +111,20 @@ class RoleThemeData {
     required this.chartBar3,
     required this.chartGrid,
     this.isDarkCanvas = false,
+    this.sidebarBg = SoftPalette.pureWhiteSoft,
+    this.sidebarBgSecondary = SoftPalette.slate100,
+    this.sidebarBorder = SoftPalette.slate200,
+    this.sidebarText = SoftPalette.slate600,
+    this.sidebarTextActive = SoftPalette.slate900,
+    this.sidebarActiveBg = SoftPalette.indigo100,
+    this.sidebarActiveLine = SoftPalette.cobaltBlue,
+    this.isDarkSidebar = false,
+    this.visualTheme = AppVisualTheme.classicRoleLight,
   });
 
   // Design System v2 surfaces. Every role shares one neutral canvas per mode;
-  // the role identity lives in the accent. Cards sit one step off the canvas
-  // and are separated by a 1px hairline (bgRule) rather than heavy shadows.
+  // the role identity lives in the accent. Cards sit clearly above the canvas
+  // separated by crisp 1px hairlines and deliberate categorical color contrast.
   RoleThemeData toDarkMode() {
     final darkAccent = _liftForDark(accent);
     return RoleThemeData(
@@ -115,23 +137,32 @@ class RoleThemeData {
       accentLight: _liftForDark(accentLight),
       // Light tints glare on a dark canvas: use the accent washed over the card.
       accentMuted: Color.alphaBlend(darkAccent.withValues(alpha: 0.18), SoftPalette.slate800),
-      accentGradient: accentGradient,
-      glassTint: darkAccent.withValues(alpha: 0.12),
+      accentGradient: LinearGradient(colors: [darkAccent, _liftForDark(accentLight)]),
+      glassTint: darkAccent.withValues(alpha: 0.14),
       textPrimary: SoftPalette.gray150,
       textSecondary: SoftPalette.slate300,
       textTertiary: SoftPalette.slate400,
-      danger: danger,
-      zakat: zakat,
-      nonZakat: nonZakat,
-      gmwf: gmwf,
-      cardFillTokens: cardFillTokens,
-      cardFillPrescriptions: cardFillPrescriptions,
-      cardFillDispensary: cardFillDispensary,
-      chartBar1: chartBar1,
-      chartBar2: chartBar2,
-      chartBar3: chartBar3,
+      danger: SoftPalette.brightCoral,
+      zakat: SoftPalette.brightMint,
+      nonZakat: SoftPalette.brightCobalt,
+      gmwf: SoftPalette.brightGold,
+      cardFillTokens: darkAccent,
+      cardFillPrescriptions: _liftForDark(cardFillPrescriptions),
+      cardFillDispensary: _liftForDark(cardFillDispensary),
+      chartBar1: darkAccent,
+      chartBar2: SoftPalette.brightMint,
+      chartBar3: SoftPalette.brightCobalt,
       chartGrid: SoftPalette.slate750,
       isDarkCanvas: true,
+      sidebarBg: SoftPalette.slate900,
+      sidebarBgSecondary: SoftPalette.slate800,
+      sidebarBorder: SoftPalette.slate700,
+      sidebarText: SoftPalette.slate350,
+      sidebarTextActive: SoftPalette.gray150,
+      sidebarActiveBg: Color.alphaBlend(darkAccent.withValues(alpha: 0.22), SoftPalette.slate800),
+      sidebarActiveLine: darkAccent,
+      isDarkSidebar: true,
+      visualTheme: AppVisualTheme.classicRoleDark,
     );
   }
 
@@ -141,32 +172,107 @@ class RoleThemeData {
     return RoleThemeData(
       roleLabel: roleLabel,
       bg: SoftPalette.slate100,
-      bgCard: SoftPalette.slate50,
-      bgCardAlt: SoftPalette.slate100,
-      bgRule: SoftPalette.slate150,
+      bgCard: SoftPalette.pureWhiteSoft,
+      bgCardAlt: SoftPalette.slate50,
+      bgRule: SoftPalette.slate200,
       accent: accent,
       accentLight: accentLight,
-      accentMuted: accentMuted,
+      accentMuted: Color.alphaBlend(accent.withValues(alpha: 0.10), SoftPalette.pureWhiteSoft),
       accentGradient: accentGradient,
-      glassTint: glassTint,
+      glassTint: accent.withValues(alpha: 0.12),
       textPrimary: SoftPalette.slate900,
       textSecondary: SoftPalette.slate600,
       textTertiary: SoftPalette.slate500,
-      danger: danger,
-      zakat: zakat,
-      nonZakat: nonZakat,
-      gmwf: gmwf,
+      danger: SoftPalette.roseCoral,
+      zakat: SoftPalette.jadeEmerald,
+      nonZakat: SoftPalette.cobaltBlue,
+      gmwf: SoftPalette.warmMarigold,
       cardFillTokens: cardFillTokens,
       cardFillPrescriptions: cardFillPrescriptions,
       cardFillDispensary: cardFillDispensary,
-      chartBar1: chartBar1,
-      chartBar2: chartBar2,
-      chartBar3: chartBar3,
-      chartGrid: SoftPalette.slate150,
+      chartBar1: accent,
+      chartBar2: SoftPalette.jadeEmerald,
+      chartBar3: SoftPalette.cobaltBlue,
+      chartGrid: SoftPalette.slate200,
       isDarkCanvas: false,
+      sidebarBg: SoftPalette.pureWhiteSoft,
+      sidebarBgSecondary: SoftPalette.slate100,
+      sidebarBorder: SoftPalette.slate200,
+      sidebarText: SoftPalette.slate600,
+      sidebarTextActive: accent,
+      sidebarActiveBg: Color.alphaBlend(accent.withValues(alpha: 0.11), SoftPalette.pureWhiteSoft),
+      sidebarActiveLine: accent,
+      isDarkSidebar: false,
+      visualTheme: AppVisualTheme.classicRoleLight,
     );
   }
 
+  /// The role's colours for a theme. Since 2026-11-17 the preset only says
+  /// which of the three themes (GMWF / Nexus / Twilight) and which mode; every
+  /// colour comes from the shared design system (gmwf_ui), the same palette
+  /// as the root theme, School and the websites.
+  RoleThemeData withVisualTheme(
+    AppVisualTheme theme, {
+    Color? customAccent,
+    bool? isDark,
+  }) {
+    final effective = isDark == null ? theme : theme.pairedForDarkMode(isDark);
+    final choice = ui.GThemeChoice.fromStorageKey(effective.storageKey);
+    final colors = ui.GTheme.colors(
+      effective.isDark ? Brightness.dark : Brightness.light,
+      family: choice.family,
+      brandOverride: customAccent,
+    );
+    return withDesignSystem(colors, isDark: effective.isDark, legacyPreset: effective);
+  }
+
+  /// Builds the role colours from design-system colours [c]. Domain colours
+  /// (zakat / non-zakat / GMWF fund) keep their fixed meaning.
+  RoleThemeData withDesignSystem(ui.GComfortColors c, {required bool isDark, AppVisualTheme? legacyPreset}) {
+    final hsv = HSVColor.fromColor(c.brand);
+    final darkShade = hsv.withValue((hsv.value - 0.16).clamp(0.0, 1.0)).toColor();
+    final darkerShade = hsv.withValue((hsv.value - 0.28).clamp(0.0, 1.0)).toColor();
+    final lightAccent = hsv
+        .withValue((hsv.value + (isDark ? 0.12 : 0.18)).clamp(0.0, 1.0))
+        .withSaturation((hsv.saturation - 0.12).clamp(0.0, 1.0))
+        .toColor();
+    return RoleThemeData(
+      roleLabel: roleLabel,
+      bg: c.background,
+      bgCard: c.surface,
+      bgCardAlt: c.surfaceSunken,
+      bgRule: c.border,
+      accent: c.brand,
+      accentLight: lightAccent,
+      accentMuted: c.brandSoft,
+      accentGradient: LinearGradient(colors: isDark ? [c.brand, lightAccent] : [c.brand, c.brandStrong]),
+      glassTint: c.brand.withValues(alpha: isDark ? 0.16 : 0.12),
+      textPrimary: c.textPrimary,
+      textSecondary: c.textSecondary,
+      textTertiary: c.textMuted,
+      danger: c.danger,
+      zakat: isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+      nonZakat: isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+      gmwf: isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+      cardFillTokens: c.brand,
+      cardFillPrescriptions: darkShade,
+      cardFillDispensary: darkerShade,
+      chartBar1: c.chart1,
+      chartBar2: c.chart2,
+      chartBar3: c.chart3,
+      chartGrid: c.border,
+      isDarkCanvas: isDark,
+      sidebarBg: c.sidebarBg,
+      sidebarBgSecondary: c.sidebarBgAlt,
+      sidebarBorder: c.sidebarBorder,
+      sidebarText: c.sidebarText,
+      sidebarTextActive: c.sidebarTextActive,
+      sidebarActiveBg: c.sidebarActiveBg,
+      sidebarActiveLine: c.sidebarActiveLine,
+      isDarkSidebar: c.sidebarBg.computeLuminance() < 0.35,
+      visualTheme: legacyPreset ?? (isDark ? AppVisualTheme.emeraldMeridianDark : AppVisualTheme.emeraldMeridianHybrid),
+    );
+  }
   // ── Chairman – warm light canvas in light mode, soft brass-gold accent ─────
   static const RoleThemeData _chairman = RoleThemeData(
     roleLabel:             'CHAIRMAN',
@@ -614,6 +720,15 @@ class RoleThemeData {
       chartBar2:             base.chartBar2,
       chartBar3:             base.chartBar3,
       chartGrid:             base.chartGrid,
+      sidebarBg:             base.sidebarBg,
+      sidebarBgSecondary:    base.sidebarBgSecondary,
+      sidebarBorder:         base.sidebarBorder,
+      sidebarText:           base.sidebarText,
+      sidebarTextActive:     base.sidebarTextActive,
+      sidebarActiveBg:       base.sidebarActiveBg,
+      sidebarActiveLine:     base.sidebarActiveLine,
+      isDarkSidebar:         base.isDarkSidebar,
+      visualTheme:           base.visualTheme,
     );
   }
 
@@ -675,6 +790,15 @@ class RoleThemeData {
     chartBar2:             chartBar2,
     chartBar3:             chartBar3,
     chartGrid:             chartGrid,
+    sidebarBg:             sidebarBg,
+    sidebarBgSecondary:    sidebarBgSecondary,
+    sidebarBorder:         sidebarBorder,
+    sidebarText:           sidebarText,
+    sidebarTextActive:     sidebarTextActive,
+    sidebarActiveBg:       sidebarActiveBg,
+    sidebarActiveLine:     sidebarActiveLine,
+    isDarkSidebar:         isDarkSidebar,
+    visualTheme:           visualTheme,
   );
 }
 

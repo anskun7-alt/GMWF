@@ -17,6 +17,8 @@ import 'package:gmwf/services/donations_local_storage.dart';
 import 'package:gmwf/pages/madrassa/utils/madrassa_local_storage.dart';
 import 'package:gmwf/pages/school/utils/school_sync_service.dart';
 import 'package:gmwf/pages/school/utils/school_local_storage.dart';
+import 'package:gmwf/pages/school/core/school_branch_id.dart';
+import 'package:gmwf/pages/school/core/school_store.dart' show SchoolCollection;
 import 'package:gmwf/services/finance_local_storage.dart';
 import 'package:gmwf/services/finance_loans_storage.dart';
 import 'package:gmwf/services/finance_expenses_storage.dart';
@@ -36,6 +38,9 @@ import 'package:gmwf/services/pre_login_security_service.dart';
 
 import 'package:gmwf/services/network_health_service.dart';
 import 'package:gmwf/services/auto_update_service.dart';
+import 'package:gmwf/services/stock/stock_ledger.dart';
+import 'package:gmwf/services/stock/stock_repair.dart';
+import 'package:gmwf/services/stock/stock_sync.dart';
 import 'package:gmwf/services/donation_box_storage.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
@@ -298,8 +303,20 @@ class SyncService {
     // event-pump starvation and Windows (Not Responding) freezes.
     _scheduleBackgroundBackfill(branchId, moduleScope: moduleScope);
 
-    // Stock changes are uploaded once an hour, added up per medicine.
+    // Old-format stock changes still queued from before the stock book (none are created now).
     HourlyDispensarySync.start();
+    // Stock book: one-time repair on this PC, then movements / cloud following / weekly check.
+    unawaited(() async {
+      try {
+        await StockLedger.ensureOpen();
+        await StockRepair.runIfNeeded(branchId: branchId);
+        await StockSync.start(branchId: branchId);
+        if (StockSync.isLanClient) StockSync.onLinkUp(branchId);
+        await StockSync.weeklyCheckIfDue();
+      } catch (e) {
+        Logger().w('[SyncService] stock book start failed: $e');
+      }
+    }());
     LanFirestoreGate.start(); // dispensary desks on the LAN leave Firestore to the server
 
     ConnectionManager().removeReconnectListener(_onLanReconnected);
@@ -707,6 +724,9 @@ class SyncService {
     if (bId != null && bId.isNotEmpty) {
       Logger().d('[SyncService] 🔄 LAN reconnected — pushing any unsynced local tokens to LAN Server');
       _pushUnsyncedEntriesToLanServer(bId).ignore();
+      // Stock: offer the server this desk's unconfirmed movements and compare figures.
+      // A short delay lets the link finish identifying first.
+      Future<void>.delayed(const Duration(seconds: 3), () => StockSync.onLinkUp(bId)).ignore();
     }
   }
 
@@ -1793,6 +1813,10 @@ class SyncService {
 
         final keyStr = key.toString();
         final isTeacher = keyStr.contains('__tchlog__');
+        final isStudentLog = keyStr.contains('__log__');
+        // Skip calendar (`cal__`) and events (`evt__`) keys that share schoolLogsBox;
+        // section 6 below backfills them into their own Firestore collections.
+        if (!isTeacher && !isStudentLog && SchoolBranchId.branchOfKey(key) != null) continue;
         final dateKey = (data['date'] ?? (isTeacher ? keyStr.split('__tchlog__').last : keyStr.split('__log__').last)).toString().trim();
         final coll = isTeacher
             ? 'branches/$rb/school_teacher_attendance'
@@ -1825,7 +1849,9 @@ class SyncService {
         final isSynced = (data['syncStatus'] == 'synced' || data['synced'] == true) && data['pendingSync'] != true;
         if (isSynced) continue;
 
-        final gid = (data['id'] ?? key.toString().split('__').last).toString().trim();
+        final gradeKeyId = SchoolCollection.grades.idOfKey(key, SchoolBranchId.all);
+        if (gradeKeyId == null && SchoolBranchId.branchOfKey(key) != null) continue;
+        final gid = (data['id'] ?? gradeKeyId ?? key.toString().split('__').last).toString().trim();
         final coll = 'branches/$rb/school_grades';
         if (gid.isEmpty || alreadyQueued.contains('$coll/$gid')) continue;
 
@@ -1855,7 +1881,9 @@ class SyncService {
         final isSynced = (data['syncStatus'] == 'synced' || data['synced'] == true) && data['pendingSync'] != true;
         if (isSynced) continue;
 
-        final fid = (data['id'] ?? key.toString().split('__').last).toString().trim();
+        final feeKeyId = SchoolCollection.fees.idOfKey(key, SchoolBranchId.all);
+        if (feeKeyId == null && SchoolBranchId.branchOfKey(key) != null) continue;
+        final fid = (data['id'] ?? feeKeyId ?? key.toString().split('__').last).toString().trim();
         final coll = 'branches/$rb/school_fees';
         if (fid.isEmpty || alreadyQueued.contains('$coll/$fid')) continue;
 
@@ -1870,6 +1898,54 @@ class SyncService {
         });
         alreadyQueued.add('$coll/$fid');
         queued++;
+      }
+
+      // 6. Library books, book loans, homerooms, audit (previously never backfilled, so a
+      //    failed upload of a book return stayed local forever and the next pull undid it).
+      for (final col in const [
+        SchoolCollection.books,
+        SchoolCollection.bookLoans,
+        SchoolCollection.libraryMembers,
+        SchoolCollection.librarySettings,
+        SchoolCollection.homerooms,
+        SchoolCollection.calendar,
+        SchoolCollection.events,
+        SchoolCollection.gradeAttachments,
+        SchoolCollection.feeConfigs,
+        SchoolCollection.feeSheets,
+        SchoolCollection.feePayments,
+        SchoolCollection.feeAdjustments,
+        SchoolCollection.auditLogs,
+      ]) {
+        final box = Hive.isBoxOpen(col.box) ? Hive.box(col.box) : await LocalStorageService.openBoxSafe(col.box);
+        for (final key in box.keys) {
+          final raw = box.get(key);
+          if (raw is! Map) continue;
+          final data = Map<String, dynamic>.from(raw);
+          final isSynced = (data['syncStatus'] == 'synced' || data['synced'] == true) && data['pendingSync'] != true;
+          if (isSynced) continue;
+          // Several School collections share one box (loans/members/settings,
+          // day logs/calendar). A branch-prefixed key that is not this
+          // collection's belongs to another one: skip it, or it would be
+          // uploaded into the wrong Firestore collection.
+          final keyId = col.idOfKey(key, SchoolBranchId.all);
+          if (keyId == null && SchoolBranchId.branchOfKey(key) != null) continue;
+          final rb = SchoolBranchId.normalize((data['branchId'] ?? SchoolBranchId.branchOfKey(key) ?? branchId).toString());
+          if (rb == SchoolBranchId.all) continue;
+          final id = (data['id'] ?? keyId ?? '').toString().trim();
+          final coll = 'branches/$rb/${col.name}';
+          if (id.isEmpty || alreadyQueued.contains('$coll/$id')) continue;
+          await LocalStorageService.enqueueSync({
+            'backlog': true,
+            'action': 'set',
+            'branchId': rb,
+            'collection': coll,
+            'docId': id,
+            'data': data,
+          });
+          alreadyQueued.add('$coll/$id');
+          queued++;
+        }
       }
 
       if (queued > 0) {
@@ -2661,12 +2737,19 @@ class SyncService {
               }
 
               if (act == 'delete') {
-                await docRef.delete();
                 if (isUserCol) {
-                  await _db.collection('users').doc(docId).delete().catchError((_) {});
+                  final batch = _db.batch();
+                  final seenPaths = <String>{docRef.path};
+                  batch.delete(docRef);
+                  final rootDoc = _db.collection('users').doc(docId);
+                  if (seenPaths.add(rootDoc.path)) batch.delete(rootDoc);
                   if (branchId.isNotEmpty && branchId != 'all' && branchId != 'global') {
-                    await _db.collection('branches').doc(branchId).collection('users').doc(docId).delete().catchError((_) {});
+                    final branchDoc = _db.collection('branches').doc(branchId).collection('users').doc(docId);
+                    if (seenPaths.add(branchDoc.path)) batch.delete(branchDoc);
                   }
+                  await batch.commit();
+                } else {
+                  await docRef.delete();
                 }
               } else {
                 var fsData = LocalStorageService.sanitizeForCloudUpload(data);
@@ -2675,19 +2758,30 @@ class SyncService {
                 } else if (colPath.contains('school_students')) {
                   fsData = SchoolLocalStorage.compactMediaForCloud(fsData);
                 }
-                await docRef.set(fsData, SetOptions(merge: true));
                 if (isUserCol) {
-                  // Dual write: ensure both root /users and branch /branches/{b}/users are updated
-                  await _db.collection('users').doc(docId).set(fsData, SetOptions(merge: true)).catchError((_) {});
+                  final batch = _db.batch();
+                  final seenPaths = <String>{docRef.path};
+                  batch.set(docRef, fsData, SetOptions(merge: true));
+                  final rootDoc = _db.collection('users').doc(docId);
+                  if (seenPaths.add(rootDoc.path)) batch.set(rootDoc, fsData, SetOptions(merge: true));
                   if (branchId.isNotEmpty && branchId != 'all' && branchId != 'global') {
-                    await _db.collection('branches').doc(branchId).collection('users').doc(docId).set(fsData, SetOptions(merge: true)).catchError((_) {});
+                    final branchDoc = _db.collection('branches').doc(branchId).collection('users').doc(docId);
+                    if (seenPaths.add(branchDoc.path)) batch.set(branchDoc, fsData, SetOptions(merge: true));
                   }
+                  await batch.commit();
+                } else {
+                  await docRef.set(fsData, SetOptions(merge: true));
                 }
               }
 
               // Update local cache status for school records
               try {
-                final bId = branchId.toLowerCase().trim();
+                // School items carry their branch in the path (branches/<b>/school_*);
+                // the sync session's branch can differ (HQ, aliases).
+                final pathParts = colPath.split('/');
+                final bId = (colPath.contains('school_') && pathParts.length >= 3 && pathParts[0] == 'branches')
+                    ? SchoolBranchId.normalize(pathParts[1])
+                    : branchId.toLowerCase().trim();
                 final nowIso = DateTime.now().toIso8601String();
                 if (colPath.contains('school_students') && Hive.isBoxOpen(LocalStorageService.schoolStudentsBox)) {
                   final sBox = Hive.box(LocalStorageService.schoolStudentsBox);
@@ -2935,44 +3029,46 @@ class SyncService {
               if (_isBacklogItem(action) && (st == 'waiting' || st == 'pending' || st.isEmpty)) {
                 fsData.remove('status');
               }
-              await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(upperSerial).set(fsData, SetOptions(merge: true));
-              // The dispense and prescription copies are part of this item: a failure here used
-              // to be swallowed and the item deleted as uploaded, so the cloud kept the token but
-              // lost its prescription/dispense for good. Failing the item retries it; all writes
-              // are merges on fixed document ids, so a retry is safe.
-              await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial).set(fsData, SetOptions(merge: true));
+              // Batch atomic write for dispensary entry: serial doc + dispensary copy +
+              // patient prescription timeline + patient profile doc in ONE atomic commit.
+              final batch = _db.batch();
+              final serialDocRef = _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(upperSerial);
+              batch.set(serialDocRef, fsData, SetOptions(merge: true));
+
+              final dispDocRef = _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(upperSerial);
+              batch.set(dispDocRef, fsData, SetOptions(merge: true));
 
               // Direct write embedded prescription to patient timeline so historical data is easily found
               final pCnic = (fsData['patientCnic'] ?? fsData['cnic'] ?? '').toString().trim();
               if (pCnic.isNotEmpty && (fsData['prescription'] != null || fsData['medicines'] != null || fsData['doctorName'] != null)) {
-                await _db.collection('branches').doc(branchId).collection('prescriptions').doc(pCnic).collection('prescriptions').doc(upperSerial).set(fsData, SetOptions(merge: true));
-                // (No unread copy under patients/{cnic}/prescriptions.)
+                final prescDocRef = _db.collection('branches').doc(branchId).collection('prescriptions').doc(pCnic).collection('prescriptions').doc(upperSerial);
+                batch.set(prescDocRef, fsData, SetOptions(merge: true));
               }
 
               // Direct write patient profile
               final pid = (fsData['patientId'] ?? fsData['id'] ?? '').toString().trim();
               if (pid.isNotEmpty && !pid.startsWith('unknown_')) {
-                try {
-                  final patData = {
-                    'id': pid,
-                    'patientId': pid,
-                    'name': fsData['patientName'] ?? fsData['name'],
-                    'cnic': fsData['patientCnic'] ?? fsData['cnic'],
-                    if (fsData['phone'] != null) 'phone': fsData['phone'],
-                    if (fsData['gender'] != null) 'gender': fsData['gender'],
-                    if (fsData['age'] != null) 'age': fsData['age'],
-                    'branchId': branchId,
-                    // No per-visit field, so CloudDb skips repeat writes of the same profile.
-                  };
-                  await _db.collection('branches').doc(branchId).collection('patients').doc(pid).set(patData, SetOptions(merge: true));
-                } catch (_) {}
+                final patData = {
+                  'id': pid,
+                  'patientId': pid,
+                  'name': fsData['patientName'] ?? fsData['name'],
+                  'cnic': fsData['patientCnic'] ?? fsData['cnic'],
+                  if (fsData['phone'] != null) 'phone': fsData['phone'],
+                  if (fsData['gender'] != null) 'gender': fsData['gender'],
+                  if (fsData['age'] != null) 'age': fsData['age'],
+                  'branchId': branchId,
+                  // No per-visit field, so CloudDb skips repeat writes of the same profile.
+                };
+                final patDocRef = _db.collection('branches').doc(branchId).collection('patients').doc(pid);
+                batch.set(patDocRef, patData, SetOptions(merge: true));
               }
 
               if (serial != upperSerial) {
-                try {
-                  await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(serial.toLowerCase()).delete();
-                } catch (_) {}
+                final oldSerialDocRef = _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(serial.toLowerCase());
+                batch.delete(oldSerialDocRef);
               }
+
+              await batch.commit();
 
               // Update local entry so pendingSync is cleared
               try {
@@ -3035,24 +3131,25 @@ class SyncService {
               }
             }
 
-            await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(serial).set(updateMap, SetOptions(merge: true));
+            final batch = _db.batch();
+            final serialDocRef = _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(serial);
+            batch.set(serialDocRef, updateMap, SetOptions(merge: true));
 
             // Direct write to prescriptions and dispensary paths
             final cnic = (data['patientCnic'] ?? data['cnic'] ?? '').toString();
             if (cnic.isNotEmpty) {
-              try {
-                await _db.collection('branches').doc(branchId).collection('prescriptions').doc(cnic).collection('prescriptions').doc(serial).set(Map<String, dynamic>.from(data)..addAll(updateMap), SetOptions(merge: true));
-              } catch (_) {}
+              final prescDocRef = _db.collection('branches').doc(branchId).collection('prescriptions').doc(cnic).collection('prescriptions').doc(serial);
+              batch.set(prescDocRef, Map<String, dynamic>.from(data)..addAll(updateMap), SetOptions(merge: true));
             }
-            try {
-              await _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(serial).set(updateMap, SetOptions(merge: true));
-            } catch (_) {}
+            final dispDocRef = _db.collection('branches').doc(branchId).collection('dispensary').doc(dateKey).collection(dateKey).doc(serial);
+            batch.set(dispDocRef, updateMap, SetOptions(merge: true));
 
             if (rawSerial != serial) {
-              try {
-                await _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(rawSerial.toLowerCase()).delete();
-              } catch (_) {}
+              final oldSerialDocRef = _db.collection('branches').doc(branchId).collection('serials').doc(campDocKey).collection(queueType).doc(rawSerial.toLowerCase());
+              batch.delete(oldSerialDocRef);
             }
+
+            await batch.commit();
 
             // Update local entry so pendingSync is cleared
             try {
@@ -3225,7 +3322,19 @@ class SyncService {
           else if (type == 'register_medicine' || type == 'add_stock' || type == 'add_proforma_stock') {
             final data = Map<String, dynamic>.from(action['data'] ?? {});
             final docId = data['id']?.toString() ?? data['docId']?.toString() ?? action['medicineId']?.toString() ?? action['docId']?.toString() ?? action['syncId']?.toString() ?? const Uuid().v4();
-            final fsData = Map<String, dynamic>.from(data)..remove('id')..remove('syncStatus');
+            // Details only: a quantity in this write would overwrite every other PC's dispenses
+            // and restocks. Quantity reaches the cloud only as stock movements (StockCloud).
+            final fsData = Map<String, dynamic>.from(data)
+              ..remove('id')
+              ..remove('syncStatus')
+              ..remove('quantity')
+              ..remove('quantityRaw')
+              ..remove('stock')
+              ..remove('base')
+              ..remove('rev')
+              ..remove('baseOps')
+              ..remove('lastOps')
+              ..remove('_quantityDelta');
             // downloadInventory's delta query compares updatedAt with a Timestamp; the client's
             // ISO string never matched, so edited/registered medicines didn't reach other PCs.
             fsData['updatedAt'] = FieldValue.serverTimestamp();
@@ -3957,10 +4066,22 @@ class SyncService {
                 if (action['localKey'] != null) action['localKey'],
                 if (action['localId'] != null) action['localId'],
               };
+              // Only mark a record uploaded if it still holds what was just sent. A punch added
+              // while this upload was on its way (same employee, same day) is not in the cloud
+              // yet; marking it "synced" hid it from every later sweep.
+              int punchCount(Map m) => m['punches'] is List ? (m['punches'] as List).length : 0;
+              final sentPunches = punchCount(data);
+              final sentLast = data['lastPunchTime']?.toString();
+              var newerLocally = false;
               for (final k in keysToCheck) {
                 if (aBox.containsKey(k)) {
                   final rec = aBox.get(k);
                   if (rec is Map) {
+                    if (punchCount(rec) > sentPunches ||
+                        (sentLast != null && rec['lastPunchTime'] != null && rec['lastPunchTime'].toString() != sentLast)) {
+                      newerLocally = true;
+                      continue; // newer than the upload: stays pending and is sent again
+                    }
                     final updated = Map<String, dynamic>.from(rec)
                       ..['syncStatus'] = 'synced'
                       ..['synced'] = true
@@ -3973,10 +4094,12 @@ class SyncService {
               }
               if (Hive.isBoxOpen('app_flags')) {
                 final flags = Hive.box('app_flags');
-                for (final k in keysToCheck) {
-                  await flags.put('attendance_synced_$k', true);
+                if (!newerLocally) {
+                  for (final k in keysToCheck) {
+                    await flags.put('attendance_synced_$k', true);
+                  }
+                  await flags.put('attendance_synced_${employeeId}_$dateStr', true);
                 }
-                await flags.put('attendance_synced_${employeeId}_$dateStr', true);
               }
             }
           }
@@ -4805,9 +4928,11 @@ class SyncService {
                   ? studentBranch
                   : 'gujrat';
             }
-            bId = MadrassaLocalStorage.normalizeBranch(bId);
+            bId = SchoolBranchId.normalize(bId);
             data['branchId'] = bId;
-            data['lastModified'] = DateTime.now().toIso8601String();
+            // Keep the edit's own stamp. Re-stamping with the upload time made an old
+            // offline edit look newest and beat later edits from other PCs.
+            data['lastModified'] ??= DateTime.now().toIso8601String();
             final fsData = SchoolLocalStorage.compactMediaForCloud(LocalStorageService.sanitizeForCloudUpload(data));
             await _db.collection('branches').doc(bId).collection('school_students').doc(studentId).set(fsData, SetOptions(merge: true));
 
@@ -5397,8 +5522,8 @@ class SyncService {
       'appliedAt': FieldValue.serverTimestamp(),
     });
     await batch.commit();
-    // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
-    if (amount < 0) unawaited(StockFloor.repair(docRef.path));
+    // No silent reset to 0 any more: that lost real differences and caused drift. Screens show
+    // 0 for a negative figure and the weekly stock check lists it for a count.
   }
 
   /// True if [id] is already listed in the day document's [field] (e.g. 'appliedBatches').

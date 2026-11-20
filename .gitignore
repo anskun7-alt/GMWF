@@ -85,3 +85,4 @@ tool/out.txt
 GMWF_Network_Pressure_Report_*.txt
 GMWF_Stress_Test_Cumulative_History.txt
 stress_test_state.json
+sandbox/

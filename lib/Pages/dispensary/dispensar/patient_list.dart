@@ -14,6 +14,7 @@ import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
 import 'package:gmwf/design/design_system.dart';
 import 'package:gmwf/utils/branch_labels.dart';
+import '../widgets/desk_theme.dart';
 import 'dispense_queue.dart';
 
 class PatientList extends StatefulWidget {
@@ -37,10 +38,9 @@ class PatientList extends StatefulWidget {
 }
 
 class _PatientListState extends State<PatientList> {
-  static const Color _teal   = SoftPalette.teal600;
-  static const Color _emerald = SoftPalette.emerald550;
+  Color get _teal => context.comfort.brand;
+  Color get _emerald => context.comfort.brand;
   static const Color _indigo  = SoftPalette.indigo600;
-  static const Color _amber   = SoftPalette.orange400;
 
   bool get _isDark {
     try {
@@ -182,12 +182,12 @@ class _PatientListState extends State<PatientList> {
                 updated['name'] = pName;
               }
               final incomingP = data['patientCnic']?.toString().trim();
-              if (incomingP != null && incomingP.isNotEmpty && !incomingP.startsWith('unknown_') && incomingP != '00000-0000000-0' && incomingP != '-') {
+              if (incomingP != null && incomingP.isNotEmpty && !incomingP.startsWith('unknown_') && incomingP != '-') {
                 updated['patientCnic'] = incomingP;
                 updated['cnic'] ??= incomingP;
               }
               final incomingC = data['cnic']?.toString().trim();
-              if (incomingC != null && incomingC.isNotEmpty && !incomingC.startsWith('unknown_') && incomingC != '00000-0000000-0' && incomingC != '-') {
+              if (incomingC != null && incomingC.isNotEmpty && !incomingC.startsWith('unknown_') && incomingC != '-') {
                 updated['cnic'] = incomingC;
                 updated['patientCnic'] ??= incomingC;
               }
@@ -412,11 +412,11 @@ class _PatientListState extends State<PatientList> {
       if (hasChanges && mounted) {
         _debouncedRebuild();
         if (showToast) {
-          AppToast.showSnackBar(context, 
-            const SnackBar(
-              content: Text('Cloud sync complete.'),
-              backgroundColor: SoftPalette.teal600,
-              duration: Duration(seconds: 2),
+          AppToast.showSnackBar(context,
+            SnackBar(
+              content: const Text('Cloud sync complete.'),
+              backgroundColor: _teal,
+              duration: const Duration(seconds: 2),
             ),
           );
         }
@@ -538,10 +538,10 @@ class _PatientListState extends State<PatientList> {
           }
           return _buildListContent(context);
         }
-        return const Center(
+        return Center(
           child: Padding(
-            padding: EdgeInsets.all(24),
-            child: CircularProgressIndicator(color: SoftPalette.emerald550),
+            padding: const EdgeInsets.all(24),
+            child: CircularProgressIndicator(color: _teal),
           ),
         );
       },
@@ -550,279 +550,337 @@ class _PatientListState extends State<PatientList> {
 
   Widget _buildListContent(BuildContext context) {
     final isMobile = GBreakpoint.isMobile(context);
+    final c = context.comfort;
 
     if (!_isQueueInitialized) {
       _refreshQueueCache();
     }
     final allPatients = _cachedAllPatients;
 
-        final pendingList = allPatients
-            .where((p) =>
-                (p['dispenseStatus'] ?? '').toString().toLowerCase() != 'dispensed')
-            .toList();
-        final dispensedList = allPatients
-            .where((p) =>
-                (p['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed')
-            .toList();
+    final pendingList = allPatients
+        .where((p) =>
+            (p['dispenseStatus'] ?? '').toString().toLowerCase() != 'dispensed')
+        .toList();
+    final dispensedList = allPatients
+        .where((p) =>
+            (p['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed')
+        .toList();
 
-        final waitingCount   = pendingList.length;
-        final dispensedCount = dispensedList.length;
-        final totalCount     = allPatients.length;
+    final waitingCount   = pendingList.length;
+    final dispensedCount = dispensedList.length;
+    final totalCount     = allPatients.length;
 
-        final patients = _dispenseFilter == 'pending'
-            ? pendingList
-            : (_dispenseFilter == 'dispensed' ? dispensedList : allPatients);
+    final patients = _dispenseFilter == 'pending'
+        ? pendingList
+        : (_dispenseFilter == 'dispensed' ? dispensedList : allPatients);
 
-        return Column(
-          children: [
-            // ── Summary Cards (Matching Receptionist Solid Aesthetics) ───────
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _compactSummaryCard(
-                      label: 'Waiting',
-                      value: '$waitingCount',
-                      icon: Icons.hourglass_top_rounded,
-                      bgGradientStart: _amber,
-                      bgGradientEnd: SoftPalette.orange500,
-                      glowColor: _amber,
-                      isSelected: _dispenseFilter == 'pending',
-                      onTap: () => setState(() => _dispenseFilter = _dispenseFilter == 'pending' ? 'all' : 'pending'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _compactSummaryCard(
-                      label: 'Dispensed',
-                      value: '$dispensedCount',
-                      icon: Icons.check_circle_outline_rounded,
-                      bgGradientStart: _emerald,
-                      bgGradientEnd: SoftPalette.emerald600,
-                      glowColor: _emerald,
-                      isSelected: _dispenseFilter == 'dispensed',
-                      onTap: () => setState(() => _dispenseFilter = _dispenseFilter == 'dispensed' ? 'all' : 'dispensed'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _compactSummaryCard(
-                      label: 'Total Queue',
-                      value: '$totalCount',
-                      icon: Icons.people_alt_rounded,
-                      bgGradientStart: _teal,
-                      bgGradientEnd: SoftPalette.teal600,
-                      glowColor: _teal,
-                      isSelected: _dispenseFilter == 'all',
-                      onTap: () => setState(() => _dispenseFilter = 'all'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ── Main Card (Matching Receptionist Today's Tokens Card) ────────
-            Expanded(
-              child: Card(
-                elevation: 8,
-                color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+    return DeskCard(
+      accentTop: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Top Header Row ──────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 10, 10),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.medication_liquid_rounded,
+                  color: c.brand,
+                  size: 17,
                 ),
-                clipBehavior: Clip.antiAlias,
-                child: Stack(
-                  children: [
-                    // ── Golden Watermark (1.webp) on Bottom Right ──────────
-                    Positioned(
-                      right: -135,
-                      bottom: -50,
-                      width: 320,
-                      height: 320,
-                      child: IgnorePointer(
-                        child: Transform.rotate(
-                          angle: -0.16,
-                          child: Opacity(
-                            opacity: _isDark ? 0.22 : 0.32,
-                            child: GDecorativeImage.asset(
-                              'assets/images/1.webp',
-                              fit: BoxFit.contain,
-                              color: _isDark ? SoftPalette.amber200 : SoftPalette.yellow300,
-                              colorBlendMode: BlendMode.srcIn,
-                            ),
-                          ),
+                const SizedBox(width: 8),
+                Text(
+                  'Dispense Queue',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: c.textPrimary,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                const Spacer(),
+                Tooltip(
+                  message: _dispenseFilter == 'all'
+                      ? 'Showing all $totalCount in queue'
+                      : 'Show all $totalCount in queue',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(20),
+                    onTap: _dispenseFilter == 'all'
+                        ? null
+                        : () => setState(() => _dispenseFilter = 'all'),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: _dispenseFilter == 'all'
+                            ? c.brandSoft
+                            : c.surfaceSunken,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: _dispenseFilter == 'all'
+                              ? c.brand.withValues(alpha: 0.35)
+                              : c.border,
+                        ),
+                      ),
+                      child: Text(
+                        '$totalCount total',
+                        style: TextStyle(
+                          color: _dispenseFilter == 'all'
+                              ? c.brand
+                              : c.textMuted,
+                          fontSize: 11.5,
+                          fontWeight: _dispenseFilter == 'all'
+                              ? FontWeight.w700
+                              : FontWeight.w600,
                         ),
                       ),
                     ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Tooltip(
+                  message: _sortNewestFirst ? 'Sort: Oldest First' : 'Sort: Newest First',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(6),
+                    onTap: () => setState(() {
+                      _sortNewestFirst = !_sortNewestFirst;
+                      _refreshQueueCache();
+                    }),
+                    child: SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: Icon(
+                        _sortNewestFirst
+                            ? Icons.arrow_downward_rounded
+                            : Icons.arrow_upward_rounded,
+                        color: c.textSecondary,
+                        size: 16,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Tooltip(
+                  message: 'Refresh & Fetch Missing Tokens from Server',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(6),
+                    onTap: _isSyncingQueue
+                        ? null
+                        : () async {
+                            setState(() => _isSyncingQueue = true);
+                            try {
+                              // 1. Force immediate LAN catch-up sweep from LAN Server
+                              await RealtimeManager().forceFlushAndCatchUp();
+                              // 2. Fetch today's tokens from Cloud Firestore fallback
+                              await LocalStorageService.downloadTodayTokens(widget.branchId);
+                            } catch (e) {
+                              debugPrint('[PatientList] Manual refresh error: $e');
+                            } finally {
+                              if (mounted) {
+                                setState(() => _isSyncingQueue = false);
+                                WidgetsBinding.instance.addPostFrameCallback(
+                                    (_) => _tryAutoSelectSmallestPending());
+                              }
+                            }
+                          },
+                    child: SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: Center(
+                        child: _isSyncingQueue
+                            ? SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  color: c.brand,
+                                  strokeWidth: 1.8,
+                                ),
+                              )
+                            : Icon(
+                                Icons.refresh_rounded,
+                                color: c.textSecondary,
+                                size: 17,
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
 
-                    // ── Card Content ───────────────────────────────────────
-                    Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Header Row
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.list_alt_rounded,
-                                color: _isDark ? SoftPalette.sky350 : _teal,
-                                size: 24,
-                              ),
-                              const SizedBox(width: 10),
-                              Text(
-                                "Dispense Queue",
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: _isDark ? SoftPalette.gray50 : _teal,
-                                ),
-                              ),
-                              const Spacer(),
-                              IconButton(
-                                icon: Icon(
-                                  _sortNewestFirst
-                                      ? Icons.arrow_downward_rounded
-                                      : Icons.arrow_upward_rounded,
-                                  color: _isDark ? SoftPalette.sky350 : _teal,
-                                  size: 20,
-                                ),
-                                onPressed: () => setState(() {
-                                  _sortNewestFirst = !_sortNewestFirst;
-                                  _refreshQueueCache();
-                                }),
-                                tooltip: _sortNewestFirst ? 'Sort: Oldest First' : 'Sort: Newest First',
-                              ),
-                              IconButton(
-                                icon: _isSyncingQueue
-                                    ? SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          color: _isDark ? SoftPalette.sky350 : _teal,
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : Icon(
-                                        Icons.refresh_rounded,
-                                        color: _isDark ? SoftPalette.sky350 : _teal,
-                                        size: 22,
-                                      ),
-                                onPressed: _isSyncingQueue
-                                    ? null
-                                    : () async {
-                                        setState(() => _isSyncingQueue = true);
-                                        try {
-                                          // 1. Force immediate LAN catch-up sweep from LAN Server
-                                          await RealtimeManager().forceFlushAndCatchUp();
-                                          // 2. Fetch today's tokens from Cloud Firestore fallback
-                                          await LocalStorageService.downloadTodayTokens(widget.branchId);
-                                        } catch (e) {
-                                          debugPrint('[PatientList] Manual refresh error: $e');
-                                        } finally {
-                                          if (mounted) {
-                                            setState(() => _isSyncingQueue = false);
-                                            WidgetsBinding.instance.addPostFrameCallback(
-                                                (_) => _tryAutoSelectSmallestPending());
-                                          }
-                                        }
-                                      },
-                                tooltip: 'Refresh & Fetch Missing Tokens from Server',
-                              ),
-                            ],
-                          ),
+          Divider(height: 1, thickness: 1, color: c.border),
 
-                          // Session / Shift Filter Bar inside Card
-                          Padding(
-                            padding: const EdgeInsets.only(top: 8, bottom: 8),
-                            child: SizedBox(
-                              width: double.infinity,
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: Row(
-                                  children: [
-                                    _buildSessionChip('auto', '⚡ Current (${CampSessionService.getCurrentSession(null, widget.branchId).toUpperCase()})', _isDark),
-                                    const SizedBox(width: 6),
-                                    _buildSessionChip('all', '📋 All Today', _isDark),
-                                    if (_allowedSessions.contains('morning') || _allowedSessions.contains('all')) ...[
-                                      const SizedBox(width: 6),
-                                      _buildSessionChip('morning', '☀️ Morning', _isDark),
-                                    ],
-                                    if (_allowedSessions.contains('evening') || _allowedSessions.contains('all')) ...[
-                                      const SizedBox(width: 6),
-                                      _buildSessionChip('evening', '🌅 Evening', _isDark),
-                                    ],
-                                    if (_allowedSessions.contains('night') || _allowedSessions.contains('all')) ...[
-                                      const SizedBox(width: 6),
-                                      _buildSessionChip('night', '🌙 Night', _isDark),
-                                    ],
-                                  ],
-                                ),
+          // ── Session Filter Strip ────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildSessionChip(
+                    'auto',
+                    'Current (${CampSessionService.getCurrentSession(null, widget.branchId).toUpperCase()})',
+                    _isDark,
+                  ),
+                  const SizedBox(width: 6),
+                  _buildSessionChip('all', 'All Today', _isDark),
+                  if (_allowedSessions.contains('morning') || _allowedSessions.contains('all')) ...[
+                    const SizedBox(width: 6),
+                    _buildSessionChip('morning', 'Morning', _isDark),
+                  ],
+                  if (_allowedSessions.contains('evening') || _allowedSessions.contains('all')) ...[
+                    const SizedBox(width: 6),
+                    _buildSessionChip('evening', 'Evening', _isDark),
+                  ],
+                  if (_allowedSessions.contains('night') || _allowedSessions.contains('all')) ...[
+                    const SizedBox(width: 6),
+                    _buildSessionChip('night', 'Night', _isDark),
+                  ],
+                ],
+              ),
+            ),
+          ),
+
+          // ── Integrated 3-Column Soft-Tinted KPI Filter Strip ────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _compactSummaryCard(
+                    label: 'Waiting',
+                    value: '$waitingCount',
+                    icon: Icons.hourglass_top_rounded,
+                    activeColor: c.warning,
+                    bgTint: c.warningBg,
+                    isSelected: _dispenseFilter == 'pending',
+                    onTap: () => setState(() => _dispenseFilter = _dispenseFilter == 'pending' ? 'all' : 'pending'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _compactSummaryCard(
+                    label: 'Dispensed',
+                    value: '$dispensedCount',
+                    icon: Icons.check_circle_outline_rounded,
+                    activeColor: c.success,
+                    bgTint: c.successBg,
+                    isSelected: _dispenseFilter == 'dispensed',
+                    onTap: () => setState(() => _dispenseFilter = _dispenseFilter == 'dispensed' ? 'all' : 'dispensed'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _compactSummaryCard(
+                    label: 'Total Queue',
+                    value: '$totalCount',
+                    icon: Icons.people_alt_rounded,
+                    activeColor: c.brand,
+                    bgTint: c.brandSoft,
+                    isSelected: _dispenseFilter == 'all',
+                    onTap: () => setState(() => _dispenseFilter = 'all'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          Divider(height: 1, thickness: 1, color: c.border),
+
+          // ── Patient List ────────────────────────────────────────────────
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: patients.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(14),
+                              child: Image.asset(
+                                'assets/images/doctor_empty_queue.jpg',
+                                width: 112,
+                                height: 112,
+                                fit: BoxFit.cover,
                               ),
                             ),
-                          ),
-
-                          // Header Row (Patient Count)
-                          Row(
-                            children: [
-                              Text(
-                                '$totalCount patients',
-                                style: TextStyle(
-                                  color: _isDark ? SoftPalette.slate350 : SoftPalette.gray550,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'No completed prescriptions in queue',
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w600,
+                                color: c.textSecondary,
                               ),
-                            ],
-                          ),
-                          const Divider(height: 18),
-
-                          // Patient List
-                          Expanded(
-                            child: patients.isEmpty
-                                ? Center(
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scroll,
+                      itemCount: patients.length,
+                      itemBuilder: (context, index) {
+                        final patient = patients[index];
+                        final card = _buildPatientItem(patient, isMobile);
+                        final showDispensedDivider = _dispenseFilter == 'all' &&
+                            DispenseQueue.isDispensed(patient) &&
+                            (index == 0 ||
+                                !DispenseQueue.isDispensed(patients[index - 1]));
+                        if (!showDispensedDivider) return card;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(4, 10, 4, 6),
+                              child: Row(
+                                children: [
+                                  Expanded(child: Container(height: 1, color: c.border)),
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: c.successBg,
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(color: c.success.withValues(alpha: 0.3)),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(
-                                          Icons.assignment_turned_in_outlined,
-                                          size: 56,
-                                          color: _isDark ? SoftPalette.slate600 : SoftPalette.gray300,
-                                        ),
-                                        const SizedBox(height: 12),
+                                        Icon(Icons.check_circle_outline_rounded, size: 11, color: c.success),
+                                        const SizedBox(width: 4),
                                         Text(
-                                          "No completed prescriptions in queue",
+                                          'DISPENSED ($dispensedCount)',
                                           style: TextStyle(
-                                            fontSize: 14,
-                                            color: _isDark ? SoftPalette.slate350 : SoftPalette.gray500,
+                                            fontSize: 9.5,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 0.6,
+                                            color: c.success,
                                           ),
-                                          textAlign: TextAlign.center,
                                         ),
                                       ],
                                     ),
-                                  )
-                                : ListView.separated(
-                                    controller: _scroll,
-                                    itemCount: patients.length,
-                                    separatorBuilder: (_, _) => Divider(
-                                      height: 1,
-                                      color: _isDark ? SoftPalette.slate700 : SoftPalette.gray100,
-                                    ),
-                                    itemBuilder: (context, index) {
-                                      final patient = patients[index];
-                                      return _buildPatientItem(patient, isMobile);
-                                    },
                                   ),
-                          ),
-                        ],
-                      ),
+                                  Expanded(child: Container(height: 1, color: c.border)),
+                                ],
+                              ),
+                            ),
+                            card,
+                          ],
+                        );
+                      },
                     ),
-                  ],
-                ),
-              ),
             ),
-          ],
-        );
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildPatientItem(Map<String, dynamic> e, bool isMobile) {
@@ -831,7 +889,11 @@ class _PatientListState extends State<PatientList> {
     final name = (rawName != null && rawName.isNotEmpty && rawName.toLowerCase() != 'null')
         ? rawName
         : 'Unknown Patient';
-    final cnic = (e['patientCnic'] ?? e['cnic'] ?? e['guardianCnic'])?.toString().trim() ?? '';
+    final cnic = LocalStorageService.resolveFirstValidCnic([
+      e['patientCnic'],
+      e['cnic'],
+      e['guardianCnic'],
+    ]);
     final queueTypeRaw = (e['queueType'] as String?)?.toLowerCase().trim() ?? 'unknown';
     final days = _getDaysOfMedicine(e);
 
@@ -851,13 +913,13 @@ class _PatientListState extends State<PatientList> {
         badgeColor = SoftPalette.orange400;
         displayType = 'GMWF';
       } else {
-        badgeColor = SoftPalette.emerald550;
+        badgeColor = context.comfort.brand;
         displayType = BranchLabels.karachiZakatLabel;
       }
     } else {
       switch (queueTypeRaw) {
         case 'zakat':
-          badgeColor = SoftPalette.emerald550;
+          badgeColor = context.comfort.brand;
           displayType = 'Zakat';
           break;
         case 'non-zakat':
@@ -869,12 +931,13 @@ class _PatientListState extends State<PatientList> {
           displayType = 'GMWF';
           break;
         default:
-          badgeColor = SoftPalette.emerald550;
+          badgeColor = context.comfort.brand;
           displayType = 'Zakat';
       }
     }
 
     // Status pill
+    final c = context.comfort;
     String statusLabel;
     Color statusBg;
     Color statusText;
@@ -882,18 +945,18 @@ class _PatientListState extends State<PatientList> {
 
     if (isDispensed) {
       statusLabel = 'Dispensed';
-      statusBg = _isDark ? SoftPalette.green700 : SoftPalette.green100m;
-      statusText = _isDark ? SoftPalette.emerald200 : SoftPalette.green550;
+      statusBg = c.successBg;
+      statusText = c.success;
       statusIcon = Icons.check_circle_outline_rounded;
     } else if (isOnHold) {
       statusLabel = 'On Hold';
-      statusBg = _isDark ? SoftPalette.orange800 : SoftPalette.yellow50;
-      statusText = _isDark ? SoftPalette.yellow200 : SoftPalette.orange350;
+      statusBg = c.warningBg;
+      statusText = c.warning;
       statusIcon = Icons.pause_circle_outline_rounded;
     } else {
       statusLabel = 'Waiting to Dispense';
-      statusBg = _isDark ? SoftPalette.blue750 : SoftPalette.slate100;
-      statusText = _isDark ? SoftPalette.blue300 : SoftPalette.blue550;
+      statusBg = c.brandSoft;
+      statusText = c.brand;
       statusIcon = Icons.medication_outlined;
     }
 
@@ -927,13 +990,13 @@ class _PatientListState extends State<PatientList> {
           ),
           decoration: BoxDecoration(
             color: isSelected
-                ? (_isDark ? SoftPalette.teal700.withValues(alpha: 0.5) : SoftPalette.teal50)
-                : (_isDark ? SoftPalette.slate800 : SoftPalette.gray50),
+                ? context.comfort.brand.withValues(alpha: _isDark ? 0.18 : 0.10)
+                : context.comfort.surface,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
               color: isSelected
-                  ? (_isDark ? SoftPalette.teal300 : _teal)
-                  : (_isDark ? SoftPalette.slate700 : SoftPalette.gray100),
+                  ? context.comfort.brand
+                  : context.comfort.border,
               width: isSelected ? 1.8 : 1.0,
             ),
           ),
@@ -941,16 +1004,19 @@ class _PatientListState extends State<PatientList> {
             children: [
               // ── Token Number Pill ──────────────────────────────
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: isDispensed ? SoftPalette.gray350 : badgeColor,
-                  borderRadius: BorderRadius.circular(8),
+                  color: isDispensed ? c.surfaceSunken : c.brandSoft,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isDispensed ? c.border : c.brand.withValues(alpha: 0.35),
+                  ),
                 ),
                 child: Text(
                   '#$seqNumber',
-                  style: const TextStyle(
-                    color: SoftPalette.gray50,
-                    fontWeight: FontWeight.bold,
+                  style: TextStyle(
+                    color: isDispensed ? c.textMuted : c.brand,
+                    fontWeight: FontWeight.w800,
                     fontSize: 13,
                   ),
                 ),
@@ -969,11 +1035,9 @@ class _PatientListState extends State<PatientList> {
                           child: Text(
                             name,
                             style: TextStyle(
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w700,
                               fontSize: isMobile ? 13 : 14,
-                              color: isDispensed
-                                  ? SoftPalette.gray350
-                                  : (_isDark ? SoftPalette.gray50 : SoftPalette.gray900A87),
+                              color: isDispensed ? c.textSecondary : c.textPrimary,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1002,32 +1066,40 @@ class _PatientListState extends State<PatientList> {
                     Row(
                       children: [
                         if (cnic.isNotEmpty) ...[
-                          GestureDetector(
-                            onTap: () {
-                              Clipboard.setData(ClipboardData(text: cnic));
-                              AppToast.showSnackBar(context, 
-                                SnackBar(
-                                  content: Text('Copied CNIC: $cnic'),
-                                  duration: const Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  cnic,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: _isDark ? SoftPalette.sky350 : _teal,
-                                    decoration: TextDecoration.underline,
+                          Flexible(
+                            child: GestureDetector(
+                              onTap: () {
+                                Clipboard.setData(ClipboardData(text: cnic));
+                                AppToast.showSnackBar(context, 
+                                  SnackBar(
+                                    content: Text('Copied CNIC: $cnic'),
+                                    duration: const Duration(seconds: 1),
                                   ),
-                                ),
-                                const SizedBox(width: 3),
-                                Icon(Icons.copy_rounded,
-                                    size: 11,
-                                    color: _isDark ? SoftPalette.sky350 : _teal),
-                              ],
+                                );
+                              },
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      cnic,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: c.brand,
+                                        decoration: TextDecoration.underline,
+                                        decorationStyle: TextDecorationStyle.dotted,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Icon(Icons.copy_rounded,
+                                      size: 10,
+                                      color: c.brand),
+                                ],
+                              ),
                             ),
                           ),
                           const SizedBox(width: 6),
@@ -1038,7 +1110,7 @@ class _PatientListState extends State<PatientList> {
                             decoration: BoxDecoration(
                               color: campTag.contains('HAJI')
                                   ? SoftPalette.indigo500
-                                  : SoftPalette.teal500,
+                                  : c.brand,
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
@@ -1060,32 +1132,32 @@ class _PatientListState extends State<PatientList> {
               const SizedBox(width: 8),
 
               // ── Category & Status Pills ────────────────────────
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+              Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
                     decoration: BoxDecoration(
                       color: isDarkCategoryBadgeBg(badgeColor),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: badgeColor.withValues(alpha: 0.5)),
+                      border: Border.all(color: badgeColor.withValues(alpha: 0.3)),
                     ),
                     child: Text(
                       displayType,
                       style: TextStyle(
                         fontSize: 10,
-                        fontWeight: FontWeight.bold,
+                        fontWeight: FontWeight.w700,
                         color: badgeColor,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 3),
+                  const SizedBox(width: 4),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
                     decoration: BoxDecoration(
                       color: statusBg,
                       borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: statusText.withValues(alpha: 0.3)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1096,7 +1168,7 @@ class _PatientListState extends State<PatientList> {
                           statusLabel,
                           style: TextStyle(
                             fontSize: 10,
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w700,
                             color: statusText,
                           ),
                         ),
@@ -1120,67 +1192,65 @@ class _PatientListState extends State<PatientList> {
     required String label,
     required String value,
     required IconData icon,
-    required Color bgGradientStart,
-    required Color bgGradientEnd,
-    required Color glowColor,
+    required Color activeColor,
+    required Color bgTint,
     VoidCallback? onTap,
     bool isSelected = false,
   }) {
+    final c = context.comfort;
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(10),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [bgGradientStart, bgGradientEnd],
-            ),
-            borderRadius: BorderRadius.circular(16),
+            color: isSelected
+                ? bgTint
+                : activeColor.withValues(alpha: _isDark ? 0.08 : 0.05),
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: isSelected ? SoftPalette.gray50 : SoftPalette.gray50.withValues(alpha: 0.25),
-              width: isSelected ? 2.2 : 1.0,
+              color: isSelected
+                  ? activeColor
+                  : activeColor.withValues(alpha: _isDark ? 0.28 : 0.22),
+              width: isSelected ? 1.5 : 1.0,
             ),
-            boxShadow: [
-              BoxShadow(
-                color: glowColor.withValues(alpha: isSelected ? 0.48 : 0.28),
-                blurRadius: isSelected ? 14 : 10,
-                offset: const Offset(0, 4),
-              ),
-            ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: activeColor,
+                  height: 1.1,
+                ),
+              ),
+              const SizedBox(height: 3),
               Row(
                 children: [
-                  Icon(icon, size: 14, color: SoftPalette.gray50.withValues(alpha: 0.90)),
-                  const SizedBox(width: 5),
                   Expanded(
                     child: Text(
                       label,
                       style: TextStyle(
                         fontSize: 11,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
-                        color: SoftPalette.gray50.withValues(alpha: 0.95),
+                        fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                        color: c.textSecondary,
                       ),
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  Icon(
+                    icon,
+                    size: 13,
+                    color: activeColor.withValues(alpha: isSelected ? 0.95 : 0.65),
+                  ),
                 ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                  color: SoftPalette.gray50,
-                ),
               ),
             ],
           ),
@@ -1210,7 +1280,7 @@ class _PatientListState extends State<PatientList> {
           value: items.any((i) => i['id'] == value) ? value : items.first['id'],
           isDense: true,
           icon: Icon(Icons.arrow_drop_down,
-              size: 16, color: isDark ? SoftPalette.sky350 : _teal),
+              size: 16, color: _teal),
           dropdownColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
           style: TextStyle(
             fontSize: 11,
@@ -1237,32 +1307,31 @@ class _PatientListState extends State<PatientList> {
   }
 
   Widget _buildSessionChip(String value, String label, bool isDark) {
+    final c = context.comfort;
     final isSelected = _selectedSessionFilter == value;
     return InkWell(
       onTap: () => setState(() {
         _selectedSessionFilter = value;
         _refreshQueueCache();
       }),
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: isSelected ? _teal : (isDark ? SoftPalette.slate800 : SoftPalette.gray50),
-          borderRadius: BorderRadius.circular(10),
+          color: isSelected ? c.brand : c.surfaceSunken,
+          borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: isSelected ? _teal : (isDark ? SoftPalette.slate700 : SoftPalette.slate200),
+            color: isSelected ? c.brand : c.border,
             width: 1,
           ),
-          boxShadow: isSelected
-              ? [BoxShadow(color: _teal.withValues(alpha: 0.3), blurRadius: 4, offset: const Offset(0, 1))]
-              : null,
         ),
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 11,
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
-            color: isSelected ? SoftPalette.gray50 : (isDark ? SoftPalette.slate200 : SoftPalette.slate700),
+            fontSize: 11.5,
+            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+            color: isSelected ? c.onBrand : c.textSecondary,
           ),
         ),
       ),

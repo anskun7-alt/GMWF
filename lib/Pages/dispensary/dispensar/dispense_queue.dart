@@ -164,6 +164,10 @@ class DispenseQueue {
         e['cnic'],
         e['guardianCnic'],
       ]);
+      if (cnic.isNotEmpty) {
+        ov(e)['cnic'] = cnic;
+        ov(e)['patientCnic'] = cnic;
+      }
 
       // Fall back to prescription details if entry name OR cnic is missing/synthetic
       if ((name.isEmpty || cnic.isEmpty) && presc != null) {

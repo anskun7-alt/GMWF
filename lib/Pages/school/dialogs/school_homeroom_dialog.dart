@@ -1,13 +1,15 @@
 // lib/pages/school/dialogs/school_homeroom_dialog.dart
+//
+// Assign or transfer a homeroom (Class Incharge) teacher (Phase 6: gmwf_ui
+// tokens and all configured sections A–D).
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
-import '../models/school_teacher.dart';
-import '../theme/school_theme.dart';
-import '../utils/school_local_storage.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+
 import '../constants/school_constants.dart';
-import '../../../widgets/app_feedback.dart';
+import '../models/school_teacher.dart';
+import '../utils/school_local_storage.dart';
+import '../widgets/erp/school_erp.dart';
 
 class SchoolHomeroomDialog extends StatefulWidget {
   final String branchId;
@@ -30,282 +32,240 @@ class SchoolHomeroomDialog extends StatefulWidget {
 class _SchoolHomeroomDialogState extends State<SchoolHomeroomDialog> {
   late String _selectedGrade;
   late String _selectedSection;
-  SchoolTeacher? _selectedTeacher;
+  String? _selectedTeacherId;
   bool _isSaving = false;
-
-  final List<String> _grades = SchoolConstants.grades;
-  final List<String> _sections = ['A', 'B', 'C'];
 
   @override
   void initState() {
     super.initState();
-    _selectedGrade = widget.initialGrade;
-    _selectedSection = widget.initialSection;
+    _selectedGrade = SchoolConstants.grades.contains(widget.initialGrade)
+        ? widget.initialGrade
+        : SchoolConstants.grades.first;
+    _selectedSection = SchoolConstants.sections.contains(widget.initialSection)
+        ? widget.initialSection
+        : SchoolConstants.sections.first;
   }
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Container(
-        width: 520,
-        padding: const EdgeInsets.all(24),
-        child: StreamBuilder<List<Map<String, dynamic>>>(
-          stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
-          builder: (context, snapshot) {
-            final rawTeachers = snapshot.data ?? [];
-            final activeTeachers = rawTeachers
-                .map((m) => SchoolTeacher.fromMap(m['id'] ?? '', m))
-                .where((t) => t.status == 'active')
-                .toList();
+      shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+      backgroundColor: c.surface,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Padding(
+          padding: const EdgeInsets.all(Gsp.sp5),
+          child: StreamBuilder<List<Map<String, dynamic>>>(
+            stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
+            builder: (context, snapshot) {
+              final rawTeachers = snapshot.data ?? const [];
+              final activeTeachers = rawTeachers
+                  .map((m) => SchoolTeacher.fromMap((m['id'] ?? '').toString(), m))
+                  .where((t) => t.status.toLowerCase() == 'active')
+                  .toList()
+                ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
-            final currentAssignment = SchoolLocalStorage.getHomeroomAssignmentCached(
-              widget.branchId,
-              _selectedGrade,
-              _selectedSection,
-            );
-            final currentTeacherId = currentAssignment?['teacherId']?.toString() ?? '';
-            final currentTeacherName = currentAssignment?['teacherName']?.toString() ?? 'Unassigned';
+              final currentAssignment = SchoolLocalStorage.getHomeroomAssignmentCached(
+                widget.branchId,
+                _selectedGrade,
+                _selectedSection,
+              );
+              final currentTeacherId = currentAssignment?['teacherId']?.toString() ?? '';
+              final currentTeacherName = currentAssignment?['teacherName']?.toString() ?? 'Unassigned';
 
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.sky700).withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(Icons.supervisor_account_rounded, color: context.adapt(SoftPalette.sky700), size: 24),
-                    ),
-                    const SizedBox(width: 14),
+              SchoolTeacher? selectedTeacher;
+              for (final t in activeTeachers) {
+                if (t.id == _selectedTeacherId) selectedTeacher = t;
+              }
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Header
+                  Row(children: [
+                    const GModuleTile(icon: GIcons.classroom, size: 36),
+                    const SizedBox(width: Gsp.sp3),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Assign / Transfer Homeroom Teacher',
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate800)),
-                          ),
-                          Text(
-                            'Manage Class Incharge responsibility & attendance permissions',
-                            style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.slate550)),
-                          ),
-                        ],
-                      ),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Assign / transfer homeroom teacher', style: GText.h3(c.textPrimary)),
+                        Text('Manage class in-charge and attendance access', style: GText.caption(c.textMuted)),
+                      ]),
                     ),
                     IconButton(
-                      icon: Icon(Icons.close_rounded, color: context.adapt(SoftPalette.gray350)),
-                      onPressed: () => Navigator.pop(context, false),
+                      tooltip: 'Close',
+                      icon: const Icon(GIcons.close),
+                      onPressed: _isSaving ? null : () => Navigator.pop(context, false),
                     ),
-                  ],
-                ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
+                  Divider(height: 1, color: c.border),
+                  const SizedBox(height: Gsp.sp4),
 
-                const SizedBox(height: 20),
-                const Divider(),
-                const SizedBox(height: 16),
-
-                // Select Class & Section
-                Row(
-                  children: [
+                  // Class & Section
+                  Row(children: [
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Target Grade / Class:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(SoftPalette.slate600))),
-                          const SizedBox(height: 6),
-                          DropdownButtonFormField<String>(
-                            value: _selectedGrade,
-                            decoration: InputDecoration(
-                              filled: true,
-                              fillColor: context.adapt(SoftPalette.gray50),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: context.adapt(SoftPalette.slate150))),
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                            ),
-                            items: _grades.map((g) => DropdownMenuItem(value: g, child: Text('Grade $g'))).toList(),
-                            onChanged: (v) {
-                              if (v != null) setState(() { _selectedGrade = v; _selectedTeacher = null; });
-                            },
-                          ),
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('hr-grade-$_selectedGrade'),
+                        initialValue: _selectedGrade,
+                        isExpanded: true,
+                        decoration: const InputDecoration(labelText: 'Class / grade', isDense: true),
+                        items: [
+                          for (final g in SchoolConstants.grades) DropdownMenuItem(value: g, child: Text('Class $g')),
                         ],
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() {
+                              _selectedGrade = v;
+                              _selectedTeacherId = null;
+                            });
+                          }
+                        },
                       ),
                     ),
-                    const SizedBox(width: 16),
+                    const SizedBox(width: Gsp.sp3),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Section:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(SoftPalette.slate600))),
-                          const SizedBox(height: 6),
-                          DropdownButtonFormField<String>(
-                            value: _selectedSection,
-                            decoration: InputDecoration(
-                              filled: true,
-                              fillColor: context.adapt(SoftPalette.gray50),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: context.adapt(SoftPalette.slate150))),
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                            ),
-                            items: _sections.map((s) => DropdownMenuItem(value: s, child: Text('Section $s'))).toList(),
-                            onChanged: (v) {
-                              if (v != null) setState(() { _selectedSection = v; _selectedTeacher = null; });
-                            },
-                          ),
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('hr-sec-$_selectedSection'),
+                        initialValue: _selectedSection,
+                        isExpanded: true,
+                        decoration: const InputDecoration(labelText: 'Section', isDense: true),
+                        items: [
+                          for (final s in SchoolConstants.sections) DropdownMenuItem(value: s, child: Text('Section $s')),
                         ],
+                        onChanged: (v) {
+                          if (v != null) {
+                            setState(() {
+                              _selectedSection = v;
+                              _selectedTeacherId = null;
+                            });
+                          }
+                        },
                       ),
                     ),
-                  ],
-                ),
+                  ]),
+                  const SizedBox(height: Gsp.sp4),
 
-                const SizedBox(height: 16),
-
-                // Current Homeroom Teacher Status Banner
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: currentTeacherId.isNotEmpty ? context.adapt(SchoolTheme.primaryLight) : context.adapt(SchoolTheme.statusLeaveBg),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: currentTeacherId.isNotEmpty ? context.adapt(SchoolTheme.primary).withValues(alpha: 0.3) : SchoolTheme.statusLeave.withValues(alpha: 0.3),
+                  // Current status banner
+                  Container(
+                    padding: const EdgeInsets.all(Gsp.sp3),
+                    decoration: BoxDecoration(
+                      color: currentTeacherId.isNotEmpty ? c.brandSoft : c.warningBg,
+                      borderRadius: SchoolErp.radius,
+                      border: Border.all(
+                        color: (currentTeacherId.isNotEmpty ? c.brand : c.warning).withValues(alpha: 0.35),
+                      ),
                     ),
-                  ),
-                  child: Row(
-                    children: [
+                    child: Row(children: [
                       Icon(
-                        currentTeacherId.isNotEmpty ? Icons.check_circle_rounded : Icons.info_outline_rounded,
-                        color: currentTeacherId.isNotEmpty ? context.adapt(SchoolTheme.primary) : SchoolTheme.statusLeave,
-                        size: 20,
+                        currentTeacherId.isNotEmpty ? GIcons.checkCircle : GIcons.info,
+                        color: currentTeacherId.isNotEmpty ? c.brand : c.warning,
+                        size: GIconSize.sm,
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: Gsp.sp2),
                       Expanded(
                         child: Text(
                           currentTeacherId.isNotEmpty
-                              ? 'Currently Assigned: $currentTeacherName'
-                              : 'No Homeroom Teacher assigned for $_selectedGrade - Section $_selectedSection',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            color: currentTeacherId.isNotEmpty ? context.adapt(SchoolTheme.primary) : SchoolTheme.statusLeave,
-                          ),
+                              ? 'Currently assigned: $currentTeacherName'
+                              : 'No homeroom teacher assigned for Class $_selectedGrade-$_selectedSection',
+                          style: GText.body2Bold(currentTeacherId.isNotEmpty ? c.brand : c.warning),
                         ),
                       ),
+                    ]),
+                  ),
+                  const SizedBox(height: Gsp.sp4),
+
+                  // Teacher picker
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('hr-tch-$_selectedGrade-$_selectedSection-$_selectedTeacherId'),
+                    initialValue: selectedTeacher?.id,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Assign / transfer to teacher',
+                      hintText: 'Select a faculty member…',
+                      isDense: true,
+                    ),
+                    items: [
+                      for (final t in activeTeachers)
+                        DropdownMenuItem(
+                          value: t.id,
+                          child: Text(
+                            '${t.name}${t.employeeId.isEmpty ? '' : ' (${t.employeeId})'}${t.isHomeroom ? ' · Currently ${t.homeroomClass}' : ''}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
                     ],
+                    onChanged: (val) => setState(() => _selectedTeacherId = val),
                   ),
-                ),
+                  const SizedBox(height: Gsp.sp5),
 
-                const SizedBox(height: 16),
-
-                // Teacher Selector Dropdown
-                Text('Assign / Transfer To Teacher:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(SoftPalette.slate600))),
-                const SizedBox(height: 6),
-                DropdownButtonFormField<SchoolTeacher>(
-                  value: _selectedTeacher,
-                  hint: const Text('Select a faculty member...'),
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: context.adapt(SoftPalette.gray50),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: context.adapt(SoftPalette.slate150))),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  ),
-                  items: activeTeachers.map((t) {
-                    final homeroomInfo = t.isHomeroom ? ' (Currently: ${t.homeroomClass})' : '';
-                    return DropdownMenuItem<SchoolTeacher>(
-                      value: t,
-                      child: Text('${t.name} — ${t.employeeId} $homeroomInfo', overflow: TextOverflow.ellipsis),
-                    );
-                  }).toList(),
-                  onChanged: (val) {
-                    setState(() => _selectedTeacher = val);
-                  },
-                ),
-
-                const SizedBox(height: 24),
-
-                // Action Buttons
-                Row(
-                  children: [
+                  // Footer actions
+                  Row(children: [
                     if (currentTeacherId.isNotEmpty)
                       OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
-                          foregroundColor: SoftPalette.red500,
-                          side: const BorderSide(color: SoftPalette.red500),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          foregroundColor: c.danger,
+                          side: BorderSide(color: c.danger),
                         ),
-                        icon: const Icon(Icons.person_remove_rounded, size: 18),
-                        label: const Text('Remove Assignment'),
+                        icon: const Icon(GIcons.cancel, size: 16),
+                        label: const Text('Remove'),
                         onPressed: _isSaving ? null : () => _saveAssignment(remove: true),
                       ),
                     const Spacer(),
                     TextButton(
-                      onPressed: () => Navigator.pop(context, false),
+                      onPressed: _isSaving ? null : () => Navigator.pop(context, false),
                       child: const Text('Cancel'),
                     ),
-                    const SizedBox(width: 8),
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SchoolTheme.accent,
-                        foregroundColor: SoftPalette.gray50,
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
+                    const SizedBox(width: Gsp.sp2),
+                    FilledButton.icon(
                       icon: _isSaving
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2))
-                          : const Icon(Icons.check_rounded, size: 18),
-                      label: Text(_isSaving ? 'Saving...' : 'Confirm Assignment'),
-                      onPressed: (_isSaving || _selectedTeacher == null) ? null : () => _saveAssignment(remove: false),
+                          ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 2))
+                          : const Icon(GIcons.check, size: 16),
+                      label: Text(_isSaving ? 'Saving…' : 'Confirm assignment'),
+                      onPressed: (_isSaving || selectedTeacher == null)
+                          ? null
+                          : () => _saveAssignment(remove: false, teacher: selectedTeacher),
                     ),
-                  ],
-                ),
-              ],
-            );
-          },
+                  ]),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _saveAssignment({bool remove = false}) async {
+  Future<void> _saveAssignment({required bool remove, SchoolTeacher? teacher}) async {
     setState(() => _isSaving = true);
     try {
-      if (remove) {
-        await SchoolLocalStorage.assignHomeroomTeacher(
-          branchId: widget.branchId,
-          grade: _selectedGrade,
-          section: _selectedSection,
-          teacherId: null,
-          teacherName: null,
-          editorName: widget.editorName,
-        );
-      } else if (_selectedTeacher != null) {
-        await SchoolLocalStorage.assignHomeroomTeacher(
-          branchId: widget.branchId,
-          grade: _selectedGrade,
-          section: _selectedSection,
-          teacherId: _selectedTeacher!.id,
-          teacherName: _selectedTeacher!.name,
-          editorName: widget.editorName,
-        );
-      }
+      await SchoolLocalStorage.assignHomeroomTeacher(
+        branchId: widget.branchId,
+        grade: _selectedGrade,
+        section: _selectedSection,
+        teacherId: remove ? null : teacher?.id,
+        teacherName: remove ? null : teacher?.name,
+        editorName: widget.editorName,
+      );
 
-      if (mounted) {
-        Navigator.pop(context, true);
-        AppFeedback.showSuccess(
-          context,
+      if (!mounted) return;
+      final nav = Navigator.of(context);
+      final parentCtx = nav.context;
+      nav.pop(true);
+      if (parentCtx.mounted) {
+        AppFeedback.success(
+          parentCtx,
           remove
-              ? 'Homeroom teacher assignment removed for $_selectedGrade - Section $_selectedSection.'
-              : 'Successfully assigned ${_selectedTeacher?.name} as Homeroom Teacher for $_selectedGrade - Section $_selectedSection.',
-          subtitle: 'Saved locally • Syncing to cloud',
+              ? 'Homeroom teacher removed for Class $_selectedGrade-$_selectedSection.'
+              : 'Assigned ${teacher?.name} as homeroom teacher for Class $_selectedGrade-$_selectedSection.',
         );
       }
     } catch (e) {
       if (mounted) {
-        AppFeedback.showError(context, 'Error saving homeroom assignment: $e');
+        setState(() => _isSaving = false);
+        AppFeedback.error(context, 'Error saving homeroom assignment: $e');
       }
-    } finally {
-      if (mounted) setState(() => _isSaving = false);
     }
   }
 }

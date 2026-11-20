@@ -1,6 +1,7 @@
 // lib/widgets/app_back_button.dart
 
 import 'package:flutter/material.dart';
+import '../pages/home/home_module_host.dart';
 
 /// A modern, colorful, rounded back button for GMWF app headers and AppBars.
 /// Automatically hides if there is no route to pop unless an explicit [onPressed] is provided.
@@ -19,7 +20,7 @@ class AppBackButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final canPop = Navigator.canPop(context);
-    if (!canPop && onPressed == null) {
+    if ((!canPop || HomeModuleHost.isModuleRoot(context)) && onPressed == null) {
       return const SizedBox.shrink();
     }
 

@@ -13,6 +13,7 @@ import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
 import 'package:gmwf/widgets/app_skeleton.dart';
+import '../widgets/medicine_icon_badge.dart';
 
 // Alias kept for backwards compatibility with existing call sites
 typedef PatientHistory = PatientHistoryPanel;
@@ -281,10 +282,11 @@ class PatientHistoryPanel extends StatefulWidget {
 }
 
 class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
 
   List<_HistoryEntry> _entries   = [];
   bool                _isLoading = false;
+  bool                _showAllEarlier = false;
 
   // FIX-4: cancellation token — incremented every time a new load starts.
   // The async load captures the token at start; if the token changes by the
@@ -654,7 +656,7 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
     }
 
     final isDark = _getIsDark(context);
-    final tealColor = isDark ? SoftPalette.teal300 : _teal;
+    final tealColor = context.comfort.brand;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -721,73 +723,369 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
   }
 
   Widget _buildCompactLatestVisit(String patientName) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Icon(Icons.history_edu_rounded, color: context.adapt(_teal), size: 17),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text('Last Visit',
-                  style: TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w800, color: context.adapt(_teal))),
-            ),
-            if (!_isLoading && _entries.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: context.adapt(_teal).withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: context.adapt(_teal).withValues(alpha: 0.3)),
-                ),
-                child: Text(
-                  '${_entries.length} visit${_entries.length == 1 ? '' : 's'}',
-                  style: TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.bold, color: context.adapt(_teal)),
-                ),
+    final isDark = _getIsDark(context);
+    if (_isLoading) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: CircularProgressIndicator(
+            color: context.comfort.brand,
+            strokeWidth: 2,
+          ),
+        ),
+      );
+    }
+    if (_entries.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 16),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: Image.asset(
+                'assets/images/doctor_empty_history.jpg',
+                width: 96,
+                height: 96,
+                fit: BoxFit.cover,
               ),
-            const SizedBox(width: 6),
-            GestureDetector(
-              onTap: _isLoading ? null : _reload,
-              child: Icon(Icons.refresh_rounded, color: context.adapt(_teal), size: 17),
             ),
-          ]),
-          const SizedBox(height: 8),
-          if (_isLoading)
-            Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: CircularProgressIndicator(color: context.adapt(_teal), strokeWidth: 2),
-              ),
-            )
-          else if (_entries.isEmpty)
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 20),
-              alignment: Alignment.center,
-              child: Column(children: [
-                Icon(Icons.assignment_outlined, size: 36, color: context.adapt(SoftPalette.gray150)),
-                const SizedBox(height: 8),
-                Text('No visit history yet',
-                    style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.gray300))),
-              ]),
-            )
-          else
-            Builder(
-              builder: (_) {
-                final latestPrescription = _entries.firstWhere((e) => e.medicines.isNotEmpty, orElse: () => _entries.first);
-                final latestVitals = _entries.firstWhere((e) => e.vitals.isNotEmpty, orElse: () => _entries.first);
-                return _CompactLatestCard(
-                  entry: latestPrescription,
-                  latestVitalsEntry: (latestPrescription != latestVitals && latestVitals.vitals.isNotEmpty) ? latestVitals : null,
-                  onRepeat: widget.onRepeatLast,
-                );
-              },
-            ),
-        ],
-      ),
+            const SizedBox(height: 10),
+            Text('No visit history yet',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? SoftPalette.slate350 : SoftPalette.slate600,
+                )),
+          ],
+        ),
+      );
+    }
+
+    final latestPrescription = _entries.firstWhere(
+      (e) => e.medicines.isNotEmpty,
+      orElse: () => _entries.first,
     );
+    final latestVitals = _entries.firstWhere(
+      (e) => e.vitals.isNotEmpty,
+      orElse: () => _entries.first,
+    );
+
+    final brand = Theme.of(context).colorScheme.primary;
+    final muted = isDark ? SoftPalette.slate400 : SoftPalette.slate550;
+    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate200;
+
+    // Compute quick summary stats + family link count for the footer card
+    final totalVisits = _entries.length;
+    final firstVisitStr = DateFormat('d MMM yyyy').format(_entries.last.date);
+    final totalMeds = _entries.fold<int>(0, (sum, e) => sum + e.medicines.length);
+    final totalLabs = _entries.fold<int>(0, (sum, e) => sum + e.labTests.length);
+    final pData = widget.patientData ?? const <String, dynamic>{};
+    final gCnic = (pData['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    final pCnic = (pData['cnic'] ?? pData['patientCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    final allLocal = LocalStorageService.getAllLocalPatients();
+    final int familyCount = gCnic.isNotEmpty
+        ? allLocal.where((p) => (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '') == gCnic).length
+        : (pCnic.length == 13
+            ? allLocal.where((p) => (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '') == pCnic).length
+            : 0);
+
+    return LayoutBuilder(builder: (ctx, constraints) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: (constraints.maxHeight - 24).clamp(0.0, double.infinity),
+          ),
+          child: IntrinsicHeight(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _CompactLatestCard(
+                  entry: latestPrescription,
+                  latestVitalsEntry: (latestPrescription != latestVitals && latestVitals.vitals.isNotEmpty)
+                      ? latestVitals
+                      : null,
+                  onRepeat: widget.onRepeatLast,
+                ),
+          if (_entries.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Builder(builder: (_) {
+              final brand = Theme.of(context).colorScheme.primary;
+              final canCollapse = _entries.length > 2;
+              final hiddenCount = _entries.length - 2;
+
+              Widget buildTimelineNode(_HistoryEntry e, {required bool isFirst, required bool isLast}) {
+                final dateStr = DateFormat('d MMM yyyy').format(e.date);
+                final titleText = e.diagnosis.isNotEmpty
+                    ? e.diagnosis
+                    : (e.complaint.isNotEmpty ? e.complaint : 'Consultation');
+                final medCount = e.medicines.length;
+                return IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        child: Column(
+                          children: [
+                            const SizedBox(height: 4),
+                            Container(
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isFirst
+                                    ? brand
+                                    : (isDark ? SoftPalette.slate600 : SoftPalette.slate300),
+                              ),
+                            ),
+                            if (!isLast)
+                              Expanded(
+                                child: Container(
+                                  width: 1.5,
+                                  color: isDark
+                                      ? SoftPalette.slate700
+                                      : SoftPalette.slate200,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Padding(
+                          padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                dateStr,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                titleText,
+                                style: TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 1),
+                              Text(
+                                '$medCount medicine${medCount == 1 ? '' : 's'}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        'EARLIER',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.7,
+                          color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (canCollapse)
+                        InkWell(
+                          borderRadius: BorderRadius.circular(5),
+                          onTap: () => setState(() => _showAllEarlier = !_showAllEarlier),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            child: Text(
+                              _showAllEarlier ? 'Collapse' : 'Show all (${_entries.length})',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: brand,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (!canCollapse || _showAllEarlier)
+                    ...List.generate(_entries.length, (i) {
+                      return buildTimelineNode(
+                        _entries[i],
+                        isFirst: i == 0,
+                        isLast: i == _entries.length - 1,
+                      );
+                    })
+                  else ...[
+                    buildTimelineNode(_entries.first, isFirst: true, isLast: false),
+                    IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            child: Center(
+                              child: Container(
+                                width: 1.5,
+                                color: isDark ? SoftPalette.slate700 : SoftPalette.slate200,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(7),
+                                onTap: () => setState(() => _showAllEarlier = true),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: brand.withValues(alpha: isDark ? 0.16 : 0.07),
+                                    borderRadius: BorderRadius.circular(7),
+                                    border: Border.all(color: brand.withValues(alpha: 0.3)),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.unfold_more_rounded, size: 14, color: brand),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        '$hiddenCount more visit${hiddenCount == 1 ? '' : 's'}',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                          color: isDark ? SoftPalette.gray50 : brand,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    buildTimelineNode(_entries.last, isFirst: false, isLast: true),
+                  ],
+                ],
+              );
+            }),
+          ],
+          const Spacer(),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+              color: brand.withValues(alpha: isDark ? 0.12 : 0.05),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: borderColor),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.insights_rounded, size: 14, color: brand),
+                    const SizedBox(width: 6),
+                    Text(
+                      'PATIENT SUMMARY',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.7,
+                        color: muted,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      'Since $firstVisitStr',
+                      style: TextStyle(fontSize: 10.5, color: muted),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Visits', style: TextStyle(fontSize: 10.5, color: muted)),
+                          const SizedBox(height: 1),
+                          Text('$totalVisits',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                              )),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Medicines', style: TextStyle(fontSize: 10.5, color: muted)),
+                          const SizedBox(height: 1),
+                          Text('$totalMeds',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                              )),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(familyCount > 0 ? 'Family' : 'Labs',
+                              style: TextStyle(fontSize: 10.5, color: muted)),
+                          const SizedBox(height: 1),
+                          Text('${familyCount > 0 ? familyCount : totalLabs}',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                              )),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+            ),
+          ),
+        ),
+      );
+    });
   }
 }
 
@@ -812,11 +1110,81 @@ class PatientHistoryPage extends StatefulWidget {
 }
 
 class _PatientHistoryPageState extends State<PatientHistoryPage> {
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
 
   List<_HistoryEntry> _entries   = [];
   bool                _isLoading = true;
   int                 _loadToken = 0;
+  bool                _showAllMiddle = false;
+
+  Map<String, dynamic> _profileData = {};
+  Map<String, dynamic>? _guardianData;
+  List<Map<String, dynamic>> _familyChildren = [];
+  List<String> _historicalNames = [];
+
+  void _resolveFamilyAndNames(Map<String, dynamic>? fsPatient, List<_HistoryEntry> entries) {
+    final merged = <String, dynamic>{
+      ...widget.patientData,
+      if (fsPatient != null) ...fsPatient,
+    };
+    _profileData = merged;
+
+    final currentName = (merged['patientName'] ?? merged['name'] ?? merged['fullName'] ?? '').toString().trim();
+    final nameSet = <String>{};
+    void addName(dynamic v) {
+      final s = (v ?? '').toString().trim();
+      if (s.isNotEmpty && s.toLowerCase() != 'unknown' && s.toLowerCase() != 'unknown patient' && s != 'null') {
+        nameSet.add(s);
+      }
+    }
+    addName(currentName);
+    for (final key in const ['previousNames', 'nameHistory', 'aliases', 'oldNames']) {
+      final list = merged[key];
+      if (list is List) {
+        for (final item in list) {
+          if (item is Map) {
+            addName(item['name'] ?? item['oldName'] ?? item['value']);
+          } else {
+            addName(item);
+          }
+        }
+      }
+    }
+    if (merged['oldName'] != null) addName(merged['oldName']);
+    for (final e in entries) {
+      addName(e.raw['patientName'] ?? e.raw['name'] ?? e.raw['fullName']);
+    }
+    _historicalNames = nameSet.toList();
+
+    // Resolve Guardian & Children from local storage
+    final allLocal = LocalStorageService.getAllLocalPatients();
+    final cnic = (merged['cnic'] ?? merged['patientCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    final gCnic = (merged['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    final isAdult = merged['isAdult'] == true || (gCnic.isEmpty && cnic.length == 13);
+
+    if (isAdult && cnic.isNotEmpty) {
+      _guardianData = null;
+      _familyChildren = allLocal.where((p) {
+        if (p['isAdult'] == true) return false;
+        final pg = (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+        return pg == cnic;
+      }).toList();
+    } else if (gCnic.isNotEmpty) {
+      _guardianData = LocalStorageService.getLocalPatientByCnic(
+        (merged['guardianCnic'] ?? '').toString(),
+      );
+      _familyChildren = allLocal.where((p) {
+        if (p['isAdult'] == true) return false;
+        final pg = (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+        final pId = (p['id'] ?? p['patientId'] ?? '').toString();
+        final myId = (merged['id'] ?? merged['patientId'] ?? '').toString();
+        return pg == gCnic && (myId.isEmpty || pId != myId);
+      }).toList();
+    } else {
+      _guardianData = null;
+      _familyChildren = [];
+    }
+  }
 
   @override
   void initState() {
@@ -1073,6 +1441,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
     final hasPrescriptionLocal = found.any((e) => e.medicines.isNotEmpty);
     if (found.isNotEmpty && mounted && _loadToken == token) {
       found.sort((a, b) => b.date.compareTo(a.date));
+      _resolveFamilyAndNames(fsPatient, found);
       setState(() { _entries = List.from(found); _isLoading = !hasPrescriptionLocal; });
       if (hasPrescriptionLocal) return;
     }
@@ -1127,7 +1496,507 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
     if (_loadToken != token) return;
 
     found.sort((a, b) => b.date.compareTo(a.date));
-    if (mounted && _loadToken == token) setState(() { _entries = found; _isLoading = false; });
+    if (mounted && _loadToken == token) {
+      _resolveFamilyAndNames(fsPatient, found);
+      setState(() { _entries = found; _isLoading = false; });
+    }
+  }
+
+  Widget _buildSidebarCard({
+    required bool isDark,
+    required Color brand,
+    required Color borderColor,
+    required IconData icon,
+    required String title,
+    required List<Widget> children,
+    Widget? trailing,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 12, 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 26,
+                  height: 26,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: brand.withValues(alpha: isDark ? 0.22 : 0.1),
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Icon(icon, size: 15, color: brand),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                    ),
+                  ),
+                ),
+                if (trailing != null) trailing,
+              ],
+            ),
+          ),
+          Divider(height: 1, color: borderColor),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPatientSidebar(bool isDark, Color brand, Color muted, Color borderColor) {
+    final p = _profileData.isNotEmpty ? _profileData : widget.patientData;
+    final pName = (p['patientName'] ?? p['name'] ?? p['fullName'] ?? 'Patient').toString().trim();
+    final age = (p['age'] ?? p['vitals']?['age'] ?? '').toString().trim();
+    final gender = (p['gender'] ?? p['vitals']?['gender'] ?? '').toString().trim();
+    final blood = (p['bloodGroup'] ?? p['vitals']?['bloodGroup'] ?? '').toString().trim();
+    final cnic = (p['cnic'] ?? p['patientCnic'] ?? '').toString().trim();
+    final gCnic = (p['guardianCnic'] ?? '').toString().trim();
+    final phone = (p['phone'] ?? p['contact'] ?? p['mobile'] ?? '').toString().trim();
+    final address = (p['address'] ?? p['city'] ?? p['village'] ?? '').toString().trim();
+    final mr = (p['mrNumber'] ?? p['patientId'] ?? p['id'] ?? '').toString().trim();
+    final rawQt = (p['queueType'] ?? 'zakat').toString().toUpperCase();
+    final qtLabel = rawQt.contains('NON') ? 'NON-ZAKAT' : (rawQt.contains('GMWF') ? 'GMWF' : 'ZAKAT');
+    final staffInfo = StaffPatientLinkService.getStaffInfoFromPatientMap(p);
+
+    Widget infoRow(IconData icon, String label, String value) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 14, color: muted),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 84,
+              child: Text(label, style: TextStyle(fontSize: 11.5, color: muted)),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget treeNode({
+      required String title,
+      required String subtitle,
+      required IconData icon,
+      required bool isCurrent,
+      bool isRoot = false,
+      bool isLast = false,
+    }) {
+      return IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!isRoot)
+              SizedBox(
+                width: 22,
+                child: Column(
+                  children: [
+                    Container(
+                      width: 1.5,
+                      height: 14,
+                      color: isDark ? SoftPalette.slate600 : SoftPalette.slate300,
+                    ),
+                    Row(
+                      children: [
+                        const SizedBox(width: 10),
+                        Container(
+                          width: 11,
+                          height: 1.5,
+                          color: isDark ? SoftPalette.slate600 : SoftPalette.slate300,
+                        ),
+                      ],
+                    ),
+                    if (!isLast)
+                      Expanded(
+                        child: Container(
+                          width: 1.5,
+                          color: isDark ? SoftPalette.slate600 : SoftPalette.slate300,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            Expanded(
+              child: Container(
+                margin: EdgeInsets.only(bottom: isLast ? 0 : 8),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: isCurrent
+                      ? brand.withValues(alpha: isDark ? 0.18 : 0.08)
+                      : (isDark ? SoftPalette.slate900.withValues(alpha: 0.6) : SoftPalette.slate50),
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                    color: isCurrent ? brand.withValues(alpha: 0.55) : borderColor,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(icon, size: 15, color: isCurrent ? brand : muted),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
+                              color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (subtitle.isNotEmpty)
+                            Text(
+                              subtitle,
+                              style: TextStyle(fontSize: 11, color: muted),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (isCurrent)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: brand,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'CURRENT',
+                          style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.w800, color: SoftPalette.gray50),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final hasRenames = _historicalNames.length > 1;
+    final hasGuardian = _guardianData != null || gCnic.isNotEmpty;
+    final hasChildren = _familyChildren.isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 1. Patient Profile Card
+        _buildSidebarCard(
+          isDark: isDark,
+          brand: brand,
+          borderColor: borderColor,
+          icon: Icons.person_outline_rounded,
+          title: 'Patient Profile',
+          trailing: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: brand.withValues(alpha: isDark ? 0.25 : 0.12),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              qtLabel,
+              style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: isDark ? SoftPalette.gray50 : brand),
+            ),
+          ),
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: brand.withValues(alpha: isDark ? 0.25 : 0.12),
+                  child: Text(
+                    pName.isNotEmpty ? pName[0].toUpperCase() : 'P',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: isDark ? SoftPalette.gray50 : brand),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        pName,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w800,
+                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        [
+                          if (age.isNotEmpty) '$age yrs',
+                          if (gender.isNotEmpty) gender,
+                          if (blood.isNotEmpty) 'Blood $blood',
+                        ].join(' · '),
+                        style: TextStyle(fontSize: 11.5, color: muted),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (staffInfo != null) ...[
+              const SizedBox(height: 10),
+              StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: isDark),
+            ],
+            const SizedBox(height: 12),
+            if (mr.isNotEmpty) infoRow(Icons.badge_outlined, 'Patient ID', mr),
+            if (cnic.isNotEmpty) infoRow(Icons.credit_card_outlined, 'CNIC', cnic),
+            if (gCnic.isNotEmpty && gCnic != cnic) infoRow(Icons.shield_outlined, 'Guardian CNIC', gCnic),
+            if (phone.isNotEmpty) infoRow(Icons.phone_outlined, 'Phone', phone),
+            if (address.isNotEmpty) infoRow(Icons.location_on_outlined, 'Address', address),
+            infoRow(Icons.history_rounded, 'Total Visits', '${_entries.length}'),
+          ],
+        ),
+
+        // 2. Name History / Renames Card
+        if (hasRenames)
+          _buildSidebarCard(
+            isDark: isDark,
+            brand: brand,
+            borderColor: borderColor,
+            icon: Icons.drive_file_rename_outline_rounded,
+            title: 'Name History / Renames',
+            children: _historicalNames.asMap().entries.map((entry) {
+              final isCurrent = entry.value.toLowerCase() == pName.toLowerCase();
+              return Padding(
+                padding: EdgeInsets.only(bottom: entry.key == _historicalNames.length - 1 ? 0 : 6),
+                child: Row(
+                  children: [
+                    Icon(
+                      isCurrent ? Icons.check_circle_rounded : Icons.history_rounded,
+                      size: 14,
+                      color: isCurrent ? brand : muted,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        entry.value,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
+                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                        ),
+                      ),
+                    ),
+                    if (isCurrent)
+                      Text('Current', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: brand))
+                    else
+                      Text('Previous', style: TextStyle(fontSize: 10.5, color: muted)),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+
+        // 3. Family Tree Card
+        _buildSidebarCard(
+          isDark: isDark,
+          brand: brand,
+          borderColor: borderColor,
+          icon: Icons.account_tree_outlined,
+          title: 'Family Tree',
+          children: [
+            if (!hasGuardian && !hasChildren)
+              Text(
+                'No linked guardian or dependents found in local records.',
+                style: TextStyle(fontSize: 12, color: muted),
+              )
+            else if (hasGuardian) ...[
+              treeNode(
+                title: (_guardianData?['name'] ?? 'Guardian').toString(),
+                subtitle: [
+                  if (_guardianData?['age'] != null) '${_guardianData!['age']} yrs',
+                  if (_guardianData?['gender'] != null) _guardianData!['gender'].toString(),
+                  if (gCnic.isNotEmpty) 'CNIC $gCnic',
+                ].join(' · '),
+                icon: Icons.shield_outlined,
+                isCurrent: false,
+                isRoot: true,
+              ),
+              treeNode(
+                title: pName,
+                subtitle: [if (age.isNotEmpty) '$age yrs', if (gender.isNotEmpty) gender].join(' · '),
+                icon: Icons.person_rounded,
+                isCurrent: true,
+                isLast: _familyChildren.isEmpty,
+              ),
+              ...List.generate(_familyChildren.length, (i) {
+                final c = _familyChildren[i];
+                return treeNode(
+                  title: (c['name'] ?? 'Dependent').toString(),
+                  subtitle: [
+                    if (c['age'] != null) '${c['age']} yrs',
+                    if (c['gender'] != null) c['gender'].toString(),
+                  ].join(' · '),
+                  icon: Icons.child_care_rounded,
+                  isCurrent: false,
+                  isLast: i == _familyChildren.length - 1,
+                );
+              }),
+            ] else ...[
+              treeNode(
+                title: pName,
+                subtitle: [
+                  if (age.isNotEmpty) '$age yrs',
+                  if (gender.isNotEmpty) gender,
+                  'Head / Guardian',
+                ].join(' · '),
+                icon: Icons.person_rounded,
+                isCurrent: true,
+                isRoot: true,
+              ),
+              ...List.generate(_familyChildren.length, (i) {
+                final c = _familyChildren[i];
+                return treeNode(
+                  title: (c['name'] ?? 'Dependent').toString(),
+                  subtitle: [
+                    if (c['age'] != null) '${c['age']} yrs',
+                    if (c['gender'] != null) c['gender'].toString(),
+                  ].join(' · '),
+                  icon: Icons.child_care_rounded,
+                  isCurrent: false,
+                  isLast: i == _familyChildren.length - 1,
+                );
+              }),
+            ],
+          ],
+        ),
+
+        // 4. Branches & Doctors Visited Card
+        if (_entries.isNotEmpty)
+          Builder(builder: (_) {
+            final branchCounts = <String, int>{};
+            final doctorCounts = <String, int>{};
+            for (final e in _entries) {
+              final rawB = (e.raw['branchName'] ?? e.raw['branchId'] ?? widget.branchId).toString().trim();
+              final bLabel = rawB.isNotEmpty
+                  ? (LocalStorageService.getBranchName(rawB) ?? rawB)
+                  : LocalStorageService.getBranchName(widget.branchId) ?? widget.branchId;
+              final campPart = e.campName.isNotEmpty && e.campName.toLowerCase() != bLabel.toLowerCase()
+                  ? '$bLabel · ${e.campName}'
+                  : bLabel;
+              branchCounts[campPart] = (branchCounts[campPart] ?? 0) + 1;
+
+              final doc = e.doctorName.trim();
+              if (doc.isNotEmpty) {
+                final cleanDoc = doc.toLowerCase().startsWith('dr') ? doc : 'Dr. $doc';
+                doctorCounts[cleanDoc] = (doctorCounts[cleanDoc] ?? 0) + 1;
+              }
+            }
+
+            return _buildSidebarCard(
+              isDark: isDark,
+              brand: brand,
+              borderColor: borderColor,
+              icon: Icons.local_hospital_outlined,
+              title: 'Branches & Doctors',
+              children: [
+                Text(
+                  'BRANCHES / CAMPS',
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: muted),
+                ),
+                const SizedBox(height: 6),
+                ...branchCounts.entries.map((kv) => Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Row(
+                        children: [
+                          Icon(Icons.location_on_outlined, size: 13, color: brand),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              kv.key,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            '${kv.value} visit${kv.value == 1 ? '' : 's'}',
+                            style: TextStyle(fontSize: 11, color: muted),
+                          ),
+                        ],
+                      ),
+                    )),
+                if (doctorCounts.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'DOCTORS CONSULTED',
+                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: muted),
+                  ),
+                  const SizedBox(height: 6),
+                  ...doctorCounts.entries.map((kv) => Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: Row(
+                          children: [
+                            Icon(Icons.medical_services_outlined, size: 13, color: brand),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                kv.key,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Text(
+                              '${kv.value} visit${kv.value == 1 ? '' : 's'}',
+                              style: TextStyle(fontSize: 11, color: muted),
+                            ),
+                          ],
+                        ),
+                      )),
+                ],
+              ],
+            );
+          }),
+      ],
+    );
   }
 
   @override
@@ -1137,64 +2006,227 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
 
     final isDark = Theme.of(context).brightness == Brightness.dark ||
         (Hive.isBoxOpen('app_settings') && Hive.box('app_settings').get('is_dark_mode', defaultValue: false) == true);
+    final brand = Theme.of(context).colorScheme.primary;
+    final muted = isDark ? SoftPalette.slate400 : SoftPalette.slate550;
+    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate200;
 
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.lime100m,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
-        backgroundColor: _teal,
-        foregroundColor: SoftPalette.gray50,
+        backgroundColor: Theme.of(context).cardColor,
+        foregroundColor: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+        elevation: 0,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: borderColor),
+        ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Text(name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Text(name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
                 Builder(builder: (_) {
                   final staffInfo = StaffPatientLinkService.getStaffInfoFromPatientMap(widget.patientData);
                   if (staffInfo != null) {
                     return Padding(
                       padding: const EdgeInsets.only(left: 8),
-                      child: StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: true),
+                      child: StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: isDark),
                     );
                   }
                   return const SizedBox.shrink();
                 }),
               ],
             ),
-            Text(id, style: const TextStyle(fontSize: 12, color: SoftPalette.gray50A70)),
+            Text(id, style: TextStyle(fontSize: 11.5, color: muted)),
           ],
         ),
         actions: [
+          if (!_isLoading && _entries.isNotEmpty)
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: brand.withValues(alpha: isDark ? 0.22 : 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: brand.withValues(alpha: 0.35)),
+                ),
+                child: Text(
+                  '${_entries.length} visit${_entries.length == 1 ? '' : 's'}',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: isDark ? SoftPalette.gray50 : brand,
+                  ),
+                ),
+              ),
+            ),
           IconButton(
             icon: _isLoading
-                ? const SizedBox(width: 20, height: 20,
-                    child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2))
-                : const Icon(Icons.refresh),
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(color: brand, strokeWidth: 2))
+                : Icon(Icons.refresh_rounded, color: brand),
             onPressed: _isLoading ? null : _load,
           ),
         ],
       ),
       body: _isLoading
-          ? Center(child: CircularProgressIndicator(color: context.adapt(_teal)))
+          ? Center(child: CircularProgressIndicator(color: brand))
           : _entries.isEmpty
               ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.assignment_outlined, size: 64, color: SoftPalette.adaptive(SoftPalette.gray150, isDark)),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.asset(
+                      'assets/images/doctor_empty_history.jpg',
+                      width: 128,
+                      height: 128,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
                   const SizedBox(height: 14),
                   Text('No visit history found for $name',
-                      style: TextStyle(color: SoftPalette.adaptive(SoftPalette.gray350, isDark), fontSize: 15),
+                      style: TextStyle(color: muted, fontSize: 14, fontWeight: FontWeight.w600),
                       textAlign: TextAlign.center),
                 ]))
-              : ListView.builder(
-                  padding: const EdgeInsets.all(14),
-                  itemCount: _entries.length,
-                  itemBuilder: (_, i) => _HistoryCard(
-                    entry: _entries[i],
-                    isLatest: i == 0,
-                    onRepeatLast: widget.onRepeatLast != null
-                        ? (raw) { widget.onRepeatLast!(raw); Navigator.pop(context); }
-                        : null,
-                  ),
-                ),
+              : Builder(builder: (_) {
+                  final canCollapseMiddle = _entries.length > 2;
+                  final hiddenCount = _entries.length - 2;
+                  final onRep = widget.onRepeatLast != null
+                      ? (Map<String, dynamic> raw) {
+                          widget.onRepeatLast!(raw);
+                          Navigator.pop(context);
+                        }
+                      : null;
+
+                  final items = <Widget>[];
+                  if (!canCollapseMiddle || _showAllMiddle) {
+                    for (int i = 0; i < _entries.length; i++) {
+                      items.add(_HistoryCard(
+                        entry: _entries[i],
+                        isLatest: i == 0,
+                        isOldest: i == _entries.length - 1 && _entries.length > 1,
+                        initiallyExpanded: i == 0 || i == _entries.length - 1,
+                        onRepeatLast: onRep,
+                      ));
+                    }
+                    if (canCollapseMiddle) {
+                      items.insert(
+                        1,
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () => setState(() => _showAllMiddle = false),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                              decoration: BoxDecoration(
+                                color: brand.withValues(alpha: isDark ? 0.16 : 0.07),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: brand.withValues(alpha: 0.3)),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.unfold_less_rounded, size: 16, color: brand),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'Collapse $hiddenCount middle visit${hiddenCount == 1 ? '' : 's'} (show latest & oldest)',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: isDark ? SoftPalette.gray50 : brand,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+                  } else {
+                    items.add(_HistoryCard(
+                      entry: _entries.first,
+                      isLatest: true,
+                      initiallyExpanded: true,
+                      onRepeatLast: onRep,
+                    ));
+                    items.add(
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: () => setState(() => _showAllMiddle = true),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: brand.withValues(alpha: isDark ? 0.16 : 0.07),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: brand.withValues(alpha: 0.3)),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.unfold_more_rounded, size: 16, color: brand),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Show $hiddenCount earlier visit${hiddenCount == 1 ? '' : 's'}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: isDark ? SoftPalette.gray50 : brand,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                    items.add(_HistoryCard(
+                      entry: _entries.last,
+                      isOldest: true,
+                      initiallyExpanded: true,
+                      onRepeatLast: onRep,
+                    ));
+                  }
+
+                  return LayoutBuilder(builder: (ctx, constraints) {
+                    if (constraints.maxWidth >= 900) {
+                      return Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              flex: 32,
+                              child: SingleChildScrollView(
+                                child: _buildPatientSidebar(isDark, brand, muted, borderColor),
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              flex: 68,
+                              child: ListView(
+                                children: items,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    return ListView(
+                      padding: const EdgeInsets.all(14),
+                      children: [
+                        _buildPatientSidebar(isDark, brand, muted, borderColor),
+                        ...items,
+                      ],
+                    );
+                  });
+                }),
     );
   }
 }
@@ -1207,7 +2239,6 @@ class _CompactLatestCard extends StatelessWidget {
   final _HistoryEntry entry;
   final _HistoryEntry? latestVitalsEntry;
   final void Function(Map<String, dynamic>)? onRepeat;
-  static const Color _teal = SoftPalette.teal600;
 
   const _CompactLatestCard({
     required this.entry,
@@ -1228,158 +2259,159 @@ class _CompactLatestCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = _getIsDark(context);
-    final e       = entry;
-    final dateStr = DateFormat('d MMM yyyy  •  hh:mm a').format(e.date);
-    final oralMeds     = e.medicines.where((m) => !m.isInjectable).toList();
-    final injectables  = e.medicines.where((m) => m.isInjectable).toList();
+    final e = entry;
+    final dateStr = DateFormat('d MMM yyyy').format(e.date);
+    final docStr = e.doctorName.isNotEmpty
+        ? (e.doctorName.toLowerCase().startsWith('dr') ? e.doctorName : 'Dr. ${e.doctorName}')
+        : '';
+    final vitalsMap = latestVitalsEntry?.vitals ?? e.vitals;
+    final allMeds = e.medicines;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: isDark ? SoftPalette.slate700 : _teal.withValues(alpha: 0.25), width: 1.2),
-        boxShadow: [BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.07), blurRadius: 10, offset: const Offset(0, 3))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          decoration: const BoxDecoration(
-            color: _teal,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(13)),
-          ),
-          child: Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 8,
-            runSpacing: 4,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.calendar_month_rounded, color: SoftPalette.gray50A70, size: 13),
-                  const SizedBox(width: 5),
-                  Text(dateStr, style: const TextStyle(color: SoftPalette.gray50, fontSize: 11.5, fontWeight: FontWeight.w600)),
-                ],
-              ),
-              if (e.doctorName.isNotEmpty)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.person_outline_rounded, color: SoftPalette.gray50A60, size: 13),
-                    const SizedBox(width: 4),
-                    Text(e.doctorName, style: const TextStyle(color: SoftPalette.gray50A70, fontSize: 11)),
-                  ],
+    Widget kvRow(String label, String value, {bool boldValue = false}) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 5),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 68,
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
                 ),
-              if (e.campName.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(color: SoftPalette.gray50.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(4)),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.location_on_outlined, color: SoftPalette.gray50, size: 11),
-                      const SizedBox(width: 3),
-                      Text(e.campName, style: const TextStyle(color: SoftPalette.gray50, fontSize: 10, fontWeight: FontWeight.bold)),
-                    ],
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: boldValue ? FontWeight.w700 : FontWeight.w500,
+                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Header: LAST VISIT  |  2 Nov 2026 · Dr. Asif ──
+        Row(
+          children: [
+            Text(
+              'LAST VISIT',
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.7,
+                color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              docStr.isNotEmpty ? '$dateStr · $docStr' : dateStr,
+              style: TextStyle(
+                fontSize: 11,
+                color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+
+        // ── Condition, Diagnosis, Vitals ──
+        if (e.complaint.isNotEmpty) kvRow('Condition', e.complaint),
+        if (e.diagnosis.isNotEmpty) kvRow('Diagnosis', e.diagnosis, boldValue: true),
+        if (vitalsMap.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 2, bottom: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 68,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      'Vitals',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                      ),
+                    ),
                   ),
                 ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(color: SoftPalette.gray50A24, borderRadius: BorderRadius.circular(4)),
-                child: Text('${e.days} Days', style: const TextStyle(color: SoftPalette.gray50, fontSize: 10, fontWeight: FontWeight.bold)),
-              ),
-              if (e.isVitalsOnly) ...[
-                const SizedBox(width: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(color: SoftPalette.orange350, borderRadius: BorderRadius.circular(4)),
-                  child: const Text('🩺 Vitals Only', style: TextStyle(color: SoftPalette.gray50, fontSize: 10, fontWeight: FontWeight.bold)),
+                Expanded(
+                  child: _buildCompactVitalsDisplay(vitalsMap, isDark),
                 ),
               ],
-            ],
+            ),
           ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            if (e.complaint.isNotEmpty) ...[
-              _label('Condition', isDark), const SizedBox(height: 3),
-              Text(e.complaint,
-                  style: TextStyle(fontSize: 12.5, color: isDark ? SoftPalette.slate150 : SoftPalette.gray900A87),
-                  maxLines: 2, overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 8),
-            ],
-            if (e.diagnosis.isNotEmpty) ...[
-              _label('Diagnosis', isDark), const SizedBox(height: 3),
-              Text(e.diagnosis,
-                  style: TextStyle(fontSize: 12.5, color: isDark ? SoftPalette.slate150 : SoftPalette.gray900A87),
-                  maxLines: 2, overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 8),
-            ],
-            if (e.vitals.isNotEmpty || (latestVitalsEntry != null && latestVitalsEntry!.vitals.isNotEmpty)) ...[
-              _label(latestVitalsEntry != null ? 'Vitals (Latest Visit)' : 'Vitals', isDark), const SizedBox(height: 4),
-              _buildCompactVitalsDisplay(latestVitalsEntry?.vitals ?? e.vitals, isDark),
-              const SizedBox(height: 8),
-            ],
-            if (oralMeds.isNotEmpty) ...[
-              _label('Medicines', isDark), const SizedBox(height: 4),
-              ...oralMeds.map((m) => _medTile(m, isInj: false, isDark: isDark)),
-              const SizedBox(height: 4),
-            ],
-            if (injectables.isNotEmpty) ...[
-              _label('Injectables', isDark), const SizedBox(height: 4),
-              ...injectables.map((m) => _medTile(m, isInj: true, isDark: isDark)),
-              const SizedBox(height: 4),
-            ],
-            if (oralMeds.isEmpty && injectables.isEmpty) ...[
-              _label('Medicines', isDark), const SizedBox(height: 4),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.gray150),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.info_outline_rounded, size: 14, color: isDark ? SoftPalette.slate350 : SoftPalette.gray500),
-                    const SizedBox(width: 6),
-                    Text(
-                      'No medicines prescribed in this visit',
-                      style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.slate350 : SoftPalette.gray500),
-                    ),
-                  ],
+        ],
+
+        // ── Medicines List ──
+        if (allMeds.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          ...allMeds.map((m) => _medTile(m, isInj: m.isInjectable, isDark: isDark)),
+        ] else ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: isDark ? SoftPalette.slate900 : SoftPalette.slate100,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate200),
+            ),
+            child: Text(
+              'No medicines prescribed in this visit',
+              style: TextStyle(fontSize: 11.5, color: isDark ? SoftPalette.slate400 : SoftPalette.gray500),
+            ),
+          ),
+        ],
+
+        if (e.labTests.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 5,
+            runSpacing: 5,
+            children: e.labTests.map((t) => _labChip(t, isDark)).toList(),
+          ),
+        ],
+
+        if (onRepeat != null && allMeds.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => onRepeat!(e.raw),
+              icon: Icon(Icons.replay_rounded,
+                  size: 14, color: context.comfort.brand),
+              label: Text(
+                'Repeat this prescription',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: context.comfort.brand,
                 ),
               ),
-              const SizedBox(height: 4),
-            ],
-            if (e.labTests.isNotEmpty) ...[
-              _label(e.raw['isPhysiotherapist'] == true ? 'Physiotherapies' : 'Lab Tests', isDark), const SizedBox(height: 4),
-              Wrap(spacing: 5, runSpacing: 5,
-                  children: e.labTests.map((t) => _labChip(t, isDark)).toList()),
-              const SizedBox(height: 4),
-            ],
-            if (onRepeat != null && e.medicines.isNotEmpty) ...[
-              const SizedBox(height: 6), Divider(height: 1, color: isDark ? SoftPalette.slate700 : SoftPalette.gray100), const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => onRepeat!(e.raw),
-                  icon: const Icon(Icons.repeat_rounded, size: 15),
-                  label: const Text('Repeat This Prescription',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _teal, foregroundColor: SoftPalette.gray50,
-                    padding: const EdgeInsets.symmetric(vertical: 10), elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
+              style: OutlinedButton.styleFrom(
+                backgroundColor: isDark ? SoftPalette.slate900.withValues(alpha: 0.65) : SoftPalette.gray50,
+                side: BorderSide(
+                  color: context.comfort.brand.withValues(alpha: isDark ? 0.55 : 0.45),
                 ),
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
               ),
-            ],
-          ]),
-        ),
-      ]),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -1429,26 +2461,35 @@ class _CompactLatestCard extends StatelessWidget {
     }
 
     return Wrap(spacing: 5, runSpacing: 5, children: [
-      if (vitals['bp'] != null && vitals['bp'] != 'N/A') _vitalChip('BP', vitals['bp'].toString(), SoftPalette.adaptive(SoftPalette.red500, isDark)),
-      if (vitals['temp'] != null && vitals['temp'] != 'N/A') _vitalChip('Temp', '${vitals['temp']}${vitals['tempUnit'] ?? ''}', SoftPalette.adaptive(SoftPalette.orange350, isDark)),
-      if (vitals['sugar'] != null && vitals['sugar'].toString().isNotEmpty) _vitalChip('Sugar', vitals['sugar'].toString(), SoftPalette.adaptive(SoftPalette.purple550, isDark)),
-      if (vitals['weight'] != null && vitals['weight'] != 'N/A') _vitalChip('Wt', '${vitals['weight']} kg', SoftPalette.adaptive(SoftPalette.teal500, isDark)),
+      if (vitals['bp'] != null && vitals['bp'] != 'N/A' && vitals['bp'].toString().trim().isNotEmpty)
+        _vitalChip('BP', vitals['bp'].toString(), SoftPalette.adaptive(SoftPalette.red500, isDark)),
+      if (vitals['temp'] != null && vitals['temp'] != 'N/A' && vitals['temp'].toString().trim().isNotEmpty)
+        _vitalChip('Temp', '${vitals['temp']}${vitals['tempUnit'] ?? ''}', SoftPalette.adaptive(SoftPalette.orange350, isDark)),
+      if (vitals['sugar'] != null && vitals['sugar'] != 'N/A' && vitals['sugar'].toString().trim().isNotEmpty)
+        _vitalChip('Sugar', vitals['sugar'].toString(), SoftPalette.adaptive(SoftPalette.sky500, isDark)),
+      if (vitals['weight'] != null && vitals['weight'] != 'N/A' && vitals['weight'].toString().trim().isNotEmpty)
+        _vitalChip('Wt', '${vitals['weight']} kg', SoftPalette.adaptive(SoftPalette.emerald500, isDark)),
     ]);
   }
 
-  Widget _label(String text, bool isDark) => Text(text.toUpperCase(),
-      style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: isDark ? SoftPalette.teal300 : _teal, letterSpacing: 0.8));
+  Widget _label(BuildContext context, String text) => Text(text.toUpperCase(),
+      style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: context.comfort.brand, letterSpacing: 0.8));
 
   Widget _vitalChip(String label, String value, Color color) => Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
-      child: RichText(text: TextSpan(children: [
-        TextSpan(text: '$label  ', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.85))),
-        TextSpan(text: value,     style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,  color: color)),
-      ])));
+      child: Text(
+        label == 'BP' ? 'BP $value' : value,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: color,
+        ),
+      ));
 
   Widget _labChip(String text, bool isDark) => Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
@@ -1459,46 +2500,69 @@ class _CompactLatestCard extends StatelessWidget {
       child: Text(text, style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.amber200 : SoftPalette.orange400, fontWeight: FontWeight.w600)));
 
   Widget _medTile(_MedEntry med, {required bool isInj, required bool isDark}) {
-    final parts     = <String>[];
-    if (med.dosage.isNotEmpty)    parts.add(med.dosage);
-    if (med.frequency.isNotEmpty) parts.add(med.frequency);
-    if (med.timing.isNotEmpty)    parts.add(med.timing);
-    if (!isInj && med.meal.isNotEmpty) parts.add(med.meal);
-
-    final badgeColor = isInj ? SoftPalette.blue550 : _teal;
-    final badge = isInj ? 'Inj' :
-        (med.abbrev.length > 3 ? med.abbrev.substring(0, 3) :
-         med.abbrev.isNotEmpty ? med.abbrev : 'Med');
+    final nameWithDose = [
+      med.name,
+      if (med.dosage.isNotEmpty) med.dosage,
+    ].join(' ');
+    final timingStr = med.timing.isNotEmpty
+        ? med.timing
+        : (med.frequency.isNotEmpty ? med.frequency : '');
 
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: isInj
-            ? (isDark ? SoftPalette.blue700.withValues(alpha: 0.25) : SoftPalette.slate100)
-            : (isDark ? SoftPalette.slate800 : _teal.withValues(alpha: 0.04)),
-        borderRadius: BorderRadius.circular(9),
+        color: isDark ? SoftPalette.slate900.withValues(alpha: 0.65) : SoftPalette.slate50,
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(
-            color: isDark
-                ? SoftPalette.slate700
-                : (isInj ? SoftPalette.sky300 : _teal.withValues(alpha: 0.15))),
+          color: isDark ? SoftPalette.slate700.withValues(alpha: 0.8) : SoftPalette.slate200,
+        ),
       ),
       child: Row(children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          decoration: BoxDecoration(color: badgeColor, borderRadius: BorderRadius.circular(5)),
-          child: Text(badge, style: const TextStyle(color: SoftPalette.gray50, fontSize: 9, fontWeight: FontWeight.bold)),
+        MedicineIconBadge(
+          name: med.name,
+          type: isInj ? 'injection' : '',
+          size: 20,
+          iconSize: 12,
+          borderRadius: 5,
         ),
         const SizedBox(width: 8),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(med.name,
-              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87),
-              maxLines: 1, overflow: TextOverflow.ellipsis),
-          if (parts.isNotEmpty)
-            Text(parts.join(' · '),
-                style: TextStyle(fontSize: 10.5, color: isDark ? SoftPalette.slate350 : SoftPalette.gray500),
-                maxLines: 1, overflow: TextOverflow.ellipsis),
-        ])),
+        Expanded(
+          child: RichText(
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            text: TextSpan(
+              children: [
+                TextSpan(
+                  text: nameWithDose,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                  ),
+                ),
+                if (timingStr.isNotEmpty)
+                  TextSpan(
+                    text: ' · $timingStr',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '${med.quantity}',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+          ),
+        ),
       ]),
     );
   }
@@ -1508,14 +2572,34 @@ class _CompactLatestCard extends StatelessWidget {
 // FULL HISTORY CARD (Ultra-Compact, High Information Density)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-class _HistoryCard extends StatelessWidget {
+class _HistoryCard extends StatefulWidget {
   final _HistoryEntry entry;
   final bool isLatest;
+  final bool isOldest;
+  final bool initiallyExpanded;
   final void Function(Map<String, dynamic>)? onRepeatLast;
 
-  const _HistoryCard({required this.entry, this.isLatest = false, this.onRepeatLast});
+  const _HistoryCard({
+    required this.entry,
+    this.isLatest = false,
+    this.isOldest = false,
+    this.initiallyExpanded = true,
+    this.onRepeatLast,
+  });
 
-  static const Color _teal = SoftPalette.teal600;
+  @override
+  State<_HistoryCard> createState() => _HistoryCardState();
+}
+
+class _HistoryCardState extends State<_HistoryCard> {
+  Color get _teal => context.comfort.brand;
+  late bool _expanded;
+
+  @override
+  void initState() {
+    super.initState();
+    _expanded = widget.initiallyExpanded;
+  }
 
   bool _getIsDark(BuildContext context) {
     try {
@@ -1530,311 +2614,412 @@ class _HistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = _getIsDark(context);
-    final e = entry;
-    final dateStr = DateFormat('d MMM yyyy • hh:mm a').format(e.date);
+    final brand = Theme.of(context).colorScheme.primary;
+    final muted = isDark ? SoftPalette.slate400 : SoftPalette.slate550;
+    final e = widget.entry;
+    final dateStr = DateFormat('d MMM yyyy · hh:mm a').format(e.date);
     final oralMeds = e.medicines.where((m) => !m.isInjectable).toList();
     final injectables = e.medicines.where((m) => m.isInjectable).toList();
 
-    final cardBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-    final cardBorder = isDark ? SoftPalette.slate700 : _teal.withValues(alpha: 0.25);
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
+    final cardBg = Theme.of(context).cardColor;
+    final cardBorder = widget.isLatest
+        ? brand.withValues(alpha: 0.45)
+        : (isDark ? SoftPalette.slate700 : SoftPalette.slate200);
+    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
         color: cardBg,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cardBorder, width: 1.1),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.25 : 0.05),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        border: Border.all(color: cardBorder, width: widget.isLatest ? 1.4 : 1.0),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Compact Header ──
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: isDark ? SoftPalette.slate800 : SoftPalette.emerald600,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.calendar_today_rounded, color: SoftPalette.gray50, size: 12),
-                const SizedBox(width: 5),
-                Text(
-                  dateStr,
-                  style: const TextStyle(color: SoftPalette.gray50, fontSize: 12, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: SoftPalette.gray50.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    '${e.days}d',
-                    style: const TextStyle(color: SoftPalette.gray50, fontSize: 10, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                if (e.doctorName.isNotEmpty) ...[
+          // ── Clickable Collapsible Header ──
+          InkWell(
+            borderRadius: _expanded
+                ? const BorderRadius.vertical(top: Radius.circular(11))
+                : BorderRadius.circular(11),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: widget.isLatest
+                    ? brand.withValues(alpha: isDark ? 0.16 : 0.08)
+                    : (isDark ? SoftPalette.slate900.withValues(alpha: 0.55) : SoftPalette.slate50),
+                borderRadius: _expanded
+                    ? const BorderRadius.vertical(top: Radius.circular(11))
+                    : BorderRadius.circular(11),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.calendar_today_rounded, color: brand, size: 13),
                   const SizedBox(width: 6),
-                  Flexible(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                      decoration: BoxDecoration(
-                        color: SoftPalette.gray50.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        'Dr. ${e.doctorName}',
-                        style: const TextStyle(color: SoftPalette.gray50, fontSize: 10.5, fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
+                  Text(
+                    dateStr,
+                    style: TextStyle(color: textPrimary, fontSize: 12.5, fontWeight: FontWeight.w700),
                   ),
-                ],
-                const Spacer(),
-                Text(
-                  '#${e.serial}',
-                  style: TextStyle(
-                    color: isDark ? SoftPalette.slate350 : SoftPalette.gray50A70,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (isLatest) ...[
                   const SizedBox(width: 6),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
                     decoration: BoxDecoration(
-                      color: SoftPalette.emerald350,
-                      borderRadius: BorderRadius.circular(6),
+                      color: brand.withValues(alpha: isDark ? 0.25 : 0.12),
+                      borderRadius: BorderRadius.circular(5),
                     ),
-                    child: const Text(
-                      'LATEST',
-                      style: TextStyle(
-                        color: SoftPalette.gray50,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.5,
+                    child: Text(
+                      '${e.days}d',
+                      style: TextStyle(color: isDark ? SoftPalette.gray50 : brand, fontSize: 10, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  if (e.doctorName.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: isDark ? SoftPalette.slate800 : Colors.white,
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate200),
+                      ),
+                      child: Text(
+                        e.doctorName.toLowerCase().startsWith('dr') ? e.doctorName : 'Dr. ${e.doctorName}',
+                        style: TextStyle(color: isDark ? SoftPalette.slate200 : SoftPalette.slate700, fontSize: 10.5, fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                  ],
+                  if (!_expanded && (e.diagnosis.isNotEmpty || e.medicines.isNotEmpty)) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        [
+                          if (e.diagnosis.isNotEmpty) e.diagnosis,
+                          '${e.medicines.length} med${e.medicines.length == 1 ? '' : 's'}',
+                        ].join(' · '),
+                        style: TextStyle(fontSize: 11.5, color: muted),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ] else
+                    const Spacer(),
+                  Text(
+                    '#${e.serial}',
+                    style: TextStyle(color: muted, fontSize: 10.5, fontWeight: FontWeight.w500),
+                  ),
+                  if (widget.isLatest) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: brand,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: const Text(
+                        'LATEST',
+                        style: TextStyle(color: SoftPalette.gray50, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.4),
+                      ),
+                    ),
+                  ] else if (widget.isOldest) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isDark ? SoftPalette.slate700 : SoftPalette.slate200,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        'OLDEST',
+                        style: TextStyle(color: isDark ? SoftPalette.slate200 : SoftPalette.slate700, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.4),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 6),
+                  Icon(
+                    _expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                    size: 18,
+                    color: muted,
                   ),
                 ],
-              ],
+              ),
             ),
           ),
 
-          // ── Compact Body ──
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Condition & Diagnosis Inline (Distinct harmonious colors)
-                if (e.complaint.isNotEmpty || e.diagnosis.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (e.complaint.isNotEmpty)
-                          Expanded(
-                            child: _compactInlineBlock(
-                              label: 'Condition',
-                              value: e.complaint,
-                              icon: Icons.medical_services_outlined,
-                              accentColor: isDark ? SoftPalette.sky350 : SoftPalette.sky500,
-                              bgColor: isDark ? SoftPalette.sky800.withValues(alpha: 0.35) : SoftPalette.slate50,
-                              borderColor: isDark ? SoftPalette.sky550.withValues(alpha: 0.5) : SoftPalette.slate150,
-                              textPrimary: textPrimary,
+          // ── Body (when expanded) ──
+          if (_expanded) ...[
+            Divider(height: 1, color: isDark ? SoftPalette.slate700.withValues(alpha: 0.7) : SoftPalette.slate200),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Branch, Camp, Doctor, Session & Dispense Metadata Strip
+                  Builder(builder: (_) {
+                    final rawB = (e.raw['branchName'] ?? e.raw['branchId'] ?? '').toString().trim();
+                    final bLabel = rawB.isNotEmpty ? (LocalStorageService.getBranchName(rawB) ?? rawB) : '';
+                    final campLabel = e.campName.isNotEmpty && e.campName.toLowerCase() != bLabel.toLowerCase() ? e.campName : '';
+                    final session = (e.raw['session'] ?? e.raw['shift'] ?? '').toString().trim();
+                    final dispensedBy = (e.raw['dispensedBy'] ?? e.raw['performedBy'] ?? '').toString().trim();
+                    final dispStatus = (e.raw['dispenseStatus'] ?? e.raw['status'] ?? '').toString().toLowerCase();
+                    final isDisp = dispStatus == 'dispensed' || dispensedBy.isNotEmpty;
+
+                    Widget metaChip(IconData icon, String text, Color color) {
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: isDark ? 0.16 : 0.08),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: color.withValues(alpha: 0.3)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(icon, size: 11, color: color),
+                            const SizedBox(width: 4),
+                            Text(text, style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : color)),
+                          ],
+                        ),
+                      );
+                    }
+
+                    final chips = <Widget>[
+                      if (bLabel.isNotEmpty) metaChip(Icons.local_hospital_outlined, bLabel, brand),
+                      if (campLabel.isNotEmpty) metaChip(Icons.location_on_outlined, campLabel, SoftPalette.sky500),
+                      if (e.doctorName.isNotEmpty)
+                        metaChip(
+                          Icons.medical_services_outlined,
+                          e.doctorName.toLowerCase().startsWith('dr') ? e.doctorName : 'Dr. ${e.doctorName}',
+                          brand,
+                        ),
+                      if (session.isNotEmpty)
+                        metaChip(Icons.schedule_rounded, session[0].toUpperCase() + session.substring(1).toLowerCase(), muted),
+                      if (isDisp)
+                        metaChip(
+                          Icons.check_circle_outline_rounded,
+                          dispensedBy.isNotEmpty ? 'Dispensed by $dispensedBy' : 'Dispensed',
+                          SoftPalette.emerald500,
+                        ),
+                    ];
+                    if (chips.isEmpty) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Wrap(spacing: 6, runSpacing: 5, children: chips),
+                    );
+                  }),
+
+                  if (e.complaint.isNotEmpty || e.diagnosis.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (e.complaint.isNotEmpty)
+                            Expanded(
+                              child: _compactInlineBlock(
+                                label: 'Condition',
+                                value: e.complaint,
+                                icon: Icons.medical_services_outlined,
+                                accentColor: isDark ? SoftPalette.sky350 : SoftPalette.sky500,
+                                bgColor: SoftPalette.sky500.withValues(alpha: isDark ? 0.14 : 0.06),
+                                borderColor: SoftPalette.sky500.withValues(alpha: isDark ? 0.35 : 0.25),
+                                textPrimary: textPrimary,
+                              ),
                             ),
-                          ),
-                        if (e.complaint.isNotEmpty && e.diagnosis.isNotEmpty)
-                          const SizedBox(width: 8),
-                        if (e.diagnosis.isNotEmpty)
-                          Expanded(
-                            child: _compactInlineBlock(
-                              label: 'Diagnosis',
-                              value: e.diagnosis,
-                              icon: Icons.assignment_outlined,
-                              accentColor: isDark ? SoftPalette.emerald300 : SoftPalette.emerald500,
-                              bgColor: isDark ? SoftPalette.emerald700.withValues(alpha: 0.3) : SoftPalette.emerald50,
-                              borderColor: isDark ? SoftPalette.emerald550.withValues(alpha: 0.5) : SoftPalette.emerald150,
-                              textPrimary: textPrimary,
+                          if (e.complaint.isNotEmpty && e.diagnosis.isNotEmpty)
+                            const SizedBox(width: 8),
+                          if (e.diagnosis.isNotEmpty)
+                            Expanded(
+                              child: _compactInlineBlock(
+                                label: 'Diagnosis',
+                                value: e.diagnosis,
+                                icon: Icons.assignment_outlined,
+                                accentColor: brand,
+                                bgColor: brand.withValues(alpha: isDark ? 0.14 : 0.06),
+                                borderColor: brand.withValues(alpha: isDark ? 0.35 : 0.25),
+                                textPrimary: textPrimary,
+                              ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
 
-                // Vitals
-                if (e.vitals.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: _buildCompactVitalsRow(e.vitals, isDark),
-                  ),
-
-                // Medicines Wrap
-                if (oralMeds.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                          margin: const EdgeInsets.only(right: 6, top: 1),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.teal500.withValues(alpha: 0.25) : _teal.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.medication_rounded, size: 11, color: isDark ? SoftPalette.teal300 : _teal),
-                              const SizedBox(width: 3),
-                              Text(
-                                'Medicines',
-                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.teal300 : _teal),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Expanded(
-                          child: Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            children: oralMeds.map((m) => _compactMedChip(m, isDark)).toList(),
-                          ),
-                        ),
-                      ],
+                  // Vitals
+                  if (e.vitals.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _buildCompactVitalsRow(e.vitals, isDark),
                     ),
-                  ),
 
-                // Injectables Wrap
-                if (injectables.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                          margin: const EdgeInsets.only(right: 6, top: 1),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.blue700.withValues(alpha: 0.4) : SoftPalette.slate200,
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.vaccines_rounded, size: 11, color: SoftPalette.adaptive(SoftPalette.blue550, isDark)),
-                              const SizedBox(width: 3),
-                              Text(
-                                'Injectables',
-                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.blue300 : SoftPalette.blue600),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Expanded(
-                          child: Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            children: injectables.map((m) => _compactInjChip(m, isDark)).toList(),
-                          ),
-                        ),
-                      ],
+                  // Medicines & Injectables Structured Rows
+                  if (oralMeds.isNotEmpty || injectables.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Text(
+                        'MEDICINES PRESCRIBED (${e.medicines.length})',
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: muted),
+                      ),
                     ),
-                  ),
-
-                // Lab tests / Physiotherapies
-                if (e.labTests.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                          margin: const EdgeInsets.only(right: 6, top: 1),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.orange800 : SoftPalette.amber150,
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                e.raw['isPhysiotherapist'] == true ? Icons.accessibility_rounded : Icons.science_rounded,
-                                size: 11,
-                                color: isDark ? SoftPalette.orange350 : SoftPalette.orange400,
-                              ),
-                              const SizedBox(width: 3),
-                              Text(
-                                e.raw['isPhysiotherapist'] == true ? 'Physiotherapy' : 'Lab Tests',
-                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.orange350 : SoftPalette.orange400),
-                              ),
-                            ],
-                          ),
+                    ...[...oralMeds, ...injectables].map((m) {
+                      final isInj = m.isInjectable;
+                      final accent = isInj ? SoftPalette.amber500 : brand;
+                      final nameStr = [m.name, if (m.dosage.isNotEmpty) m.dosage].join(' ');
+                      final metaParts = <String>[
+                        if (m.type.isNotEmpty) m.type,
+                        if (m.timing.isNotEmpty) m.timing,
+                        if (m.frequency.isNotEmpty && m.frequency != m.timing) m.frequency,
+                        if (m.meal.isNotEmpty) m.meal,
+                      ];
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 5),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: isDark ? SoftPalette.slate900.withValues(alpha: 0.6) : SoftPalette.slate50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate200),
                         ),
-                        Expanded(
-                          child: Wrap(
-                            spacing: 5,
-                            runSpacing: 4,
-                            children: e.labTests.map((t) => Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 22,
+                              height: 22,
+                              alignment: Alignment.center,
                               decoration: BoxDecoration(
-                                color: isDark ? SoftPalette.orange800.withValues(alpha: 0.7) : SoftPalette.amber100m,
+                                color: accent.withValues(alpha: isDark ? 0.22 : 0.12),
                                 borderRadius: BorderRadius.circular(6),
-                                border: Border.all(color: isDark ? SoftPalette.red600 : SoftPalette.amber300),
+                              ),
+                              child: Icon(
+                                isInj ? Icons.vaccines_rounded : Icons.medication_rounded,
+                                size: 12,
+                                color: accent,
+                              ),
+                            ),
+                            const SizedBox(width: 9),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    nameStr,
+                                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: textPrimary),
+                                  ),
+                                  if (metaParts.isNotEmpty)
+                                    Text(
+                                      metaParts.join(' · '),
+                                      style: TextStyle(fontSize: 11, color: muted),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: accent.withValues(alpha: isDark ? 0.2 : 0.1),
+                                borderRadius: BorderRadius.circular(5),
                               ),
                               child: Text(
-                                t,
+                                '×${m.quantity}',
                                 style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w800,
+                                  color: isDark ? SoftPalette.gray50 : accent,
                                 ),
                               ),
-                            )).toList(),
-                          ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                  ),
+                      );
+                    }),
+                    const SizedBox(height: 4),
+                  ],
 
-                if (onRepeatLast != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: () => onRepeatLast!(entry.raw),
-                        icon: const Icon(Icons.repeat, size: 14),
-                        label: const Text('Repeat This Prescription', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: isDark ? SoftPalette.teal500 : _teal,
-                          foregroundColor: SoftPalette.gray50,
-                          padding: const EdgeInsets.symmetric(vertical: 6),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          elevation: 0,
+                  // Lab tests / Physiotherapies
+                  if (e.labTests.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                            margin: const EdgeInsets.only(right: 6, top: 1),
+                            decoration: BoxDecoration(
+                              color: SoftPalette.amber500.withValues(alpha: isDark ? 0.2 : 0.1),
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  e.raw['isPhysiotherapist'] == true ? Icons.accessibility_rounded : Icons.science_rounded,
+                                  size: 11,
+                                  color: SoftPalette.amber400,
+                                ),
+                                const SizedBox(width: 3),
+                                Text(
+                                  e.raw['isPhysiotherapist'] == true ? 'Physiotherapy' : 'Lab Tests',
+                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.amber300 : SoftPalette.amber500),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Expanded(
+                            child: Wrap(
+                              spacing: 5,
+                              runSpacing: 4,
+                              children: e.labTests.map((t) => Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: SoftPalette.amber500.withValues(alpha: isDark ? 0.18 : 0.08),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: SoftPalette.amber500.withValues(alpha: 0.35)),
+                                ),
+                                child: Text(
+                                  t,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? SoftPalette.amber200 : SoftPalette.amber500,
+                                  ),
+                                ),
+                              )).toList(),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  if (widget.onRepeatLast != null && e.medicines.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () => widget.onRepeatLast!(e.raw),
+                          icon: Icon(Icons.replay_rounded, size: 14, color: isDark ? SoftPalette.gray50 : brand),
+                          label: Text(
+                            'Repeat this prescription',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: isDark ? SoftPalette.gray50 : brand,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: brand.withValues(alpha: isDark ? 0.16 : 0.07),
+                            side: BorderSide(color: brand.withValues(alpha: 0.45)),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -1986,7 +3171,7 @@ class _HistoryCard extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
-              color: isDark ? SoftPalette.teal500 : _teal,
+              color: context.comfort.brand,
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(

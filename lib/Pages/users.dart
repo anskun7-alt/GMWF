@@ -69,6 +69,7 @@ class _UsersScreenState extends State<UsersScreen>
   bool _filtersExpanded = false;
   final Set<String> _syncedBranches = {};
   final Set<String> _collapsedCategories = {};
+  static DateTime? _lastBranchesFetch;
 
   void _toggleCategory(String key) {
     setState(() {
@@ -149,9 +150,13 @@ class _UsersScreenState extends State<UsersScreen>
       }
     } catch (_) {}
 
-    // 2. Fetch fresh branches in background
+    // 2. Fetch fresh branches in background (guarded by 6-hour TTL)
+    if (_branches.isNotEmpty && _lastBranchesFetch != null && DateTime.now().difference(_lastBranchesFetch!).inHours < 6) {
+      return;
+    }
     try {
       final snap = await FirebaseFirestore.instance.collection('branches').get();
+      _lastBranchesFetch = DateTime.now();
 
       var rawBranches = snap.docs.where((d) {
         final idLower = d.id.toLowerCase().trim();
@@ -291,6 +296,28 @@ class _UsersScreenState extends State<UsersScreen>
               ),
             ),
       body: Column(children: [
+        // Without its own app bar (executive shell), keep "Register User".
+        if (isWrapped && !widget.isPatientMode && !widget.isGuardianMode)
+          Container(
+            color: t.bgCard,
+            padding: const EdgeInsets.fromLTRB(10, 8, 12, 2),
+            alignment: AlignmentDirectional.centerEnd,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+              label: const Text('Register User', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: t.accent,
+                foregroundColor: SoftPalette.gray50,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const Register()),
+              ),
+            ),
+          ),
         // ── Tab bar ──
         if (_branches.length > 1)
           Container(
@@ -506,21 +533,21 @@ class _UsersScreenState extends State<UsersScreen>
           }
         }
         try {
-          await FirebaseFirestore.instance.collection('users').doc(uid).set(
+          final batch = FirebaseFirestore.instance.batch();
+          batch.set(
+            FirebaseFirestore.instance.collection('users').doc(uid),
             fsPayload,
             SetOptions(merge: true),
-          ).timeout(const Duration(seconds: 15));
+          );
 
           if (branch.isNotEmpty && branch != 'all' && branch != 'global') {
-            await FirebaseFirestore.instance
-                .collection('branches')
-                .doc(branch)
-                .collection('users')
-                .doc(uid)
-                .set(fsPayload, SetOptions(merge: true))
-                .timeout(const Duration(seconds: 10))
-                .catchError((_) {});
+            batch.set(
+              FirebaseFirestore.instance.collection('branches').doc(branch).collection('users').doc(uid),
+              fsPayload,
+              SetOptions(merge: true),
+            );
           }
+          await batch.commit().timeout(const Duration(seconds: 15));
           directWriteSucceeded = true;
         } catch (cloudErr) {
           debugPrint('[_healSingleAccount] Direct write notice (queued for sync): $cloudErr');
@@ -2892,10 +2919,19 @@ class _UsersScreenState extends State<UsersScreen>
         'deletedAt': FieldValue.serverTimestamp(),
       };
 
+      final batch = firestore.batch();
+      final seenPaths = <String>{};
+
+      void addBatchSet(DocumentReference ref) {
+        if (seenPaths.add(ref.path)) {
+          batch.set(ref, deletePayload, SetOptions(merge: true));
+        }
+      }
+
       for (final id in identifiers) {
-        await firestore.collection('users').doc(id).set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+        addBatchSet(firestore.collection('users').doc(id));
         if (branchId.isNotEmpty && branchId != 'all') {
-          await firestore.collection('branches').doc(branchId).collection('users').doc(id).set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+          addBatchSet(firestore.collection('branches').doc(branchId).collection('users').doc(id));
         }
       }
 
@@ -2903,7 +2939,7 @@ class _UsersScreenState extends State<UsersScreen>
         try {
           final snap = await firestore.collection('users').where('usernameLower', isEqualTo: usernameLower).get();
           for (final doc in snap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         } catch (_) {}
       }
@@ -2912,7 +2948,7 @@ class _UsersScreenState extends State<UsersScreen>
         try {
           final snap = await firestore.collection('users').where('email', isEqualTo: email).get();
           for (final doc in snap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         } catch (_) {}
       }
@@ -2921,7 +2957,7 @@ class _UsersScreenState extends State<UsersScreen>
         try {
           final snap = await firestore.collection('users').where('uid', isEqualTo: targetUid).get();
           for (final doc in snap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         } catch (_) {}
       }
@@ -2930,22 +2966,28 @@ class _UsersScreenState extends State<UsersScreen>
         if (targetUid.isNotEmpty) {
           final gSnap = await firestore.collectionGroup('users').where('uid', isEqualTo: targetUid).get();
           for (final doc in gSnap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         }
         if (email.isNotEmpty) {
           final gSnap = await firestore.collectionGroup('users').where('email', isEqualTo: email).get();
           for (final doc in gSnap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         }
         if (usernameLower.isNotEmpty) {
           final gSnap = await firestore.collectionGroup('users').where('usernameLower', isEqualTo: usernameLower).get();
           for (final doc in gSnap.docs) {
-            await doc.reference.set(deletePayload, SetOptions(merge: true)).catchError((_) {});
+            addBatchSet(doc.reference);
           }
         }
       } catch (_) {}
+
+      try {
+        await batch.commit();
+      } catch (e) {
+        debugPrint('[Users] Online purge batch failed: $e');
+      }
 
       try {
         SyncService().triggerUpload(urgent: true);
@@ -3728,47 +3770,47 @@ class _UsersScreenState extends State<UsersScreen>
     // below must not wait on them. An awaited SDK set() on root /users never returned when
     // the quota was used up, so the decision was never queued or broadcast.
     unawaited(() async {
-      // Update root /users
-      for (final docId in targetDocIds) {
-        try {
-          await CloudDb.instance.collection('users').doc(docId).set(fsPayload, SetOptions(merge: true));
-        } catch (e) {
-          debugPrint('[Users] root users update failed for $docId: $e');
-        }
-      }
-
-      // Update branch-level collections
-      for (final bId in candidateBranches) {
+      try {
+        final batch = CloudDb.instance.batch();
+        // Update root /users
         for (final docId in targetDocIds) {
-          try {
-            await CloudDb.instance
-                .collection('branches')
-                .doc(bId)
-                .collection('users')
-                .doc(docId)
-                .set(fsPayload, SetOptions(merge: true));
-          } catch (_) {}
+          batch.set(
+            CloudDb.instance.collection('users').doc(docId),
+            fsPayload,
+            SetOptions(merge: true),
+          );
         }
 
-        final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? '').toString().trim();
-        if (empId.isNotEmpty) {
-          try {
-            await CloudDb.instance
-                .collection('branches')
-                .doc(bId)
-                .collection('employees')
-                .doc(empId)
-                .set({
-              'restoreRequested': false,
-              'restoreRequestStatus': isAllow ? 'approved' : 'rejected',
-              'isActive': isAllow,
-              'status': isAllow ? 'active' : 'offboarded',
-              'employeeStatus': isAllow ? 'active' : 'offboarded',
-              if (isAllow) 'restoredAt': FieldValue.serverTimestamp(),
-              if (!isAllow) 'rejectedAt': FieldValue.serverTimestamp(),
-            }, SetOptions(merge: true));
-          } catch (_) {}
+        // Update branch-level collections
+        for (final bId in candidateBranches) {
+          for (final docId in targetDocIds) {
+            batch.set(
+              CloudDb.instance.collection('branches').doc(bId).collection('users').doc(docId),
+              fsPayload,
+              SetOptions(merge: true),
+            );
+          }
+
+          final empId = (data['linkedEmployeeId'] ?? data['localId'] ?? data['id'] ?? '').toString().trim();
+          if (empId.isNotEmpty) {
+            batch.set(
+              CloudDb.instance.collection('branches').doc(bId).collection('employees').doc(empId),
+              {
+                'restoreRequested': false,
+                'restoreRequestStatus': isAllow ? 'approved' : 'rejected',
+                'isActive': isAllow,
+                'status': isAllow ? 'active' : 'offboarded',
+                'employeeStatus': isAllow ? 'active' : 'offboarded',
+                if (isAllow) 'restoredAt': FieldValue.serverTimestamp(),
+                if (!isAllow) 'rejectedAt': FieldValue.serverTimestamp(),
+              },
+              SetOptions(merge: true),
+            );
+          }
         }
+        await batch.commit();
+      } catch (e) {
+        debugPrint('[Users] restore/reject batch write notice: $e');
       }
     }());
 
@@ -4054,6 +4096,7 @@ class _UsersScreenState extends State<UsersScreen>
 
   // ── Stream ──
 
+  // ignore: unused_element
   Future<QuerySnapshot> _loadUsersSnapshot(String branchId) async {
     final normalizedBranch = branchId.trim().toLowerCase();
     if (normalizedBranch.isEmpty || normalizedBranch == 'all' || normalizedBranch == 'global') {

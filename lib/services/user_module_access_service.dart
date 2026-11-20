@@ -94,6 +94,10 @@ class UserModuleAccessService {
       if (mod == 'server_sync' || mod == 'server') {
         return false;
       }
+      // Creating branches is not for the HQ Manager (user, 2026-11-19).
+      if (mod == 'register_branch' || mod == 'branches_register') {
+        return false;
+      }
       // HQ Manager has full access to Food Tokens / Office Boy
       if (mod == 'office_boy' || mod == 'office boy' || mod == 'officeboy') {
         return true;
@@ -169,7 +173,7 @@ class UserModuleAccessService {
   static const List<Map<String, String>> systemModules = [
     {'id': 'office_finance', 'name': 'Finance & Payroll ERP', 'category': 'Office'},
     {'id': 'dispensary', 'name': 'Dispensary & Patients', 'category': 'Medical'},
-    {'id': 'medicine_ledger', 'name': 'Medicine Stock Ledger', 'category': 'Medical'},
+    {'id': 'medicine_ledger', 'name': 'Dispensary Report', 'category': 'Medical'},
     {'id': 'madrassa', 'name': 'Madrassa Education System', 'category': 'Education'},
     {'id': 'school', 'name': 'School Management System', 'category': 'Education'},
     {'id': 'dasterkhwaan', 'name': 'Dasterkhwaan Food Distribution', 'category': 'Welfare'},
@@ -180,13 +184,13 @@ class UserModuleAccessService {
   static Map<String, List<String>> getRoleDefaultsMap() {
     return {
       '1. Chairman': ['100% Unrestricted & Immutable Access across all modules, branches, ledgers, and system settings'],
-      '2. Global Admin': ['Finance & Payroll', 'Dispensary & Patients', 'Medicine Ledger', 'Madrassa System', 'School System', 'Dasterkhwaan', 'Donations', 'User Management', 'Executive Dashboard'],
-      '3. CEO': ['Finance & Payroll', 'Dispensary & Patients', 'Medicine Ledger', 'Madrassa System', 'School System', 'Dasterkhwaan', 'Donations', 'Executive Dashboard'],
+      '2. Global Admin': ['Finance & Payroll', 'Dispensary & Patients', 'Dispensary Report', 'Madrassa System', 'School System', 'Dasterkhwaan', 'Donations', 'User Management', 'Executive Dashboard'],
+      '3. CEO': ['Finance & Payroll', 'Dispensary & Patients', 'Dispensary Report', 'Madrassa System', 'School System', 'Dasterkhwaan', 'Donations', 'Executive Dashboard'],
       '4. Global Accounts': ['Finance & Payroll', 'Donations', 'Financial Reports'],
       '5. HQ Manager': ['Multi-branch operational oversight', 'Finance', 'Dispensary', 'Madrassa', 'School', 'Dasterkhwaan', 'Donations'],
-      '6. Branch Manager': ['Assigned Branch Only: Finance', 'Dispensary', 'Medicine Ledger', 'Madrassa', 'School', 'Dasterkhwaan', 'Donations'],
-      '7. Supervisor': ['Assigned Branch Only: Dispensary', 'Medicine Ledger', 'Madrassa', 'Dasterkhwaan'],
-      '8. Doctor / Dispenser': ['Dispensary & Patients', 'Medicine Stock Ledger', 'Prescriptions'],
+      '6. Branch Manager': ['Assigned Branch Only: Finance', 'Dispensary', 'Dispensary Report', 'Madrassa', 'School', 'Dasterkhwaan', 'Donations'],
+      '7. Supervisor': ['Assigned Branch Only: Dispensary', 'Dispensary Report', 'Madrassa', 'Dasterkhwaan'],
+      '8. Doctor / Dispenser': ['Dispensary & Patients', 'Dispensary Report', 'Prescriptions'],
       '9. Madrassa / School Admin': ['Education Module Admin', 'Attendance & Daily Logs'],
       '10. Donations / Office Boy': ['Welfare & Donation Operations', 'Food Tokens'],
     };

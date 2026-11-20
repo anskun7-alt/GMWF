@@ -6,12 +6,10 @@
 // public API (BranchStats, DS, fmtNum, fmtPKR, RoleThemeData).
 
 import 'dart:async';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/components/app_toast.dart';
-import 'package:gmwf/design/components/decorative_image.dart';
+import 'package:gmwf/design/design_system.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lottie/lottie.dart';
@@ -34,7 +32,231 @@ import 'app_skeleton.dart';
 import '../utils/branch_labels.dart';
 
 // ════════════════════════════════════════════════════════════════════════
-// 1. Compact stat tile w/ "vs yesterday" delta
+// Shared Nexus-inspired executive surface, header & toggle primitives
+// Uses RoleThemeData + SoftPalette + Design System v2 tokens (0 raw colors)
+// ════════════════════════════════════════════════════════════════════════
+
+Color _dashSurface(RoleThemeData t) => t.bgCard;
+
+Color _dashSubtleSurface(RoleThemeData t) => t.bgCardAlt;
+
+Color _dashBorder(RoleThemeData t) => t.bgRule;
+
+BoxDecoration _dashCardDecoration(
+  RoleThemeData t, {
+  bool hovered = false,
+  Color? highlightColor,
+  double radius = Gr.r4,
+}) {
+  final isDark = t.isDarkCanvas;
+  final borderCol = hovered
+      ? (highlightColor ?? t.accent).withValues(alpha: isDark ? 0.58 : 0.48)
+      : _dashBorder(t);
+  return BoxDecoration(
+    color: _dashSurface(t),
+    borderRadius: BorderRadius.circular(radius),
+    border: Border.all(color: borderCol, width: 1.0),
+    boxShadow: hovered ? GShadow.s2(isDark) : GShadow.s1(isDark),
+  );
+}
+
+class _DashCardHeader extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  final RoleThemeData t;
+  final Widget? trailing;
+  final bool showLiveDot;
+
+  const _DashCardHeader({
+    required this.title,
+    this.subtitle,
+    required this.t,
+    this.trailing,
+    this.showLiveDot = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = t.isDarkCanvas;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      title,
+                      style: TextStyle(
+                        color: t.textPrimary,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.25,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (showLiveDot) ...[
+                    const SizedBox(width: 7),
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: GColor.successOf(isDark),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              if (subtitle != null && subtitle!.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  subtitle!,
+                  style: TextStyle(
+                    color: t.textSecondary,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w400,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (trailing != null) ...[
+          const SizedBox(width: 10),
+          trailing!,
+        ],
+      ],
+    );
+  }
+}
+
+class _DashSegmentedToggle<T> extends StatelessWidget {
+  final RoleThemeData t;
+  final T value;
+  final List<(T value, String label)> items;
+  final ValueChanged<T> onChanged;
+
+  const _DashSegmentedToggle({
+    required this.t,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = t.isDarkCanvas;
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: _dashSubtleSurface(t),
+        borderRadius: BorderRadius.circular(Gr.r2),
+        border: Border.all(color: _dashBorder(t), width: 1.0),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: items.map((item) {
+          final isSel = item.$1 == value;
+          return MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => onChanged(item.$1),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isSel ? _dashSurface(t) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(Gr.r2 - 2),
+                  boxShadow: isSel ? GShadow.s1(isDark) : GShadow.s0,
+                ),
+                child: Text(
+                  item.$2,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: isSel ? FontWeight.w700 : FontWeight.w500,
+                    color: isSel ? t.textPrimary : t.textSecondary,
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+class _DashEmptyState extends StatelessWidget {
+  final IconData icon;
+  final String message;
+  final String? hint;
+  final RoleThemeData t;
+
+  const _DashEmptyState({
+    required this.icon,
+    required this.message,
+    this.hint,
+    required this.t,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: _dashSubtleSurface(t),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, size: 18, color: t.textTertiary),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: TextStyle(
+                color: t.textPrimary,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            if (hint != null && hint!.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              Text(
+                hint!,
+                style: TextStyle(
+                  color: t.textSecondary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w400,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 1. Compact stat tile w/ clean NexusMetricCard hierarchy & honest context
 // ════════════════════════════════════════════════════════════════════════
 
 class HomeStatTile extends StatefulWidget {
@@ -42,8 +264,12 @@ class HomeStatTile extends StatefulWidget {
   final String value;
   final String? prefix;
   final IconData icon;
+  final String? imageAsset;
   final Color color;
-  final double? deltaPct; // null = no yesterday data ("New today")
+  final double? deltaPct;
+  final String? subtext;
+  final bool isActionTile;
+  final RoleThemeData? t;
   final VoidCallback? onTap;
 
   const HomeStatTile({
@@ -52,8 +278,12 @@ class HomeStatTile extends StatefulWidget {
     required this.value,
     this.prefix,
     required this.icon,
+    this.imageAsset,
     required this.color,
     this.deltaPct,
+    this.subtext,
+    this.isActionTile = false,
+    this.t,
     this.onTap,
   });
 
@@ -61,7 +291,8 @@ class HomeStatTile extends StatefulWidget {
   State<HomeStatTile> createState() => _HomeStatTileState();
 }
 
-class _HomeStatTileState extends State<HomeStatTile> with SingleTickerProviderStateMixin {
+class _HomeStatTileState extends State<HomeStatTile>
+    with SingleTickerProviderStateMixin {
   bool _hov = false;
   late AnimationController _pressCtrl;
   late Animation<double> _pressScale;
@@ -71,8 +302,8 @@ class _HomeStatTileState extends State<HomeStatTile> with SingleTickerProviderSt
     super.initState();
     _pressCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 100));
-    _pressScale = Tween<double>(begin: 1.0, end: 0.97).animate(
-        CurvedAnimation(parent: _pressCtrl, curve: Curves.easeOut));
+    _pressScale = Tween<double>(begin: 1.0, end: 0.98)
+        .animate(CurvedAnimation(parent: _pressCtrl, curve: Curves.easeOut));
   }
 
   @override
@@ -83,230 +314,274 @@ class _HomeStatTileState extends State<HomeStatTile> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    final t = RoleThemeScope.dataOf(context);
+    final t = widget.t ?? RoleThemeScope.dataOf(context);
+    final isDark = t.isDarkCanvas;
     final hasDelta = widget.deltaPct != null;
     final isUp = hasDelta && widget.deltaPct! >= 0;
-    final deltaColor = !hasDelta
-        ? DS.neutral
-        : (isUp ? SoftPalette.green400 : SoftPalette.red500);
-    final isDark = t.isDarkCanvas;
-
+    final Color deltaColor = !hasDelta
+        ? t.textSecondary
+        : (isUp ? GColor.successOf(isDark) : GColor.dangerOf(isDark));
     final Color categoryColor = widget.color;
-    final categoryGradient = LinearGradient(
-      colors: [categoryColor.withValues(alpha: 0.85), categoryColor],
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
+    final bool isLongValue = widget.value.length > 10;
+
+    final String? fallbackContext = () {
+      if (widget.subtext != null && widget.subtext!.isNotEmpty) {
+        return widget.subtext!;
+      }
+      if (hasDelta) return null;
+      final trimmed = widget.value.trim();
+      if (trimmed == '0' || trimmed == '0%' || trimmed == 'Rs 0') {
+        return 'No entries today';
+      }
+      return 'Recorded today';
+    }();
+
+    final baseDecoration = _dashCardDecoration(
+      t,
+      hovered: _hov,
+      highlightColor: categoryColor,
+      radius: Gr.r3,
     );
 
     final tileContent = AnimatedContainer(
-      duration: const Duration(milliseconds: 260),
+      duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        boxShadow: [
-          BoxShadow(
-            color: categoryColor.withValues(alpha: _hov ? (isDark ? 0.35 : 0.22) : (isDark ? 0.12 : 0.06)),
-            blurRadius: _hov ? 24 : 14,
-            spreadRadius: _hov ? 1.5 : 0,
-            offset: Offset(0, _hov ? 8 : 4),
-          ),
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.30 : 0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+      decoration: baseDecoration.copyWith(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.alphaBlend(
+              categoryColor.withValues(alpha: _hov ? (isDark ? 0.14 : 0.065) : (isDark ? 0.07 : 0.03)),
+              _dashSurface(t),
+            ),
+            _dashSurface(t),
+          ],
+        ),
+        boxShadow: _hov
+            ? [
+                ...GShadow.s2(isDark),
+                BoxShadow(
+                  color: categoryColor.withValues(alpha: isDark ? 0.20 : 0.11),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
+              ]
+            : baseDecoration.boxShadow,
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(22),
-          // No BackdropFilter here: up to 11 live blurs per frame pinned the HD 520 GPU; the
-          // tile gradient was raised a little in opacity instead.
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(22),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: isDark
-                    ? [
-                        SoftPalette.slate800.withValues(alpha: _hov ? 0.92 : 0.80),
-                        SoftPalette.slate900.withValues(alpha: _hov ? 0.88 : 0.74),
-                      ]
-                    : [
-                        SoftPalette.gray50.withValues(alpha: _hov ? 0.97 : 0.92),
-                        SoftPalette.gray50.withValues(alpha: _hov ? 0.92 : 0.84),
-                      ],
-              ),
-              border: Border.all(
-                color: _hov
-                    ? categoryColor.withValues(alpha: isDark ? 0.65 : 0.50)
-                    : (isDark
-                        ? SoftPalette.gray50.withValues(alpha: 0.14)
-                        : SoftPalette.gray50.withValues(alpha: 0.65)),
-                width: 1.0,
-              ),
-            ),
-            child: Stack(
-              children: [
-                // Localized ambient radial glow spot behind badge
-                Positioned(
-                  top: -24,
-                  left: -24,
-                  width: 90,
-                  height: 90,
-                  child: IgnorePointer(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: RadialGradient(
-                          colors: [
-                            categoryColor.withValues(alpha: _hov ? (isDark ? 0.30 : 0.20) : (isDark ? 0.16 : 0.10)),
-                            categoryColor.withValues(alpha: 0.0),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 11, 12, 10),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      // Floating squircle badge with gradient & soft shadow
-                      AnimatedRotation(
-                        turns: _hov ? 0.02 : 0,
-                        duration: const Duration(milliseconds: 250),
-                        curve: Curves.easeOutBack,
-                        child: Container(
-                          padding: const EdgeInsets.all(8.5),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(13),
-                            gradient: categoryGradient,
-                            border: Border.all(
-                              color: SoftPalette.gray50.withValues(alpha: 0.35),
-                              width: 0.9,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: categoryColor.withValues(alpha: _hov ? 0.40 : 0.25),
-                                blurRadius: _hov ? 10 : 6,
-                                offset: const Offset(0, 3),
-                              ),
-                              BoxShadow(
-                                color: SoftPalette.gray50.withValues(alpha: 0.20),
-                                blurRadius: 1,
-                                offset: const Offset(-1, -1),
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            widget.icon,
-                            color: SoftPalette.gray50,
-                            size: 16,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-
-                      // Text info
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              widget.label,
-                              style: TextStyle(
-                                color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.1,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 2),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.baseline,
-                              textBaseline: TextBaseline.alphabetic,
-                              children: [
-                                if (widget.prefix != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 3),
-                                    child: Text(
-                                      widget.prefix!,
-                                      style: TextStyle(
-                                        color: categoryColor,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ),
-                                Flexible(
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      widget.value,
-                                      style: TextStyle(
-                                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                                        fontSize: 16.5,
-                                        fontWeight: FontWeight.w900,
-                                        letterSpacing: -0.5,
-                                        height: 1.1,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 3),
-                            // Delta pill badge
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 1.5),
-                              decoration: BoxDecoration(
-                                color: deltaColor.withValues(alpha: isDark ? 0.18 : 0.10),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: deltaColor.withValues(alpha: isDark ? 0.28 : 0.18),
-                                  width: 0.6,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    !hasDelta
-                                        ? Icons.fiber_new_rounded
-                                        : (isUp ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded),
-                                    size: 9.5,
-                                    color: deltaColor,
-                                  ),
-                                  const SizedBox(width: 2.5),
-                                  Text(
-                                    !hasDelta ? 'New today' : '${widget.deltaPct!.abs().toStringAsFixed(0)}% vs yesterday',
-                                    style: TextStyle(
-                                      color: deltaColor,
-                                      fontSize: 8.5,
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: -0.1,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+        borderRadius: BorderRadius.circular(Gr.r3),
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 2.5,
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      categoryColor.withValues(alpha: _hov ? 1.0 : 0.85),
+                      categoryColor.withValues(alpha: _hov ? 0.72 : 0.45),
                     ],
                   ),
                 ),
-              ],
+              ),
             ),
-          ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 11),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  // Top row: uppercase metadata label + bordered vivid icon square
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          widget.label.toUpperCase(),
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.45,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        width: 30,
+                        height: 30,
+                        decoration: BoxDecoration(
+                          color: categoryColor.withValues(alpha: isDark ? 0.20 : 0.13),
+                          borderRadius: BorderRadius.circular(Gr.r2),
+                          border: Border.all(
+                            color: categoryColor.withValues(alpha: isDark ? 0.36 : 0.24),
+                            width: 0.9,
+                          ),
+                        ),
+                        child: widget.imageAsset != null
+                            ? Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: Image.asset(
+                                  widget.imageAsset!,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) => Icon(
+                                    widget.icon,
+                                    color: categoryColor,
+                                    size: 15,
+                                  ),
+                                ),
+                              )
+                            : Icon(
+                                widget.icon,
+                                color: categoryColor,
+                                size: 15,
+                              ),
+                      ),
+                    ],
+                  ),
+
+                  // Center row: crisp tabular KPI figure (or compact branch name)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      if (widget.prefix != null)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 3),
+                          child: Text(
+                            widget.prefix!,
+                            style: TextStyle(
+                              color: t.textSecondary,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      Expanded(
+                        child: isLongValue
+                            ? Text(
+                                widget.value,
+                                style: TextStyle(
+                                  color: t.textPrimary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: -0.25,
+                                  height: 1.15,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              )
+                            : FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  widget.value,
+                                  style: TextStyle(
+                                    color: t.textPrimary,
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.5,
+                                    height: 1.05,
+                                    fontFeatures: const [FontFeature.tabularFigures()],
+                                  ),
+                                ),
+                              ),
+                      ),
+                    ],
+                  ),
+
+                  // Bottom row: delta trend indicator OR clear subtext context
+                  Row(
+                    children: [
+                      if (hasDelta) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: deltaColor.withValues(alpha: isDark ? 0.16 : 0.10),
+                            borderRadius: BorderRadius.circular(Gr.r1),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                isUp
+                                    ? Icons.trending_up_rounded
+                                    : Icons.trending_down_rounded,
+                                size: 11,
+                                color: deltaColor,
+                              ),
+                              const SizedBox(width: 2.5),
+                              Text(
+                                '${isUp ? '+' : ''}${widget.deltaPct!.toStringAsFixed(0)}%',
+                                style: TextStyle(
+                                  color: deltaColor,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  fontFeatures: const [FontFeature.tabularFigures()],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'vs yesterday',
+                            style: TextStyle(
+                              color: t.textSecondary,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ] else ...[
+                        Container(
+                          width: 5,
+                          height: 5,
+                          decoration: BoxDecoration(
+                            color: widget.isActionTile
+                                ? categoryColor
+                                : (widget.value.trim() == '0'
+                                    ? t.textTertiary.withValues(alpha: 0.45)
+                                    : categoryColor.withValues(alpha: 0.85)),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            fallbackContext ?? 'Recorded today',
+                            style: TextStyle(
+                              color: widget.isActionTile ? categoryColor : t.textSecondary,
+                              fontSize: 10.5,
+                              fontWeight: widget.isActionTile ? FontWeight.w600 : FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (widget.isActionTile)
+                          Icon(
+                            Icons.arrow_forward_rounded,
+                            size: 12,
+                            color: categoryColor,
+                          ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
 
@@ -340,19 +615,28 @@ class HomeStatTileRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (tiles.isEmpty) return const SizedBox.shrink();
     return LayoutBuilder(builder: (context, c) {
-      int cols = 6;
-      double aspectRatio = 2.15;
+      final int count = tiles.length;
+      final int cols;
+      final double extent;
 
       if (c.maxWidth < 600) {
         cols = 2;
-        aspectRatio = 1.85;
-      } else if (c.maxWidth < 1100) {
-        cols = 6;
-        aspectRatio = 1.95;
+        extent = 104.0;
+      } else if (c.maxWidth < 960) {
+        cols = (count == 8 || count == 4) ? 4 : 3;
+        extent = 106.0;
       } else {
-        cols = 6;
-        aspectRatio = 2.25;
+        if (count <= 3) {
+          cols = count;
+        } else if (count == 4 || count == 8) {
+          cols = 4;
+        } else {
+          // 10 tiles form a balanced 5x2 grid with zero orphan gaps
+          cols = 5;
+        }
+        extent = 108.0;
       }
 
       return GridView.builder(
@@ -361,9 +645,9 @@ class HomeStatTileRow extends StatelessWidget {
         itemCount: tiles.length,
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: cols,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: aspectRatio,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          mainAxisExtent: extent,
         ),
         itemBuilder: (context, index) => tiles[index],
       );
@@ -451,7 +735,7 @@ class _FlatAnimatedDonutState extends State<_FlatAnimatedDonut> with SingleTicke
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: _anim,
-        builder: (_, __) => SizedBox(
+        builder: (_, _) => SizedBox(
           width: widget.size,
           height: widget.size,
           child: Stack(alignment: Alignment.center, children: [
@@ -554,189 +838,223 @@ class HomeBranchPerformanceTable extends StatelessWidget {
   final List<HomeBranchRow> rows; // pass pre-sorted
   final void Function(String branchId)? onTapBranch;
 
-  const HomeBranchPerformanceTable({super.key, required this.t, required this.rows, this.onTapBranch});
+  const HomeBranchPerformanceTable({
+    super.key,
+    required this.t,
+    required this.rows,
+    this.onTapBranch,
+  });
 
   @override
   Widget build(BuildContext context) {
     final isDark = t.isDarkCanvas;
+    final activeCount = rows.where((r) {
+      final pats = r.today.zakat + r.today.nonZakat + r.today.gmwf;
+      return pats > 0 || r.today.donations > 0 || r.today.dispensaryRevenue > 0;
+    }).length;
+    final liveCol = GColor.successOf(isDark);
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
-        child: Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: isDark
-                  ? [
-                      SoftPalette.slate800.withValues(alpha: 0.90),
-                      SoftPalette.slate900.withValues(alpha: 0.82),
-                    ]
-                  : [
-                      SoftPalette.gray50.withValues(alpha: 0.94),
-                      SoftPalette.gray50.withValues(alpha: 0.82),
-                    ],
-            ),
-            border: Border.all(
-              color: isDark
-                  ? SoftPalette.gray50.withValues(alpha: 0.14)
-                  : SoftPalette.gray50.withValues(alpha: 0.65),
-              width: 1.0,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.04),
-                blurRadius: 16,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Dispensaries & Camps Performance Today',
-                    style: TextStyle(
-                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.3,
-                    ),
+    return Container(
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+
+          final tableBody = rows.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.storefront_outlined,
+                  message: 'No dispensaries or camps to show',
+                  hint: 'Branch activity appears here once clinics sync.',
+                  t: t,
+                )
+              : ListView.separated(
+                  shrinkWrap: !isBounded,
+                  physics: isBounded
+                      ? const BouncingScrollPhysics()
+                      : const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  itemCount: rows.length,
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: _dashBorder(t).withValues(alpha: 0.65),
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  itemBuilder: (context, i) {
+                    final row = rows[i];
+
+                    final don = row.today.donations;
+                    final yDon = row.yesterday.donations;
+                    final double? donDelta =
+                        yDon == 0 ? null : ((don - yDon) / yDon) * 100;
+
+                    final pats =
+                        row.today.zakat + row.today.nonZakat + row.today.gmwf;
+                    final yPats = row.yesterday.zakat +
+                        row.yesterday.nonZakat +
+                        row.yesterday.gmwf;
+                    final double? patsDelta =
+                        yPats == 0 ? null : ((pats - yPats) / yPats) * 100;
+
+                    final rev = row.today.dispensaryRevenue;
+                    final yRev = row.yesterday.dispensaryRevenue;
+                    final double? revDelta =
+                        yRev == 0 ? null : ((rev - yRev) / yRev) * 100;
+
+                    return _BranchPerformanceRow(
+                      rank: i + 1,
+                      name: row.name,
+                      don: don,
+                      donDelta: donDelta,
+                      pats: pats,
+                      patsDelta: patsDelta,
+                      rev: rev,
+                      revDelta: revDelta,
+                      t: t,
+                      subtitle: row.subtitle,
+                      onTap: onTapBranch != null
+                          ? () => onTapBranch!(row.id)
+                          : null,
+                    );
+                  },
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                child: _DashCardHeader(
+                  title: 'Dispensaries & Camps',
+                  subtitle: rows.isEmpty
+                      ? 'Today\'s site activity'
+                      : '$activeCount active of ${rows.length} sites today',
+                  showLiveDot: activeCount > 0,
+                  t: t,
+                  trailing: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                     decoration: BoxDecoration(
-                      color: SoftPalette.sky400.withValues(alpha: isDark ? 0.20 : 0.10),
-                      borderRadius: BorderRadius.circular(20),
+                      color: liveCol.withValues(alpha: isDark ? 0.16 : 0.10),
+                      borderRadius: BorderRadius.circular(Gr.rFull),
                       border: Border.all(
-                        color: SoftPalette.sky400.withValues(alpha: 0.3),
-                        width: 0.8,
+                        color: liveCol.withValues(alpha: isDark ? 0.35 : 0.25),
                       ),
                     ),
-                    child: const Text(
+                    child: Text(
                       'LIVE FEED',
                       style: TextStyle(
-                        color: SoftPalette.sky400,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w900,
+                        color: liveCol,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
                         letterSpacing: 0.6,
                       ),
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              // Table header pill
-              Container(
-                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? SoftPalette.gray50.withValues(alpha: 0.05)
-                      : SoftPalette.slate100.withValues(alpha: 0.8),
-                  borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Row(
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              // Column header strip (Nexus table style)
+              Container(
+                color: _dashSubtleSurface(t),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                child: Row(
                   children: [
                     Expanded(
                       flex: 5,
-                      child: Text('Dispensary / Camp', style: TextStyle(color: SoftPalette.slate550, fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.4)),
+                      child: Text(
+                        'DISPENSARY / CAMP',
+                        style: TextStyle(
+                          color: t.textSecondary,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.55,
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
-                      child: Center(child: Text('Donations', style: TextStyle(color: SoftPalette.slate550, fontSize: 10.5, fontWeight: FontWeight.w700))),
+                      child: Center(
+                        child: Text(
+                          'DONATIONS',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
-                      child: Center(child: Text('Patients', style: TextStyle(color: SoftPalette.slate550, fontSize: 10.5, fontWeight: FontWeight.w700))),
+                      child: Center(
+                        child: Text(
+                          'PATIENTS',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
-                      child: Center(child: Text('Revenue', style: TextStyle(color: SoftPalette.slate550, fontSize: 10.5, fontWeight: FontWeight.w700))),
+                      child: Center(
+                        child: Text(
+                          'REVENUE',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 6),
-              Expanded(
-                child: rows.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'No dispensaries or camps to show',
-                          style: TextStyle(color: SoftPalette.slate350, fontSize: 12),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: tableBody) else tableBody,
+              if (onTapBranch != null) ...[
+                Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+                InkWell(
+                  onTap: () => onTapBranch!('all'),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'View all branches',
+                          style: TextStyle(
+                            color: t.accent,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
-                      )
-                    : SingleChildScrollView(
-                        physics: const BouncingScrollPhysics(),
-                        child: Column(
-                          children: rows.asMap().entries.map((e) {
-                            final i = e.key;
-                            final row = e.value;
-                            
-                            final don = row.today.donations;
-                            final yDon = row.yesterday.donations;
-                            final double? donDelta = yDon == 0 ? null : ((don - yDon) / yDon) * 100;
-
-                            final pats = row.today.zakat + row.today.nonZakat + row.today.gmwf;
-                            final yPats = row.yesterday.zakat + row.yesterday.nonZakat + row.yesterday.gmwf;
-                            final double? patsDelta = yPats == 0 ? null : ((pats - yPats) / yPats) * 100;
-
-                            final rev = row.today.dispensaryRevenue;
-                            final yRev = row.yesterday.dispensaryRevenue;
-                            final double? revDelta = yRev == 0 ? null : ((rev - yRev) / yRev) * 100;
-
-                            return _BranchPerformanceRow(
-                              rank: i + 1,
-                              name: row.name,
-                              don: don,
-                              donDelta: donDelta,
-                              pats: pats,
-                              patsDelta: patsDelta,
-                              rev: rev,
-                              revDelta: revDelta,
-                              isDark: isDark,
-                              subtitle: row.subtitle,
-                              onTap: onTapBranch != null ? () => onTapBranch!(row.id) : null,
-                            );
-                          }).toList(),
-                        ),
-                      ),
-              ),
-              const SizedBox(height: 6),
-              // View all branches link
-              Center(
-                child: TextButton(
-                  onPressed: () {
-                    if (onTapBranch != null) onTapBranch!('all');
-                  },
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'View all branches',
-                        style: TextStyle(
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.arrow_forward_rounded,
                           color: t.accent,
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w800,
+                          size: 13,
                         ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(Icons.arrow_forward_rounded, color: t.accent, size: 13),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
+              ],
             ],
-          ),
-        ),
+          );
+        },
+      ),
     );
   }
 }
@@ -750,7 +1068,7 @@ class _BranchPerformanceRow extends StatefulWidget {
   final double? patsDelta;
   final int rev;
   final double? revDelta;
-  final bool isDark;
+  final RoleThemeData t;
   final String? subtitle;
   final VoidCallback? onTap;
 
@@ -763,7 +1081,7 @@ class _BranchPerformanceRow extends StatefulWidget {
     required this.patsDelta,
     required this.rev,
     required this.revDelta,
-    required this.isDark,
+    required this.t,
     this.subtitle,
     this.onTap,
   });
@@ -777,24 +1095,24 @@ class _BranchPerformanceRowState extends State<_BranchPerformanceRow> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = widget.isDark;
+    final t = widget.t;
+    final isDark = t.isDarkCanvas;
+    final hasActivity = widget.pats > 0 || widget.don > 0 || widget.rev > 0;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hov = true),
       onExit: (_) => setState(() => _hov = false),
-      cursor: widget.onTap != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
+      cursor: widget.onTap != null
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          margin: const EdgeInsets.symmetric(vertical: 2.5),
-          padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
-          decoration: BoxDecoration(
-            color: _hov
-                ? (isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.gray900.withValues(alpha: 0.04))
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
-          ),
+          duration: const Duration(milliseconds: 150),
+          color: _hov
+              ? _dashSubtleSurface(t).withValues(alpha: isDark ? 0.65 : 0.75)
+              : Colors.transparent,
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
           child: Row(
             children: [
               // Branch name with rank
@@ -802,32 +1120,54 @@ class _BranchPerformanceRowState extends State<_BranchPerformanceRow> {
                 flex: 5,
                 child: Row(
                   children: [
-                    _RankBadge(rank: widget.rank),
-                    const SizedBox(width: 8),
+                    _RankBadge(rank: widget.rank, t: t),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            widget.name,
-                            style: TextStyle(
-                              color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
+                          Row(
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                margin: const EdgeInsets.only(right: 6),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: hasActivity
+                                      ? GColor.successOf(isDark)
+                                      : t.textTertiary.withValues(alpha: 0.45),
+                                ),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  widget.name,
+                                  style: TextStyle(
+                                    color: hasActivity
+                                        ? t.textPrimary
+                                        : t.textSecondary,
+                                    fontSize: 12.5,
+                                    fontWeight: hasActivity
+                                        ? FontWeight.w700
+                                        : FontWeight.w500,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
                           ),
-                          if (widget.subtitle != null && widget.subtitle!.isNotEmpty)
+                          if (widget.subtitle != null &&
+                              widget.subtitle!.isNotEmpty)
                             Padding(
-                              padding: const EdgeInsets.only(top: 2),
+                              padding: const EdgeInsets.only(top: 2, left: 12),
                               child: Text(
                                 widget.subtitle!,
-                                style: const TextStyle(
-                                  color: SoftPalette.slate550,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
+                                style: TextStyle(
+                                  color: t.textSecondary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
                                 ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
@@ -842,61 +1182,31 @@ class _BranchPerformanceRowState extends State<_BranchPerformanceRow> {
               // Donations
               Expanded(
                 flex: 2,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        fmtNum(widget.don),
-                        style: TextStyle(
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      if (widget.donDelta != null) _deltaIndicator(widget.donDelta!, isDark),
-                    ],
-                  ),
+                child: _metricCell(
+                  fmtNum(widget.don),
+                  widget.don > 0,
+                  widget.donDelta,
+                  t,
                 ),
               ),
               // Patients
               Expanded(
                 flex: 2,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        fmtNum(widget.pats),
-                        style: TextStyle(
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      if (widget.patsDelta != null) _deltaIndicator(widget.patsDelta!, isDark),
-                    ],
-                  ),
+                child: _metricCell(
+                  fmtNum(widget.pats),
+                  widget.pats > 0,
+                  widget.patsDelta,
+                  t,
                 ),
               ),
               // Revenue
               Expanded(
                 flex: 2,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        fmtNum(widget.rev),
-                        style: TextStyle(
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      if (widget.revDelta != null) _deltaIndicator(widget.revDelta!, isDark),
-                    ],
-                  ),
+                child: _metricCell(
+                  fmtNum(widget.rev),
+                  widget.rev > 0,
+                  widget.revDelta,
+                  t,
                 ),
               ),
             ],
@@ -906,24 +1216,59 @@ class _BranchPerformanceRowState extends State<_BranchPerformanceRow> {
     );
   }
 
+  Widget _metricCell(
+    String formatted,
+    bool nonZero,
+    double? delta,
+    RoleThemeData t,
+  ) {
+    final isDark = t.isDarkCanvas;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            formatted,
+            style: TextStyle(
+              color: nonZero ? t.textPrimary : t.textTertiary,
+              fontSize: 12.5,
+              fontWeight: nonZero ? FontWeight.w700 : FontWeight.w500,
+              fontFeatures: const [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+          if (delta != null) _deltaIndicator(delta, isDark),
+        ],
+      ),
+    );
+  }
+
   Widget _deltaIndicator(double delta, bool isDark) {
     final isUp = delta >= 0;
-    final color = isUp ? SoftPalette.emerald350 : SoftPalette.red400;
+    final color = isUp ? GColor.successOf(isDark) : GColor.dangerOf(isDark);
     return Container(
       margin: const EdgeInsets.only(top: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: isDark ? 0.18 : 0.10),
-        borderRadius: BorderRadius.circular(6),
+        color: color.withValues(alpha: isDark ? 0.16 : 0.10),
+        borderRadius: BorderRadius.circular(Gr.r1),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(isUp ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded, size: 8.5, color: color),
+          Icon(
+            isUp ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+            size: 8.5,
+            color: color,
+          ),
           const SizedBox(width: 1.5),
           Text(
             '${delta.abs().toStringAsFixed(0)}%',
-            style: TextStyle(color: color, fontSize: 8.5, fontWeight: FontWeight.w800),
+            style: TextStyle(
+              color: color,
+              fontSize: 8.5,
+              fontWeight: FontWeight.w700,
+              fontFeatures: const [ui.FontFeature.tabularFigures()],
+            ),
           ),
         ],
       ),
@@ -933,95 +1278,35 @@ class _BranchPerformanceRowState extends State<_BranchPerformanceRow> {
 
 class _RankBadge extends StatelessWidget {
   final int rank;
-  const _RankBadge({required this.rank});
+  final RoleThemeData t;
+  const _RankBadge({required this.rank, required this.t});
 
   @override
   Widget build(BuildContext context) {
-    if (rank == 1) {
-      return Container(
-        width: 26,
-        height: 26,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [SoftPalette.yellow150, SoftPalette.amber300, SoftPalette.orange400],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: SoftPalette.amber300.withValues(alpha: 0.50),
-              blurRadius: 7,
-              offset: const Offset(0, 2),
-            ),
-          ],
-          border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.75), width: 1.2),
-        ),
-        child: const Center(
-          child: Icon(
-            Icons.emoji_events_rounded,
-            color: SoftPalette.gray50,
-            size: 15,
-          ),
-        ),
-      );
-    }
+    final isDark = t.isDarkCanvas;
 
-    if (rank == 2) {
+    if (rank <= 3) {
+      final Color tone = switch (rank) {
+        1 => isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+        2 => isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+        _ => isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+      };
       return Container(
-        width: 26,
-        height: 26,
+        width: 24,
+        height: 24,
         decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [SoftPalette.gray50, SoftPalette.slate350, SoftPalette.slate550],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
+          borderRadius: BorderRadius.circular(Gr.r2),
+          color: tone.withValues(alpha: isDark ? 0.18 : 0.12),
+          border: Border.all(
+            color: tone.withValues(alpha: isDark ? 0.45 : 0.35),
+            width: 1.0,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: SoftPalette.slate350.withValues(alpha: 0.40),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-          border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.75), width: 1.2),
         ),
-        child: const Center(
+        child: Center(
           child: Icon(
             Icons.emoji_events_rounded,
-            color: SoftPalette.gray50,
-            size: 14,
-          ),
-        ),
-      );
-    }
-
-    if (rank == 3) {
-      return Container(
-        width: 26,
-        height: 26,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [SoftPalette.amber100, SoftPalette.orange400, SoftPalette.red600],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: SoftPalette.orange400.withValues(alpha: 0.40),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-          border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.75), width: 1.2),
-        ),
-        child: const Center(
-          child: Icon(
-            Icons.emoji_events_rounded,
-            color: SoftPalette.gray50,
-            size: 13,
+            color: tone,
+            size: 13.5,
           ),
         ),
       );
@@ -1031,20 +1316,18 @@ class _RankBadge extends StatelessWidget {
       width: 24,
       height: 24,
       decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: SoftPalette.slate550.withValues(alpha: 0.12),
-        border: Border.all(
-          color: SoftPalette.slate550.withValues(alpha: 0.25),
-          width: 0.8,
-        ),
+        borderRadius: BorderRadius.circular(Gr.r2),
+        color: _dashSubtleSurface(t),
+        border: Border.all(color: _dashBorder(t), width: 1.0),
       ),
       child: Center(
         child: Text(
           '$rank',
-          style: const TextStyle(
-            color: SoftPalette.slate550,
+          style: TextStyle(
+            color: t.textSecondary,
             fontSize: 10.5,
-            fontWeight: FontWeight.w800,
+            fontWeight: FontWeight.w700,
+            fontFeatures: const [ui.FontFeature.tabularFigures()],
           ),
         ),
       ),
@@ -1075,7 +1358,8 @@ class HomeBestBranchSpotlight extends StatefulWidget {
   });
 
   @override
-  State<HomeBestBranchSpotlight> createState() => _HomeBestBranchSpotlightState();
+  State<HomeBestBranchSpotlight> createState() =>
+      _HomeBestBranchSpotlightState();
 }
 
 class _HomeBestBranchSpotlightState extends State<HomeBestBranchSpotlight> {
@@ -1083,9 +1367,27 @@ class _HomeBestBranchSpotlightState extends State<HomeBestBranchSpotlight> {
 
   @override
   Widget build(BuildContext context) {
+    final t = widget.t ?? RoleThemeScope.dataOf(context);
+    final isDark = t.isDarkCanvas;
     final hasGrowth = widget.growthPct != null;
     final isUp = hasGrowth && widget.growthPct! >= 0;
-    final isDark = widget.t?.isDarkCanvas ?? false;
+    final amberTone = isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
+    final patientsTone = isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
+    final donationsTone = isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral;
+    final successCol = GColor.successOf(isDark);
+    final dangerCol = GColor.dangerOf(isDark);
+
+    final growthText = hasGrowth
+        ? '${isUp ? '+' : ''}${widget.growthPct!.toStringAsFixed(0)}%'
+        : (widget.revenue > 0 || widget.patients > 0 ? '+100%' : '0%');
+    final growthSub = hasGrowth
+        ? 'vs yesterday'
+        : (widget.revenue > 0 || widget.patients > 0 ? 'Active today' : 'Steady');
+    final growthColor = hasGrowth
+        ? (isUp ? successCol : dangerCol)
+        : (widget.revenue > 0 || widget.patients > 0
+            ? successCol
+            : t.textSecondary);
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hov = true),
@@ -1094,279 +1396,298 @@ class _HomeBestBranchSpotlightState extends State<HomeBestBranchSpotlight> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 260),
+          duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.amber300.withValues(
-                  alpha: _hov
-                      ? (isDark ? 0.35 : 0.22)
-                      : (isDark ? 0.18 : 0.12),
-                ),
-                blurRadius: _hov ? 24 : 14,
-                spreadRadius: _hov ? 1 : 0,
-                offset: Offset(0, _hov ? 8 : 4),
-              ),
-              BoxShadow(
-                color: isDark
-                    ? SoftPalette.gray900.withValues(alpha: 0.45)
-                    : SoftPalette.slate900.withValues(alpha: 0.06),
-                blurRadius: 10,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            color: _dashSurface(t),
+            borderRadius: BorderRadius.circular(Gr.r4),
+            border: Border.all(
+              color: _hov
+                  ? amberTone.withValues(alpha: isDark ? 0.72 : 0.75)
+                  : amberTone.withValues(alpha: isDark ? 0.35 : 0.42),
+              width: _hov ? 1.3 : 1.0,
+            ),
+            boxShadow: _hov ? GShadow.s2(isDark) : GShadow.s1(isDark),
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(24),
-              child: Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(24),
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: isDark
-                        ? [
-                            SoftPalette.slate800.withValues(alpha: 0.95),
-                            SoftPalette.slate900.withValues(alpha: 0.98),
-                          ]
-                        : [
-                            SoftPalette.yellow50m.withValues(alpha: 0.98),
-                            SoftPalette.gray50.withValues(alpha: 0.98),
-                          ],
-                  ),
-                  border: Border.all(
-                    color: _hov
-                        ? SoftPalette.amber300.withValues(alpha: 0.85)
-                        : (isDark
-                            ? SoftPalette.amber300.withValues(alpha: 0.38)
-                            : SoftPalette.amber300.withValues(alpha: 0.50)),
-                    width: _hov ? 1.5 : 1.2,
-                  ),
-                ),
-                child: Stack(
-                  children: [
-                    // Ambient radial glow behind trophy
-                    Positioned(
-                      top: -15,
-                      right: -15,
-                      width: 110,
-                      height: 110,
-                      child: IgnorePointer(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: RadialGradient(
-                              colors: [
-                                SoftPalette.amber300.withValues(alpha: isDark ? 0.30 : 0.18),
-                                SoftPalette.amber300.withValues(alpha: 0.0),
-                              ],
-                            ),
-                          ),
-                        ),
+          clipBehavior: Clip.antiAlias,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final isBounded = constraints.hasBoundedHeight;
+              return Column(
+                mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.fromLTRB(18, 15, 18, 14),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          amberTone.withValues(alpha: isDark ? 0.14 : 0.11),
+                          amberTone.withValues(alpha: isDark ? 0.04 : 0.025),
+                        ],
                       ),
                     ),
-
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                        decoration: BoxDecoration(
-                                          gradient: const LinearGradient(
-                                            colors: [SoftPalette.amber300, SoftPalette.orange400],
-                                          ),
-                                          borderRadius: BorderRadius.circular(12),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: SoftPalette.amber300.withValues(alpha: 0.30),
-                                              blurRadius: 6,
-                                              offset: const Offset(0, 2),
-                                            ),
-                                          ],
-                                        ),
-                                        child: const Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(Icons.star_rounded, color: SoftPalette.gray50, size: 11),
-                                            SizedBox(width: 3),
-                                            Text(
-                                              '#1 TOP PERFORMER',
-                                              style: TextStyle(
-                                                color: SoftPalette.gray50,
-                                                fontSize: 9,
-                                                fontWeight: FontWeight.w900,
-                                                letterSpacing: 0.6,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    widget.branchName,
-                                    style: TextStyle(
-                                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                                      fontSize: 16.5,
-                                      fontWeight: FontWeight.w900,
-                                      letterSpacing: -0.4,
-                                      height: 1.2,
-                                    ),
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            // Floating 3D Golden trophy badge (themed glass pedestal)
-                            AnimatedRotation(
-                              turns: _hov ? 0.04 : 0,
-                              duration: const Duration(milliseconds: 260),
-                              curve: Curves.easeOutBack,
-                              child: Container(
-                                width: 52,
-                                height: 52,
-                                padding: const EdgeInsets.all(4),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
-                                  color: isDark
-                                      ? SoftPalette.slate900.withValues(alpha: 0.85)
-                                      : SoftPalette.yellow50m,
-                                  shape: BoxShape.circle,
+                                  color: amberTone
+                                      .withValues(alpha: isDark ? 0.22 : 0.14),
+                                  borderRadius: BorderRadius.circular(Gr.rFull),
                                   border: Border.all(
-                                    color: SoftPalette.amber300.withValues(alpha: isDark ? 0.55 : 0.70),
-                                    width: 1.5,
+                                    color: amberTone
+                                        .withValues(alpha: isDark ? 0.45 : 0.38),
                                   ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: SoftPalette.amber300.withValues(alpha: isDark ? 0.35 : 0.25),
-                                      blurRadius: 10,
-                                      offset: const Offset(0, 3),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.star_rounded,
+                                        color: amberTone, size: 11),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '#1 TOP PERFORMER',
+                                      style: TextStyle(
+                                        color: amberTone,
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0.6,
+                                      ),
                                     ),
                                   ],
                                 ),
-                                child: RepaintBoundary(
-                                  child: Lottie.asset(
-                                  'assets/animations/Trophy.json',
-                                  fit: BoxFit.contain,
-                                  repeat: !GDecor.reduceMotion, // reduce motion: play once, no endless loop
-                                  errorBuilder: (_, __, ___) => const Icon(
-                                    Icons.emoji_events_rounded,
-                                    color: SoftPalette.amber300,
-                                    size: 28,
-                                  ),
-                                  ),
-                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        Container(
-                          height: 1,
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                Colors.transparent,
-                                isDark ? SoftPalette.gray50.withValues(alpha: 0.15) : SoftPalette.amber300.withValues(alpha: 0.30),
-                                Colors.transparent,
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        // 4 Modern metric cards in compact layout
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              _metricRow(Icons.payments_rounded, 'Revenue', fmtPKR(widget.revenue), isDark, valueColor: SoftPalette.emerald350),
-                              _metricRow(Icons.volunteer_activism_rounded, 'Donations', fmtPKR(widget.donations), isDark, valueColor: isDark ? SoftPalette.amber200 : SoftPalette.orange400),
-                              _metricRow(Icons.people_alt_rounded, 'Patients', widget.patients.toString(), isDark, valueColor: isDark ? SoftPalette.sky350 : SoftPalette.sky500),
-                              _metricRow(
-                                isUp ? Icons.trending_up_rounded : (hasGrowth ? Icons.trending_down_rounded : Icons.trending_up_rounded),
-                                'Growth',
-                                hasGrowth
-                                    ? '${isUp ? '+' : ''}${widget.growthPct!.toStringAsFixed(0)}% vs yesterday'
-                                    : (widget.revenue > 0 || widget.patients > 0 ? '+100% (Active Today)' : 'Steady (0%)'),
-                                isDark,
-                                valueColor: hasGrowth
-                                    ? (isUp ? SoftPalette.emerald350 : SoftPalette.red400)
-                                    : (widget.revenue > 0 || widget.patients > 0 ? SoftPalette.emerald350 : (isDark ? SoftPalette.slate350 : SoftPalette.slate550)),
+                              const SizedBox(height: 8),
+                              Text(
+                                widget.branchName,
+                                style: TextStyle(
+                                  color: t.textPrimary,
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.3,
+                                  height: 1.2,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                widget.title,
+                                style: TextStyle(
+                                  color: t.textSecondary,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ],
                           ),
                         ),
+                        const SizedBox(width: 10),
+                        AnimatedRotation(
+                          turns: _hov ? 0.03 : 0,
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutBack,
+                          child: Container(
+                            width: 46,
+                            height: 46,
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: _dashSurface(t),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: amberTone
+                                    .withValues(alpha: isDark ? 0.50 : 0.55),
+                                width: 1.2,
+                              ),
+                            ),
+                            child: RepaintBoundary(
+                              child: Lottie.asset(
+                                'assets/animations/Trophy.json',
+                                fit: BoxFit.contain,
+                                repeat: !GDecor.reduceMotion,
+                                errorBuilder: (_, _, _) => Icon(
+                                  Icons.emoji_events_rounded,
+                                  color: amberTone,
+                                  size: 24,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                  Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _metricCell(
+                                t: t,
+                                icon: Icons.payments_rounded,
+                                label: 'REVENUE',
+                                value: fmtPKR(widget.revenue),
+                                accentColor: successCol,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: _metricCell(
+                                t: t,
+                                icon: Icons.people_alt_rounded,
+                                label: 'PATIENTS',
+                                value: fmtNum(widget.patients),
+                                accentColor: patientsTone,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _metricCell(
+                                t: t,
+                                icon: Icons.volunteer_activism_rounded,
+                                label: 'DONATIONS',
+                                value: fmtPKR(widget.donations),
+                                accentColor: donationsTone,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: _metricCell(
+                                t: t,
+                                icon: isUp
+                                    ? Icons.trending_up_rounded
+                                    : (hasGrowth
+                                        ? Icons.trending_down_rounded
+                                        : Icons.trending_up_rounded),
+                                label: 'VS YESTERDAY',
+                                value: growthText,
+                                subtext: growthSub,
+                                accentColor: growthColor,
+                                valueColor: growthColor,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (isBounded) const Spacer(),
+                  Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          'Inspect branch details',
+                          style: TextStyle(
+                            color: _hov ? t.accent : t.textSecondary,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.arrow_forward_rounded,
+                          color: _hov ? t.accent : t.textSecondary,
+                          size: 13,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ),
       ),
     );
   }
 
-  Widget _metricRow(IconData icon, String label, String value, bool isDark, {Color? valueColor}) {
+  Widget _metricCell({
+    required RoleThemeData t,
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color accentColor,
+    Color? valueColor,
+    String? subtext,
+  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5.5),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900.withValues(alpha: 0.60) : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.yellow150.withValues(alpha: 0.85),
-          width: 0.9,
-        ),
-        boxShadow: isDark
-            ? []
-            : [
-                BoxShadow(
-                  color: SoftPalette.slate900.withValues(alpha: 0.03),
-                  blurRadius: 4,
-                  offset: const Offset(0, 1.5),
-                ),
-              ],
+        color: _dashSubtleSurface(t),
+        borderRadius: BorderRadius.circular(Gr.r3),
+        border: Border.all(color: _dashBorder(t), width: 1.0),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
-            size: 14,
+          Row(
+            children: [
+              Icon(icon, size: 12.5, color: accentColor),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: t.textSecondary,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.45,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: TextStyle(
-              color: isDark ? SoftPalette.slate200 : SoftPalette.slate600,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const Spacer(),
+          const SizedBox(height: 5),
           Text(
             value,
             style: TextStyle(
-              color: valueColor ?? (isDark ? SoftPalette.gray50 : SoftPalette.slate900),
-              fontSize: 12,
+              color: valueColor ?? t.textPrimary,
+              fontSize: 14,
               fontWeight: FontWeight.w800,
+              letterSpacing: -0.25,
+              fontFeatures: const [ui.FontFeature.tabularFigures()],
             ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
+          if (subtext != null) ...[
+            const SizedBox(height: 1),
+            Text(
+              subtext,
+              style: TextStyle(
+                color: t.textTertiary,
+                fontSize: 9.5,
+                fontWeight: FontWeight.w500,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
         ],
       ),
     );
@@ -1377,236 +1698,300 @@ class HomePatientsByCategoryDonut extends StatelessWidget {
   final RoleThemeData t;
   final BranchStats s;
 
-  const HomePatientsByCategoryDonut({super.key, required this.t, required this.s});
+  const HomePatientsByCategoryDonut({
+    super.key,
+    required this.t,
+    required this.s,
+  });
 
   @override
   Widget build(BuildContext context) {
     final int total = s.zakat + s.nonZakat + s.gmwf;
     final bool isDark = t.isDarkCanvas;
-    
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
-        child: Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: isDark
-                  ? [
-                      SoftPalette.slate800.withValues(alpha: 0.90),
-                      SoftPalette.slate900.withValues(alpha: 0.82),
-                    ]
-                  : [
-                      SoftPalette.gray50.withValues(alpha: 0.98),
-                      SoftPalette.gray50.withValues(alpha: 0.90),
-                    ],
+    final zakatCol = isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+    final nonZakatCol = isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
+    final gmwfCol = isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
+    final successCol = GColor.successOf(isDark);
+
+    return Container(
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+          final isNarrow = constraints.maxWidth < 285;
+          final double donutSize = isNarrow
+              ? 118.0
+              : (constraints.maxWidth * 0.34).clamp(96.0, 140.0);
+
+          final donutRing = SizedBox(
+            width: donutSize,
+            height: donutSize,
+            child: CustomPaint(
+              painter: _DonutChartPainter(
+                zakat: s.zakat.toDouble(),
+                nonZakat: s.nonZakat.toDouble(),
+                gmwf: s.gmwf.toDouble(),
+                total: total.toDouble(),
+                isDark: isDark,
+                trackColor: _dashSubtleSurface(t),
+                zakatColor: zakatCol,
+                nonZakatColor: nonZakatCol,
+                gmwfColor: gmwfCol,
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      fmtNum(total),
+                      style: TextStyle(
+                        color: t.textPrimary,
+                        fontSize: donutSize < 112 ? 19 : 22,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.5,
+                        height: 1.05,
+                        fontFeatures: const [ui.FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Patients',
+                      style: TextStyle(
+                        color: t.textSecondary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-            border: Border.all(
-              color: isDark
-                  ? SoftPalette.gray50.withValues(alpha: 0.14)
-                  : SoftPalette.slate150.withValues(alpha: 0.85),
-              width: 1.0,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.04),
-                blurRadius: 16,
-                offset: const Offset(0, 4),
+          );
+
+          final breakdownColumn = Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _categoryProgressRow(
+                label: BranchLabels.zakat(),
+                val: s.zakat,
+                total: total,
+                color: zakatCol,
+              ),
+              const SizedBox(height: 7),
+              _categoryProgressRow(
+                label: BranchLabels.nonZakat(),
+                val: s.nonZakat,
+                total: total,
+                color: nonZakatCol,
+              ),
+              const SizedBox(height: 7),
+              _categoryProgressRow(
+                label: 'GMWF',
+                val: s.gmwf,
+                total: total,
+                color: gmwfCol,
               ),
             ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          );
+
+          final bodyContent = total == 0
+              ? _DashEmptyState(
+                  icon: Icons.pie_chart_outline_rounded,
+                  message: 'No patient data in this period',
+                  hint: 'Patient category shares will chart here.',
+                  t: t,
+                )
+              : Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  child: isNarrow
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            donutRing,
+                            const SizedBox(height: 12),
+                            breakdownColumn,
+                          ],
+                        )
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(flex: 6, child: breakdownColumn),
+                            const SizedBox(width: 12),
+                            Expanded(flex: 4, child: Center(child: donutRing)),
+                          ],
+                        ),
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Patients by Category',
-                    style: TextStyle(
-                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                child: _DashCardHeader(
+                  title: 'Patients by Category',
+                  subtitle: 'Token category share',
+                  t: t,
+                  trailing: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                     decoration: BoxDecoration(
-                      color: SoftPalette.emerald350.withValues(alpha: isDark ? 0.20 : 0.12),
-                      borderRadius: BorderRadius.circular(20),
+                      color:
+                          successCol.withValues(alpha: isDark ? 0.16 : 0.10),
+                      borderRadius: BorderRadius.circular(Gr.rFull),
                       border: Border.all(
-                        color: SoftPalette.emerald350.withValues(alpha: isDark ? 0.35 : 0.30),
-                        width: 0.8,
+                        color:
+                            successCol.withValues(alpha: isDark ? 0.35 : 0.25),
                       ),
                     ),
                     child: Text(
                       '$total TOTAL',
-                      style: const TextStyle(
-                        color: SoftPalette.emerald350,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w900,
+                      style: TextStyle(
+                        color: successCol,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
                         letterSpacing: 0.5,
+                        fontFeatures: const [ui.FontFeature.tabularFigures()],
                       ),
                     ),
                   ),
-                ],
+                ),
               ),
-              const SizedBox(height: 14),
-              Expanded(
-                child: total == 0
-                    ? const Center(
-                        child: Text('No patient data in this period', style: TextStyle(color: SoftPalette.slate350, fontSize: 12)),
-                      )
-                    : Row(
-                        children: [
-                          // Legend column with frosted pill cards
-                          Expanded(
-                            flex: 6,
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                _donutLegendItem(BranchLabels.zakat(), s.zakat, total, SoftPalette.emerald350, Icons.assignment_ind_rounded, isDark),
-                                _donutLegendItem(BranchLabels.nonZakat(), s.nonZakat, total, SoftPalette.blue500, Icons.badge_rounded, isDark),
-                                _donutLegendItem('GMWF', s.gmwf, total, SoftPalette.amber300, Icons.child_care_rounded, isDark),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          // Donut ring
-                          Expanded(
-                            flex: 5,
-                            child: AspectRatio(
-                              aspectRatio: 1.0,
-                              child: CustomPaint(
-                                painter: _DonutChartPainter(
-                                  zakat: s.zakat.toDouble(),
-                                  nonZakat: s.nonZakat.toDouble(),
-                                  gmwf: s.gmwf.toDouble(),
-                                  total: total.toDouble(),
-                                  isDark: isDark,
-                                ),
-                                child: Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        total.toString(),
-                                        style: TextStyle(
-                                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                                          fontSize: 22,
-                                          fontWeight: FontWeight.w900,
-                                          letterSpacing: -0.5,
-                                          height: 1.0,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 3),
-                                      Text(
-                                        'Total Patients',
-                                        style: TextStyle(
-                                          color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
-                                          fontSize: 9.5,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded)
+                Expanded(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      child: bodyContent,
+                    ),
+                  ),
+                )
+              else
+                bodyContent,
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              Container(
+                color: _dashSubtleSurface(t),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Token Fee Revenue',
+                      style: TextStyle(
+                        color: t.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
+                    ),
+                    Text(
+                      fmtPKR(s.dispensaryRevenue),
+                      style: TextStyle(
+                        color: s.dispensaryRevenue > 0
+                            ? successCol
+                            : t.textSecondary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        fontFeatures: const [ui.FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
-          ),
-        ),
+          );
+        },
+      ),
     );
   }
 
-  Widget _donutLegendItem(String label, int val, int total, Color color, IconData icon, bool isDark) {
-    final double pct = total == 0 ? 0.0 : (val / total) * 100;
+  Widget _categoryProgressRow({
+    required String label,
+    required int val,
+    required int total,
+    required Color color,
+  }) {
+    final bool isDark = t.isDarkCanvas;
+    final double ratio = total == 0 ? 0.0 : (val / total).clamp(0.0, 1.0);
+    final double pct = ratio * 100;
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: isDark ? color.withValues(alpha: 0.12) : SoftPalette.gray50.withValues(alpha: 0.90),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: color.withValues(alpha: isDark ? 0.25 : 0.20),
-          width: 0.8,
-        ),
-        boxShadow: isDark
-            ? []
-            : [
-                BoxShadow(
-                  color: color.withValues(alpha: 0.06),
-                  blurRadius: 6,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+        color: _dashSubtleSurface(t),
+        borderRadius: BorderRadius.circular(Gr.r2),
+        border: Border.all(color: _dashBorder(t), width: 1.0),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            padding: const EdgeInsets.all(5.5),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [color, color.withValues(alpha: 0.80)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
-              borderRadius: BorderRadius.circular(7),
-              boxShadow: [
-                BoxShadow(
-                  color: color.withValues(alpha: 0.30),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Icon(icon, color: SoftPalette.gray50, size: 12),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
                   label,
                   style: TextStyle(
-                    color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w700,
+                    color: t.textPrimary,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 1),
-                Text(
-                  val.toString(),
+              ),
+              Text(
+                fmtNum(val),
+                style: TextStyle(
+                  color: val > 0 ? t.textPrimary : t.textTertiary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  fontFeatures: const [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 5.5, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: isDark ? 0.18 : 0.12),
+                  borderRadius: BorderRadius.circular(Gr.r1),
+                ),
+                child: Text(
+                  '${pct.toStringAsFixed(0)}%',
                   style: TextStyle(
-                    color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w900,
+                    color: color,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [ui.FontFeature.tabularFigures()],
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: isDark ? 0.20 : 0.12),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '${pct.toStringAsFixed(1)}%',
-              style: TextStyle(
-                color: color,
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(Gr.r1),
+            child: Container(
+              height: 4,
+              color: _dashSurface(t),
+              child: FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: ratio,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(Gr.r1),
+                  ),
+                ),
               ),
             ),
           ),
@@ -1622,6 +2007,10 @@ class _DonutChartPainter extends CustomPainter {
   final double gmwf;
   final double total;
   final bool isDark;
+  final Color trackColor;
+  final Color zakatColor;
+  final Color nonZakatColor;
+  final Color gmwfColor;
 
   _DonutChartPainter({
     required this.zakat,
@@ -1629,60 +2018,60 @@ class _DonutChartPainter extends CustomPainter {
     required this.gmwf,
     required this.total,
     required this.isDark,
+    required this.trackColor,
+    required this.zakatColor,
+    required this.nonZakatColor,
+    required this.gmwfColor,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
     final radius = min(size.width, size.height) / 2;
-    final rect = Rect.fromCircle(center: center, radius: radius - 10);
-    
-    // Background track ring
+    final strokeW = (radius * 0.22).clamp(11.0, 15.0);
+    final rect =
+        Rect.fromCircle(center: center, radius: radius - strokeW / 2 - 2);
+
     final paintTrack = Paint()
-      ..color = isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.slate150
+      ..color = trackColor
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
+      ..strokeWidth = strokeW
+      ..strokeCap = StrokeCap.butt;
 
     canvas.drawArc(rect, 0, 2 * pi, false, paintTrack);
 
-    if (total == 0) return;
+    if (total <= 0) return;
 
-    final paintZ = Paint()
-      ..color = SoftPalette.emerald350
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
+    final segments = <(double value, Color color)>[
+      if (zakat > 0) (zakat, zakatColor),
+      if (nonZakat > 0) (nonZakat, nonZakatColor),
+      if (gmwf > 0) (gmwf, gmwfColor),
+    ];
 
-    final paintNz = Paint()
-      ..color = SoftPalette.blue500
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
+    if (segments.isEmpty) return;
 
-    final paintGm = Paint()
-      ..color = SoftPalette.amber300
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
+    if (segments.length == 1) {
+      final paintSingle = Paint()
+        ..color = segments.first.$2
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW
+        ..strokeCap = StrokeCap.butt;
+      canvas.drawArc(rect, -pi / 2, 2 * pi, false, paintSingle);
+      return;
+    }
 
+    const gap = 0.06;
     double startAngle = -pi / 2;
-
-    if (zakat > 0) {
-      final sweepZ = (zakat / total) * 2 * pi;
-      canvas.drawArc(rect, startAngle + 0.05, (sweepZ - 0.1).clamp(0.01, 2 * pi), false, paintZ);
-      startAngle += sweepZ;
-    }
-
-    if (nonZakat > 0) {
-      final sweepNz = (nonZakat / total) * 2 * pi;
-      canvas.drawArc(rect, startAngle + 0.05, (sweepNz - 0.1).clamp(0.01, 2 * pi), false, paintNz);
-      startAngle += sweepNz;
-    }
-
-    if (gmwf > 0) {
-      final sweepGm = (gmwf / total) * 2 * pi;
-      canvas.drawArc(rect, startAngle + 0.05, (sweepGm - 0.1).clamp(0.01, 2 * pi), false, paintGm);
+    for (final seg in segments) {
+      final fullSweep = (seg.$1 / total) * 2 * pi;
+      final drawSweep = (fullSweep - gap).clamp(0.03, 2 * pi);
+      final paintSeg = Paint()
+        ..color = seg.$2
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeW
+        ..strokeCap = StrokeCap.round;
+      canvas.drawArc(rect, startAngle + gap / 2, drawSweep, false, paintSeg);
+      startAngle += fullSweep;
     }
   }
 
@@ -1692,97 +2081,227 @@ class _DonutChartPainter extends CustomPainter {
       oldDelegate.nonZakat != nonZakat ||
       oldDelegate.gmwf != gmwf ||
       oldDelegate.total != total ||
-      oldDelegate.isDark != isDark;
+      oldDelegate.isDark != isDark ||
+      oldDelegate.trackColor != trackColor ||
+      oldDelegate.zakatColor != zakatColor ||
+      oldDelegate.nonZakatColor != nonZakatColor ||
+      oldDelegate.gmwfColor != gmwfColor;
 }
 
 class HomeRecentDonationsTable extends StatelessWidget {
   final List<RecentActivity> activities;
   final RoleThemeData t;
+  final VoidCallback? onViewAll;
 
-  const HomeRecentDonationsTable({super.key, required this.activities, required this.t});
+  const HomeRecentDonationsTable({
+    super.key,
+    required this.activities,
+    required this.t,
+    this.onViewAll,
+  });
 
   @override
   Widget build(BuildContext context) {
     final donations = activities.where((a) => a.type == 'donation').toList();
     final bool isDark = t.isDarkCanvas;
+    final successCol = GColor.successOf(isDark);
 
     return Container(
-      padding: const EdgeInsets.all(DS.s2 + 4),
-      decoration: BoxDecoration(
-        color: isDark ? t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Recent Donations',
-                  style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-              Text('View all', style: TextStyle(color: t.accent, fontSize: 10, fontWeight: FontWeight.w700)),
-            ],
-          ),
-          const SizedBox(height: DS.s2),
-          // Table header
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(border: Border(bottom: BorderSide(color: isDark ? t.bgRule : DS.border, width: 1.0))),
-            child: const Row(
-              children: [
-                Expanded(flex: 3, child: Text('Donor', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700))),
-                Expanded(flex: 2, child: Center(child: Text('Amount', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700)))),
-                Expanded(flex: 3, child: Text('Branch', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700))),
-                Expanded(flex: 2, child: Center(child: Text('Time', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700)))),
-              ],
-            ),
-          ),
-          if (donations.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 20),
-              child: Center(child: Text('No recent donations', style: TextStyle(color: DS.neutral, fontSize: 11))),
-            )
-          else
-            ...donations.take(4).map((a) {
-              final match = RegExp(r'Received from ([^(]+)').firstMatch(a.subtitle);
-              final donorName = match?.group(1)?.trim() ?? 'Walk-in Donor';
-              final amt = a.amount ?? 0.0;
-              final timeStr = DateFormat('hh:mm a').format(a.timestamp);
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+          final rowsList = donations.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.volunteer_activism_outlined,
+                  message: 'No recent donations',
+                  hint: 'New donor receipts appear here.',
+                  t: t,
+                )
+              : ListView.separated(
+                  shrinkWrap: !isBounded,
+                  physics: isBounded
+                      ? const BouncingScrollPhysics()
+                      : const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  itemCount: min(5, donations.length),
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: _dashBorder(t).withValues(alpha: 0.65),
+                  ),
+                  itemBuilder: (context, index) {
+                    final a = donations[index];
+                    final match = RegExp(r'Received from ([^(]+)')
+                        .firstMatch(a.subtitle);
+                    final donorName = match?.group(1)?.trim() ?? 'Walk-in Donor';
+                    final amt = a.amount ?? 0.0;
+                    final timeStr = DateFormat('hh:mm a').format(a.timestamp);
 
-              return Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(border: Border(bottom: BorderSide(color: isDark ? t.bgRule : DS.border, width: 0.5))),
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 9),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              donorName,
+                              style: TextStyle(
+                                color: t.textPrimary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Center(
+                              child: Text(
+                                'Rs ${fmtNum(amt.toInt())}',
+                                style: TextStyle(
+                                  color: successCol,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              a.branchName,
+                              style: TextStyle(
+                                color: t.textSecondary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Center(
+                              child: Text(
+                                timeStr,
+                                style: TextStyle(
+                                  color: t.textTertiary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 13, 16, 11),
+                child: _DashCardHeader(
+                  title: 'Recent Donations',
+                  t: t,
+                  trailing: onViewAll != null
+                      ? InkWell(
+                          onTap: onViewAll,
+                          borderRadius: BorderRadius.circular(Gr.r1),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 2),
+                            child: Text(
+                              'View all →',
+                              style: TextStyle(
+                                color: t.accent,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        )
+                      : null,
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              Container(
+                color: _dashSubtleSurface(t),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
                 child: Row(
                   children: [
                     Expanded(
                       flex: 3,
-                      child: Text(donorName, style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 11.5, fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis),
+                      child: Text(
+                        'DONOR',
+                        style: TextStyle(
+                          color: t.textSecondary,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
                       child: Center(
-                        child: Text('Rs ${fmtNum(amt.toInt())}', style: const TextStyle(color: SoftPalette.emerald350, fontSize: 11, fontWeight: FontWeight.w800)),
+                        child: Text(
+                          'AMOUNT',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
                       ),
                     ),
                     Expanded(
                       flex: 3,
-                      child: Text(a.branchName, style: const TextStyle(color: DS.neutral, fontSize: 11, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+                      child: Text(
+                        'BRANCH',
+                        style: TextStyle(
+                          color: t.textSecondary,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
                       child: Center(
-                        child: Text(timeStr, style: const TextStyle(color: DS.neutral, fontSize: 10, fontWeight: FontWeight.w600)),
+                        child: Text(
+                          'TIME',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
-              );
-            }),
-        ],
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: rowsList) else rowsList,
+            ],
+          );
+        },
       ),
     );
   }
@@ -1791,8 +2310,14 @@ class HomeRecentDonationsTable extends StatelessWidget {
 class HomeRecentPatientsTable extends StatelessWidget {
   final List<RecentActivity> activities;
   final RoleThemeData t;
+  final VoidCallback? onViewAll;
 
-  const HomeRecentPatientsTable({super.key, required this.activities, required this.t});
+  const HomeRecentPatientsTable({
+    super.key,
+    required this.activities,
+    required this.t,
+    this.onViewAll,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1800,112 +2325,246 @@ class HomeRecentPatientsTable extends StatelessWidget {
     final bool isDark = t.isDarkCanvas;
 
     return Container(
-      padding: const EdgeInsets.all(DS.s2 + 4),
-      decoration: BoxDecoration(
-        color: isDark ? t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+          final rowsList = tokens.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.medical_services_outlined,
+                  message: 'No recent patients',
+                  hint: 'Patient tokens issued today appear here.',
+                  t: t,
+                )
+              : ListView.separated(
+                  shrinkWrap: !isBounded,
+                  physics: isBounded
+                      ? const BouncingScrollPhysics()
+                      : const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  itemCount: min(5, tokens.length),
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: _dashBorder(t).withValues(alpha: 0.65),
+                  ),
+                  itemBuilder: (context, index) {
+                    final a = tokens[index];
+                    final match = RegExp(r'Patient: ([^\(]+)\s*\(([^)]+)\)')
+                        .firstMatch(a.subtitle);
+                    final pName = match?.group(1)?.trim() ?? 'Patient';
+                    final rawCat = match?.group(2)?.trim() ?? 'ZAKAT';
+                    final category = BranchLabels.text(rawCat);
+
+                    final hash = a.id.hashCode.abs() % 10000;
+                    final pId = 'P-${hash.toString().padLeft(5, '0')}';
+
+                    final timeStr = DateFormat('hh:mm a').format(a.timestamp);
+
+                    Color catColor =
+                        isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+                    if (rawCat.toLowerCase().contains('non')) {
+                      catColor = isDark
+                          ? SoftPalette.brightCobalt
+                          : SoftPalette.cobaltBlue;
+                    } else if (rawCat.toLowerCase().contains('gmwf')) {
+                      catColor = isDark
+                          ? SoftPalette.brightGold
+                          : SoftPalette.warmMarigold;
+                    }
+
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  pName,
+                                  style: TextStyle(
+                                    color: t.textPrimary,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                Text(
+                                  pId,
+                                  style: TextStyle(
+                                    color: t.textTertiary,
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w500,
+                                    fontFeatures: const [
+                                      ui.FontFeature.tabularFigures(),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 7, vertical: 2.5),
+                                decoration: BoxDecoration(
+                                  color: catColor
+                                      .withValues(alpha: isDark ? 0.18 : 0.11),
+                                  borderRadius: BorderRadius.circular(Gr.r1),
+                                  border: Border.all(
+                                    color: catColor
+                                        .withValues(alpha: isDark ? 0.35 : 0.25),
+                                  ),
+                                ),
+                                child: Text(
+                                  category,
+                                  style: TextStyle(
+                                    color: catColor,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              a.branchName,
+                              style: TextStyle(
+                                color: t.textSecondary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Center(
+                              child: Text(
+                                timeStr,
+                                style: TextStyle(
+                                  color: t.textTertiary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Recent Patients',
-                  style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-              Text('View all', style: TextStyle(color: t.accent, fontSize: 10, fontWeight: FontWeight.w700)),
-            ],
-          ),
-          const SizedBox(height: DS.s2),
-          // Table header
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(border: Border(bottom: BorderSide(color: isDark ? t.bgRule : DS.border, width: 1.0))),
-            child: const Row(
-              children: [
-                Expanded(flex: 3, child: Text('Patient ID', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700))),
-                Expanded(flex: 2, child: Center(child: Text('Category', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700)))),
-                Expanded(flex: 3, child: Text('Branch', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700))),
-                Expanded(flex: 2, child: Center(child: Text('Time', style: TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w700)))),
-              ],
-            ),
-          ),
-          if (tokens.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 20),
-              child: Center(child: Text('No recent patients', style: TextStyle(color: DS.neutral, fontSize: 11))),
-            )
-          else
-            ...tokens.take(4).map((a) {
-              final match = RegExp(r'Patient: ([^\(]+)\s*\(([^)]+)\)').firstMatch(a.subtitle);
-              final pName = match?.group(1)?.trim() ?? 'Patient';
-              final category = BranchLabels.text(match?.group(2)?.trim() ?? 'ZAKAT');
-              
-              final hash = a.id.hashCode.abs() % 10000;
-              final pId = 'P-${hash.toString().padLeft(5, '0')}';
-              
-              final timeStr = DateFormat('hh:mm a').format(a.timestamp);
-
-              Color badgeBg = isDark ? SoftPalette.emerald700 : SoftPalette.emerald50;
-              Color badgeText = isDark ? SoftPalette.emerald300 : SoftPalette.emerald550;
-              if (category.toLowerCase() == 'non-zakat') {
-                badgeBg = isDark ? SoftPalette.blue700 : SoftPalette.slate100;
-                badgeText = isDark ? SoftPalette.blue350 : SoftPalette.blue550;
-              } else if (category.toLowerCase() == 'gmwf') {
-                badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.yellow100;
-                badgeText = isDark ? SoftPalette.amber200 : SoftPalette.orange400;
-              }
-
-              return Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(border: Border(bottom: BorderSide(color: isDark ? t.bgRule : DS.border, width: 0.5))),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 13, 16, 11),
+                child: _DashCardHeader(
+                  title: 'Recent Patients',
+                  t: t,
+                  trailing: onViewAll != null
+                      ? InkWell(
+                          onTap: onViewAll,
+                          borderRadius: BorderRadius.circular(Gr.r1),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 2),
+                            child: Text(
+                              'View all →',
+                              style: TextStyle(
+                                color: t.accent,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        )
+                      : null,
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              Container(
+                color: _dashSubtleSurface(t),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
                 child: Row(
                   children: [
                     Expanded(
                       flex: 3,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(pId, style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 11, fontWeight: FontWeight.w700)),
-                          Text(pName, style: const TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
-                        ],
+                      child: Text(
+                        'PATIENT',
+                        style: TextStyle(
+                          color: t.textSecondary,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
                       ),
                     ),
                     Expanded(
                       flex: 2,
                       child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: badgeBg,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            category,
-                            style: TextStyle(color: badgeText, fontSize: 8.5, fontWeight: FontWeight.w800),
+                        child: Text(
+                          'CATEGORY',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
                           ),
                         ),
                       ),
                     ),
                     Expanded(
                       flex: 3,
-                      child: Text(a.branchName, style: const TextStyle(color: DS.neutral, fontSize: 11, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+                      child: Text(
+                        'BRANCH',
+                        style: TextStyle(
+                          color: t.textSecondary,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
                     ),
                     Expanded(
                       flex: 2,
                       child: Center(
-                        child: Text(timeStr, style: const TextStyle(color: DS.neutral, fontSize: 10, fontWeight: FontWeight.w600)),
+                        child: Text(
+                          'TIME',
+                          style: TextStyle(
+                            color: t.textSecondary,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
-              );
-            }),
-        ],
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: rowsList) else rowsList,
+            ],
+          );
+        },
       ),
     );
   }
@@ -1915,219 +2574,352 @@ class HomeRecentPatientsTable extends StatelessWidget {
 // 5. Patients Revenue Line Chart (CustomPainter)
 // ════════════════════════════════════════════════════════════════════════
 
+enum _TrendViewMode { indexed, financials, volume }
+
+enum _TrendSeriesId { donations, patientsRev, tokens, staff }
+
 class HomeRevenueLineChart extends StatefulWidget {
   final List<HomeLineChartPoint> points;
   final RoleThemeData t;
-  const HomeRevenueLineChart({super.key, required this.points, required this.t});
+  const HomeRevenueLineChart({
+    super.key,
+    required this.points,
+    required this.t,
+  });
 
   @override
   State<HomeRevenueLineChart> createState() => _HomeRevenueLineChartState();
 }
 
 class _HomeRevenueLineChartState extends State<HomeRevenueLineChart> {
+  static const double _leftMargin = 48.0;
+  static const double _rightMargin = 16.0;
+
   int? hoveredIndex;
+  _TrendViewMode _mode = _TrendViewMode.indexed;
+  final Set<_TrendSeriesId> _hidden = {};
+
+  List<_TrendSeriesId> get _activeModeSeries => switch (_mode) {
+        _TrendViewMode.indexed => const [
+            _TrendSeriesId.donations,
+            _TrendSeriesId.patientsRev,
+            _TrendSeriesId.tokens,
+            _TrendSeriesId.staff,
+          ],
+        _TrendViewMode.financials => const [
+            _TrendSeriesId.donations,
+            _TrendSeriesId.patientsRev,
+          ],
+        _TrendViewMode.volume => const [
+            _TrendSeriesId.tokens,
+            _TrendSeriesId.staff,
+          ],
+      };
+
+  void _toggleSeries(_TrendSeriesId id) {
+    setState(() {
+      if (_hidden.contains(id)) {
+        _hidden.remove(id);
+      } else {
+        final visibleInMode =
+            _activeModeSeries.where((s) => !_hidden.contains(s)).length;
+        if (visibleInMode > 1) {
+          _hidden.add(id);
+        }
+      }
+    });
+  }
+
+  void _updateHover(double localDx, double width) {
+    if (widget.points.isEmpty) return;
+    if (widget.points.length == 1) {
+      if (hoveredIndex != 0) setState(() => hoveredIndex = 0);
+      return;
+    }
+    final chartW = max(1.0, width - _leftMargin - _rightMargin);
+    final relX = (localDx - _leftMargin).clamp(0.0, chartW);
+    final stepX = chartW / (widget.points.length - 1);
+    final idx = (relX / stepX).round().clamp(0, widget.points.length - 1);
+    if (hoveredIndex != idx) {
+      setState(() => hoveredIndex = idx);
+    }
+  }
+
+  String _seriesLatestValue(_TrendSeriesId id, HomeLineChartPoint pt) =>
+      switch (id) {
+        _TrendSeriesId.donations => fmtPKR(pt.donations),
+        _TrendSeriesId.patientsRev => fmtPKR(pt.patientsRevenue),
+        _TrendSeriesId.tokens => fmtNum(pt.tokens),
+        _TrendSeriesId.staff => fmtNum(pt.employeesPresent),
+      };
+
+  String _seriesLabel(_TrendSeriesId id) => switch (id) {
+        _TrendSeriesId.donations => 'Donations',
+        _TrendSeriesId.patientsRev => 'Patients Rev',
+        _TrendSeriesId.tokens => 'Tokens',
+        _TrendSeriesId.staff => 'Staff',
+      };
+
+  Color _seriesColor(_TrendSeriesId id) {
+    final isDark = widget.t.isDarkCanvas;
+    return switch (id) {
+      _TrendSeriesId.donations =>
+        isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+      _TrendSeriesId.patientsRev => widget.t.accent,
+      _TrendSeriesId.tokens =>
+        isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+      _TrendSeriesId.staff =>
+        isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.points.isEmpty) {
-      return Container(
-        height: 250,
-        decoration: BoxDecoration(
-          color: widget.t.isDarkCanvas ? SoftPalette.slate800 : SoftPalette.gray50,
-          borderRadius: BorderRadius.circular(DS.r2),
-          border: Border.all(color: DS.border),
-        ),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.show_chart_rounded, size: 28, color: DS.neutral.withValues(alpha: 0.5)),
-              const SizedBox(height: 8),
-              const Text('Monthly Revenue & Token Trend', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: DS.neutral)),
-              const SizedBox(height: 4),
-              Text('Syncing trend data...', style: TextStyle(fontSize: 11, color: DS.neutral.withValues(alpha: 0.6))),
-            ],
-          ),
-        ),
-      );
-    }
-
-    final double maxMoney = widget.points.isEmpty 
-        ? 100 
-        : max(100.0, max(
-            widget.points.map((p) => p.patientsRevenue.toDouble()).reduce(max),
-            widget.points.map((p) => p.donations.toDouble()).reduce(max),
-          )) * 1.15;
-          
-    final double maxTokens = widget.points.isEmpty
-        ? 10
-        : max(10.0, widget.points.map((p) => p.tokens.toDouble()).reduce(max)) * 1.15;
-
-    final double maxEmployees = widget.points.isEmpty
-        ? 10
-        : max(10.0, widget.points.map((p) => p.employeesPresent.toDouble()).reduce(max)) * 1.15;
-
-    final bool isDark = widget.t.isDarkCanvas;
+    final t = widget.t;
+    final bool isDark = t.isDarkCanvas;
 
     return Container(
-      padding: const EdgeInsets.all(DS.s2 + 4),
-      decoration: BoxDecoration(
-        color: isDark ? widget.t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? widget.t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Monthly Progress Trends',
-                        style: TextStyle(color: isDark ? widget.t.textPrimary : SoftPalette.slate900, fontSize: 14, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-                    const SizedBox(height: 2),
-                    const Text('Metrics for the last 5 months',
-                        style: TextStyle(color: DS.neutral, fontSize: 11, fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
-              if (hoveredIndex != null && hoveredIndex! < widget.points.length) ...[
-                Builder(
-                  builder: (context) {
-                    final pt = widget.points[hoveredIndex!];
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          DateFormat('MMM yyyy').format(pt.date),
-                          style: TextStyle(color: isDark ? widget.t.textPrimary : SoftPalette.slate900, fontSize: 11, fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            _hoverPill('Donations', fmtPKR(pt.donations), SoftPalette.emerald350),
-                            const SizedBox(width: 4),
-                            _hoverPill('Patients Rev', fmtPKR(pt.patientsRevenue), widget.t.accent),
-                            const SizedBox(width: 4),
-                            _hoverPill('Tokens', pt.tokens.toString(), SoftPalette.blue500),
-                            const SizedBox(width: 4),
-                            _hoverPill('Staff', pt.employeesPresent.toString(), SoftPalette.violet500),
-                          ],
-                        ),
-                      ],
-                    );
-                  }
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: DS.s2),
-          SizedBox(
-            height: 180,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final width = constraints.maxWidth;
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
 
-                return GestureDetector(
-                  onPanUpdate: (details) {
-                    final localPos = details.localPosition;
-                    final dx = localPos.dx;
-                    final stepX = width / (widget.points.length - 1);
-                    int index = (dx / stepX).round().clamp(0, widget.points.length - 1);
-                    if (hoveredIndex != index) {
-                      setState(() {
-                        hoveredIndex = index;
-                      });
-                    }
-                  },
-                  onPanEnd: (_) {
-                    setState(() {
-                      hoveredIndex = null;
-                    });
-                  },
-                  onTapDown: (details) {
-                    final localPos = details.localPosition;
-                    final dx = localPos.dx;
-                    final stepX = width / (widget.points.length - 1);
-                    int index = (dx / stepX).round().clamp(0, widget.points.length - 1);
-                    setState(() {
-                      hoveredIndex = index;
-                    });
-                  },
+          if (widget.points.isEmpty) {
+            return Column(
+              mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                  child: _DashCardHeader(
+                    title: 'Monthly Progress Trends',
+                    subtitle: '5-month trajectory',
+                    t: t,
+                  ),
+                ),
+                Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+                if (isBounded)
+                  Expanded(
+                    child: _DashEmptyState(
+                      icon: Icons.show_chart_rounded,
+                      message: 'No monthly trend points yet',
+                      hint: 'Historical metrics populate after daily records sync.',
+                      t: t,
+                    ),
+                  )
+                else
+                  _DashEmptyState(
+                    icon: Icons.show_chart_rounded,
+                    message: 'No monthly trend points yet',
+                    hint: 'Historical metrics populate after daily records sync.',
+                    t: t,
+                  ),
+              ],
+            );
+          }
+
+          final double maxMoney = max(
+                100.0,
+                max(
+                  widget.points
+                      .map((p) => p.patientsRevenue.toDouble())
+                      .reduce(max),
+                  widget.points.map((p) => p.donations.toDouble()).reduce(max),
+                ),
+              ) *
+              1.15;
+
+          final double maxTokens = max(
+                10.0,
+                widget.points.map((p) => p.tokens.toDouble()).reduce(max),
+              ) *
+              1.15;
+
+          final double maxEmployees = max(
+                10.0,
+                widget.points
+                    .map((p) => p.employeesPresent.toDouble())
+                    .reduce(max),
+              ) *
+              1.15;
+
+          final double maxVolume = max(maxTokens, maxEmployees);
+
+          final activeIdx =
+              (hoveredIndex != null && hoveredIndex! < widget.points.length)
+                  ? hoveredIndex!
+                  : widget.points.length - 1;
+          final refPoint = widget.points[activeIdx];
+          final refMonthLabel = hoveredIndex != null
+              ? '${DateFormat('MMM yyyy').format(refPoint.date)} (hover)'
+              : '${DateFormat('MMM yyyy').format(refPoint.date)} latest · ${switch (_mode) {
+                  _TrendViewMode.indexed => 'Normalized %',
+                  _TrendViewMode.financials => 'PKR Scale',
+                  _TrendViewMode.volume => 'Headcount / Tokens',
+                }}';
+
+          final canvasWidget = LayoutBuilder(
+            builder: (context, chartConstraints) {
+              final width = chartConstraints.maxWidth;
+              final height = chartConstraints.maxHeight;
+
+              return MouseRegion(
+                onHover: (ev) => _updateHover(ev.localPosition.dx, width),
+                onExit: (_) {
+                  if (hoveredIndex != null) {
+                    setState(() => hoveredIndex = null);
+                  }
+                },
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanUpdate: (details) =>
+                      _updateHover(details.localPosition.dx, width),
+                  onPanEnd: (_) => setState(() => hoveredIndex = null),
+                  onTapDown: (details) =>
+                      _updateHover(details.localPosition.dx, width),
                   child: CustomPaint(
-                    size: Size(width, constraints.maxHeight),
+                    size: Size(width, height),
                     painter: _MultiLineChartPainter(
                       points: widget.points,
-                      accentColor: widget.t.accent,
+                      accentColor: t.accent,
+                      donationsColor: _seriesColor(_TrendSeriesId.donations),
+                      tokensColor: _seriesColor(_TrendSeriesId.tokens),
+                      staffColor: _seriesColor(_TrendSeriesId.staff),
                       maxMoney: maxMoney,
                       maxTokens: maxTokens,
                       maxEmployees: maxEmployees,
+                      maxVolume: maxVolume,
+                      mode: _mode,
+                      hiddenSeries: _hidden,
                       hoveredIndex: hoveredIndex,
                       isDark: isDark,
-                      gridColor: isDark ? widget.t.bgRule : DS.border,
+                      gridColor: _dashBorder(t),
+                      labelColor: t.textSecondary,
+                      surfaceColor: _dashSurface(t),
                     ),
                   ),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 8),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _legendItem('Donations', SoftPalette.emerald350),
-                const SizedBox(width: 12),
-                _legendItem('Patients Revenue', widget.t.accent),
-                const SizedBox(width: 12),
-                _legendItem('Tokens Issued', SoftPalette.blue500),
-                const SizedBox(width: 12),
-                _legendItem('Employees Present', SoftPalette.violet500),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+                ),
+              );
+            },
+          );
 
-  Widget _hoverPill(String label, String value, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withValues(alpha: 0.15)),
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                child: _DashCardHeader(
+                  title: 'Monthly Progress Trends',
+                  subtitle: refMonthLabel,
+                  t: t,
+                  trailing: _DashSegmentedToggle<_TrendViewMode>(
+                    t: t,
+                    value: _mode,
+                    items: const [
+                      (_TrendViewMode.indexed, 'All'),
+                      (_TrendViewMode.financials, 'PKR'),
+                      (_TrendViewMode.volume, 'Volume'),
+                    ],
+                    onChanged: (next) => setState(() => _mode = next),
+                  ),
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              // Toggleable legend strip showing active/hovered month metrics
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: _activeModeSeries.map((id) {
+                    final isVisible = !_hidden.contains(id);
+                    final color = _seriesColor(id);
+                    return MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: () => _toggleSeries(id),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 140),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: isVisible
+                                ? _dashSubtleSurface(t)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(Gr.r2),
+                            border: Border.all(
+                              color: isVisible
+                                  ? _dashBorder(t)
+                                  : _dashBorder(t).withValues(alpha: 0.45),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  color: isVisible
+                                      ? color
+                                      : color.withValues(alpha: 0.30),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                _seriesLabel(id),
+                                style: TextStyle(
+                                  color: isVisible
+                                      ? t.textSecondary
+                                      : t.textTertiary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                _seriesLatestValue(id, refPoint),
+                                style: TextStyle(
+                                  color: isVisible
+                                      ? t.textPrimary
+                                      : t.textTertiary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+              if (isBounded)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 4, 10, 8),
+                    child: canvasWidget,
+                  ),
+                )
+              else
+                SizedBox(
+                  height: 195,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 4, 10, 8),
+                    child: canvasWidget,
+                  ),
+                ),
+            ],
+          );
+        },
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 4, height: 4, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
-          const SizedBox(width: 3),
-          Text(value, style: TextStyle(color: color, fontSize: 8.5, fontWeight: FontWeight.w800)),
-        ],
-      ),
-    );
-  }
-
-  Widget _legendItem(String label, Color color) {
-    return Row(
-      children: [
-        Container(
-          width: 10,
-          height: 3,
-          decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)),
-        ),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(color: DS.neutral, fontSize: 10, fontWeight: FontWeight.w600)),
-      ],
     );
   }
 }
@@ -2135,192 +2927,354 @@ class _HomeRevenueLineChartState extends State<HomeRevenueLineChart> {
 class _MultiLineChartPainter extends CustomPainter {
   final List<HomeLineChartPoint> points;
   final Color accentColor;
+  final Color donationsColor;
+  final Color tokensColor;
+  final Color staffColor;
   final double maxMoney;
   final double maxTokens;
   final double maxEmployees;
+  final double maxVolume;
+  final _TrendViewMode mode;
+  final Set<_TrendSeriesId> hiddenSeries;
   final int? hoveredIndex;
   final bool isDark;
   final Color gridColor;
+  final Color labelColor;
+  final Color surfaceColor;
 
   _MultiLineChartPainter({
     required this.points,
     required this.accentColor,
+    required this.donationsColor,
+    required this.tokensColor,
+    required this.staffColor,
     required this.maxMoney,
     required this.maxTokens,
     required this.maxEmployees,
+    required this.maxVolume,
+    required this.mode,
+    required this.hiddenSeries,
     required this.isDark,
     required this.gridColor,
+    required this.labelColor,
+    required this.surfaceColor,
     this.hoveredIndex,
   });
+
+  String _formatAxisMoney(double val) {
+    if (val <= 0) return '0';
+    if (val >= 1000000) return '${(val / 1000000).toStringAsFixed(1)}M';
+    if (val >= 1000) return '${(val / 1000).toStringAsFixed(val >= 10000 ? 0 : 1)}k';
+    return val.round().toString();
+  }
+
+  String _yLabelAt(double frac) => switch (mode) {
+        _TrendViewMode.indexed => '${(frac * 100).round()}%',
+        _TrendViewMode.financials => _formatAxisMoney(maxMoney * frac),
+        _TrendViewMode.volume => fmtNum((maxVolume * frac).round()),
+      };
 
   @override
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
-    final width = size.width;
-    final chartHeight = size.height - 24;
-    final len = points.length;
-    final double stepX = width / (len - 1);
 
-    double getX(int i) => i * stepX;
-    
-    double getYMoney(double val) {
-      final ratio = val / maxMoney;
-      return chartHeight - (ratio * chartHeight);
+    const double leftMargin = 46.0;
+    const double rightMargin = 14.0;
+    const double topMargin = 8.0;
+    const double bottomMargin = 22.0;
+
+    final double chartWidth = max(1.0, size.width - leftMargin - rightMargin);
+    final double chartHeight = max(1.0, size.height - topMargin - bottomMargin);
+    final int len = points.length;
+
+    double getX(int i) => len <= 1
+        ? leftMargin + chartWidth / 2
+        : leftMargin + (i / (len - 1)) * chartWidth;
+
+    double getY(double val, double limit) {
+      final safeLimit = max(1.0, limit);
+      final ratio = (val / safeLimit).clamp(0.0, 1.0);
+      return topMargin + chartHeight * (1.0 - ratio);
     }
 
-    double getYTokens(double val) {
-      final ratio = val / maxTokens;
-      return chartHeight - (ratio * chartHeight);
-    }
-
-    double getYEmployees(double val) {
-      final ratio = val / maxEmployees;
-      return chartHeight - (ratio * chartHeight);
-    }
-
-    // 1. Draw Grid Lines
-    final gridPaint = Paint()
-      ..color = gridColor
-      ..strokeWidth = 0.5;
-    
-    const int gridCount = 4;
-    for (int i = 0; i <= gridCount; i++) {
-      final y = chartHeight * i / gridCount;
-      canvas.drawLine(Offset(0, y), Offset(width, y), gridPaint);
-    }
-
-    final donColor = SoftPalette.emerald350;
-    final tokColor = SoftPalette.blue500;
-    final empColor = SoftPalette.violet500;
-
-    // 2. Draw Lines (Donations, Patients Rev, Tokens, Employees)
-    _drawLine(canvas, points.map((p) => p.donations.toDouble()).toList(), donColor, stepX, chartHeight, maxMoney);
-    _drawLine(canvas, points.map((p) => p.patientsRevenue.toDouble()).toList(), accentColor, stepX, chartHeight, maxMoney);
-    _drawLine(canvas, points.map((p) => p.tokens.toDouble()).toList(), tokColor, stepX, chartHeight, maxTokens);
-    _drawLine(canvas, points.map((p) => p.employeesPresent.toDouble()).toList(), empColor, stepX, chartHeight, maxEmployees);
-
-    // 3. Draw X-axis labels (Day names like Mon, Tue, Wed...)
-    final textStyle = const TextStyle(
-      color: DS.neutral,
+    final labelStyle = TextStyle(
+      color: labelColor,
       fontSize: 10,
-      fontWeight: FontWeight.w600,
+      fontWeight: FontWeight.w500,
+      fontFeatures: const [ui.FontFeature.tabularFigures()],
     );
 
-    for (int i = 0; i < len; i++) {
-      final x = getX(i);
-      final weekLabel = DateFormat('d/M').format(points[i].date);
-      
-      final textSpan = TextSpan(text: weekLabel, style: textStyle);
-      final textPainter = TextPainter(
-        text: textSpan,
+    // 1. Horizontal Gridlines + Y-axis labels
+    final gridPaint = Paint()
+      ..color = gridColor.withValues(alpha: 0.75)
+      ..strokeWidth = 1.0;
+
+    const ySteps = [1.0, 0.75, 0.5, 0.25, 0.0];
+    for (final step in ySteps) {
+      final y = topMargin + chartHeight * (1.0 - step);
+      canvas.drawLine(
+        Offset(leftMargin, y),
+        Offset(leftMargin + chartWidth, y),
+        gridPaint,
+      );
+
+      final tp = TextPainter(
+        text: TextSpan(text: _yLabelAt(step), style: labelStyle),
         textDirection: ui.TextDirection.ltr,
       )..layout();
-
-      textPainter.paint(
+      tp.paint(
         canvas,
-        Offset(x - (textPainter.width / 2), chartHeight + 8),
+        Offset(leftMargin - tp.width - 7, y - tp.height / 2),
       );
     }
 
-    // 4. Draw hover highlights
-    if (hoveredIndex != null) {
+    // Determine limits per mode
+    final double tokensLimit =
+        mode == _TrendViewMode.volume ? maxVolume : maxTokens;
+    final double staffLimit =
+        mode == _TrendViewMode.volume ? maxVolume : maxEmployees;
+
+    final donColor = donationsColor;
+    final tokColor = tokensColor;
+    final empColor = staffColor;
+
+    final bool showDonations = (mode == _TrendViewMode.indexed ||
+            mode == _TrendViewMode.financials) &&
+        !hiddenSeries.contains(_TrendSeriesId.donations);
+    final bool showPatientsRev = (mode == _TrendViewMode.indexed ||
+            mode == _TrendViewMode.financials) &&
+        !hiddenSeries.contains(_TrendSeriesId.patientsRev);
+    final bool showTokens =
+        (mode == _TrendViewMode.indexed || mode == _TrendViewMode.volume) &&
+            !hiddenSeries.contains(_TrendSeriesId.tokens);
+    final bool showStaff =
+        (mode == _TrendViewMode.indexed || mode == _TrendViewMode.volume) &&
+            !hiddenSeries.contains(_TrendSeriesId.staff);
+
+    // 2. Draw visible series
+    if (showDonations) {
+      _drawLine(
+        canvas,
+        [for (int i = 0; i < len; i++) Offset(getX(i), getY(points[i].donations.toDouble(), maxMoney))],
+        donColor,
+        topMargin + chartHeight,
+        leftMargin,
+        chartWidth,
+      );
+    }
+    if (showPatientsRev) {
+      _drawLine(
+        canvas,
+        [for (int i = 0; i < len; i++) Offset(getX(i), getY(points[i].patientsRevenue.toDouble(), maxMoney))],
+        accentColor,
+        topMargin + chartHeight,
+        leftMargin,
+        chartWidth,
+      );
+    }
+    if (showTokens) {
+      _drawLine(
+        canvas,
+        [for (int i = 0; i < len; i++) Offset(getX(i), getY(points[i].tokens.toDouble(), tokensLimit))],
+        tokColor,
+        topMargin + chartHeight,
+        leftMargin,
+        chartWidth,
+      );
+    }
+    if (showStaff) {
+      _drawLine(
+        canvas,
+        [for (int i = 0; i < len; i++) Offset(getX(i), getY(points[i].employeesPresent.toDouble(), staffLimit))],
+        empColor,
+        topMargin + chartHeight,
+        leftMargin,
+        chartWidth,
+      );
+    }
+
+    // 3. Draw X-axis month labels cleanly clamped inside chart bounds (no '30/11' right-edge clip)
+    final distinctMonths =
+        points.map((p) => '${p.date.year}-${p.date.month}').toSet().length;
+    final xFormatter =
+        distinctMonths >= len ? DateFormat('MMM') : DateFormat('d MMM');
+
+    for (int i = 0; i < len; i++) {
+      final x = getX(i);
+      final label = xFormatter.format(points[i].date);
+      final tp = TextPainter(
+        text: TextSpan(text: label, style: labelStyle),
+        textDirection: ui.TextDirection.ltr,
+      )..layout();
+
+      final clampedX =
+          (x - tp.width / 2).clamp(leftMargin, size.width - tp.width - 2);
+      tp.paint(canvas, Offset(clampedX, topMargin + chartHeight + 6));
+    }
+
+    // 4. Draw hover crosshair or latest-point marker dots
+    if (hoveredIndex != null && hoveredIndex! < len) {
       final hIdx = hoveredIndex!;
       final hX = getX(hIdx);
 
-      // Draw vertical reference line
       final linePaintRef = Paint()
-        ..color = DS.neutral.withValues(alpha: 0.25)
+        ..color = labelColor.withValues(alpha: 0.35)
         ..strokeWidth = 1.0
         ..style = PaintingStyle.stroke;
-      canvas.drawLine(Offset(hX, 0), Offset(hX, chartHeight), linePaintRef);
+      canvas.drawLine(
+        Offset(hX, topMargin),
+        Offset(hX, topMargin + chartHeight),
+        linePaintRef,
+      );
 
-      _drawHoverCircle(canvas, hX, getYMoney(points[hIdx].donations.toDouble()), donColor);
-      _drawHoverCircle(canvas, hX, getYMoney(points[hIdx].patientsRevenue.toDouble()), accentColor);
-      _drawHoverCircle(canvas, hX, getYTokens(points[hIdx].tokens.toDouble()), tokColor);
-      _drawHoverCircle(canvas, hX, getYEmployees(points[hIdx].employeesPresent.toDouble()), empColor);
+      if (showDonations) {
+        _drawHoverCircle(
+            canvas, hX, getY(points[hIdx].donations.toDouble(), maxMoney), donColor);
+      }
+      if (showPatientsRev) {
+        _drawHoverCircle(
+            canvas, hX, getY(points[hIdx].patientsRevenue.toDouble(), maxMoney), accentColor);
+      }
+      if (showTokens) {
+        _drawHoverCircle(
+            canvas, hX, getY(points[hIdx].tokens.toDouble(), tokensLimit), tokColor);
+      }
+      if (showStaff) {
+        _drawHoverCircle(
+            canvas, hX, getY(points[hIdx].employeesPresent.toDouble(), staffLimit), empColor);
+      }
     }
   }
 
-  void _drawLine(Canvas canvas, List<double> values, Color color, double stepX, double height, double maxLimit) {
-    final path = Path();
-    final fillPath = Path();
+  void _drawLine(
+    Canvas canvas,
+    List<Offset> pts,
+    Color color,
+    double bottomY,
+    double leftMargin,
+    double chartWidth,
+  ) {
+    if (pts.isEmpty) return;
 
-    double getY(double val) {
-      final ratio = val / maxLimit;
-      return height - (ratio * height);
+    if (pts.length == 1) {
+      _drawEndpointDot(canvas, pts.first, color);
+      return;
     }
 
-    path.moveTo(0, getY(values[0]));
-    fillPath.moveTo(0, height);
-    fillPath.lineTo(0, getY(values[0]));
+    final path = Path()..moveTo(pts.first.dx, pts.first.dy);
+    final fillPath = Path()
+      ..moveTo(pts.first.dx, bottomY)
+      ..lineTo(pts.first.dx, pts.first.dy);
 
-    for (int i = 0; i < values.length - 1; i++) {
-      final x1 = i * stepX;
-      final y1 = getY(values[i]);
-      final x2 = (i + 1) * stepX;
-      final y2 = getY(values[i + 1]);
-      final cx = (x1 + x2) / 2;
-
-      path.cubicTo(cx, y1, cx, y2, x2, y2);
-      fillPath.cubicTo(cx, y1, cx, y2, x2, y2);
+    for (int i = 0; i < pts.length - 1; i++) {
+      final p0 = pts[i];
+      final p1 = pts[i + 1];
+      final cx = (p0.dx + p1.dx) / 2;
+      path.cubicTo(cx, p0.dy, cx, p1.dy, p1.dx, p1.dy);
+      fillPath.cubicTo(cx, p0.dy, cx, p1.dy, p1.dx, p1.dy);
     }
 
-    fillPath.lineTo((values.length - 1) * stepX, height);
+    fillPath.lineTo(pts.last.dx, bottomY);
     fillPath.close();
 
     final fillPaint = Paint()
       ..shader = LinearGradient(
-        colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.0)],
+        colors: [color.withValues(alpha: 0.20), color.withValues(alpha: 0.0)],
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-      ).createShader(Rect.fromLTWH(0, 0, (values.length - 1) * stepX, height))
+      ).createShader(
+          Rect.fromLTWH(leftMargin, 0, chartWidth, max(1.0, bottomY)))
       ..style = PaintingStyle.fill;
     canvas.drawPath(fillPath, fillPaint);
 
     final linePaint = Paint()
       ..color = color
-      ..strokeWidth = 2.0
+      ..strokeWidth = 2.2
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
     canvas.drawPath(path, linePaint);
+
+    // Subtle endpoint marker like NexusPerformanceChart
+    _drawEndpointDot(canvas, pts.last, color);
+  }
+
+  void _drawEndpointDot(Canvas canvas, Offset center, Color color) {
+    canvas.drawCircle(center, 3.8, Paint()..color = color);
+    canvas.drawCircle(center, 2.0, Paint()..color = surfaceColor);
   }
 
   void _drawHoverCircle(Canvas canvas, double x, double y, Color color) {
-    final circleOuter = Paint()..color = color.withValues(alpha: 0.25);
-    canvas.drawCircle(Offset(x, y), 7.0, circleOuter);
-
-    final circleInner = Paint()..color = color;
-    canvas.drawCircle(Offset(x, y), 3.5, circleInner);
+    canvas.drawCircle(
+        Offset(x, y), 6.5, Paint()..color = color.withValues(alpha: 0.22));
+    canvas.drawCircle(Offset(x, y), 3.8, Paint()..color = color);
+    canvas.drawCircle(Offset(x, y), 1.8, Paint()..color = surfaceColor);
   }
 
   @override
   bool shouldRepaint(_MultiLineChartPainter oldDelegate) =>
       oldDelegate.hoveredIndex != hoveredIndex ||
+      oldDelegate.points != points ||
+      oldDelegate.mode != mode ||
+      oldDelegate.hiddenSeries.length != hiddenSeries.length ||
+      !oldDelegate.hiddenSeries.containsAll(hiddenSeries) ||
       oldDelegate.maxMoney != maxMoney ||
       oldDelegate.maxTokens != maxTokens ||
-      oldDelegate.maxEmployees != maxEmployees;
+      oldDelegate.maxEmployees != maxEmployees ||
+      oldDelegate.maxVolume != maxVolume ||
+      oldDelegate.isDark != isDark ||
+      oldDelegate.accentColor != accentColor ||
+      oldDelegate.donationsColor != donationsColor ||
+      oldDelegate.tokensColor != tokensColor ||
+      oldDelegate.staffColor != staffColor ||
+      oldDelegate.gridColor != gridColor;
 }
 
 // ════════════════════════════════════════════════════════════════════════
 // 6. Patients by Branch Horizontal Bar Chart
 // ════════════════════════════════════════════════════════════════════════
 
-class HomePatientsByBranchBarChart extends StatelessWidget {
+class HomePatientsByBranchBarChart extends StatefulWidget {
   final RoleThemeData t;
   final List<HomeBranchRow> rows;
-  const HomePatientsByBranchBarChart({super.key, required this.t, required this.rows});
+  final void Function(String branchId)? onTapBranch;
+
+  const HomePatientsByBranchBarChart({
+    super.key,
+    required this.t,
+    required this.rows,
+    this.onTapBranch,
+  });
+
+  @override
+  State<HomePatientsByBranchBarChart> createState() =>
+      _HomePatientsByBranchBarChartState();
+}
+
+class _HomePatientsByBranchBarChartState
+    extends State<HomePatientsByBranchBarChart> {
+  bool _showWeekly = true;
 
   @override
   Widget build(BuildContext context) {
+    final t = widget.t;
+
     // Consolidate camps into collective branch rows with normalized keys and clean names
     final Map<String, HomeBranchRow> branchMap = {};
-    for (final r in rows) {
-      final rawKey = r.id.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
-      final isKarachi = rawKey.contains('karachi') || r.name.toLowerCase().contains('karachi');
-      final isJalalpur = rawKey.contains('jalal') || r.name.toLowerCase().contains('jalal');
-      final isGujrat = rawKey.contains('gujrat') || r.name.toLowerCase().contains('gujrat');
-      final isSialkot = rawKey.contains('sialkot') || r.name.toLowerCase().contains('sialkot');
-      final isRawalpindi = rawKey.contains('rawalpindi') || rawKey.contains('pindi') || r.name.toLowerCase().contains('rawalpindi');
+    for (final r in widget.rows) {
+      final rawKey =
+          r.id.toLowerCase().trim().replaceAll(' ', '_').replaceAll('-', '_');
+      final lowName = r.name.toLowerCase();
+      final isKarachi =
+          rawKey.contains('karachi') || lowName.contains('karachi');
+      final isJalalpur =
+          rawKey.contains('jalal') || lowName.contains('jalal');
+      final isGujrat = rawKey.contains('gujrat') || lowName.contains('gujrat');
+      final isSialkot =
+          rawKey.contains('sialkot') || lowName.contains('sialkot');
+      final isRawalpindi = rawKey.contains('rawalpindi') ||
+          rawKey.contains('pindi') ||
+          lowName.contains('rawalpindi');
 
       final String branchKey = isKarachi
           ? 'karachi'
@@ -2361,108 +3315,238 @@ class HomePatientsByBranchBarChart extends StatelessWidget {
       }
     }
 
-    final sortedRows = branchMap.values.toList()
-      ..sort((a, b) => b.today.tokens.compareTo(a.today.tokens));
+    int todayCount(HomeBranchRow r) {
+      final catSum = r.today.zakat + r.today.nonZakat + r.today.gmwf;
+      return max(r.today.tokens, catSum);
+    }
 
-    final maxTokens = sortedRows.isEmpty
+    int displayCount(HomeBranchRow r) {
+      final td = todayCount(r);
+      return _showWeekly ? max(r.weeklyPatients, td) : td;
+    }
+
+    final sortedRows = branchMap.values.toList()
+      ..sort((a, b) {
+        final dCmp = displayCount(b).compareTo(displayCount(a));
+        if (dCmp != 0) return dCmp;
+        final tCmp = todayCount(b).compareTo(todayCount(a));
+        if (tCmp != 0) return tCmp;
+        return a.name.compareTo(b.name);
+      });
+
+    final int maxVal = sortedRows.isEmpty
         ? 1
-        : max(1, sortedRows.map((r) => r.today.tokens).reduce(max));
-    final bool isDark = t.isDarkCanvas;
+        : max(1, sortedRows.map(displayCount).reduce(max));
+    final int totalVal =
+        sortedRows.fold<int>(0, (sum, r) => sum + displayCount(r));
+    final int activeBranches =
+        sortedRows.where((r) => displayCount(r) > 0).length;
+
+    final isDark = t.isDarkCanvas;
+    final branchBarPalette = [
+      t.accent,
+      isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+      isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+      isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+      isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+      isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+    ];
 
     return Container(
-      padding: const EdgeInsets.all(DS.s2 + 4),
-      decoration: BoxDecoration(
-        color: isDark ? t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Patients by Branch (Last 7 Days)',
-              style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 14, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-          const SizedBox(height: DS.s2),
-          if (sortedRows.isEmpty)
-            const Expanded(
-              child: Center(
-                child: Text('No patient data today', style: TextStyle(color: DS.neutral, fontSize: 12)),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.separated(
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: min(8, sortedRows.length),
-                separatorBuilder: (_, __) => const SizedBox(height: 10),
-                itemBuilder: (context, i) {
-                  final row = sortedRows[i];
-                    final val = row.weeklyPatients > 0
-                      ? row.weeklyPatients
-                      : row.today.tokens;
-                  final double pct = val / maxTokens;
-                  
-                  return Row(
-                    children: [
-                      // Branch name
-                      SizedBox(
-                        width: 110,
-                        child: Text(
-                          row.name,
-                          style: TextStyle(color: isDark ? t.textSecondary : SoftPalette.slate600, fontSize: 11, fontWeight: FontWeight.w700),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Bar
-                      Expanded(
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            return Stack(
-                              children: [
-                                Container(
-                                  height: 10,
-                                  decoration: BoxDecoration(
-                                    color: isDark ? t.bg : SoftPalette.gray100,
-                                    borderRadius: BorderRadius.circular(5),
-                                  ),
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+
+          final bodyList = sortedRows.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.bar_chart_rounded,
+                  message: 'No branch patient data',
+                  hint: 'Patient totals by city appear here once recorded.',
+                  t: t,
+                )
+              : ListView.separated(
+                  shrinkWrap: !isBounded,
+                  physics: isBounded
+                      ? const BouncingScrollPhysics()
+                      : const NeverScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  itemCount: min(8, sortedRows.length),
+                  separatorBuilder: (_, _) => const SizedBox(height: 11),
+                  itemBuilder: (context, i) {
+                    final row = sortedRows[i];
+                    final int val = displayCount(row);
+                    final int td = todayCount(row);
+                    final double ratio = val <= 0 ? 0.0 : val / maxVal;
+                    final double widthFactor =
+                        val <= 0 ? 0.0 : ratio.clamp(0.025, 1.0);
+                    final double sharePct =
+                        totalVal > 0 ? (val / totalVal) * 100 : 0.0;
+                    final Color barColor = val > 0
+                        ? branchBarPalette[i % branchBarPalette.length]
+                        : t.textTertiary;
+
+                    final content = Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: val > 0
+                                    ? barColor
+                                    : t.textTertiary.withValues(alpha: 0.4),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                row.name,
+                                style: TextStyle(
+                                  color: val > 0
+                                      ? t.textPrimary
+                                      : t.textSecondary,
+                                  fontSize: 12.5,
+                                  fontWeight: val > 0
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
                                 ),
-                                FractionallySizedBox(
-                                  alignment: Alignment.centerLeft,
-                                  widthFactor: pct.clamp(0.02, 1.0),
-                                  child: Container(
-                                    height: 10,
-                                    decoration: BoxDecoration(
-                                      gradient: const LinearGradient(
-                                        colors: [SoftPalette.teal550, SoftPalette.teal500],
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (val > 0) ...[
+                              Text(
+                                '${sharePct.toStringAsFixed(sharePct >= 10 ? 0 : 1)}%',
+                                style: TextStyle(
+                                  color: t.textSecondary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(minWidth: 32),
+                              child: Text(
+                                fmtNum(val),
+                                style: TextStyle(
+                                  color:
+                                      val > 0 ? t.textPrimary : t.textTertiary,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w800,
+                                  fontFeatures: const [
+                                    ui.FontFeature.tabularFigures(),
+                                  ],
+                                ),
+                                textAlign: TextAlign.right,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(Gr.r1),
+                          child: Container(
+                            height: 7,
+                            color: _dashSubtleSurface(t),
+                            alignment: Alignment.centerLeft,
+                            child: widthFactor > 0
+                                ? FractionallySizedBox(
+                                    alignment: Alignment.centerLeft,
+                                    widthFactor: widthFactor,
+                                    child: Container(
+                                      height: 7,
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          colors: [
+                                            barColor,
+                                            barColor.withValues(alpha: 0.78),
+                                          ],
+                                        ),
+                                        borderRadius:
+                                            BorderRadius.circular(Gr.r1),
                                       ),
-                                      borderRadius: BorderRadius.circular(5),
                                     ),
-                                  ),
-                                ),
-                              ],
-                            );
-                          }
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Value
-                      SizedBox(
-                        width: 24,
-                        child: Text(
-                          val.toString(),
-                          style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 12, fontWeight: FontWeight.w900),
-                          textAlign: TextAlign.right,
+                        const SizedBox(height: 4),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _showWeekly
+                                  ? (td > 0
+                                      ? '$td visits today'
+                                      : (val > 0
+                                          ? '0 visits today'
+                                          : 'No visits in last 7 days'))
+                                  : (row.weeklyPatients > 0
+                                      ? '${fmtNum(row.weeklyPatients)} in last 7 days'
+                                      : 'No visits today'),
+                              style: TextStyle(
+                                color: t.textTertiary,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w400,
+                              ),
+                            ),
+                          ],
                         ),
+                      ],
+                    );
+
+                    if (widget.onTapBranch == null) return content;
+
+                    return InkWell(
+                      onTap: () => widget.onTapBranch!(row.id),
+                      borderRadius: BorderRadius.circular(Gr.r2),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 2, horizontal: 2),
+                        child: content,
                       ),
+                    );
+                  },
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                child: _DashCardHeader(
+                  title: 'Patients by Branch',
+                  subtitle: totalVal > 0
+                      ? '${fmtNum(totalVal)} visits · $activeBranches active branches'
+                      : 'No visits recorded in window',
+                  t: t,
+                  trailing: _DashSegmentedToggle<bool>(
+                    t: t,
+                    value: _showWeekly,
+                    items: const [
+                      (true, '7D'),
+                      (false, 'Today'),
                     ],
-                  );
-                },
+                    onChanged: (v) => setState(() => _showWeekly = v),
+                  ),
+                ),
               ),
-            ),
-        ],
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: bodyList) else bodyList,
+            ],
+          );
+        },
       ),
     );
   }
@@ -2491,136 +3575,229 @@ class HomeRecentActivityFeed extends StatelessWidget {
     final bool isDark = t.isDarkCanvas;
 
     return Container(
-      padding: const EdgeInsets.all(DS.s2 + 4),
-      decoration: BoxDecoration(
-        color: isDark ? t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Recent Activity',
-                  style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 14, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-              InkWell(
-                onTap: () {
-                  final reportsModule = availableModules.firstWhere(
-                    (m) => m.id == 'branches',
-                    orElse: () => availableModules.first,
-                  );
-                  onOpenModule(reportsModule);
-                },
-                child: Text('View all', style: TextStyle(color: t.accent, fontSize: 11, fontWeight: FontWeight.w700)),
-              ),
-            ],
-          ),
-          const SizedBox(height: DS.s2),
-          if (activities.isEmpty)
-            const Expanded(
-              child: Center(
-                child: Text('No recent activity records', style: TextStyle(color: DS.neutral, fontSize: 12)),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.separated(
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: min(4, activities.length),
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (context, i) {
-                  final act = activities[i];
-                  final isDon = act.type == 'donation';
-                  final isToken = act.type == 'token';
-                  
-                  // Configure color and icons to match the mockup
-                  Color iconColor = SoftPalette.blue500; // Blue for Token/Default
-                  IconData iconData = Icons.confirmation_number_rounded;
-                  
-                  if (isDon) {
-                    iconColor = SoftPalette.emerald350; // Green for Donations
-                    iconData = Icons.volunteer_activism_rounded;
-                  } else if (act.type == 'reception' || act.title.contains('Register') || act.title.contains('Patient')) {
-                    iconColor = SoftPalette.violet500; // Purple for Patient Register
-                    iconData = Icons.person_add_rounded;
-                  } else if (act.type == 'revenue' || act.title.contains('Revenue') || act.title.contains('Record')) {
-                    iconColor = SoftPalette.amber300; // Orange for Revenue
-                    iconData = Icons.payments_rounded;
-                  }
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
+          final itemsCount = min(5, activities.length);
 
-                  return InkWell(
-                    onTap: () {
-                      final targetModuleId = isDon ? 'donations' : (isToken ? 'token_generation' : 'branches');
-                      final module = availableModules.firstWhere(
-                        (m) => m.id == targetModuleId,
-                        orElse: () => availableModules.firstWhere(
-                          (m) => m.id == 'branches',
-                          orElse: () => availableModules.first,
+          final body = activities.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.history_rounded,
+                  message: 'No recent activity records',
+                  hint: 'Tokens, receipts, and branch updates stream here.',
+                  t: t,
+                )
+              : ListView.separated(
+                  shrinkWrap: !isBounded,
+                  physics: isBounded
+                      ? const BouncingScrollPhysics()
+                      : const NeverScrollableScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: itemsCount,
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    thickness: 1,
+                    indent: 52,
+                    color: _dashBorder(t).withValues(alpha: 0.65),
+                  ),
+                  itemBuilder: (context, i) {
+                    final act = activities[i];
+                    final isDon = act.type == 'donation';
+                    final isToken = act.type == 'token';
+
+                    Color iconColor = isDark
+                        ? SoftPalette.brightCobalt
+                        : SoftPalette.cobaltBlue;
+                    IconData iconData = Icons.confirmation_number_rounded;
+                    String badgeLabel = 'TOKEN';
+
+                    if (isDon) {
+                      iconColor = isDark
+                          ? SoftPalette.brightMint
+                          : SoftPalette.jadeEmerald;
+                      iconData = Icons.volunteer_activism_rounded;
+                      badgeLabel = 'DONATION';
+                    } else if (act.type == 'reception' ||
+                        act.title.contains('Register') ||
+                        act.title.contains('Patient')) {
+                      iconColor = isDark
+                          ? SoftPalette.softLavender
+                          : SoftPalette.royalViolet;
+                      iconData = Icons.person_add_rounded;
+                      badgeLabel = 'PATIENT';
+                    } else if (act.type == 'revenue' ||
+                        act.title.contains('Revenue') ||
+                        act.title.contains('Record')) {
+                      iconColor = isDark
+                          ? SoftPalette.brightGold
+                          : SoftPalette.warmMarigold;
+                      iconData = Icons.payments_rounded;
+                      badgeLabel = 'REVENUE';
+                    }
+
+                    return InkWell(
+                      onTap: availableModules.isEmpty
+                          ? null
+                          : () {
+                              final targetModuleId = isDon
+                                  ? 'donations'
+                                  : (isToken ? 'token_generation' : 'branches');
+                              final module = availableModules.firstWhere(
+                                (m) => m.id == targetModuleId,
+                                orElse: () => availableModules.firstWhere(
+                                  (m) => m.id == 'branches',
+                                  orElse: () => availableModules.first,
+                                ),
+                              );
+                              onOpenModule(module);
+                            },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 9),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: iconColor
+                                    .withValues(alpha: isDark ? 0.19 : 0.12),
+                                borderRadius: BorderRadius.circular(Gr.r2),
+                                border: Border.all(
+                                  color: iconColor
+                                      .withValues(alpha: isDark ? 0.34 : 0.22),
+                                  width: 0.9,
+                                ),
+                              ),
+                              child: Icon(
+                                iconData,
+                                color: iconColor,
+                                size: 14,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 5, vertical: 1),
+                                        margin: const EdgeInsets.only(right: 6),
+                                        decoration: BoxDecoration(
+                                          color: iconColor.withValues(
+                                              alpha: isDark ? 0.18 : 0.10),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          badgeLabel,
+                                          style: TextStyle(
+                                            color: iconColor,
+                                            fontSize: 8.5,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 0.4,
+                                          ),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Text(
+                                          act.title,
+                                          style: TextStyle(
+                                            color: t.textPrimary,
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    act.subtitle,
+                                    style: TextStyle(
+                                      color: t.textSecondary,
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w400,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              DateFormat('hh:mm a').format(act.timestamp),
+                              style: TextStyle(
+                                color: t.textTertiary,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                                fontFeatures: const [
+                                  ui.FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      );
-                      onOpenModule(module);
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: iconColor.withValues(alpha: 0.1),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              iconData,
-                              color: iconColor,
-                              size: 14,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  act.title,
-                                  style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 11.5, fontWeight: FontWeight.w700),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(height: 1),
-                                Text(
-                                  act.subtitle,
-                                  style: const TextStyle(color: DS.neutral, fontSize: 10, fontWeight: FontWeight.w500),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            DateFormat('hh:mm a').format(act.timestamp),
-                            style: const TextStyle(color: DS.neutral, fontSize: 9, fontWeight: FontWeight.w600),
-                          ),
-                        ],
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+                child: _DashCardHeader(
+                  title: 'Recent Activity',
+                  subtitle: 'Latest clinic & branch events',
+                  showLiveDot: activities.isNotEmpty,
+                  t: t,
+                  trailing: availableModules.isEmpty
+                      ? null
+                      : InkWell(
+                          onTap: () {
+                            final reportsModule = availableModules.firstWhere(
+                              (m) => m.id == 'branches',
+                              orElse: () => availableModules.first,
+                            );
+                            onOpenModule(reportsModule);
+                          },
+                          borderRadius: BorderRadius.circular(Gr.r1),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 2),
+                            child: Text(
+                              'View all →',
+                              style: TextStyle(
+                                color: t.accent,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                ),
               ),
-            ),
-        ],
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: body) else body,
+            ],
+          );
+        },
       ),
     );
   }
-
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2631,44 +3808,49 @@ class QuickActionsRow extends StatelessWidget {
   final List<AppModule> availableModules;
   final RoleThemeData t;
   final void Function(AppModule) onOpenModule;
+  final int? todayFoodTokens;
 
   const QuickActionsRow({
     super.key,
     required this.availableModules,
     required this.t,
     required this.onOpenModule,
+    this.todayFoodTokens,
   });
 
   @override
   Widget build(BuildContext context) {
-    int todayFoodTokens = 0;
-    try {
-      if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
-        final box = Hive.box(LocalStorageService.dasterkhwaanTokensBox);
-        final todayYmd = DateFormat('yyyy-MM-dd').format(DateTime.now());
-        final todayDmyy = DateFormat('ddMMyy').format(DateTime.now());
-        for (final raw in box.values) {
-          if (raw is Map) {
-            final dk = raw['dateKey']?.toString() ?? '';
-            if (dk == todayYmd || dk == todayDmyy) todayFoodTokens++;
+    int foodTokensCount = todayFoodTokens ?? 0;
+    if (todayFoodTokens == null) {
+      try {
+        if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)) {
+          final box = Hive.box(LocalStorageService.dasterkhwaanTokensBox);
+          final todayYmd = DateFormat('yyyy-MM-dd').format(DateTime.now());
+          final todayDmyy = DateFormat('ddMMyy').format(DateTime.now());
+          for (final raw in box.values) {
+            if (raw is Map) {
+              final dk = raw['dateKey']?.toString() ?? '';
+              if (dk == todayYmd || dk == todayDmyy) foodTokensCount++;
+            }
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
+    final bool isDark = t.isDarkCanvas;
     final List<Map<String, dynamic>> targetActions = [
-      {'id': 'branches', 'label': 'Branches', 'icon': Icons.store_outlined, 'color': SoftPalette.teal500},
-      {'id': 'employees', 'label': 'Staff Attendance', 'icon': Icons.badge_outlined, 'color': SoftPalette.indigo500},
-      {'id': 'madrassa_attendance', 'label': 'Madrassa Attend.', 'icon': Icons.how_to_reg_rounded, 'color': SoftPalette.pink400},
-      {'id': 'madrassa_students', 'label': 'Madrassa Students', 'icon': Icons.groups_rounded, 'color': SoftPalette.teal350},
-      {'id': 'school_attendance', 'label': 'School Students', 'icon': Icons.school_rounded, 'color': SoftPalette.emerald350},
-      {'id': 'school_teacher_attendance', 'label': 'School Faculty', 'icon': Icons.co_present_rounded, 'color': SoftPalette.violet500},
-      {'id': 'office_boy', 'label': todayFoodTokens > 0 ? 'Food Tokens ($todayFoodTokens)' : 'Food Tokens', 'icon': Icons.room_service_rounded, 'color': SoftPalette.amber300},
-      {'id': 'dasterkhwaan_inventory', 'label': 'Dasterkhwaan', 'icon': Icons.inventory_2_outlined, 'color': SoftPalette.orange400},
-      {'id': 'inventory', 'label': 'Med Inventory', 'icon': Icons.medication_liquid_rounded, 'color': SoftPalette.sky500},
-      {'id': 'finance', 'label': 'Finance & HR', 'icon': Icons.monetization_on_rounded, 'color': SoftPalette.red400},
-      {'id': 'donations', 'label': 'Add Donation', 'icon': Icons.volunteer_activism_rounded, 'color': SoftPalette.emerald500},
-      {'id': 'patients_registration', 'label': 'Add Patient', 'icon': Icons.person_add_rounded, 'color': SoftPalette.violet550},
+      {'id': 'branches', 'label': 'Branches', 'icon': Icons.store_outlined, 'color': isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan},
+      {'id': 'employees', 'label': 'Staff Attendance', 'icon': Icons.badge_outlined, 'color': isDark ? SoftPalette.softIndigo : SoftPalette.luminousIndigo},
+      {'id': 'madrassa_attendance', 'label': 'Madrassa Attend.', 'icon': Icons.how_to_reg_rounded, 'color': isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid},
+      {'id': 'madrassa_students', 'label': 'Madrassa Students', 'icon': Icons.groups_rounded, 'color': isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald},
+      {'id': 'school_attendance', 'label': 'School Students', 'icon': Icons.school_rounded, 'color': isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue},
+      {'id': 'school_teacher_attendance', 'label': 'School Faculty', 'icon': Icons.co_present_rounded, 'color': isDark ? SoftPalette.softLavender : SoftPalette.royalViolet},
+      {'id': 'office_boy', 'label': foodTokensCount > 0 ? 'Food Tokens ($foodTokensCount)' : 'Food Tokens', 'icon': Icons.room_service_rounded, 'color': isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold},
+      {'id': 'dasterkhwaan_inventory', 'label': 'Dasterkhwaan', 'icon': Icons.inventory_2_outlined, 'color': isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral},
+      {'id': 'inventory', 'label': 'Med Inventory', 'icon': Icons.medication_liquid_rounded, 'color': isDark ? SoftPalette.sky350 : SoftPalette.sky550},
+      {'id': 'finance', 'label': 'Finance & HR', 'icon': Icons.monetization_on_rounded, 'color': isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral},
+      {'id': 'donations', 'label': 'Add Donation', 'icon': Icons.volunteer_activism_rounded, 'color': isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald},
+      {'id': 'patients_registration', 'label': 'Add Patient', 'icon': Icons.person_add_rounded, 'color': isDark ? SoftPalette.softLavender : SoftPalette.royalViolet},
     ];
 
     final activeActions = targetActions.where((action) {
@@ -2684,192 +3866,265 @@ class QuickActionsRow extends StatelessWidget {
       return availableModules.any((m) => m.id == action['id'] || (action['id'] == 'patients_registration' && m.id == 'patient_register_standalone'));
     }).toList();
 
-    final bool isDark = t.isDarkCanvas;
-
     return Container(
-      padding: const EdgeInsets.all(DS.s2),
-      decoration: BoxDecoration(
-        color: isDark ? t.bgCard : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(DS.r2),
-        border: Border.all(color: isDark ? t.bgRule : DS.border),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
-        ],
-      ),
+      decoration: _dashCardDecoration(t, radius: Gr.r4),
+      clipBehavior: Clip.antiAlias,
       child: LayoutBuilder(
         builder: (context, constraints) {
+          final isBounded = constraints.hasBoundedHeight;
           final w = constraints.maxWidth;
-          final crossAxisCount = (w / 95).floor().clamp(2, 6);
-          final rowCount = (activeActions.length / crossAxisCount).ceil();
-          final availableHeight = constraints.maxHeight - 38;
-          final calcExtent = (rowCount > 0 && availableHeight > 0)
-              ? ((availableHeight - (rowCount - 1) * 8) / rowCount).clamp(62.0, 95.0)
+          final crossAxisCount = (w / 96).floor().clamp(2, 6);
+          final rowCount = activeActions.isEmpty
+              ? 1
+              : (activeActions.length / crossAxisCount).ceil();
+          final availableHeight = constraints.maxHeight - 64;
+          final calcExtent = (isBounded && rowCount > 0 && availableHeight > 0)
+              ? ((availableHeight - (rowCount - 1) * 8) / rowCount)
+                  .clamp(62.0, 90.0)
               : 72.0;
 
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Quick Actions',
-                  style: TextStyle(color: isDark ? t.textPrimary : SoftPalette.slate900, fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: -0.3)),
-              const SizedBox(height: DS.s2),
-              Expanded(
-                child: GridView.builder(
-                  physics: const BouncingScrollPhysics(),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: crossAxisCount,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                    mainAxisExtent: calcExtent,
-                  ),
-                  itemCount: activeActions.length,
-                  itemBuilder: (context, index) {
-                    final action = activeActions[index];
-                    final mainModuleId = (action['id'] == 'employees')
-                        ? 'employees'
-                        : ((action['id'] == 'madrassa_attendance' || action['id'] == 'madrassa_students' || action['id'] == 'add_student' || action['id'] == 'madrassa_report')
-                            ? 'madrassa'
-                            : ((action['id'] == 'school_attendance' || action['id'] == 'school_teacher_attendance' || action['id'] == 'school')
-                                ? 'school_module'
-                                : action['id']));
-                    final baseModule = availableModules.firstWhere(
-                      (m) => m.id == mainModuleId || (mainModuleId == 'patients_registration' && m.id == 'patient_register_standalone') || (mainModuleId == 'school_module' && (m.id == 'school_attendance' || m.id == 'school_teacher_attendance' || m.id == 'school_module')),
-                      orElse: () => availableModules.firstWhere((m) => m.id == mainModuleId, orElse: () => availableModules.first),
-                    );
-                    
-                    // Construct custom copy of the module with modified builder
-                    var module = baseModule;
-                    if (action['id'] == 'employees') {
-                      module = baseModule.copyWith(
-                        title: 'Employee Management',
-                        builder: (context, data) => EmployeeManagementPage(
-                          branchId: data['branchId'] ?? 'all',
-                          isAdmin: true,
+          final grid = activeActions.isEmpty
+              ? _DashEmptyState(
+                  icon: Icons.apps_outlined,
+                  message: 'No shortcuts available',
+                  hint: 'Enabled module shortcuts appear here.',
+                  t: t,
+                )
+              : Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: GridView.builder(
+                    shrinkWrap: !isBounded,
+                    physics: isBounded
+                        ? const BouncingScrollPhysics()
+                        : const NeverScrollableScrollPhysics(),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: crossAxisCount,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                      mainAxisExtent: calcExtent,
+                    ),
+                    itemCount: activeActions.length,
+                    itemBuilder: (context, index) {
+                      final action = activeActions[index];
+                      final mainModuleId = (action['id'] == 'employees')
+                          ? 'employees'
+                          : ((action['id'] == 'madrassa_attendance' ||
+                                  action['id'] == 'madrassa_students' ||
+                                  action['id'] == 'add_student' ||
+                                  action['id'] == 'madrassa_report')
+                              ? 'madrassa'
+                              : ((action['id'] == 'school_attendance' ||
+                                      action['id'] ==
+                                          'school_teacher_attendance' ||
+                                      action['id'] == 'school')
+                                  ? 'school_module'
+                                  : action['id']));
+                      final baseModule = availableModules.firstWhere(
+                        (m) =>
+                            m.id == mainModuleId ||
+                            (mainModuleId == 'patients_registration' &&
+                                m.id == 'patient_register_standalone') ||
+                            (mainModuleId == 'school_module' &&
+                                (m.id == 'school_attendance' ||
+                                    m.id == 'school_teacher_attendance' ||
+                                    m.id == 'school_module')),
+                        orElse: () => availableModules.firstWhere(
+                          (m) => m.id == mainModuleId,
+                          orElse: () => availableModules.first,
                         ),
                       );
-                    } else if (action['id'] == 'madrassa_students') {
-                      module = baseModule.copyWith(
-                        title: 'Madrassa Students',
-                        builder: (context, data) {
-                          final branchId = data['branchId'] ?? 'unknown';
-                          final username = data['name'] ?? data['username'] ?? 'User';
-                          final role = (data['role'] as String? ?? 'madrassa admin').toLowerCase();
-                          final isAdmin = role.contains('admin') || role.contains('chairman') || role.contains('ceo') || role.contains('hq');
-                          return MadrassaDashboard(
-                            branchId: branchId,
-                            username: username,
-                            role: role,
-                            isAdmin: isAdmin,
-                            initialIndex: isAdmin ? 2 : 1,
-                          );
-                        },
-                      );
-                    } else if (action['id'] == 'madrassa_attendance') {
-                      module = baseModule.copyWith(
-                        title: 'Madrassa Attendance',
-                        builder: (context, data) {
-                          final branchId = data['branchId'] ?? 'unknown';
-                          final username = data['name'] ?? data['username'] ?? 'User';
-                          final role = (data['role'] as String? ?? 'madrassa admin').toLowerCase();
-                          final isAdmin = role.contains('admin') || role.contains('chairman') || role.contains('ceo') || role.contains('hq');
-                          return MadrassaDashboard(
-                            branchId: branchId,
-                            username: username,
-                            role: role,
-                            isAdmin: isAdmin,
-                            initialIndex: isAdmin ? 1 : 0,
-                          );
-                        },
-                      );
-                    } else if (action['id'] == 'madrassa_teachers') {
-                      module = baseModule.copyWith(
-                        title: 'Madrassa Teachers',
-                        builder: (context, data) {
-                          final branchId = data['branchId'] ?? 'unknown';
-                          final username = data['name'] ?? data['username'] ?? 'User';
-                          final role = (data['role'] as String? ?? 'madrassa admin').toLowerCase();
-                          final isAdmin = role.contains('admin') ||
-                              role.contains('chairman') ||
-                              role.contains('ceo') ||
-                              role.contains('hq') ||
-                              role.contains('principal') ||
-                              role.contains('manager');
-                          return MadrassaDashboard(
-                            branchId: branchId,
-                            username: username,
-                            role: role,
-                            isAdmin: isAdmin,
-                            initialIndex: 3,
-                          );
-                        },
-                      );
-                    } else if (action['id'] == 'school_attendance') {
-                      module = baseModule.copyWith(
-                        title: 'School Student Attendance',
-                        builder: (context, data) => SchoolDashboard(
-                          branchId: data['branchId'] ?? 'all',
-                          username: data['name'] ?? data['username'] ?? LocalStorageService.getActiveUsername(),
-                          role: data['role'] ?? LocalStorageService.getActiveUserRole(),
-                          initialTabIndex: 2,
-                        ),
-                      );
-                    } else if (action['id'] == 'school_teacher_attendance') {
-                      module = baseModule.copyWith(
-                        title: 'School Faculty Attendance',
-                        builder: (context, data) => SchoolDashboard(
-                          branchId: data['branchId'] ?? 'all',
-                          username: data['name'] ?? data['username'] ?? LocalStorageService.getActiveUsername(),
-                          role: data['role'] ?? LocalStorageService.getActiveUserRole(),
-                          initialTabIndex: 3,
-                        ),
-                      );
-                    }
-                    
-                    final color = action['color'] as Color;
 
-                    return InkWell(
-                      onTap: () => onOpenModule(module),
-                      borderRadius: BorderRadius.circular(12),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: isDark ? color.withValues(alpha: 0.12) : color.withValues(alpha: 0.07),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: isDark ? color.withValues(alpha: 0.3) : color.withValues(alpha: 0.22),
-                            width: 1.2,
+                      var module = baseModule;
+                      if (action['id'] == 'employees') {
+                        module = baseModule.copyWith(
+                          title: 'Employee Management',
+                          builder: (context, data) => EmployeeManagementPage(
+                            branchId: data['branchId'] ?? 'all',
+                            isAdmin: true,
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withValues(alpha: 0.05),
-                              blurRadius: 4,
-                              offset: const Offset(0, 2),
+                        );
+                      } else if (action['id'] == 'madrassa_students') {
+                        module = baseModule.copyWith(
+                          title: 'Madrassa Students',
+                          builder: (context, data) {
+                            final branchId = data['branchId'] ?? 'unknown';
+                            final username =
+                                data['name'] ?? data['username'] ?? 'User';
+                            final role =
+                                (data['role'] as String? ?? 'madrassa admin')
+                                    .toLowerCase();
+                            final isAdmin = role.contains('admin') ||
+                                role.contains('chairman') ||
+                                role.contains('ceo') ||
+                                role.contains('hq');
+                            return MadrassaDashboard(
+                              branchId: branchId,
+                              username: username,
+                              role: role,
+                              isAdmin: isAdmin,
+                              initialIndex: isAdmin ? 2 : 1,
+                            );
+                          },
+                        );
+                      } else if (action['id'] == 'madrassa_attendance') {
+                        module = baseModule.copyWith(
+                          title: 'Madrassa Attendance',
+                          builder: (context, data) {
+                            final branchId = data['branchId'] ?? 'unknown';
+                            final username =
+                                data['name'] ?? data['username'] ?? 'User';
+                            final role =
+                                (data['role'] as String? ?? 'madrassa admin')
+                                    .toLowerCase();
+                            final isAdmin = role.contains('admin') ||
+                                role.contains('chairman') ||
+                                role.contains('ceo') ||
+                                role.contains('hq');
+                            return MadrassaDashboard(
+                              branchId: branchId,
+                              username: username,
+                              role: role,
+                              isAdmin: isAdmin,
+                              initialIndex: isAdmin ? 1 : 0,
+                            );
+                          },
+                        );
+                      } else if (action['id'] == 'madrassa_teachers') {
+                        module = baseModule.copyWith(
+                          title: 'Madrassa Teachers',
+                          builder: (context, data) {
+                            final branchId = data['branchId'] ?? 'unknown';
+                            final username =
+                                data['name'] ?? data['username'] ?? 'User';
+                            final role =
+                                (data['role'] as String? ?? 'madrassa admin')
+                                    .toLowerCase();
+                            final isAdmin = role.contains('admin') ||
+                                role.contains('chairman') ||
+                                role.contains('ceo') ||
+                                role.contains('hq') ||
+                                role.contains('principal') ||
+                                role.contains('manager');
+                            return MadrassaDashboard(
+                              branchId: branchId,
+                              username: username,
+                              role: role,
+                              isAdmin: isAdmin,
+                              initialIndex: 3,
+                            );
+                          },
+                        );
+                      } else if (action['id'] == 'school_attendance') {
+                        module = baseModule.copyWith(
+                          title: 'School Student Attendance',
+                          builder: (context, data) => SchoolDashboard(
+                            branchId: data['branchId'] ?? 'all',
+                            username: data['name'] ??
+                                data['username'] ??
+                                LocalStorageService.getActiveUsername(),
+                            role: data['role'] ??
+                                LocalStorageService.getActiveUserRole(),
+                            initialTabIndex: 2,
+                          ),
+                        );
+                      } else if (action['id'] == 'school_teacher_attendance') {
+                        module = baseModule.copyWith(
+                          title: 'School Faculty Attendance',
+                          builder: (context, data) => SchoolDashboard(
+                            branchId: data['branchId'] ?? 'all',
+                            username: data['name'] ??
+                                data['username'] ??
+                                LocalStorageService.getActiveUsername(),
+                            role: data['role'] ??
+                                LocalStorageService.getActiveUserRole(),
+                            initialTabIndex: 3,
+                          ),
+                        );
+                      }
+
+                      final color = action['color'] as Color;
+
+                      return InkWell(
+                        onTap: () => onOpenModule(module),
+                        borderRadius: BorderRadius.circular(Gr.r3),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 4),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                Color.alphaBlend(
+                                  color.withValues(alpha: isDark ? 0.12 : 0.07),
+                                  _dashSubtleSurface(t),
+                                ),
+                                _dashSurface(t),
+                              ],
                             ),
-                          ],
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(action['icon'] as IconData, color: color, size: 22),
-                            const SizedBox(height: 4),
-                            Text(
-                              action['label'] as String,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: isDark ? (Color.lerp(color, SoftPalette.gray50, 0.25) ?? color) : color,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                height: 1.15,
+                            borderRadius: BorderRadius.circular(Gr.r3),
+                            border: Border.all(
+                              color: color.withValues(
+                                  alpha: isDark ? 0.34 : 0.25),
+                              width: 1.0,
+                            ),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 26,
+                                height: 26,
+                                decoration: BoxDecoration(
+                                  color: color.withValues(
+                                      alpha: isDark ? 0.22 : 0.13),
+                                  borderRadius: BorderRadius.circular(Gr.r2),
+                                ),
+                                child: Icon(action['icon'] as IconData,
+                                    color: color, size: 15),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 3.5),
+                              Text(
+                                action['label'] as String,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: t.textPrimary,
+                                  fontSize: 10.0,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.12,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
+                );
+
+          return Column(
+            mainAxisSize: isBounded ? MainAxisSize.max : MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 13, 16, 11),
+                child: _DashCardHeader(
+                  title: 'Quick Actions',
+                  t: t,
+                  trailing: Text(
+                    '${activeActions.length} shortcuts',
+                    style: TextStyle(
+                      color: t.textTertiary,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
                 ),
               ),
+              Divider(height: 1, thickness: 1, color: _dashBorder(t)),
+              if (isBounded) Expanded(child: grid) else grid,
             ],
           );
         },
@@ -2992,7 +4247,7 @@ class _BranchManagerTrophyBannerState extends State<BranchManagerTrophyBanner>
                         'assets/animations/Trophy.json',
                         fit: BoxFit.contain,
                         repeat: !GDecor.reduceMotion,
-                        errorBuilder: (_, __, ___) => Icon(
+                        errorBuilder: (_, _, _) => Icon(
                           Icons.emoji_events_rounded,
                           size: 38,
                           color: goldColor,
@@ -3010,7 +4265,7 @@ class _BranchManagerTrophyBannerState extends State<BranchManagerTrophyBanner>
                               'assets/animations/Trophy.json',
                               fit: BoxFit.contain,
                               repeat: !GDecor.reduceMotion,
-                              errorBuilder: (_, __, ___) => Icon(
+                              errorBuilder: (_, _, _) => Icon(
                                 Icons.workspace_premium_rounded,
                                 size: 38,
                                 color: goldColor,
@@ -3028,7 +4283,7 @@ class _BranchManagerTrophyBannerState extends State<BranchManagerTrophyBanner>
                               'assets/animations/Trophy.json',
                               fit: BoxFit.contain,
                               repeat: !GDecor.reduceMotion,
-                              errorBuilder: (_, __, ___) => Icon(
+                              errorBuilder: (_, _, _) => Icon(
                                 Icons.military_tech_rounded,
                                 size: 38,
                                 color: goldColor,
@@ -3177,7 +4432,7 @@ class AppreciationTrophyDialog extends StatelessWidget {
                                 'assets/animations/Trophy.json',
                                 fit: BoxFit.contain,
                                 repeat: !GDecor.reduceMotion,
-                                errorBuilder: (_, __, ___) => Icon(
+                                errorBuilder: (_, _, _) => Icon(
                                   Icons.emoji_events_rounded,
                                   size: 80,
                                   color: primaryColor,
@@ -3195,7 +4450,7 @@ class AppreciationTrophyDialog extends StatelessWidget {
                                       'assets/animations/Trophy.json',
                                       fit: BoxFit.contain,
                                       repeat: !GDecor.reduceMotion,
-                                      errorBuilder: (_, __, ___) => Icon(
+                                      errorBuilder: (_, _, _) => Icon(
                                         Icons.workspace_premium_rounded,
                                         size: 80,
                                         color: primaryColor,
@@ -3213,7 +4468,7 @@ class AppreciationTrophyDialog extends StatelessWidget {
                                       'assets/animations/Trophy.json',
                                       fit: BoxFit.contain,
                                       repeat: !GDecor.reduceMotion,
-                                      errorBuilder: (_, __, ___) => Icon(
+                                      errorBuilder: (_, _, _) => Icon(
                                         Icons.military_tech_rounded,
                                         size: 80,
                                         color: primaryColor,
@@ -3306,11 +4561,11 @@ class AppreciationTrophyDialog extends StatelessWidget {
                       'assets/animations/party_celebration.json',
                       fit: BoxFit.contain,
                       repeat: !GDecor.reduceMotion,
-                      errorBuilder: (_, __, ___) => Lottie.asset(
+                      errorBuilder: (_, _, _) => Lottie.asset(
                         'assets/animations/Party  Celebration.json',
                         fit: BoxFit.contain,
                         repeat: !GDecor.reduceMotion,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        errorBuilder: (_, _, _) => const SizedBox.shrink(),
                       ),
                       ),
                     ),
@@ -3328,7 +4583,22 @@ class AppreciationTrophyDialog extends StatelessWidget {
 // 9. Snapshot Dashboard Data Model and Loader
 // ════════════════════════════════════════════════════════════════════════
 
+// The aux counts scan whole Hive boxes (attendance, users, school and madrassa
+// logs) on the UI thread, and one dashboard load asks for them from several
+// places. A short cache turns that burst into one scan; counts stay ~live.
+final Map<String, (DateTime, Map<String, int>)> _auxCountsCache = {};
+const Duration _auxCountsTtl = Duration(seconds: 10);
+
 Map<String, int> _computeLocalDashboardAuxCounts({String? branchId}) {
+  final cacheKey = branchId ?? '';
+  final hit = _auxCountsCache[cacheKey];
+  if (hit != null && DateTime.now().difference(hit.$1) < _auxCountsTtl) return hit.$2;
+  final result = _computeLocalDashboardAuxCountsUncached(branchId: branchId);
+  _auxCountsCache[cacheKey] = (DateTime.now(), result);
+  return result;
+}
+
+Map<String, int> _computeLocalDashboardAuxCountsUncached({String? branchId}) {
   final todayDateKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
   final normB = (branchId != null && branchId != 'all' && branchId != 'global') ? branchId.toLowerCase().trim() : null;
   int empPresentCount = 0;
@@ -3449,6 +4719,43 @@ class SnapshotDashboardData {
     this.madrassaTeacherYesterdayPresentCount = 0,
     this.onlineUsersCount = 1,
   });
+}
+
+class BranchDashboardOverlay {
+  final Map<String, int> auxCounts;
+  final List<HomeLineChartPoint> chartPoints;
+  final List<RecentActivity> recentActivities;
+  const BranchDashboardOverlay({
+    required this.auxCounts,
+    required this.chartPoints,
+    required this.recentActivities,
+  });
+}
+
+/// Fetches branch-scoped attendance/aux counts, chart points, and recent
+/// activity when an executive filters the HomeDashboard to a single branch.
+Future<BranchDashboardOverlay> fetchBranchDashboardOverlay(String rawBranchId) async {
+  final parentId = rawBranchId.toLowerCase().startsWith('karachi')
+      ? 'karachi'
+      : LocalStorageService.sanitizeBranchId(rawBranchId);
+  final results = await Future.wait([
+    mergeCloudAuxCounts(_computeLocalDashboardAuxCounts(branchId: parentId), [parentId]),
+    fetchChartPoints([parentId], months: 5),
+    RecentActivityService.getRecentActivityAsync(branchId: parentId, limit: 15),
+  ]);
+  var activities = results[2] as List<RecentActivity>;
+  if (rawBranchId == 'karachi_haji' || rawBranchId == 'karachi_saddar') {
+    final token = rawBranchId == 'karachi_haji' ? 'haji' : 'saddar';
+    final campFiltered = activities.where((a) =>
+        a.branchName.toLowerCase().contains(token) ||
+        a.subtitle.toLowerCase().contains(token)).toList();
+    if (campFiltered.isNotEmpty) activities = campFiltered;
+  }
+  return BranchDashboardOverlay(
+    auxCounts: results[0] as Map<String, int>,
+    chartPoints: results[1] as List<HomeLineChartPoint>,
+    recentActivities: activities,
+  );
 }
 
 Future<SnapshotDashboardData> fetchSnapshotDashboardData(Map<String, dynamic> userData) async {
@@ -4008,6 +5315,8 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
   static final Set<String> _shownAppreciationSessionKeys = {};
   bool _isTrophyDismissed = false;
   bool _isAppreciationDialogShowing = false;
+  DateTime _lastRefreshedAt = DateTime.now();
+  bool _isRefreshing = false;
 
   @override
   void initState() {
@@ -4027,6 +5336,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
             _remoteData = remoteData;
             _lastGlobalSnapshotData = remoteData;
             _localFuture = Future.value(remoteData);
+            _lastRefreshedAt = DateTime.now();
           });
         }
       } catch (_) {}
@@ -4123,12 +5433,145 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
     }
     final remote = fetchSnapshotDashboardData(widget.userData);
     setState(() {
+      _isRefreshing = true;
       _localFuture = remote;
     });
     remote.then((d) {
-      if (mounted) setState(() => _remoteData = d);
-    }).catchError((_) {});
+      if (mounted) {
+        setState(() {
+          _remoteData = d;
+          _lastGlobalSnapshotData = d;
+          _lastRefreshedAt = DateTime.now();
+          _isRefreshing = false;
+        });
+      }
+    }).catchError((_) {
+      if (mounted) {
+        setState(() => _isRefreshing = false);
+      }
+    });
     ref.invalidate(snapshotDashboardDataProvider(_userKey));
+  }
+
+  Widget _buildSnapshotHeader({
+    required String title,
+    required List<Map<String, dynamic>> branches,
+  }) {
+    final t = widget.t;
+    final isDark = t.isDarkCanvas;
+    final updatedStr = DateFormat('hh:mm a').format(_lastRefreshedAt);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isCompact = constraints.maxWidth < 680;
+        final heading = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                color: t.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.4,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: GColor.successOf(isDark),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    'Live & cloud-merged · Updated $updatedStr',
+                    style: TextStyle(
+                      color: t.textSecondary,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+
+        final controls = Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            GlobalFilterBar(
+              controller: dashboardController,
+              branches: branches,
+            ),
+            OutlinedButton.icon(
+              onPressed: _isRefreshing ? null : _refresh,
+              icon: _isRefreshing
+                  ? SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        color: t.textSecondary,
+                      ),
+                    )
+                  : const Icon(Icons.refresh_rounded, size: 15),
+              label: Text(
+                _isRefreshing ? 'Syncing' : 'Refresh',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: t.textPrimary,
+                backgroundColor: _dashSurface(t),
+                side: BorderSide(color: _dashBorder(t), width: 1.0),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                minimumSize: const Size(0, 34),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(Gr.r2),
+                ),
+              ),
+            ),
+          ],
+        );
+
+        if (isCompact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              heading,
+              const SizedBox(height: 10),
+              controls,
+            ],
+          );
+        }
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Flexible(child: heading),
+            const SizedBox(width: 12),
+            controls,
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -4173,10 +5616,17 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.error_outline_rounded, size: 40, color: SoftPalette.red400),
+                    Icon(
+                      Icons.error_outline_rounded,
+                      size: 40,
+                      color: GColor.dangerOf(isDark),
+                    ),
                     const SizedBox(height: 12),
-                    Text('Failed to load snapshot dashboard: $err',
-                        style: const TextStyle(color: DS.neutral, fontSize: 13), textAlign: TextAlign.center),
+                    Text(
+                      'Failed to load snapshot dashboard: $err',
+                      style: TextStyle(color: widget.t.textSecondary, fontSize: 13),
+                      textAlign: TextAlign.center,
+                    ),
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
                       onPressed: _refresh,
@@ -4201,21 +5651,49 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
   }
 
   Widget _buildLoadingSkeleton(double hPad, bool isDark) {
+    final borderCol = _dashBorder(widget.t);
+    final fillCol = _dashSurface(widget.t);
+    final chipCol = _dashSubtleSurface(widget.t);
+
     return AppSkeleton(
       isDark: isDark,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 24),
+        padding: const EdgeInsets.symmetric(vertical: 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 170,
+                      height: 20,
+                      decoration: BoxDecoration(
+                        color: chipCol,
+                        borderRadius: BorderRadius.circular(Gr.r1),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Container(
+                      width: 220,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: chipCol,
+                        borderRadius: BorderRadius.circular(Gr.r1),
+                      ),
+                    ),
+                  ],
+                ),
                 Container(
-                  width: 180,
-                  height: 22,
+                  width: 210,
+                  height: 34,
                   decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.slate800 : SoftPalette.gray100,
-                    borderRadius: BorderRadius.circular(6),
+                    color: fillCol,
+                    borderRadius: BorderRadius.circular(Gr.r2),
+                    border: Border.all(color: borderCol),
                   ),
                 ),
               ],
@@ -4223,7 +5701,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
             const SizedBox(height: 16),
             // Skeleton stat tiles row
             SizedBox(
-              height: 110,
+              height: 106,
               child: Row(
                 children: List.generate(
                   widget.isDesktop ? 5 : 2,
@@ -4231,50 +5709,50 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                     child: Container(
                       margin: EdgeInsets.only(right: index == (widget.isDesktop ? 4 : 1) ? 0 : 12),
                       decoration: BoxDecoration(
-                        color: isDark ? SoftPalette.slate800 : SoftPalette.gray100,
-                        borderRadius: BorderRadius.circular(22),
+                        color: fillCol,
+                        borderRadius: BorderRadius.circular(Gr.r3),
+                        border: Border.all(color: borderCol),
                       ),
                       padding: const EdgeInsets.all(14),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Container(
-                                width: 28,
-                                height: 28,
+                                width: 84,
+                                height: 10,
                                 decoration: BoxDecoration(
-                                  color: isDark ? SoftPalette.slate700 : SoftPalette.gray150,
-                                  borderRadius: BorderRadius.circular(8),
+                                  color: chipCol,
+                                  borderRadius: BorderRadius.circular(Gr.r1),
                                 ),
                               ),
                               Container(
-                                width: 44,
-                                height: 16,
+                                width: 28,
+                                height: 28,
                                 decoration: BoxDecoration(
-                                  color: isDark ? SoftPalette.slate700 : SoftPalette.gray150,
-                                  borderRadius: BorderRadius.circular(6),
+                                  color: chipCol,
+                                  borderRadius: BorderRadius.circular(Gr.r2),
                                 ),
                               ),
                             ],
                           ),
-                          const Spacer(),
                           Container(
-                            width: 60,
-                            height: 18,
+                            width: 64,
+                            height: 20,
                             decoration: BoxDecoration(
-                              color: isDark ? SoftPalette.slate700 : SoftPalette.gray150,
-                              borderRadius: BorderRadius.circular(4),
+                              color: chipCol,
+                              borderRadius: BorderRadius.circular(Gr.r1),
                             ),
                           ),
-                          const SizedBox(height: 6),
                           Container(
-                            width: 80,
+                            width: 96,
                             height: 10,
                             decoration: BoxDecoration(
-                              color: isDark ? SoftPalette.slate700 : SoftPalette.gray150,
-                              borderRadius: BorderRadius.circular(4),
+                              color: chipCol,
+                              borderRadius: BorderRadius.circular(Gr.r1),
                             ),
                           ),
                         ],
@@ -4287,10 +5765,11 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
             const SizedBox(height: 20),
             // Skeleton main chart/card area
             Container(
-              height: 260,
+              height: 340,
               decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate800 : SoftPalette.gray100,
-                borderRadius: BorderRadius.circular(24),
+                color: fillCol,
+                borderRadius: BorderRadius.circular(Gr.r4),
+                border: Border.all(color: borderCol),
               ),
             ),
           ],
@@ -4397,6 +5876,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
         }
 
         final userRoleStr = (widget.userData['role'] as String? ?? '').toLowerCase().trim();
+        final isHqManager = userRoleStr == 'hq manager' || userRoleStr == 'hq_manager';
         final isBranchManager = userRoleStr == 'branch manager' || userRoleStr == 'branch_manager' || userRoleStr.contains('branch manager');
         final userBranchId = (widget.userData['branchId'] as String? ?? '').toLowerCase().trim();
         final isExecutive = userRoleStr == 'chairman' ||
@@ -4474,25 +5954,38 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           widget.onOpenModule(branchesModule);
         }
 
+        final isDark = widget.t.isDarkCanvas;
+
         final donationsTile = HomeStatTile(
           label: 'Donations Today',
           value: fmtNum(today.donations),
           prefix: 'Rs ',
           icon: Icons.volunteer_activism_rounded,
-          color: SoftPalette.emerald350,
-          deltaPct: yesterday.donations == 0 ? null : ((today.donations - yesterday.donations) / yesterday.donations) * 100,
+          color: isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+          deltaPct: yesterday.donations == 0
+              ? null
+              : ((today.donations - yesterday.donations) / yesterday.donations) * 100,
+          subtext: yesterday.donations == 0
+              ? (today.donations > 0 ? 'First recorded today' : 'No receipts today')
+              : null,
+          t: widget.t,
           onTap: () => tryOpenModule('donations'),
         );
 
+        final int todayPatients = today.zakat + today.nonZakat + today.gmwf;
+        final int yesterdayPatients = yesterday.zakat + yesterday.nonZakat + yesterday.gmwf;
         final patientsTile = HomeStatTile(
           label: 'Patients Today',
-          value: fmtNum(today.zakat + today.nonZakat + today.gmwf),
+          value: fmtNum(todayPatients),
           icon: Icons.people_alt_rounded,
-          color: SoftPalette.violet500,
-          deltaPct: (yesterday.zakat + yesterday.nonZakat + yesterday.gmwf) == 0 
-              ? null 
-              : (((today.zakat + today.nonZakat + today.gmwf) - (yesterday.zakat + yesterday.nonZakat + yesterday.gmwf)) / 
-                 (yesterday.zakat + yesterday.nonZakat + yesterday.gmwf)) * 100,
+          color: isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+          deltaPct: yesterdayPatients == 0
+              ? null
+              : ((todayPatients - yesterdayPatients) / yesterdayPatients) * 100,
+          subtext: yesterdayPatients == 0
+              ? (todayPatients > 0 ? 'Active registrations' : 'No patients today')
+              : null,
+          t: widget.t,
           onTap: () {
             final myBranchOrTop = (userBranchId.isNotEmpty && userBranchId != 'all') ? userBranchId : topBranchId;
             openBranchInBranchesModule(myBranchOrTop);
@@ -4505,10 +5998,14 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'Madrassa Attendance',
           value: fmtNum(data.madrassaPresentCount),
           icon: Icons.menu_book_rounded,
-          color: SoftPalette.teal500,
+          color: isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan,
           deltaPct: data.madrassaYesterdayPresentCount == 0
               ? null
               : (((data.madrassaPresentCount - data.madrassaYesterdayPresentCount) / data.madrassaYesterdayPresentCount) * 100),
+          subtext: data.madrassaYesterdayPresentCount == 0
+              ? (data.madrassaPresentCount > 0 ? 'Students checked in' : 'No attendance marked')
+              : null,
+          t: widget.t,
           onTap: () => tryOpenModule('madrassa_attendance'),
         );
 
@@ -4516,10 +6013,14 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'Madrassa Teachers',
           value: fmtNum(data.madrassaTeacherPresentCount),
           icon: Icons.record_voice_over_rounded,
-          color: SoftPalette.teal500,
+          color: isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid,
           deltaPct: data.madrassaTeacherYesterdayPresentCount == 0
               ? null
               : (((data.madrassaTeacherPresentCount - data.madrassaTeacherYesterdayPresentCount) / data.madrassaTeacherYesterdayPresentCount) * 100),
+          subtext: data.madrassaTeacherYesterdayPresentCount == 0
+              ? (data.madrassaTeacherPresentCount > 0 ? 'Faculty present today' : 'No faculty check-ins')
+              : null,
+          t: widget.t,
           onTap: () => tryOpenModule('madrassa_teachers'),
         );
 
@@ -4527,7 +6028,11 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'Staff Attendance',
           value: fmtNum(data.empPresentCount),
           icon: Icons.co_present_rounded,
-          color: SoftPalette.blue500,
+          color: isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+          subtext: data.empPresentCount > 0
+              ? 'Biometric & manual check-ins'
+              : 'No staff check-ins today',
+          t: widget.t,
           onTap: () => tryOpenModule('employees'),
         );
 
@@ -4535,7 +6040,11 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'School Students',
           value: fmtNum(data.studentPresentCount),
           icon: Icons.school_rounded,
-          color: SoftPalette.teal500,
+          color: isDark ? SoftPalette.softIndigo : SoftPalette.luminousIndigo,
+          subtext: data.studentPresentCount > 0
+              ? 'Present across campuses'
+              : 'No student check-ins',
+          t: widget.t,
           onTap: () => tryOpenModule('school_attendance'),
         );
 
@@ -4543,24 +6052,41 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'School Teachers',
           value: fmtNum(data.teacherPresentCount),
           icon: Icons.record_voice_over_rounded,
-          color: SoftPalette.violet500,
+          color: isDark ? SoftPalette.sky350 : SoftPalette.sky550,
+          subtext: data.teacherPresentCount > 0
+              ? 'Faculty present today'
+              : 'No faculty check-ins',
+          t: widget.t,
           onTap: () => tryOpenModule('school_teacher_attendance'),
         );
 
+        final String topBranchDisplayName = topRow != null
+            ? topRow.name
+            : (bestBranch != null
+                ? bestBranch.name
+                : RecentActivityService.resolveBranchName(userBranchId.isNotEmpty ? userBranchId : 'Karachi'));
+        final String topBranchSubtext = (topRow != null &&
+                (topRow.today.tokens > 0 || topRow.today.dispensaryRevenue > 0 || topRow.today.donations > 0))
+            ? '${topRow.today.tokens} patients · Rs ${fmtNum(topRow.today.dispensaryRevenue + topRow.today.donations)}'
+            : 'No branch activity yet';
 
         final activeBranchTile = HomeStatTile(
           label: isBranchManager ? 'Top Camp Today' : 'Top Branch Today',
           value: topRow != null ? topRow.name : RecentActivityService.resolveBranchName(userBranchId.isNotEmpty ? userBranchId : 'Karachi'),
           icon: Icons.emoji_events_rounded,
-          color: SoftPalette.teal500,
+          color: isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+          subtext: topBranchSubtext,
+          t: widget.t,
           onTap: () => openBranchInBranchesModule(topBranchId),
         );
 
         final branchesSummaryTile = HomeStatTile(
           label: 'Top Branch Today',
-          value: topRow != null ? topRow.name : (bestBranch != null ? bestBranch.name : 'Karachi'),
+          value: topBranchDisplayName,
           icon: Icons.emoji_events_rounded,
-          color: SoftPalette.teal500,
+          color: isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+          subtext: topBranchSubtext,
+          t: widget.t,
           onTap: () => openBranchInBranchesModule(topBranchId),
         );
 
@@ -4568,16 +6094,25 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
           label: 'Food Tokens Issued',
           value: fmtNum(today.dasterkhwaan),
           icon: Icons.room_service_rounded,
-          color: SoftPalette.amber300,
+          color: isDark ? SoftPalette.orange350 : SoftPalette.orange400,
           deltaPct: yesterday.dasterkhwaan == 0 ? null : ((today.dasterkhwaan - yesterday.dasterkhwaan) / yesterday.dasterkhwaan) * 100,
+          subtext: yesterday.dasterkhwaan == 0
+              ? (today.dasterkhwaan > 0 ? 'Meals queued today' : 'No tokens issued today')
+              : null,
+          t: widget.t,
           onTap: () => tryOpenModule('office_boy'),
         );
 
         final dasterkhwaanStockTile = HomeStatTile(
           label: 'Dasterkhawaan Stock',
-          value: 'Stock',
+          value: 'View Inventory',
           icon: Icons.inventory_2_outlined,
-          color: SoftPalette.orange400,
+          color: isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+          subtext: today.dasterkhwaanServed > 0
+              ? '${today.dasterkhwaanServed} meals served today'
+              : 'Open stock & audit log',
+          isActionTile: true,
+          t: widget.t,
           onTap: () => tryOpenModule('dasterkhwaan_inventory'),
         );
 
@@ -4596,13 +6131,22 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
 
         // Layout rows with GPU layer caching via RepaintBoundary
         final row2 = SizedBox(
-          height: 440,
+          height: 360,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(flex: 4, child: RepaintBoundary(child: HomeRevenueLineChart(points: data.chartPoints, t: widget.t))),
               const SizedBox(width: DS.s2),
-              Expanded(flex: 3, child: RepaintBoundary(child: HomePatientsByBranchBarChart(t: widget.t, rows: data.branchRows))),
+              Expanded(
+                flex: 3,
+                child: RepaintBoundary(
+                  child: HomePatientsByBranchBarChart(
+                    t: widget.t,
+                    rows: data.branchRows,
+                    onTapBranch: (bId) => openBranchInBranchesModule(bId),
+                  ),
+                ),
+              ),
               const SizedBox(width: DS.s2),
               Expanded(
                 flex: 3,
@@ -4620,7 +6164,7 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
         );
 
         final row3 = SizedBox(
-          height: 470,
+          height: 365,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -4663,19 +6207,37 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
         );
 
         final row4 = SizedBox(
-          height: 295,
+          height: 300,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(flex: 3, child: HomeRecentDonationsTable(activities: data.recentActivities, t: widget.t)),
+              Expanded(
+                flex: 3,
+                child: HomeRecentDonationsTable(
+                  activities: data.recentActivities,
+                  t: widget.t,
+                  onViewAll: () => tryOpenModule('donations'),
+                ),
+              ),
               const SizedBox(width: DS.s2),
-              Expanded(flex: 4, child: HomeRecentPatientsTable(activities: data.recentActivities, t: widget.t)),
+              Expanded(
+                flex: 4,
+                child: HomeRecentPatientsTable(
+                  activities: data.recentActivities,
+                  t: widget.t,
+                  onViewAll: () => tryOpenModule('patients_list'),
+                ),
+              ),
               const SizedBox(width: DS.s2),
-              Expanded(flex: 3, child: QuickActionsRow(
-                availableModules: widget.availableModules,
-                t: widget.t,
-                onOpenModule: widget.onOpenModule,
-              )),
+              Expanded(
+                flex: 3,
+                child: QuickActionsRow(
+                  availableModules: widget.availableModules,
+                  t: widget.t,
+                  onOpenModule: widget.onOpenModule,
+                  todayFoodTokens: today.dasterkhwaan,
+                ),
+              ),
             ],
           ),
         );
@@ -4751,31 +6313,27 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                 ? "Today's Snapshot"
                 : "${filter.timeRange == TimeRange.yesterday ? 'Yesterday' : filter.timeRange == TimeRange.week ? 'Past 7 Days' : filter.timeRange == TimeRange.biweek ? 'Past 14 Days' : filter.timeRange == TimeRange.month ? 'Past 30 Days' : filter.timeRange == TimeRange.thisMonth ? 'This Month' : 'Custom Range'} Snapshot";
 
+            final String rangeSubtitle = switch (filter.timeRange) {
+              TimeRange.today => 'Today',
+              TimeRange.yesterday => 'Yesterday',
+              TimeRange.week => 'Past 7 days',
+              TimeRange.biweek => 'Past 14 days',
+              TimeRange.month => 'Past 30 days',
+              TimeRange.thisMonth => 'This month',
+              TimeRange.custom => 'Custom range',
+            };
+
             if (isFiltered) {
               return Padding(
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          rangeLabel,
-                          style: TextStyle(
-                            color: widget.t.textPrimary,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.4,
-                          ),
-                        ),
-                        GlobalFilterBar(
-                          controller: dashboardController,
-                          branches: allLocalBranches,
-                        ),
-                      ],
+                    _buildSnapshotHeader(
+                      title: rangeLabel,
+                      branches: allLocalBranches,
                     ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 16),
                     Builder(
                       builder: (context) {
                         final cKey = statsCacheKey(filter.branchId, filter);
@@ -4797,14 +6355,22 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                                 value: fmtNum(activeStats.totalRevenue),
                                 prefix: 'Rs ',
                                 icon: Icons.payments_rounded,
-                                color: SoftPalette.emerald350,
+                                color: isDark
+                                    ? SoftPalette.brightMint
+                                    : SoftPalette.jadeEmerald,
+                                subtext: rangeSubtitle,
+                                t: widget.t,
                               ),
                               HomeStatTile(
                                 label: 'Donations',
                                 value: fmtNum(activeStats.donations),
                                 prefix: 'Rs ',
                                 icon: Icons.volunteer_activism_rounded,
-                                color: SoftPalette.teal500,
+                                color: isDark
+                                    ? SoftPalette.brightCyan
+                                    : SoftPalette.deepCyan,
+                                subtext: activeStats.donations > 0 ? rangeSubtitle : 'No donations in range',
+                                t: widget.t,
                                 onTap: () => tryOpenModule('donations'),
                               ),
                               HomeStatTile(
@@ -4812,37 +6378,76 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                                 value: fmtNum(activeStats.dispensaryRevenue),
                                 prefix: 'Rs ',
                                 icon: Icons.local_pharmacy_rounded,
-                                color: SoftPalette.blue500,
+                                color: isDark
+                                    ? SoftPalette.brightCobalt
+                                    : SoftPalette.cobaltBlue,
+                                subtext: rangeSubtitle,
+                                t: widget.t,
                               ),
                               HomeStatTile(
                                 label: 'Patients Treated',
                                 value: fmtNum(activeStats.tokens),
                                 icon: Icons.people_alt_rounded,
-                                color: SoftPalette.violet500,
+                                color: isDark
+                                    ? SoftPalette.softLavender
+                                    : SoftPalette.royalViolet,
+                                subtext: '${activeStats.dispensed} prescriptions',
+                                t: widget.t,
                               ),
                               HomeStatTile(
                                 label: BranchLabels.text('Zakat Patients', filter.branchId),
                                 value: fmtNum(activeStats.zakat),
                                 icon: Icons.assignment_ind_rounded,
-                                color: SoftPalette.orange400,
+                                color: isDark
+                                    ? SoftPalette.brightGold
+                                    : SoftPalette.warmMarigold,
+                                subtext: activeStats.tokens > 0
+                                    ? '${((activeStats.zakat / activeStats.tokens) * 100).toStringAsFixed(0)}% of patients'
+                                    : rangeSubtitle,
+                                t: widget.t,
                               ),
                               HomeStatTile(
                                 label: BranchLabels.text('Non-Zakat Patients', filter.branchId),
                                 value: fmtNum(activeStats.nonZakat),
                                 icon: Icons.badge_rounded,
-                                color: SoftPalette.cyan350,
+                                color: isDark
+                                    ? SoftPalette.softIndigo
+                                    : SoftPalette.luminousIndigo,
+                                subtext: activeStats.tokens > 0
+                                    ? '${((activeStats.nonZakat / activeStats.tokens) * 100).toStringAsFixed(0)}% of patients'
+                                    : rangeSubtitle,
+                                t: widget.t,
+                              ),
+                              HomeStatTile(
+                                label: BranchLabels.text('GMWF Patients', filter.branchId),
+                                value: fmtNum(activeStats.gmwf),
+                                icon: Icons.favorite_outline_rounded,
+                                imageAsset: 'assets/logo/gmwf-1.webp',
+                                color: isDark
+                                    ? SoftPalette.brightOrchid
+                                    : SoftPalette.plumOrchid,
+                                subtext: activeStats.tokens > 0
+                                    ? '${((activeStats.gmwf / activeStats.tokens) * 100).toStringAsFixed(0)}% of patients'
+                                    : rangeSubtitle,
+                                t: widget.t,
                               ),
                               HomeStatTile(
                                 label: 'Food Tokens Issued',
                                 value: fmtNum(activeStats.dasterkhwaan),
                                 icon: Icons.room_service_rounded,
-                                color: SoftPalette.amber300,
+                                color: isDark
+                                    ? SoftPalette.brightCoral
+                                    : SoftPalette.roseCoral,
+                                subtext: activeStats.dasterkhwaanServed > 0
+                                    ? '${activeStats.dasterkhwaanServed} meals served'
+                                    : rangeSubtitle,
+                                t: widget.t,
                                 onTap: () => tryOpenModule('office_boy'),
                               ),
                             ];
 
                             final filteredRow3 = SizedBox(
-                              height: 470,
+                              height: 365,
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
@@ -4889,6 +6494,31 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                               ),
                             );
 
+                            if (!widget.isDesktop) {
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  HomeStatTileRow(tiles: multiTiles),
+                                  const SizedBox(height: DS.s2),
+                                  HomePatientsByCategoryDonut(t: widget.t, s: activeStats),
+                                  const SizedBox(height: DS.s2),
+                                  HomeBranchPerformanceTable(
+                                    t: widget.t,
+                                    rows: sortedBranchRows,
+                                    onTapBranch: (bId) => _navigateToBranch(bId),
+                                  ),
+                                  const SizedBox(height: DS.s2),
+                                  HomeRevenueLineChart(points: data.chartPoints, t: widget.t),
+                                  const SizedBox(height: DS.s2),
+                                  HomePatientsByBranchBarChart(
+                                    t: widget.t,
+                                    rows: data.branchRows,
+                                    onTapBranch: (bId) => _navigateToBranch(bId),
+                                  ),
+                                ],
+                              );
+                            }
+
                             return Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -4926,92 +6556,226 @@ class _HomeSnapshotDashboardState extends ConsumerState<HomeSnapshotDashboard> {
                     ),
                     const SizedBox(height: DS.s3),
                   ],
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Today\'s Snapshot',
-                        style: TextStyle(
-                          color: widget.t.textPrimary,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.4,
-                        ),
+                  _buildSnapshotHeader(
+                    title: "Today's Snapshot",
+                    branches: allLocalBranches,
+                  ),
+                  const SizedBox(height: 16),
+                  if (widget.isDesktop && isHqManager) ...[
+                    // ── HQ Manager Command-Center Bento Grid ────────────────
+                    SizedBox(
+                      height: 350,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            flex: 7,
+                            child: Column(
+                              children: [
+                                Expanded(
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      Expanded(child: donationsTile),
+                                      const SizedBox(width: DS.s2),
+                                      Expanded(child: patientsTile),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: DS.s2),
+                                Expanded(
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      Expanded(child: employeeAttendanceTile),
+                                      const SizedBox(width: DS.s2),
+                                      Expanded(child: madrassaTile),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: DS.s2),
+                          Expanded(
+                            flex: 5,
+                            child: RepaintBoundary(
+                              child: HomeBranchPerformanceTable(
+                                t: widget.t,
+                                rows: sortedBranchRows,
+                                onTapBranch: (bId) => openBranchInBranchesModule(bId),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      GlobalFilterBar(
-                        controller: dashboardController,
-                        branches: allLocalBranches,
+                    ),
+                    const SizedBox(height: DS.s3),
+                    HomeStatTileRow(tiles: [
+                      madrassaTeachersTile,
+                      schoolStudentsTile,
+                      schoolTeachersTile,
+                      activeBranchTile,
+                    ]),
+                    const SizedBox(height: DS.s3),
+                    SizedBox(
+                      height: 360,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            flex: 7,
+                            child: RepaintBoundary(
+                              child: HomeRevenueLineChart(
+                                points: data.chartPoints,
+                                t: widget.t,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: DS.s2),
+                          Expanded(
+                            flex: 5,
+                            child: RepaintBoundary(
+                              child: HomePatientsByCategoryDonut(
+                                t: widget.t,
+                                s: today,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
+                    ),
+                    const SizedBox(height: DS.s3),
+                    SizedBox(
+                      height: 360,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            flex: bestBranch != null ? 7 : 12,
+                            child: RepaintBoundary(
+                              child: HomePatientsByBranchBarChart(
+                                t: widget.t,
+                                rows: data.branchRows,
+                                onTapBranch: (bId) => openBranchInBranchesModule(bId),
+                              ),
+                            ),
+                          ),
+                          if (bestBranch != null) ...[
+                            const SizedBox(width: DS.s2),
+                            Expanded(
+                              flex: 5,
+                              child: RepaintBoundary(
+                                child: HomeBestBranchSpotlight(
+                                  branchName: bestBranch.name,
+                                  revenue: bestBranch.today.dispensaryRevenue,
+                                  donations: bestBranch.today.donations,
+                                  patients: bestBranch.today.zakat +
+                                      bestBranch.today.nonZakat +
+                                      bestBranch.today.gmwf,
+                                  growthPct: (bestBranch.yesterday.dispensaryRevenue > 0)
+                                      ? (((bestBranch.today.dispensaryRevenue -
+                                                  bestBranch.yesterday.dispensaryRevenue) /
+                                              bestBranch.yesterday.dispensaryRevenue) *
+                                          100)
+                                      : ((bestBranch.today.dispensaryRevenue > 0 ||
+                                              (bestBranch.today.zakat +
+                                                      bestBranch.today.nonZakat +
+                                                      bestBranch.today.gmwf) >
+                                                  0)
+                                          ? 100.0
+                                          : null),
+                                  onTap: () => openBranchInBranchesModule(bestBranch!.id),
+                                  t: widget.t,
+                                  title: 'Best Branch Today',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: DS.s3),
+                    row4,
+                  ] else if (widget.isDesktop) ...[
+                    HomeStatTileRow(tiles: statTiles),
+                    const SizedBox(height: DS.s3),
+                    row3,
+                    const SizedBox(height: DS.s3),
+                    row2,
+                    const SizedBox(height: DS.s3),
+                    row4,
+                  ] else ...[
+                    SizedBox(
+                      height: 270,
+                      child: QuickActionsRow(
+                        availableModules: widget.availableModules,
+                        t: widget.t,
+                        onOpenModule: widget.onOpenModule,
+                        todayFoodTokens: today.dasterkhwaan,
+                      ),
+                    ),
+                    const SizedBox(height: DS.s2),
+                    HomeStatTileRow(tiles: statTiles),
+                    const SizedBox(height: DS.s2),
+                    if (bestBranch != null) ...[
+                      HomeBestBranchSpotlight(
+                        branchName: bestBranch.name,
+                        revenue: bestBranch.today.dispensaryRevenue,
+                        donations: bestBranch.today.donations,
+                        patients: bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf,
+                        growthPct: (bestBranch.yesterday.dispensaryRevenue > 0)
+                            ? (((bestBranch.today.dispensaryRevenue - bestBranch.yesterday.dispensaryRevenue) /
+                                    bestBranch.yesterday.dispensaryRevenue) *
+                                100)
+                            : ((bestBranch.today.dispensaryRevenue > 0 || (bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf) > 0) ? 100.0 : null),
+                        onTap: () => _navigateToBranch(bestBranch!.id),
+                        t: widget.t,
+                        title: isBranchManager ? 'Top Camp Today' : 'Best Branch Today',
+                      ),
+                      const SizedBox(height: DS.s2),
                     ],
-                  ),
-                  const SizedBox(height: 18),
-                  if (widget.isDesktop) ...[
-                HomeStatTileRow(tiles: statTiles),
-                const SizedBox(height: DS.s3),
-                row3,
-                const SizedBox(height: DS.s3),
-                row2,
-                const SizedBox(height: DS.s3),
-                row4,
-              ] else ...[
-                SizedBox(
-                  height: 270,
-                  child: QuickActionsRow(
-                    availableModules: widget.availableModules,
-                    t: widget.t,
-                    onOpenModule: widget.onOpenModule,
-                  ),
-                ),
-                const SizedBox(height: DS.s2),
-                HomeStatTileRow(tiles: statTiles),
-                const SizedBox(height: DS.s2),
-                if (bestBranch != null) ...[
-                  HomeBestBranchSpotlight(
-                    branchName: bestBranch.name,
-                    revenue: bestBranch.today.dispensaryRevenue,
-                    donations: bestBranch.today.donations,
-                    patients: bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf,
-                    growthPct: (bestBranch.yesterday.dispensaryRevenue > 0)
-                        ? (((bestBranch.today.dispensaryRevenue - bestBranch.yesterday.dispensaryRevenue) /
-                                bestBranch.yesterday.dispensaryRevenue) *
-                            100)
-                        : ((bestBranch.today.dispensaryRevenue > 0 || (bestBranch.today.zakat + bestBranch.today.nonZakat + bestBranch.today.gmwf) > 0) ? 100.0 : null),
-                    onTap: () => _navigateToBranch(bestBranch!.id),
-                    t: widget.t,
-                    title: isBranchManager ? 'Top Camp Today' : 'Best Branch Today',
-                  ),
-                  const SizedBox(height: DS.s2),
+                    HomePatientsByCategoryDonut(t: widget.t, s: today),
+                    const SizedBox(height: DS.s2),
+                    HomeBranchPerformanceTable(
+                      t: widget.t,
+                      rows: sortedBranchRows,
+                      onTapBranch: (bId) => _navigateToBranch(bId),
+                    ),
+                    const SizedBox(height: DS.s2),
+                    HomeRevenueLineChart(points: data.chartPoints, t: widget.t),
+                    const SizedBox(height: DS.s2),
+                    HomePatientsByBranchBarChart(
+                      t: widget.t,
+                      rows: data.branchRows,
+                      onTapBranch: (bId) => _navigateToBranch(bId),
+                    ),
+                    const SizedBox(height: DS.s2),
+                    SizedBox(
+                      height: 330,
+                      child: HomeRecentActivityFeed(
+                        activities: data.recentActivities,
+                        t: widget.t,
+                        availableModules: widget.availableModules,
+                        onOpenModule: widget.onOpenModule,
+                      ),
+                    ),
+                    const SizedBox(height: DS.s2),
+                    HomeRecentDonationsTable(
+                      activities: data.recentActivities,
+                      t: widget.t,
+                      onViewAll: () => tryOpenModule('donations'),
+                    ),
+                    const SizedBox(height: DS.s2),
+                    HomeRecentPatientsTable(
+                      activities: data.recentActivities,
+                      t: widget.t,
+                      onViewAll: () => tryOpenModule('patients_list'),
+                    ),
+                  ],
                 ],
-                SizedBox(height: 240, child: HomePatientsByCategoryDonut(t: widget.t, s: today)),
-                const SizedBox(height: DS.s2),
-                HomeBranchPerformanceTable(
-                  t: widget.t,
-                  rows: sortedBranchRows,
-                  onTapBranch: (bId) => _navigateToBranch(bId),
-                ),
-                const SizedBox(height: DS.s2),
-                HomeRevenueLineChart(points: data.chartPoints, t: widget.t),
-                const SizedBox(height: DS.s2),
-                SizedBox(height: 340, child: HomePatientsByBranchBarChart(t: widget.t, rows: data.branchRows)),
-                const SizedBox(height: DS.s2),
-                const SizedBox(height: DS.s2),
-                SizedBox(
-                  height: 330,
-                  child: HomeRecentActivityFeed(
-                    activities: data.recentActivities,
-                    t: widget.t,
-                    availableModules: widget.availableModules,
-                    onOpenModule: widget.onOpenModule,
-                  ),
-                ),
-                const SizedBox(height: DS.s2),
-                HomeRecentDonationsTable(activities: data.recentActivities, t: widget.t),
-                const SizedBox(height: DS.s2),
-                HomeRecentPatientsTable(activities: data.recentActivities, t: widget.t),
-              ],
-            ],
-          ),
-        );
+              ),
+            );
       },
     );
   }
@@ -5075,53 +6839,71 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
           kapayaPatients: 0, kapayaZakat: 0, kapayaNonZakat: 0, kapayaGmwf: 0,
         );
 
+        final headerAccent =
+            isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
+        final saddarAccent =
+            isDark ? SoftPalette.softLavender : SoftPalette.royalViolet;
+        final hajiAccent =
+            isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
+
         return Container(
           padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: widget.t.bgCard,
-            borderRadius: BorderRadius.circular(DS.r2),
-            border: Border.all(color: widget.t.bgRule),
-            boxShadow: Neumorphic3DStyle.raisedShadows(isDark: isDark, depth: 0.8),
-          ),
+          decoration: _dashCardDecoration(widget.t, radius: Gr.r4),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.location_city_rounded, color: SoftPalette.teal500, size: 20),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Karachi Branch — Dual Dispensary Camps Breakdown',
-                        style: TextStyle(
-                          color: widget.t.textPrimary,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.3,
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.location_city_rounded,
+                          color: headerAccent,
+                          size: 19,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Karachi Branch — Dual Dispensary Camps Breakdown',
+                            style: TextStyle(
+                              color: widget.t.textPrimary,
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.25,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
+                  const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      color: SoftPalette.teal500.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
+                      color: headerAccent.withValues(alpha: isDark ? 0.16 : 0.10),
+                      borderRadius: BorderRadius.circular(Gr.rFull),
+                      border: Border.all(
+                        color: headerAccent.withValues(alpha: isDark ? 0.35 : 0.25),
+                      ),
                     ),
                     child: Text(
                       'Combined: ${data.totalPatients} Patients Today',
-                      style: const TextStyle(
-                        color: SoftPalette.teal500,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w800,
+                      style: TextStyle(
+                        color: headerAccent,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
+              Divider(height: 1, thickness: 1, color: _dashBorder(widget.t)),
+              const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(
@@ -5140,7 +6922,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                       eveningZakat: data.kapayaEveningZakat,
                       eveningNonZakat: data.kapayaEveningNonZakat,
                       eveningGmwf: data.kapayaEveningGmwf,
-                      badgeColor: SoftPalette.violet550,
+                      badgeColor: saddarAccent,
                       icon: Icons.local_hospital_rounded,
                       isDark: isDark,
                     ),
@@ -5162,7 +6944,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                       eveningZakat: data.hajiCampEveningZakat,
                       eveningNonZakat: data.hajiCampEveningNonZakat,
                       eveningGmwf: data.hajiCampEveningGmwf,
-                      badgeColor: SoftPalette.blue550,
+                      badgeColor: hajiAccent,
                       icon: Icons.campaign_rounded,
                       isDark: isDark,
                     ),
@@ -5195,12 +6977,20 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
     required IconData icon,
     required bool isDark,
   }) {
+    final revenueColor =
+        isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+    final morningColor =
+        isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
+    final eveningColor =
+        isDark ? SoftPalette.softIndigo : SoftPalette.luminousIndigo;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: badgeColor.withValues(alpha: isDark ? 0.15 : 0.06),
+        color: badgeColor.withValues(alpha: isDark ? 0.14 : 0.06),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: badgeColor.withValues(alpha: 0.25)),
+        border: Border.all(
+          color: badgeColor.withValues(alpha: isDark ? 0.30 : 0.24),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5213,7 +7003,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                 child: Text(
                   title,
                   style: TextStyle(
-                    color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                    color: widget.t.textPrimary,
                     fontSize: 13,
                     fontWeight: FontWeight.bold,
                   ),
@@ -5236,8 +7026,8 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
               ),
               Text(
                 'Rs $revenue',
-                style: const TextStyle(
-                  color: SoftPalette.emerald350,
+                style: TextStyle(
+                  color: revenueColor,
                   fontSize: 14,
                   fontWeight: FontWeight.w800,
                 ),
@@ -5248,9 +7038,9 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
-              color: isDark ? SoftPalette.gray50.withValues(alpha: 0.05) : SoftPalette.gray900.withValues(alpha: 0.03),
+              color: _dashSubtleSurface(widget.t),
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: isDark ? SoftPalette.gray50A10 : SoftPalette.gray900A12),
+              border: Border.all(color: _dashBorder(widget.t)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -5261,17 +7051,21 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: SoftPalette.amber200.withValues(alpha: 0.15),
+                        color: morningColor.withValues(alpha: isDark ? 0.18 : 0.12),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.wb_sunny_rounded, color: SoftPalette.amber200, size: 13),
-                          SizedBox(width: 3),
+                          Icon(Icons.wb_sunny_rounded, color: morningColor, size: 13),
+                          const SizedBox(width: 3),
                           Text(
                             'Morning',
-                            style: TextStyle(color: SoftPalette.amber200, fontSize: 10.5, fontWeight: FontWeight.w800),
+                            style: TextStyle(
+                              color: morningColor,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ],
                       ),
@@ -5280,7 +7074,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Text(
                       '$morningTotal Patients',
                       style: TextStyle(
-                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                        color: widget.t.textPrimary,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w800,
                       ),
@@ -5289,13 +7083,14 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: isDark ? SoftPalette.gray50A10 : SoftPalette.gray100,
+                        color: _dashSurface(widget.t),
                         borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: _dashBorder(widget.t)),
                       ),
                       child: Text(
                         'Z: $morningZakat   NZ: $morningNonZakat   G: $morningGmwf',
                         style: TextStyle(
-                          color: isDark ? SoftPalette.gray150 : SoftPalette.slate600,
+                          color: widget.t.textSecondary,
                           fontSize: 10.5,
                           fontWeight: FontWeight.w700,
                         ),
@@ -5304,7 +7099,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                const Divider(height: 1, color: SoftPalette.gray900A12),
+                Divider(height: 1, color: _dashBorder(widget.t)),
                 const SizedBox(height: 6),
                 // Evening Session Row
                 Row(
@@ -5312,17 +7107,21 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: SoftPalette.indigo600.withValues(alpha: 0.15),
+                        color: eveningColor.withValues(alpha: isDark ? 0.18 : 0.12),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.nights_stay_rounded, color: SoftPalette.indigo500, size: 13),
-                          SizedBox(width: 3),
+                          Icon(Icons.nights_stay_rounded, color: eveningColor, size: 13),
+                          const SizedBox(width: 3),
                           Text(
                             'Evening',
-                            style: TextStyle(color: SoftPalette.indigo500, fontSize: 10.5, fontWeight: FontWeight.w800),
+                            style: TextStyle(
+                              color: eveningColor,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ],
                       ),
@@ -5331,7 +7130,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Text(
                       '$eveningTotal Patients',
                       style: TextStyle(
-                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                        color: widget.t.textPrimary,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w800,
                       ),
@@ -5340,13 +7139,14 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: isDark ? SoftPalette.gray50A10 : SoftPalette.gray100,
+                        color: _dashSurface(widget.t),
                         borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: _dashBorder(widget.t)),
                       ),
                       child: Text(
                         'Z: $eveningZakat   NZ: $eveningNonZakat   G: $eveningGmwf',
                         style: TextStyle(
-                          color: isDark ? SoftPalette.gray150 : SoftPalette.slate600,
+                          color: widget.t.textSecondary,
                           fontSize: 10.5,
                           fontWeight: FontWeight.w700,
                         ),
@@ -5365,7 +7165,7 @@ class _KarachiCampSnapshotWidgetState extends State<KarachiCampSnapshotWidget> {
               Text(
                 'Total Categories: ',
                 style: TextStyle(
-                  color: isDark ? SoftPalette.gray300 : SoftPalette.gray500,
+                  color: widget.t.textTertiary,
                   fontSize: 10,
                   fontWeight: FontWeight.w600,
                 ),

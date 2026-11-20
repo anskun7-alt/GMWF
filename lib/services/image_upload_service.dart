@@ -184,11 +184,30 @@ class ImageUploadService {
 
   static final Map<int, Uint8List> _b64Cache = {};
 
+  /// Fast path keyed by the raw input string. Strings read from Hive are the
+  /// same objects on every build, and Dart caches a string's hash, so a hit
+  /// costs O(1) instead of trimming / splitting / regex-cleaning tens of KB of
+  /// text per image per rebuild (that cleaning was a visible lag on lists of
+  /// photos and book covers).
+  static final Map<String, Uint8List> _rawCache = {};
+  static const int _cacheLimit = 300;
+
   /// Decodes Base64 data URI or raw Base64 string to Uint8List bytes.
   /// Caches decoded bytes by content hash so Flutter's MemoryImage sees identical
   /// object references and avoids disposing/re-decoding textures on every build pass.
   static Uint8List? decodeBase64ToBytes(String? input) {
     if (input == null || input.isEmpty) return null;
+    final hit = _rawCache[input];
+    if (hit != null) return hit;
+    final bytes = _decodeUncached(input);
+    if (bytes != null) {
+      if (_rawCache.length >= _cacheLimit) _rawCache.remove(_rawCache.keys.first);
+      _rawCache[input] = bytes;
+    }
+    return bytes;
+  }
+
+  static Uint8List? _decodeUncached(String input) {
     try {
       String clean = input.trim();
       if (clean.contains(',')) {
@@ -202,7 +221,7 @@ class ImageUploadService {
       if (cached != null) return cached;
 
       final decoded = base64Decode(base64.normalize(clean));
-      if (_b64Cache.length > 120) {
+      if (_b64Cache.length > _cacheLimit) {
         _b64Cache.remove(_b64Cache.keys.first);
       }
       _b64Cache[hash] = decoded;

@@ -22,6 +22,7 @@ import '../../services/user_theme_service.dart';
 import '../../theme/role_theme_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../design/design_system.dart';
+import '../home/home_module_host.dart';
 
 class MadrassaDashboard extends StatefulWidget {
   final String branchId;
@@ -31,6 +32,22 @@ class MadrassaDashboard extends StatefulWidget {
   final int? initialIndex;
   final bool autoOpenAddStudent;
 
+  /// Opt-in, for the app shell: hide this screen's own rail / bottom bar /
+  /// desktop sidebar and top bar, and show only the section's view. The
+  /// shell's sidebar drives [section]. Standalone madrassa users never set it.
+  final bool hideNavigation;
+
+  /// Section key: overview, daily, students, teachers, progress, monthly,
+  /// config. Takes precedence over [initialIndex]; changing it switches view.
+  final String? section;
+
+  /// Called when the screen itself changes section (e.g. Overview shortcuts),
+  /// so an outer sidebar can follow.
+  final ValueChanged<String>? onSectionChanged;
+
+  /// Every section key, in order (before role filtering).
+  static const sections = ['overview', 'daily', 'students', 'teachers', 'progress', 'monthly', 'config'];
+
   const MadrassaDashboard({
     super.key,
     required this.branchId,
@@ -39,6 +56,9 @@ class MadrassaDashboard extends StatefulWidget {
     this.isAdmin = true,
     this.initialIndex,
     this.autoOpenAddStudent = false,
+    this.hideNavigation = false,
+    this.section,
+    this.onSectionChanged,
   });
 
   @override
@@ -54,6 +74,10 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
   void initState() {
     super.initState();
     _selectedIndex = widget.initialIndex ?? 0;
+    if (widget.section != null) {
+      final i = _sectionKeys.indexOf(widget.section!);
+      if (i >= 0) _selectedIndex = i;
+    }
     _displayUsername = widget.username;
     _bootstrapFuture = _bootstrapMadrassa();
     if (widget.autoOpenAddStudent) {
@@ -66,6 +90,33 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
         );
       });
     }
+  }
+
+  @override
+  void didUpdateWidget(covariant MadrassaDashboard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Outer sidebar picked another section: switch view, keep data loaded.
+    if (widget.section != null && widget.section != oldWidget.section) {
+      final i = _sectionKeys.indexOf(widget.section!);
+      if (i >= 0 && i != _selectedIndex) setState(() => _selectedIndex = i);
+    }
+  }
+
+  bool get _isTeacherOrAdmin => _effectiveIsAdmin || widget.role.toLowerCase() == 'madrassa teacher';
+
+  /// Section keys visible to this role, in view order (matches `views`).
+  List<String> get _sectionKeys => [
+        if (_effectiveIsAdmin) 'overview',
+        'daily',
+        'students',
+        if (_effectiveIsAdmin) 'teachers',
+        if (_isTeacherOrAdmin) ...['progress', 'monthly', 'config'],
+      ];
+
+  void _goToIndex(int index) {
+    setState(() => _selectedIndex = index);
+    final keys = _sectionKeys;
+    if (index >= 0 && index < keys.length) widget.onSectionChanged?.call(keys[index]);
   }
 
   Future<void> _openProfileDialog() async {
@@ -182,14 +233,14 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
             );
           }
 
-          final isTeacherOrAdmin = _effectiveIsAdmin || widget.role.toLowerCase() == 'madrassa teacher';
+          final isTeacherOrAdmin = _isTeacherOrAdmin;
 
           final views = [
             if (_effectiveIsAdmin)
               MadrassaOverviewView(
                 branchId: branchId,
                 isAdmin: _effectiveIsAdmin,
-                onAction: (index) => setState(() => _selectedIndex = index),
+                onAction: _goToIndex,
               ),
             DailyLogView(
               branchId: branchId,
@@ -286,13 +337,41 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
               valueListenable: UserThemeService.listenable(widget.username),
               builder: (context, Box box, _) {
                 final isDark = UserThemeService.isDarkMode(widget.username);
-                final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-                final cardBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
+                final brand = Theme.of(context).colorScheme.primary;
+                final scaffoldBg = Theme.of(context).scaffoldBackgroundColor;
+                final cardBg = Theme.of(context).cardColor;
                 final textPrimary = isDark ? SoftPalette.slate100 : SoftPalette.slate900;
                 final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-                final borderColor = isDark ? SoftPalette.slate800 : SoftPalette.slate150;
-                const emeraldPrimary = SoftPalette.teal550;
-                const emeraldLight = SoftPalette.teal350;
+                final borderColor = Theme.of(context).dividerColor.withValues(alpha: isDark ? 0.5 : 0.7);
+                final emeraldPrimary = brand;
+                final emeraldLight = Color.lerp(brand, Colors.white, 0.35)!;
+
+                // Guard: a role with fewer sections must never index past the list.
+                if (_selectedIndex >= views.length) _selectedIndex = 0;
+
+                // Shell-hosted: only the section's view; the shell's sidebar
+                // and top bar replace this screen's own navigation.
+                if (widget.hideNavigation) {
+                  return Scaffold(
+                    backgroundColor: scaffoldBg,
+                    body: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _buildIslamicWatermark(isDark),
+                        Align(
+                          alignment: Alignment.topCenter,
+                          child: Container(
+                            constraints: const BoxConstraints(maxWidth: 1280),
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 220),
+                              child: KeyedSubtree(key: ValueKey(_selectedIndex), child: views[_selectedIndex]),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
 
                 return LayoutBuilder(
                   builder: (context, constraints) {
@@ -505,7 +584,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
             child: Row(
               children: [
                 // Back button if screen can be popped
-                if (Navigator.of(context).canPop()) ...[
+                if (Navigator.of(context).canPop() && !HomeModuleHost.isModuleRoot(context)) ...[
                   InkWell(
                     onTap: () => Navigator.of(context).pop(),
                     borderRadius: BorderRadius.circular(10),
@@ -876,44 +955,45 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
       child: Row(
         children: [
           // Section Title pill badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: isDark
-                    ? [SoftPalette.teal550.withValues(alpha: 0.25), SoftPalette.teal350.withValues(alpha: 0.1)]
-                    : [SoftPalette.teal550.withValues(alpha: 0.12), SoftPalette.teal350.withValues(alpha: 0.05)],
-              ),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.25),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.emerald350),
-                    shape: BoxShape.circle,
+          Builder(
+            builder: (ctx) {
+              final brand = Theme.of(ctx).colorScheme.primary;
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: brand.withValues(alpha: isDark ? 0.18 : 0.09),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: brand.withValues(alpha: 0.25),
+                    width: 1,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  currentTitle,
-                  style: context.urduStyle(
-                    style: TextStyle(
-                      color: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: brand,
+                        shape: BoxShape.circle,
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    Text(
+                      currentTitle,
+                      style: context.urduStyle(
+                        style: TextStyle(
+                          color: brand,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              );
+            },
           ),
           const Spacer(),
           // Branch info pill
@@ -1397,90 +1477,96 @@ class _SidebarNavItem extends StatefulWidget {
 }
 
 class _SidebarNavItemState extends State<_SidebarNavItem> {
-  bool _isHovered = false;
+  final ValueNotifier<bool> _hoverNotifier = ValueNotifier<bool>(false);
+
+  @override
+  void dispose() {
+    _hoverNotifier.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final activeBg = widget.isDark
-        ? const LinearGradient(
-            colors: [SoftPalette.teal550, SoftPalette.teal600],
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-          )
-        : const LinearGradient(
-            colors: [SoftPalette.teal550, SoftPalette.teal500],
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-          );
+    final brand = Theme.of(context).colorScheme.primary;
+    final activeBg = LinearGradient(
+      colors: [brand, Color.lerp(brand, Colors.black, 0.14)!],
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+    );
 
     final hoverBg = widget.isDark
         ? SoftPalette.slate800.withValues(alpha: 0.6)
         : SoftPalette.slate100;
 
     return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
+      onEnter: (_) => _hoverNotifier.value = true,
+      onExit: (_) => _hoverNotifier.value = false,
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            gradient: widget.isSelected ? activeBg : null,
-            color: widget.isSelected ? null : (_isHovered ? hoverBg : Colors.transparent),
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: widget.isSelected
-                ? [
-                    BoxShadow(
-                      color: SoftPalette.teal550.withValues(alpha: 0.3),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ]
-                : null,
-          ),
-          child: Row(
-            children: [
-              Icon(
-                widget.isSelected ? widget.activeIcon : widget.icon,
-                size: 20,
-                color: widget.isSelected
-                    ? SoftPalette.gray50
-                    : (_isHovered
-                        ? (widget.isDark ? SoftPalette.teal300 : SoftPalette.teal550)
-                        : (widget.isDark ? SoftPalette.slate350 : SoftPalette.slate550)),
+        child: ValueListenableBuilder<bool>(
+          valueListenable: _hoverNotifier,
+          builder: (context, isHovered, _) {
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                gradient: widget.isSelected ? activeBg : null,
+                color: widget.isSelected ? null : (isHovered ? hoverBg : Colors.transparent),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: widget.isSelected
+                    ? [
+                        BoxShadow(
+                          color: brand.withValues(alpha: 0.24),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ]
+                    : null,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  widget.title,
-                  style: context.urduStyle(
-                    style: TextStyle(
-                      color: widget.isSelected
-                          ? SoftPalette.gray50
-                          : (_isHovered
-                              ? (widget.isDark ? SoftPalette.gray50 : SoftPalette.slate900)
-                              : (widget.isDark ? SoftPalette.slate200 : SoftPalette.slate700)),
-                      fontWeight: widget.isSelected ? FontWeight.bold : FontWeight.w500,
-                      fontSize: 13,
+              child: Row(
+                children: [
+                  Icon(
+                    widget.isSelected ? widget.activeIcon : widget.icon,
+                    size: 20,
+                    color: widget.isSelected
+                        ? SoftPalette.gray50
+                        : (isHovered
+                            ? brand
+                            : (widget.isDark ? SoftPalette.slate350 : SoftPalette.slate550)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      style: context.urduStyle(
+                        style: TextStyle(
+                          color: widget.isSelected
+                              ? SoftPalette.gray50
+                              : (isHovered
+                                  ? (widget.isDark ? SoftPalette.gray50 : SoftPalette.slate900)
+                                  : (widget.isDark ? SoftPalette.slate200 : SoftPalette.slate700)),
+                          fontWeight: widget.isSelected ? FontWeight.bold : FontWeight.w500,
+                          fontSize: 13,
+                        ),
+                      ),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  overflow: TextOverflow.ellipsis,
-                ),
+                  if (widget.isSelected)
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: brand,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                ],
               ),
-              if (widget.isSelected)
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.emerald300),
-                    shape: BoxShape.circle,
-                  ),
-                ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );

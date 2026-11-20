@@ -1,8 +1,6 @@
 // lib/pages/school/school_dashboard.dart
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'views/school_overview_view.dart';
 import 'views/school_daily_attendance_view.dart';
 import 'views/school_teacher_attendance_view.dart';
 import 'views/school_student_management_view.dart';
@@ -11,29 +9,33 @@ import 'views/school_library_view.dart';
 import 'views/school_audit_log_view.dart';
 import 'views/school_grading_view.dart';
 import 'views/school_fee_management_view.dart';
-import 'views/school_principal_dashboard_view.dart';
-import 'theme/school_theme.dart';
+import 'views/school_erp_dashboard_view.dart';
+import 'core/school_roles.dart';
 import 'utils/school_local_storage.dart';
 import 'utils/school_sync_service.dart';
-import 'utils/school_auth_helper.dart';
 import '../../widgets/global_module_wrapper.dart';
 import '../../widgets/app_back_button.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/auth_service.dart';
 import '../settings_page.dart';
-import '../../theme/role_theme_provider.dart';
-import '../../theme/app_theme.dart';
-import '../../design/design_system.dart';
-import 'package:motion_tab_bar_v2/motion-tab-bar.dart';
-import 'package:motion_tab_bar_v2/motion-tab-controller.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+import 'theme/school_theme_scope.dart';
+import 'widgets/urdu_phonetic_scope.dart';
+import 'core/school_branch_id.dart';
+import 'core/school_branches.dart';
+
+/// Sidebar groups, in the order they appear (ERP layout, 2026-11-17).
+const _groups = ['Overview', 'Academics', 'Staff', 'Finance', 'Library', 'Administration'];
 
 class _NavItem {
   final String label;
   final IconData icon;
+  final String group;
 
   const _NavItem({
     required this.label,
     required this.icon,
+    required this.group,
   });
 }
 
@@ -57,28 +59,69 @@ class SchoolDashboard extends StatefulWidget {
   State<SchoolDashboard> createState() => _SchoolDashboardState();
 }
 
-class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderStateMixin {
+class _SchoolDashboardState extends State<SchoolDashboard> {
   int _selectedIndex = 0;
   List<_NavItem> _navItems = [];
   List<Widget> _views = [];
-  bool _isCollapsed = false;
-  MotionTabBarController? _motionTabController;
 
-  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.role);
-  bool get _isHighestAuthority => SchoolAuthHelper.isHighestAuthority(widget.role);
-  bool get _isAdminOrPrincipal => SchoolAuthHelper.isAdminOrPrincipal(widget.role);
-  bool get _isPrincipal => SchoolAuthHelper.isPrincipal(widget.role);
-  bool get _isSchoolAdmin => SchoolAuthHelper.isSchoolAdmin(widget.role);
+  /// The one School role rule (core/school_roles.dart).
+  SchoolRole get _role => SchoolRoles.resolve(widget.role);
+  bool get _isTeacher => _role == SchoolRole.teacher;
+  bool get _isManager => SchoolRoles.isManager(_role);
+
+  /// The pages this role may open, in sidebar order.
+  List<SchoolPage> _pages = const [];
+
+  /// The app's section index (executive order = SchoolPage order) → this role's page index.
+  int _indexForSection(int section) {
+    final want = SchoolPage.values[section.clamp(0, SchoolPage.values.length - 1)];
+    final i = _pages.indexOf(want);
+    return i < 0 ? 0 : i;
+  }
+  /// HQ / executive login (branch "all"): they pick which school branch to work in.
+  bool get _isHq => SchoolBranchId.isAll(widget.branchId);
+  String? _hqBranch;
 
   String get _effectiveBranchId {
+    if (_isHq) return _hqBranch ??= SchoolBranches.hqChoice();
     final b = widget.branchId.trim().toLowerCase();
-    if (b.isNotEmpty && b != 'all' && b != 'global') {
-      if (!LocalStorageService.hasSchoolFacility(b) && !_isAdminOrPrincipal && !_isTeacher) {
-        return 'gujrat';
-      }
-      return b;
+    if (!LocalStorageService.hasSchoolFacility(b) && !_isManager && !_isTeacher) {
+      return SchoolBranches.fallback;
     }
-    return 'gujrat';
+    return b;
+  }
+
+  Future<void> _switchBranch(String branch) async {
+    if (branch == _hqBranch) return;
+    await SchoolBranches.setHqChoice(branch);
+    if (!mounted) return;
+    setState(() {
+      _hqBranch = branch;
+      _initNavItemsAndViews();
+    });
+    SchoolSyncService().syncNow(branchId: branch);
+  }
+
+  Widget _branchPicker(BuildContext context) {
+    final options = SchoolBranches.withSchool();
+    final current = _effectiveBranchId;
+    return PopupMenuButton<String>(
+      tooltip: 'Choose school branch',
+      initialValue: current,
+      onSelected: _switchBranch,
+      itemBuilder: (_) => [
+        for (final b in options)
+          PopupMenuItem(value: b, child: Text(LocalStorageService.getBranchName(b))),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Gsp.sp1, vertical: Gsp.sp2),
+        child: AppChip(
+          label: 'Branch: ${LocalStorageService.getBranchName(current)}',
+          icon: GIcons.branch,
+          state: AppChipState.info,
+        ),
+      ),
+    );
   }
 
   @override
@@ -88,7 +131,7 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
     SchoolSyncService().init();
     SchoolSyncService().syncNow(branchId: _effectiveBranchId);
     _initNavItemsAndViews();
-    _selectedIndex = widget.initialTabIndex.clamp(0, _navItems.isNotEmpty ? _navItems.length - 1 : 0);
+    _selectedIndex = _indexForSection(widget.initialTabIndex);
   }
 
   @override
@@ -98,266 +141,88 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
         oldWidget.branchId != widget.branchId ||
         oldWidget.username != widget.username ||
         oldWidget.initialTabIndex != widget.initialTabIndex) {
+      if (oldWidget.branchId != widget.branchId) _hqBranch = null;
       _initNavItemsAndViews();
-      _selectedIndex = widget.initialTabIndex.clamp(0, _navItems.isNotEmpty ? _navItems.length - 1 : 0);
+      _selectedIndex = _indexForSection(widget.initialTabIndex);
     }
   }
 
+  /// Builds the sidebar and screens for this role from one table: every role
+  /// sees the same pages in the same order, minus what it may not open.
   void _initNavItemsAndViews() {
-    if (_isTeacher) {
-      // ── Teachers only see their assigned educational operations ──────────
-      // One teacher CANNOT see another teacher's profile/attendance or Admin/Principal data.
-      _navItems = const [
-        _NavItem(label: 'Daily Attendance', icon: Icons.how_to_reg_rounded),
-        _NavItem(label: 'Grading & Reports', icon: Icons.grade_rounded),
-        _NavItem(label: 'Class Students Roster', icon: Icons.groups_rounded),
-        _NavItem(label: 'School Library', icon: Icons.local_library_rounded),
-      ];
-      _views = [
-        SchoolDailyAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolGradingView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolStudentManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolLibraryView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-      ];
-    } else if (_isPrincipal) {
-      // ── Principal Executive School View ──────────────────────────────────
-      _navItems = const [
-        _NavItem(label: 'Principal Dashboard', icon: Icons.dashboard_rounded),
-        _NavItem(label: 'Student Directory', icon: Icons.groups_rounded),
-        _NavItem(label: 'Daily Attendance', icon: Icons.how_to_reg_rounded),
-        _NavItem(label: 'Faculty Attendance', icon: Icons.co_present_rounded),
-        _NavItem(label: 'Faculty Registry', icon: Icons.record_voice_over_rounded),
-        _NavItem(label: 'Fee Management', icon: Icons.payments_rounded),
-        _NavItem(label: 'School Library', icon: Icons.local_library_rounded),
-        _NavItem(label: 'Grading & Reports', icon: Icons.grade_rounded),
-        _NavItem(label: 'Audit Trail', icon: Icons.security_rounded),
-      ];
-      _views = [
-        SchoolPrincipalDashboardView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolStudentManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolDailyAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolFeeManagementView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolLibraryView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolGradingView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolAuditLogView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-        ),
-      ];
-    } else if (_isSchoolAdmin) {
-      // ── School Admin Operations & Management ──────────────────────────────
-      _navItems = const [
-        _NavItem(label: 'Admin Dashboard', icon: Icons.dashboard_rounded),
-        _NavItem(label: 'Student Admissions', icon: Icons.groups_rounded),
-        _NavItem(label: 'Student Attendance', icon: Icons.how_to_reg_rounded),
-        _NavItem(label: 'Faculty Attendance', icon: Icons.co_present_rounded),
-        _NavItem(label: 'Faculty Registry', icon: Icons.record_voice_over_rounded),
-        _NavItem(label: 'Fee Management', icon: Icons.payments_rounded),
-        _NavItem(label: 'School Library', icon: Icons.local_library_rounded),
-        _NavItem(label: 'Grading & Reports', icon: Icons.grade_rounded),
-        _NavItem(label: 'Audit Trail', icon: Icons.security_rounded),
-      ];
-      _views = [
-        SchoolPrincipalDashboardView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolStudentManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolDailyAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolFeeManagementView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolLibraryView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolGradingView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolAuditLogView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-        ),
-      ];
-    } else {
-      // ── Admin, HQ Manager, and Chairman (Highest Authority) ──────────────
-      _navItems = const [
-        _NavItem(label: 'Overview', icon: Icons.analytics_rounded),
-        _NavItem(label: 'Student Admissions', icon: Icons.groups_rounded),
-        _NavItem(label: 'Student Attendance', icon: Icons.how_to_reg_rounded),
-        _NavItem(label: 'Faculty Attendance', icon: Icons.co_present_rounded),
-        _NavItem(label: 'Faculty Registry', icon: Icons.record_voice_over_rounded),
-        _NavItem(label: 'Fee Management', icon: Icons.payments_rounded),
-        _NavItem(label: 'School Library', icon: Icons.local_library_rounded),
-        _NavItem(label: 'Grading & Reports', icon: Icons.grade_rounded),
-        _NavItem(label: 'Audit Trail', icon: Icons.security_rounded),
-      ];
-      _views = [
-        SchoolOverviewView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-        ),
-        SchoolStudentManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolDailyAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherAttendanceView(
-          branchId: _effectiveBranchId,
-          editorName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolTeacherManagementView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolFeeManagementView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolLibraryView(
-          branchId: _effectiveBranchId,
-          userName: widget.username,
-          userRole: widget.role,
-        ),
-        SchoolGradingView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-          userName: widget.username,
-        ),
-        SchoolAuditLogView(
-          branchId: _effectiveBranchId,
-          userRole: widget.role,
-        ),
-      ];
-    }
-
-    if (_navItems.length <= 5) {
-      _motionTabController?.dispose();
-      _motionTabController = MotionTabBarController(
-        initialIndex: _selectedIndex.clamp(0, _navItems.length - 1),
-        length: _navItems.length,
-        vsync: this,
-      );
-    }
+    final b = _effectiveBranchId;
+    final u = widget.username;
+    final r = widget.role;
+    _pages = SchoolRoles.pagesFor(_role);
+    final table = <SchoolPage, (_NavItem, Widget Function())>{
+      SchoolPage.dashboard: (
+        const _NavItem(label: 'Dashboard', icon: GIcons.dashboard, group: 'Overview'),
+        () => SchoolErpDashboardView(branchId: b, userName: u, userRole: r),
+      ),
+      SchoolPage.students: (
+        _NavItem(label: _isTeacher ? 'My class' : 'Students', icon: GIcons.student, group: 'Academics'),
+        () => SchoolStudentManagementView(branchId: b, userRole: r, userName: u),
+      ),
+      SchoolPage.dailyLog: (
+        const _NavItem(label: 'Daily log', icon: GIcons.attendance, group: 'Academics'),
+        () => SchoolDailyAttendanceView(branchId: b, editorName: u, userRole: r),
+      ),
+      SchoolPage.grades: (
+        const _NavItem(label: 'Grades & reports', icon: GIcons.exam, group: 'Academics'),
+        () => SchoolGradingView(branchId: b, userRole: r, userName: u),
+      ),
+      SchoolPage.staffAttendance: (
+        const _NavItem(label: 'Staff attendance', icon: GIcons.fingerprint, group: 'Staff'),
+        () => SchoolTeacherAttendanceView(branchId: b, editorName: u, userRole: r),
+      ),
+      SchoolPage.teachers: (
+        const _NavItem(label: 'Teachers', icon: GIcons.teacher, group: 'Staff'),
+        () => SchoolTeacherManagementView(branchId: b, userRole: r, userName: u),
+      ),
+      SchoolPage.fees: (
+        const _NavItem(label: 'Fees', icon: GIcons.fees, group: 'Finance'),
+        () => SchoolFeeManagementView(branchId: b, userName: u, userRole: r),
+      ),
+      SchoolPage.library: (
+        const _NavItem(label: 'Library', icon: GIcons.library, group: 'Library'),
+        () => SchoolLibraryView(branchId: b, userName: u, userRole: r),
+      ),
+      SchoolPage.audit: (
+        const _NavItem(label: 'Audit log', icon: GIcons.audit, group: 'Administration'),
+        () => SchoolAuditLogView(branchId: b, userRole: r),
+      ),
+    };
+    _navItems = [for (final p in _pages) table[p]!.$1];
+    _views = [for (final p in _pages) table[p]!.$2()];
   }
-
-  @override
-  void dispose() {
-    _motionTabController?.dispose();
-    super.dispose();
-  }
-
   Future<void> _logout() async {
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: const [
-            Icon(Icons.logout_rounded, color: SchoolTheme.statusAbsent),
-            SizedBox(width: 10),
-            Text('Sign Out'),
-          ],
-        ),
-        content: const Text('Are you sure you want to sign out from the School System?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      builder: (ctx) {
+        final c = ctx.comfort;
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+          title: Row(
+            children: [
+              Icon(GIcons.logout, color: c.danger),
+              const SizedBox(width: Gsp.sp2 + 2),
+              Text('Sign Out', style: GText.h3(c.textPrimary)),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: SchoolTheme.statusAbsent,
-              foregroundColor: SoftPalette.gray50,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          content: Text('Are you sure you want to sign out from the School System?', style: GText.body2(c.textSecondary)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
             ),
-            child: const Text('Sign Out'),
-          ),
-        ],
-      ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(backgroundColor: c.danger, foregroundColor: c.onBrand),
+              child: const Text('Sign Out'),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirm == true) {
@@ -374,71 +239,47 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    final hasSchool = LocalStorageService.hasSchoolFacility(_effectiveBranchId);
-    if (!hasSchool && !_isAdminOrPrincipal && !_isTeacher && !_isHighestAuthority) {
-      final bName = LocalStorageService.getBranchName(_effectiveBranchId);
-      return Scaffold(
-        backgroundColor: context.adapt(SchoolTheme.bgLight),
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          leading: const AppBackButton(),
-          title: const Text('School Module', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-        ),
-        body: Center(
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 480),
-            margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 36),
-            padding: const EdgeInsets.all(32),
-            decoration: BoxDecoration(
-              color: context.adapt(SoftPalette.gray50),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: context.adapt(SchoolTheme.borderLight)),
-              boxShadow: SchoolTheme.cardShadow,
+    if (_role == SchoolRole.none) {
+      return SchoolThemeScope(
+        role: widget.role,
+        child: Scaffold(
+          appBar: AppBar(leading: const AppBackButton(), title: const Text('School')),
+          body: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: AppEmptyState(
+                icon: GIcons.lock,
+                title: "You don't have access to School",
+                subtitle: 'Your role ("${widget.role}") is not a School role. School is open to the Principal, '
+                    'School admin, Accountant, Librarian, Teachers and head office. Ask system administration to set your role.',
+              ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    color: context.adapt(SchoolTheme.primaryLight),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Icons.school_outlined, size: 42, color: context.adapt(SchoolTheme.primary)),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'School is not available in $bName yet',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: context.adapt(SchoolTheme.textDark),
-                    letterSpacing: -0.4,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'The school facility is not registered for the $bName branch. Contact system administration to configure it in Branches Management.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: context.adapt(SchoolTheme.textMuted), height: 1.5),
-                ),
-                const SizedBox(height: 28),
-                ElevatedButton.icon(
+          ),
+        ),
+      );
+    }
+
+    final hasSchool = LocalStorageService.hasSchoolFacility(_effectiveBranchId);
+    if (!hasSchool && !_isManager && !_isTeacher) {
+      final bName = LocalStorageService.getBranchName(_effectiveBranchId);
+      return SchoolThemeScope(
+        role: widget.role,
+        child: Scaffold(
+          appBar: AppBar(leading: const AppBackButton(), title: const Text('School')),
+          body: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: AppEmptyState(
+                icon: GIcons.student,
+                title: 'School is not available in $bName yet',
+                subtitle: 'The school facility is not registered for the $bName branch. '
+                    'Ask system administration to turn it on in Branches Management.',
+                action: FilledButton.icon(
                   onPressed: () => Navigator.maybePop(context),
-                  icon: const Icon(Icons.arrow_back_rounded, size: 16),
-                  label: const Text('Return to Dashboard', style: TextStyle(fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: SchoolTheme.primary,
-                    foregroundColor: SoftPalette.gray50,
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    elevation: 0,
-                  ),
+                  icon: const Icon(GIcons.back),
+                  label: const Text('Back to dashboard'),
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -449,494 +290,86 @@ class _SchoolDashboardState extends State<SchoolDashboard> with TickerProviderSt
       _initNavItemsAndViews();
     }
 
-    final t = RoleThemeScope.dataOf(context);
-
     // ── DASHBOARD NAVIGATION RULE ──────────────────────────────────────────
-    // "in the dashboard we will only see the selected screen without the sidebar
-    // but the admin and principal and the teacher will see the sidebar on the desktop
-    // and bottom navbar on mobile"
+    // Inside the modular dashboard only the selected screen shows (no School nav).
+    // Standalone (direct login), every role gets the shared gmwf_ui AppShell:
+    // full sidebar on desktop, rail on tablet, drawer on phone. The role decides
+    // which items appear, never the layout (gmwf_ui MODULE_DESIGN_PLAN §2).
     final isWrapped = GlobalModuleWrapper.isWrapped(context) || widget.hideNavigation == true;
-    final isMobile = GBreakpoint.isMobile(context);
-    final isSmallScreen = GBreakpoint.isCompact(context);
-    final effectiveCollapsed = _isCollapsed || isSmallScreen;
+    final safeIndex = _selectedIndex.clamp(0, _views.isNotEmpty ? _views.length - 1 : 0);
 
-    // When wrapped inside the modular dashboard:
-    // Render ONLY the selected screen without sidebar and without bottom navbar!
+    // Views are keyed by branch so switching branch (HQ) starts them fresh.
+    final branchKey = ValueKey('school-branch-$_effectiveBranchId');
+
     if (isWrapped) {
-      final safeIndex = _selectedIndex.clamp(0, _views.isNotEmpty ? _views.length - 1 : 0);
-      return Scaffold(
-        backgroundColor: t.bg,
-        body: _views.isNotEmpty ? _views[safeIndex] : const SizedBox.shrink(),
+      return SchoolThemeScope(
+        role: widget.role,
+        child: UrduPhoneticScope(child: Builder(
+          builder: (context) => Scaffold(
+            backgroundColor: context.comfort.background,
+            body: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              if (_isHq)
+                Container(
+                  color: context.comfort.surface,
+                  padding: const EdgeInsets.symmetric(horizontal: Gsp.sp4),
+                  child: Row(children: [
+                    Text('Head office view', style: GText.caption(context.comfort.textMuted)),
+                    const Spacer(),
+                    _branchPicker(context),
+                  ]),
+                ),
+              Expanded(
+                child: KeyedSubtree(
+                  key: branchKey,
+                  child: _views.isNotEmpty ? _views[safeIndex] : const SizedBox.shrink(),
+                ),
+              ),
+            ]),
+          ),
+        )),
       );
     }
 
-    // Standalone School Mode (direct login / routing):
-    // Admin, Principal, and Teacher see:
-    // - On Desktop: Modern School Sidebar
-    // - On Mobile: Modern School Bottom Navbar
-    return Scaffold(
-      backgroundColor: t.bg,
-      appBar: _buildTopAppBar(context, t),
-      drawer: null,
-      bottomNavigationBar: isMobile ? _buildBottomNavigationBar(t) : null,
-      body: Row(
-        children: [
-          // Sidebar Navigation (Desktop only, for all authorized roles)
-          if (!isMobile) _buildSidebar(effectiveCollapsed, t),
-
-          // Main View Content Area
-          Expanded(
-            child: IndexedStack(
-              index: _selectedIndex,
-              children: _views,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBottomNavigationBar(RoleThemeData t) {
-    if (_navItems.length <= 5 && _motionTabController != null) {
-      return MotionTabBar(
-        controller: _motionTabController,
-        initialSelectedTab: _navItems[_selectedIndex.clamp(0, _navItems.length - 1)].label,
-        labels: _navItems.map((n) => n.label).toList(),
-        icons: _navItems.map((n) => n.icon).toList(),
-        tabSize: 48,
-        tabBarHeight: 58,
-        textStyle: TextStyle(
-          fontSize: 11,
-          color: t.textPrimary,
-          fontWeight: FontWeight.w700,
+    return SchoolThemeScope(
+      role: widget.role,
+      child: UrduPhoneticScope(child: AppShell(
+        header: AppSidebarHeader(
+          brand: GBrand.gmwf,
+          title: 'Taleem o Tarbiyat',
+          subtitle: 'School · ${LocalStorageService.getBranchName(_effectiveBranchId)}',
         ),
-        tabIconColor: t.textSecondary,
-        tabIconSize: 24.0,
-        tabIconSelectedSize: 22.0,
-        tabSelectedColor: t.accent,
-        tabIconSelectedColor: SoftPalette.gray50,
-        tabBarColor: t.bgCard,
-        onTabItemSelected: (int value) {
-          setState(() {
-            _selectedIndex = value;
-            _motionTabController?.index = value;
-          });
-        },
-      );
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: t.bgCard,
-        border: Border(top: BorderSide(color: t.bgRule)),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: List.generate(_navItems.length, (idx) {
-              final item = _navItems[idx];
-              final isSelected = _selectedIndex == idx;
-              return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: InkWell(
-                  onTap: () => setState(() {
-                    _selectedIndex = idx;
-                    if (_motionTabController != null && idx < _navItems.length) {
-                      _motionTabController?.index = idx;
-                    }
-                  }),
-                  borderRadius: BorderRadius.circular(12),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: isSelected ? t.accent : (t.isDarkCanvas ? SoftPalette.slate900 : SoftPalette.slate100),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: isSelected ? t.accent : t.bgRule,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          item.icon,
-                          size: 16,
-                          color: isSelected ? SoftPalette.gray50 : t.textSecondary,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          item.label,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-                            color: isSelected ? SoftPalette.gray50 : t.textPrimary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ),
-        ),
-      ),
-    );
-  }
-
-  PreferredSizeWidget _buildTopAppBar(BuildContext context, RoleThemeData t) {
-    final isMobile = GBreakpoint.isMobile(context);
-
-    return AppBar(
-      backgroundColor: t.bgCard,
-      elevation: 0,
-      surfaceTintColor: Colors.transparent,
-      automaticallyImplyLeading: false,
-      title: Row(
-        children: [
-          // Dual Brand Logos (GMWF + School)
-          ClipRRect(
-            borderRadius: SchoolTheme.radius8,
-            child: Image.asset(
-              'assets/logo/gmwf-1.webp',
-              height: 32,
-              width: 32,
-              fit: BoxFit.contain,
-              errorBuilder: (_, __, ___) => Icon(Icons.school_rounded, color: t.accent, size: 24),
-            ),
-          ),
-          const SizedBox(width: 10),
-          ClipRRect(
-            borderRadius: SchoolTheme.radius8,
-            child: Image.asset(
-              'assets/logo/twt-1.webp',
-              height: 32,
-              width: 32,
-              fit: BoxFit.contain,
-              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-            ),
-          ),
-          const SizedBox(width: 12),
-
-          // Title & Badge
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Text(
-                    'Taleem-wa-Tarbiyat School',
-                    style: TextStyle(
-                      fontSize: isMobile ? 15 : 17,
-                      fontWeight: FontWeight.w800,
-                      color: t.textPrimary,
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  if (!isMobile) ...[
-                    const SizedBox(width: 8),
-                    SchoolBadge(
-                      label: widget.role.toUpperCase(),
-                      color: t.accent,
-                      fontSize: 10.5,
-                    ),
-                  ],
-                ],
-              ),
-              Text(
-                'Branch: ${_effectiveBranchId.toUpperCase()} • Academic Portal',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w500,
-                  color: t.textSecondary,
-                ),
-              ),
+        items: [
+          // Grouped like an ERP menu; ids keep the tab index so deep links still work.
+          for (final g in _groups)
+            if (_navItems.any((n) => n.group == g)) ...[
+              GNavItem.section(g),
+              for (var i = 0; i < _navItems.length; i++)
+                if (_navItems[i].group == g) GNavItem(id: 'school/$i', label: _navItems[i].label, icon: _navItems[i].icon),
             ],
-          ),
         ],
-      ),
-      actions: [
-        _SchoolSyncBadge(branchId: _effectiveBranchId),
-        const SizedBox(width: 8),
-
-        // User badge & settings
-        if (!isMobile)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: InkWell(
-              onTap: () {
-                final uData = LocalStorageService.getActiveUserData();
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => SettingsPage(userData: Map<String, dynamic>.from(uData)),
-                  ),
-                );
-              },
-              borderRadius: BorderRadius.circular(10),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                decoration: BoxDecoration(
-                  color: t.isDarkCanvas ? SoftPalette.slate900 : SoftPalette.slate100,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: t.bgRule),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(5),
-                      decoration: BoxDecoration(
-                        color: t.accent.withValues(alpha: 0.15),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(Icons.person_rounded, size: 15, color: t.accent),
-                    ),
-                    const SizedBox(width: 8),
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.username,
-                          style: TextStyle(
-                            color: t.textPrimary,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12.5,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        Text(
-                          widget.role,
-                          style: TextStyle(
-                            color: t.textTertiary,
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
+        selectedId: 'school/$safeIndex',
+        onSelect: (id) {
+          final i = int.tryParse(id.split('/').last);
+          if (i != null) setState(() => _selectedIndex = i);
+        },
+        actions: [
+          if (_isHq) _branchPicker(context),
+          _SchoolSyncBadge(branchId: _effectiveBranchId),
+          IconButton(
+            tooltip: 'Settings',
+            icon: const Icon(GIcons.settings),
+            onPressed: () {
+              final uData = LocalStorageService.getActiveUserData();
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => SettingsPage(userData: Map<String, dynamic>.from(uData))),
+              );
+            },
           ),
-        const SizedBox(width: 6),
-      ],
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Container(height: 1, color: t.bgRule),
-      ),
-    );
-  }
-
-  Widget _buildSidebar(bool isCollapsed, RoleThemeData t) {
-    final width = isCollapsed ? 72.0 : 250.0;
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeInOut,
-      width: width,
-      decoration: const BoxDecoration(
-        color: SchoolTheme.sidebarBg,
-        border: Border(
-          right: BorderSide(color: SchoolTheme.sidebarBorder, width: 1),
-        ),
-      ),
-      child: Column(
-        children: [
-          const SizedBox(height: 14),
-
-          // Sidebar Section Header
-          if (!isCollapsed)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  _isTeacher ? 'FACULTY PORTAL' : 'SCHOOL MANAGEMENT',
-                  style: const TextStyle(
-                    color: SchoolTheme.sidebarMuted,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-              ),
-            ),
-
-          const SizedBox(height: 6),
-
-          // Navigation items list
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              itemCount: _navItems.length,
-              itemBuilder: (context, index) {
-                final item = _navItems[index];
-                final isSelected = index == _selectedIndex;
-
-                final tileWidget = Material(
-                  color: Colors.transparent,
-                  borderRadius: SchoolTheme.radius12,
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => setState(() => _selectedIndex = index),
-                    splashColor: t.accent.withValues(alpha: 0.15),
-                    hoverColor: SchoolTheme.sidebarBorder,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      padding: EdgeInsets.symmetric(
-                        horizontal: isCollapsed ? 0 : 14,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        color: isSelected ? t.accent : Colors.transparent,
-                        borderRadius: SchoolTheme.radius12,
-                        boxShadow: isSelected
-                            ? [
-                                BoxShadow(
-                                  color: t.accent.withValues(alpha: 0.35),
-                                  blurRadius: 12,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ]
-                            : [],
-                      ),
-                      child: Row(
-                        mainAxisAlignment: isCollapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
-                        children: [
-                          Icon(
-                            item.icon,
-                            color: isSelected ? SoftPalette.gray50 : SchoolTheme.sidebarMuted,
-                            size: 20,
-                          ),
-                          if (!isCollapsed) ...[
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                item.label,
-                                style: TextStyle(
-                                  color: isSelected ? SoftPalette.gray50 : SchoolTheme.sidebarText,
-                                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                                  fontSize: 13.5,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: isCollapsed ? Tooltip(message: item.label, child: tileWidget) : tileWidget,
-                );
-              },
-            ),
-          ),
-
-          // Logout Tile
-          const Divider(color: SchoolTheme.sidebarBorder, height: 1),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Material(
-              color: Colors.transparent,
-              borderRadius: BorderRadius.circular(12),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: _logout,
-                splashColor: SchoolTheme.statusAbsent.withValues(alpha: 0.2),
-                hoverColor: SchoolTheme.statusAbsent.withValues(alpha: 0.1),
-                child: Container(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: isCollapsed ? 0 : 14,
-                    vertical: 12,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: isCollapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
-                    children: [
-                      const Icon(
-                        Icons.logout_rounded,
-                        color: SoftPalette.red350,
-                        size: 20,
-                      ),
-                      if (!isCollapsed) ...[
-                        const SizedBox(width: 12),
-                        const Text(
-                          'Sign Out',
-                          style: TextStyle(
-                            color: SoftPalette.red350,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13.5,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // Collapse/Expand Footer
-          const Divider(color: SchoolTheme.sidebarBorder, height: 1),
-          InkWell(
-            onTap: () => setState(() => _isCollapsed = !_isCollapsed),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-              alignment: Alignment.center,
-              child: Row(
-                mainAxisAlignment: isCollapsed ? MainAxisAlignment.center : MainAxisAlignment.spaceBetween,
-                children: [
-                  if (!isCollapsed)
-                    Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: t.accent,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _effectiveBranchId.toUpperCase(),
-                          style: const TextStyle(
-                            color: SchoolTheme.sidebarMuted,
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  Icon(
-                    isCollapsed ? Icons.arrow_forward_ios_rounded : Icons.arrow_back_ios_rounded,
-                    color: SchoolTheme.sidebarMuted,
-                    size: 14,
-                  ),
-                ],
-              ),
-            ),
-          ),
+          IconButton(tooltip: 'Sign out', icon: const Icon(GIcons.logout), onPressed: _logout),
         ],
-      ),
+        body: KeyedSubtree(key: branchKey, child: IndexedStack(index: safeIndex, children: _views)),
+      )),
     );
   }
 }
@@ -953,84 +386,29 @@ class _SchoolSyncBadge extends StatelessWidget {
       builder: (context, snapshot) {
         final status = snapshot.data;
         if (status == null) return const SizedBox.shrink();
+        final c = context.comfort;
 
-        Color color;
-        String text;
-        IconData? icon;
-
-        switch (status.state) {
-          case SchoolSyncState.synced:
-            color = SchoolTheme.statusPresent;
-            text = 'Synced';
-            icon = Icons.cloud_done_rounded;
-            break;
-          case SchoolSyncState.syncing:
-            color = SchoolTheme.statusLeave;
-            text = 'Syncing…';
-            icon = Icons.sync_rounded;
-            break;
-          case SchoolSyncState.failed:
-            color = SchoolTheme.statusAbsent;
-            text = 'Sync Failed (${status.failedCount})';
-            icon = Icons.error_outline_rounded;
-            break;
-          case SchoolSyncState.offlinePending:
-            color = status.isOnline ? SchoolTheme.statusLeave : SchoolTheme.textMuted;
-            text = status.pendingCount > 0 ? 'Offline (${status.pendingCount} pending)' : 'Offline Mode';
-            icon = Icons.cloud_off_rounded;
-            break;
-        }
+        final (Color color, String text, IconData icon) = switch (status.state) {
+          SchoolSyncState.synced => (c.success, 'Synced', GIcons.checkCircle),
+          SchoolSyncState.syncing => (c.warning, 'Syncing…', GIcons.sync),
+          SchoolSyncState.failed => (c.danger, 'Sync failed (${status.failedCount})', GIcons.syncProblem),
+          SchoolSyncState.offlinePending => (
+              status.isOnline ? c.warning : c.textMuted,
+              status.pendingCount > 0 ? '${status.pendingCount} waiting to upload' : 'Offline',
+              GIcons.cloudOff,
+            ),
+        };
 
         return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () async {
-                AppToast.showSnackBar(context, 
-                  const SnackBar(
-                    content: Text('Triggering manual School data sync…'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-                await SchoolSyncService().syncNow(branchId: branchId);
-              },
-              borderRadius: BorderRadius.circular(20),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.12),
-                  border: Border.all(color: color.withValues(alpha: 0.35)),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (status.state == SchoolSyncState.syncing)
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: color,
-                        ),
-                      )
-                    else
-                      Icon(icon, color: color, size: 14),
-                    const SizedBox(width: 6),
-                    Text(
-                      text,
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(Icons.refresh_rounded, color: color.withValues(alpha: 0.8), size: 12),
-                  ],
-                ),
-              ),
+          padding: const EdgeInsets.symmetric(horizontal: Gsp.sp1, vertical: Gsp.sp2),
+          child: Tooltip(
+            message: 'Sync School data now',
+            child: AppChip(
+              label: text,
+              icon: icon,
+              state: AppChipState.custom,
+              color: color,
+              onTap: () => SchoolSyncService().syncNow(branchId: branchId),
             ),
           ),
         );

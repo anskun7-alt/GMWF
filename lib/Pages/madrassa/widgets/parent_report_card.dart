@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -8645,11 +8646,18 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     final scaffoldBg = isDark ? SoftPalette.slate900 : ParentReportCard.surfaceColor;
                     final appBarBg = isDark ? SoftPalette.slate800 : ParentReportCard.primaryColor;
 
+                    // Inside the executive shell its header already shows the
+                    // title, sync and dark mode. Keep only what is unique here
+                    // (back to family, child switcher, Accounts) in a slim bar.
+                    final hosted = HomeModuleHost.isModuleRoot(context);
+
                     return Scaffold(
                       backgroundColor: scaffoldBg,
                       appBar: AppBar(
                         backgroundColor: appBarBg,
                         elevation: 0,
+                        toolbarHeight: hosted ? 44 : null,
+                        automaticallyImplyLeading: false,
                         iconTheme: const IconThemeData(color: SoftPalette.gray50),
                         leading: widget.onBackToSummary != null
                             ? IconButton(
@@ -8657,11 +8665,15 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 tooltip: context.t('Back to Family Summary'),
                                 onPressed: widget.onBackToSummary,
                               )
-                            : Padding(
-                                padding: const EdgeInsets.all(8.0),
-                                child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
-                              ),
-                        title: widget.allDocs.length <= 1
+                            : hosted
+                                ? null
+                                : Padding(
+                                    padding: const EdgeInsets.all(8.0),
+                                    child: Image.asset('assets/logo/gmwf-1.webp', fit: BoxFit.contain),
+                                  ),
+                        title: hosted && widget.allDocs.length <= 1
+                            ? null
+                            : widget.allDocs.length <= 1
                             ? Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
@@ -8735,7 +8747,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                               ),
                         actions: [
                           // Cloud Sync / Download Latest Data Button
-                          IconButton(
+                          if (!hosted) IconButton(
                             icon: _isSyncing
                                 ? const SizedBox(
                                     width: 18,
@@ -8747,7 +8759,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             onPressed: _isSyncing ? null : () => _syncLatestData(context),
                           ),
                           // Dark Mode Toggle
-                          IconButton(
+                          if (!hosted) IconButton(
                             icon: Icon(
                               isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
                               color: isDark ? SoftPalette.yellow150 : SoftPalette.gray50,

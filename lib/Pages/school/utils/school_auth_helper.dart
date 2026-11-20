@@ -1,137 +1,69 @@
 // lib/pages/school/utils/school_auth_helper.dart
+//
+// Role checks for the School screens. Since Phase 5 (2026-11-17) every check
+// goes through the one rule in core/school_roles.dart:
+//   • an unknown role gets no access (it used to get everything);
+//   • "admin" only counts as School admin when the role says School;
+//   • a teacher's record is found by user id / username / email / employee id,
+//     or an exact name only when no other teacher shares it (never a partial name).
 
+import '../constants/school_constants.dart';
+import '../core/school_roles.dart';
 import 'school_local_storage.dart';
 
-/// Centralized role authorization and data isolation helper for Taleem-wa-Tarbiyat School modules.
-/// Enforces:
-/// 1. Chairman and HQ Manager are the highest authority (unrestricted access across all school data).
-/// 2. Teachers can only see their own assigned classes, assigned subjects, and their own teacher record.
-/// 3. One teacher cannot see another teacher's profile/attendance/salary/grading data.
-/// 4. Teachers cannot see Admin or Principal data (fees, financial summaries, principal dashboard, audit trail).
 class SchoolAuthHelper {
-  /// Returns true if the user has highest executive authority (Chairman, HQ Manager, CEO, Superadmin, Global Admin).
-  static bool isHighestAuthority(String role) {
-    final r = role.toLowerCase().trim();
-    return r == 'chairman' ||
-        r.contains('chairman') ||
-        r == 'hq manager' ||
-        r == 'hq_manager' ||
-        r.contains('hq manager') ||
-        r.contains('hq_manager') ||
-        r == 'ceo' ||
-        r == 'admin' ||
-        r == 'superadmin' ||
-        r == 'super_admin' ||
-        r == 'global admin' ||
-        r == 'global_admin' ||
-        r == 'master admin';
-  }
+  static SchoolRole roleOf(String role) => SchoolRoles.resolve(role);
 
-  /// Returns true if the user is explicitly a School Administrator.
-  static bool isSchoolAdmin(String role) {
-    final r = role.toLowerCase().trim();
-    return r.contains('school admin') ||
-        r.contains('school_admin') ||
-        r == 'school' ||
-        (r.contains('admin') && !r.contains('super') && !r.contains('global') && !r.contains('master'));
-  }
+  /// Chairman, HQ Manager, CEO, system admin, managers.
+  static bool isHighestAuthority(String role) => roleOf(role) == SchoolRole.executive;
 
-  /// Returns true if the user is explicitly a Principal / Headmaster / Headmistress.
-  static bool isPrincipal(String role) {
-    final r = role.toLowerCase().trim();
-    if (r.contains('admin')) return false;
-    return r.contains('principal') ||
-        r == 'headmaster' ||
-        r == 'headmistress' ||
-        r.contains('headmaster') ||
-        r.contains('headmistress');
-  }
+  /// School admin (not any other kind of admin).
+  static bool isSchoolAdmin(String role) => roleOf(role) == SchoolRole.schoolAdmin;
 
-  /// Returns true if the user is an Administrator or Principal (or highest executive).
-  static bool isAdminOrPrincipal(String role) {
-    if (isHighestAuthority(role)) return true;
-    final r = role.toLowerCase().trim();
-    return r.contains('principal') ||
-        r.contains('school admin') ||
-        r.contains('school_admin') ||
-        r == 'school' ||
-        r == 'headmaster' ||
-        r == 'headmistress' ||
-        r.contains('headmaster') ||
-        r.contains('headmistress');
-  }
+  static bool isPrincipal(String role) => roleOf(role) == SchoolRole.principal;
 
-  /// Returns true only if the user is purely a teacher (not admin, not principal, not chairman).
-  static bool isTeacher(String role) {
-    if (isAdminOrPrincipal(role)) return false;
-    final r = role.toLowerCase().trim();
-    return r.contains('teacher');
-  }
+  /// Full School access: executive, principal or school admin.
+  static bool isAdminOrPrincipal(String role) => SchoolRoles.isManager(roleOf(role));
 
-  /// Finds the teacher's cached record by matching name or email.
+  static bool isTeacher(String role) => roleOf(role) == SchoolRole.teacher;
+  static bool isAccountant(String role) => roleOf(role) == SchoolRole.accountant;
+  static bool isLibrarian(String role) => roleOf(role) == SchoolRole.librarian;
+
+  /// No School role at all: no access.
+  static bool hasNoAccess(String role) => roleOf(role) == SchoolRole.none;
+
+  /// The teacher record of the signed-in user. [userNameOrEmail] is what the
+  /// screen knows about the user; the login's id, username and email are added.
   static Map<String, dynamic>? findTeacherRecord(String branchId, String userNameOrEmail) {
-    final query = userNameOrEmail.toLowerCase().trim();
-    if (query.isEmpty) return null;
-
-    final teachers = SchoolLocalStorage.getAllTeachersCached(branchId);
-    for (final t in teachers) {
-      final name = (t['name'] ?? '').toString().toLowerCase().trim();
-      final email = (t['email'] ?? '').toString().toLowerCase().trim();
-      final empId = (t['employeeId'] ?? '').toString().toLowerCase().trim();
-      final id = (t['id'] ?? '').toString().toLowerCase().trim();
-
-      if (name == query ||
-          email == query ||
-          empId == query ||
-          id == query ||
-          (query.contains('@') && email == query)) {
-        return t;
-      }
-    }
-
-    // Secondary partial matching if exact match not found
-    for (final t in teachers) {
-      final name = (t['name'] ?? '').toString().toLowerCase().trim();
-      if (name.isNotEmpty && (name.contains(query) || query.contains(name))) {
-        return t;
-      }
-    }
-
-    return null;
+    final me = SchoolUserIdentity.current(fallbackName: userNameOrEmail);
+    final extra = userNameOrEmail.trim().toLowerCase();
+    final identity = SchoolUserIdentity(ids: {...me.ids, if (extra.isNotEmpty) extra}, name: me.name);
+    return identity.matchTeacher(SchoolLocalStorage.getAllTeachersCached(branchId));
   }
 
-  /// Returns the assigned grades for a teacher.
-  /// If admin/principal/chairman, returns an empty list meaning "no restriction / all grades".
+  /// The teacher's classes (homeroom + assigned). Empty for managers, meaning
+  /// "all classes". Empty for a teacher with no matching record, meaning none.
   static List<String> getTeacherAssignedGrades(String branchId, String role, String userNameOrEmail) {
     if (isAdminOrPrincipal(role)) return [];
-
     final teacher = findTeacherRecord(branchId, userNameOrEmail);
     if (teacher == null) return [];
-
     final grades = <String>{};
     final homeroom = (teacher['homeroomGrade'] ?? '').toString().trim();
-    if (homeroom.isNotEmpty) {
-      grades.add(homeroom);
-    }
-
+    if (homeroom.isNotEmpty) grades.add(homeroom);
     if (teacher['assignedGrades'] is List) {
       for (final g in teacher['assignedGrades']) {
         final gs = g.toString().trim();
         if (gs.isNotEmpty) grades.add(gs);
       }
     }
-
     return grades.toList();
   }
 
-  /// Returns the assigned subjects for a teacher.
-  /// If admin/principal/chairman, returns an empty list meaning "all subjects".
+  /// The teacher's subjects. Empty for managers, meaning "all subjects".
   static List<String> getTeacherAssignedSubjects(String branchId, String role, String userNameOrEmail) {
     if (isAdminOrPrincipal(role)) return [];
-
     final teacher = findTeacherRecord(branchId, userNameOrEmail);
     if (teacher == null) return [];
-
     final subjects = <String>{};
     if (teacher['subjects'] is List) {
       for (final s in teacher['subjects']) {
@@ -139,37 +71,37 @@ class SchoolAuthHelper {
         if (ss.isNotEmpty) subjects.add(ss);
       }
     }
-
     return subjects.toList();
   }
 
-  /// Checks if the user is authorized to view or edit a specific class grade.
+  /// Can this user open [grade]? Managers: any. Teachers: only their own
+  /// classes, found through their own teacher record.
   static bool canAccessGrade(String branchId, String role, String userNameOrEmail, String grade) {
     if (isAdminOrPrincipal(role)) return true;
-    if (grade == 'All') return false; // Teachers can only view specific assigned class
-
-    final assigned = getTeacherAssignedGrades(branchId, role, userNameOrEmail);
-    if (assigned.isEmpty) {
-      // Fallback: Check if teacher name is assigned in homeroom box directly
-      final hr = SchoolLocalStorage.getHomeroomAssignmentCached(branchId, grade, 'A');
-      final assignedName = (hr?['teacherName'] ?? '').toString().toLowerCase().trim();
-      if (assignedName.isNotEmpty && assignedName == userNameOrEmail.toLowerCase().trim()) {
-        return true;
-      }
-      return false;
-    }
-
+    if (!isTeacher(role) || grade == 'All') return false;
     final normalized = grade.toLowerCase().trim();
-    return assigned.any((g) => g.toLowerCase().trim() == normalized);
+    final assigned = getTeacherAssignedGrades(branchId, role, userNameOrEmail);
+    if (assigned.any((g) => g.toLowerCase().trim() == normalized)) return true;
+    // A homeroom assignment in any configured section that names this teacher's record.
+    final teacher = findTeacherRecord(branchId, userNameOrEmail);
+    if (teacher == null) return false;
+    final teacherId = (teacher['id'] ?? '').toString().trim();
+    if (teacherId.isEmpty) return false;
+    for (final sec in SchoolConstants.sections) {
+      final hr = SchoolLocalStorage.getHomeroomAssignmentCached(branchId, grade, sec);
+      final hrTeacher = (hr?['teacherId'] ?? '').toString().trim();
+      if (hrTeacher.isNotEmpty && hrTeacher == teacherId) return true;
+    }
+    return false;
   }
 
-  /// Checks if the user is authorized to view or edit marks for a specific subject.
+  /// Can this user enter marks for [subject]? Managers: any. Teachers: their
+  /// subjects, or any subject of their own class when none are listed.
   static bool canAccessSubject(String branchId, String role, String userNameOrEmail, String subject) {
     if (isAdminOrPrincipal(role)) return true;
-
+    if (!isTeacher(role)) return false;
     final assigned = getTeacherAssignedSubjects(branchId, role, userNameOrEmail);
-    if (assigned.isEmpty) return true; // If no specific subjects configured, allow assigned grade subjects
-
+    if (assigned.isEmpty) return findTeacherRecord(branchId, userNameOrEmail) != null;
     final normalized = subject.toLowerCase().trim();
     return assigned.any((s) => s.toLowerCase().trim() == normalized);
   }

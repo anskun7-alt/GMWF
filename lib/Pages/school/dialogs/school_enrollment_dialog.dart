@@ -1,34 +1,43 @@
 // lib/pages/school/dialogs/school_enrollment_dialog.dart
+//
+// Student admission & edit form (School ERP Phase 2 + Phase 6 gmwf_ui migration).
+// Built cleanly on gmwf_ui tokens (context.comfort, GText, GText.urdu, Gsp, Gr, GIcons).
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
-import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
 import 'package:intl/intl.dart' hide TextDirection;
-import 'package:hive_flutter/hive_flutter.dart';
-import 'package:google_fonts/google_fonts.dart';
-import '../../../widgets/media_upload_tile.dart';
-import '../../../services/zkteco_network_service.dart';
-import '../../../services/local_storage_service.dart';
+
 import '../../../services/image_upload_service.dart';
+import '../../../services/local_storage_service.dart';
+import '../../../services/zkteco_network_service.dart';
 import '../../../utils/formatters.dart';
-import '../../madrassa/utils/madrassa_local_storage.dart';
-import '../models/school_student.dart';
-import '../utils/school_local_storage.dart';
-import '../utils/school_admission_pdf_service.dart';
+import '../../../widgets/media_upload_tile.dart';
 import '../constants/school_constants.dart';
-import '../theme/school_theme.dart';
-import '../../../widgets/app_feedback.dart';
+import '../core/school_madrassa_transfer_reader.dart';
+import '../models/school_student.dart';
+import '../students/school_student_service.dart';
+import '../students/student_rules.dart';
+import '../students/widgets/student_dialogs.dart' show showStudentDuplicateDialog;
+import '../utils/school_admission_pdf_service.dart';
+import '../widgets/erp/school_erp.dart';
 
 class SchoolEnrollmentDialog extends StatefulWidget {
   final String branchId;
   final SchoolStudent? studentToEdit;
 
+  /// Saved on the record and in the audit log.
+  final String editorName;
+
+  /// Principal / School Admin may correct an admission number.
+  final bool canEditAdmissionNo;
+
   const SchoolEnrollmentDialog({
     super.key,
     required this.branchId,
     this.studentToEdit,
+    this.editorName = 'User',
+    this.canEditAdmissionNo = false,
   });
 
   @override
@@ -38,49 +47,53 @@ class SchoolEnrollmentDialog extends StatefulWidget {
 class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
   final _formKey = GlobalKey<FormState>();
 
-  // Text Controllers matching the physical Admission Form
-  late TextEditingController _rollNoCtrl;
-  late TextEditingController _nameCtrl;
-  late TextEditingController _guardianNameCtrl;
-  late TextEditingController _bformNoCtrl;
-  late TextEditingController _guardianCnicCtrl;
-  late TextEditingController _fatherProfessionCtrl;
-  late TextEditingController _guardianPhoneCtrl;
-  late TextEditingController _addressCtrl;
-  late TextEditingController _previousSchoolCtrl;
-  late TextEditingController _biometricPinCtrl;
+  late final TextEditingController _admissionNoCtrl;
+  late final TextEditingController _rollNoCtrl;
+  late final TextEditingController _emergencyCtrl;
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _guardianNameCtrl;
+  late final TextEditingController _bformNoCtrl;
+  late final TextEditingController _guardianCnicCtrl;
+  late final TextEditingController _fatherProfessionCtrl;
+  late final TextEditingController _guardianPhoneCtrl;
+  late final TextEditingController _addressCtrl;
+  late final TextEditingController _previousSchoolCtrl;
+  late final TextEditingController _biometricPinCtrl;
 
-  // Dropdowns & Dates
-  String _selectedGrade = 'Pre-9th';
+  String _bloodGroup = '';
+  bool _rollAuto = true;
+  Map<String, String> _fieldErrors = const {};
+
+  String _selectedGrade = '1';
   String _selectedSection = 'A';
   String _selectedAcademicGroup = 'General';
   String _selectedGender = 'Male';
-  String _status = 'active';
   DateTime _admissionDate = DateTime.now();
   DateTime? _dob;
-  bool _parentSignatureConfirmed = true;
+  bool _parentSignatureConfirmed = false;
 
-  // Media & Documents
   String? _photoUrl;
   String? _guardianCnicUrl;
   String? _bformUrl;
   List<Map<String, String>> _additionalDocuments = [];
 
-  // Madrassa Transfer Tracking
   String? _transferredMadrassaStudentId;
   String? _transferredMadrassaInfo;
 
   bool _isSaving = false;
-
-  final List<String> _grades = SchoolConstants.grades;
-  final List<String> _sections = SchoolConstants.sections;
 
   @override
   void initState() {
     super.initState();
     final st = widget.studentToEdit;
 
+    _admissionNoCtrl = TextEditingController(
+      text: st?.admissionNo ?? SchoolStudentService.nextAdmissionNo(widget.branchId),
+    );
     _rollNoCtrl = TextEditingController(text: st?.rollNo ?? '');
+    _rollAuto = st == null;
+    _emergencyCtrl = TextEditingController(text: st?.emergencyContact ?? '');
+    _bloodGroup = st?.bloodGroup ?? '';
     _nameCtrl = TextEditingController(text: st?.name ?? '');
     _guardianNameCtrl = TextEditingController(text: st?.guardianName ?? '');
     _bformNoCtrl = TextEditingController(text: st?.bformNo ?? '');
@@ -96,12 +109,16 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
     _biometricPinCtrl = TextEditingController(text: initialPin);
 
     if (st != null) {
-      _selectedGrade = _grades.contains(st.grade) ? st.grade : _grades.first;
-      _selectedSection = _sections.contains(st.section) ? st.section : _sections.first;
+      _selectedGrade = SchoolConstants.grades.contains(st.grade) ? st.grade : SchoolConstants.grades.first;
+      _selectedSection = SchoolConstants.sections.contains(st.section) ? st.section : SchoolConstants.sections.first;
       final availGroups = SchoolConstants.getAcademicGroupsForGrade(_selectedGrade);
       _selectedAcademicGroup = availGroups.contains(st.academicGroup) ? st.academicGroup : availGroups.first;
-      _selectedGender = st.gender;
-      _status = st.status;
+      _selectedGender = st.gender == 'Female' ? 'Female' : 'Male';
+      _parentSignatureConfirmed = st.parentSignatureConfirmed;
+      if (st.transferredFromMadrassaId.isNotEmpty) {
+        _transferredMadrassaStudentId = st.transferredFromMadrassaId;
+        _transferredMadrassaInfo = 'Madrassa record ${st.transferredFromMadrassaId}';
+      }
       _photoUrl = st.photoUrl;
       _guardianCnicUrl = st.guardianCnicUrl;
       _bformUrl = st.bformUrl;
@@ -116,19 +133,34 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
     } else {
       _selectedGrade = '1';
       _selectedAcademicGroup = 'General';
+      _suggestRoll();
     }
   }
 
+  String get _academicYear => (widget.studentToEdit?.academicYear.isNotEmpty ?? false)
+      ? widget.studentToEdit!.academicYear
+      : StudentRules.academicYearOf(_admissionDate);
+
+  void _suggestRoll() {
+    if (!_rollAuto) return;
+    _rollNoCtrl.text = StudentRules.suggestRollNo(
+      SchoolStudentService.roster(widget.branchId).students,
+      grade: _selectedGrade,
+      section: _selectedSection,
+      academicYear: _academicYear,
+      exceptId: widget.studentToEdit?.id,
+    );
+  }
+
   String _formatPhoneDigits(String raw) {
-    String digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
-    if (digits.length > 11) {
-      digits = digits.substring(0, 11);
-    }
-    return digits;
+    final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+    return digits.length > 11 ? digits.substring(0, 11) : digits;
   }
 
   @override
   void dispose() {
+    _admissionNoCtrl.dispose();
+    _emergencyCtrl.dispose();
     _rollNoCtrl.dispose();
     _nameCtrl.dispose();
     _guardianNameCtrl.dispose();
@@ -143,540 +175,397 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
   }
 
   Future<void> _openMadrassaTransferPicker() async {
-    List<Map<String, dynamic>> madrassaStudents = [];
+    var madrassaStudents = <Map<String, dynamic>>[];
     try {
-      madrassaStudents = MadrassaLocalStorage.getAllStudentsCached(widget.branchId);
+      madrassaStudents = SchoolMadrassaTransferReader.students(widget.branchId);
       if (madrassaStudents.isEmpty) {
-        if (Hive.isBoxOpen(LocalStorageService.madrassaStudentsBox)) {
-          final box = Hive.box(LocalStorageService.madrassaStudentsBox);
-          for (final key in box.keys) {
-            final val = box.get(key);
-            if (val is Map) {
-              final map = Map<String, dynamic>.from(val);
-              map['id'] = map['id'] ?? key.toString().split('__std__').last;
-              madrassaStudents.add(map);
-            }
-          }
-        }
+        madrassaStudents = SchoolMadrassaTransferReader.students('all');
       }
     } catch (e) {
       debugPrint('[SchoolEnrollmentDialog] Fetch madrassa students error: $e');
     }
 
     if (madrassaStudents.isEmpty) {
-      AppToast.showSnackBar(context, 
-        const SnackBar(
-          content: Text('No Madrassa students found in local storage to transfer.'),
-          backgroundColor: SoftPalette.amber300,
-        ),
-      );
+      if (mounted) AppFeedback.info(context, 'No Madrassa students found in local storage to transfer.');
       return;
     }
 
     final selected = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (ctx) {
-        String filter = '';
-        return StatefulBuilder(
-          builder: (context, setPickerState) {
-            final filtered = madrassaStudents.where((s) {
-              final q = filter.trim().toLowerCase();
-              if (q.isEmpty) return true;
-              final name = (s['name'] ?? '').toString().toLowerCase();
-              final guardian = (s['guardianName'] ?? s['fatherName'] ?? '').toString().toLowerCase();
-              final cnic = (s['studentCnic'] ?? s['bFormNo'] ?? s['bformNo'] ?? '').toString().toLowerCase();
-              final roll = (s['rollNo'] ?? '').toString().toLowerCase();
-              final pin = (s['biometricPin'] ?? '').toString();
-              return name.contains(q) || guardian.contains(q) || cnic.contains(q) || roll.contains(q) || pin.contains(q);
-            }).toList();
+        var filter = '';
+        return StatefulBuilder(builder: (dctx, setPickerState) {
+          final c = dctx.comfort;
+          final filtered = madrassaStudents.where((s) {
+            final q = filter.trim().toLowerCase();
+            if (q.isEmpty) return true;
+            final name = (s['name'] ?? '').toString().toLowerCase();
+            final guardian = (s['guardianName'] ?? s['fatherName'] ?? '').toString().toLowerCase();
+            final cnic = (s['studentCnic'] ?? s['bFormNo'] ?? s['bformNo'] ?? '').toString().toLowerCase();
+            final roll = (s['rollNo'] ?? '').toString().toLowerCase();
+            final pin = (s['biometricPin'] ?? '').toString();
+            return name.contains(q) || guardian.contains(q) || cnic.contains(q) || roll.contains(q) || pin.contains(q);
+          }).toList();
 
-            return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              title: Row(
-                children: [
-                  Icon(Icons.sync_alt_rounded, color: context.adapt(SchoolTheme.primary)),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text(
-                      'Transfer / Import Madrassa Student\nمدرسہ کے طالب علم سے ٹرانسفر',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+            title: Row(children: [
+              Icon(GIcons.swapDesk, color: c.brand),
+              const SizedBox(width: Gsp.sp2 + 2),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Transfer from Madrassa (read-only)', style: GText.h3(c.textPrimary)),
+                  Text('مدرسہ کے طالب علم کی تفصیلات درآمد کریں', style: GText.urdu(c.textMuted, size: 13)),
+                ]),
+              ),
+            ]),
+            content: SizedBox(
+              width: 580,
+              height: 440,
+              child: Column(children: [
+                TextField(
+                  decoration: const InputDecoration(
+                    hintText: 'Search by student name, father, CNIC or PIN…',
+                    prefixIcon: Icon(GIcons.search, size: 18),
+                    isDense: true,
                   ),
-                ],
-              ),
-              content: SizedBox(
-                width: 580,
-                height: 440,
-                child: Column(
-                  children: [
-                    TextField(
-                      decoration: InputDecoration(
-                        hintText: 'Search by Student Name, Father, CNIC or PIN...',
-                        prefixIcon: Icon(Icons.search_rounded, color: context.adapt(SoftPalette.sky700)),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                        isDense: true,
-                      ),
-                      onChanged: (v) => setPickerState(() => filter = v),
-                    ),
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: filtered.isEmpty
-                          ? Center(child: Text('No matching Madrassa students found', style: TextStyle(color: context.adapt(SoftPalette.gray350))))
-                          : ListView.separated(
-                              itemCount: filtered.length,
-                              separatorBuilder: (_, __) => const Divider(height: 1),
-                              itemBuilder: (context, idx) {
-                                final std = filtered[idx];
-                                final stdId = std['id']?.toString() ?? '';
-                                final cred = ZkTecoNetworkService.getCredentialByEntityId(stdId);
-                                final pin = cred?.biometricPin ?? std['biometricPin']?.toString() ?? '';
-                                final photo = std['photoUrl']?.toString() ?? '';
-                                final photoBytes = ImageUploadService.decodeBase64ToBytes(photo);
-
-                                return ListTile(
-                                  leading: CircleAvatar(
-                                    backgroundColor: context.adapt(SchoolTheme.primary).withValues(alpha: 0.1),
-                                    backgroundImage: photoBytes != null && photoBytes.isNotEmpty ? MemoryImage(photoBytes) : null,
-                                    child: photoBytes == null || photoBytes.isEmpty
-                                        ? Icon(Icons.person_rounded, color: context.adapt(SoftPalette.sky700))
-                                        : null,
-                                  ),
-                                  title: Row(
-                                    children: [
-                                      Text(std['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                      if (pin.isNotEmpty) ...[
-                                        const SizedBox(width: 8),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                                          decoration: BoxDecoration(
-                                            color: context.adapt(SchoolTheme.primary).withValues(alpha: 0.1),
-                                            borderRadius: BorderRadius.circular(4),
-                                          ),
-                                          child: Text('PIN: $pin', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.sky700))),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                  subtitle: Text(
-                                    'Father: ${std['guardianName'] ?? std['fatherName'] ?? '—'} • CNIC: ${std['studentCnic'] ?? std['bFormNo'] ?? '—'}\nClass: ${std['classLevel'] ?? std['hifzStatus'] ?? 'Madrassa'}',
-                                    style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.gray550)),
-                                  ),
-                                  trailing: ElevatedButton(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: SchoolTheme.primary,
-                                      foregroundColor: SoftPalette.gray50,
-                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    ),
-                                    onPressed: () => Navigator.pop(ctx, std),
-                                    child: const Text('Transfer Data'),
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
+                  onChanged: (v) => setPickerState(() => filter = v),
                 ),
-              ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
-              ],
-            );
-          },
-        );
+                const SizedBox(height: Gsp.sp3),
+                Expanded(
+                  child: filtered.isEmpty
+                      ? const AppEmptyState(icon: GIcons.searchOff, title: 'No matching Madrassa students', compact: true)
+                      : ListView.separated(
+                          itemCount: filtered.length,
+                          separatorBuilder: (_, _) => Divider(height: 1, color: c.border),
+                          itemBuilder: (_, idx) {
+                            final std = filtered[idx];
+                            final stdId = std['id']?.toString() ?? '';
+                            final cred = ZkTecoNetworkService.getCredentialByEntityId(stdId);
+                            final pin = cred?.biometricPin ?? std['biometricPin']?.toString() ?? '';
+                            final photoBytes = ImageUploadService.decodeBase64ToBytes(std['photoUrl']?.toString() ?? '');
+
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(vertical: Gsp.sp1),
+                              leading: CircleAvatar(
+                                backgroundColor: c.brandSoft,
+                                backgroundImage: photoBytes != null && photoBytes.isNotEmpty ? MemoryImage(photoBytes) : null,
+                                child: photoBytes == null || photoBytes.isEmpty ? Icon(GIcons.profile, color: c.brand) : null,
+                              ),
+                              title: Row(children: [
+                                Flexible(child: Text(std['name']?.toString() ?? 'Unknown', style: GText.body2Bold(c.textPrimary))),
+                                if (pin.isNotEmpty) ...[
+                                  const SizedBox(width: Gsp.sp2),
+                                  AppChip(label: 'PIN $pin', state: AppChipState.info),
+                                ],
+                              ]),
+                              subtitle: Text(
+                                'Father: ${std['guardianName'] ?? std['fatherName'] ?? '—'} · CNIC: ${std['studentCnic'] ?? std['bFormNo'] ?? '—'}',
+                                style: GText.caption(c.textMuted),
+                              ),
+                              trailing: FilledButton(
+                                onPressed: () => Navigator.pop(ctx, std),
+                                child: const Text('Import'),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ]),
+            ),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+          );
+        });
       },
     );
 
-    if (selected != null) {
+    if (selected != null && mounted) {
       final stdId = selected['id']?.toString() ?? '';
       final cred = ZkTecoNetworkService.getCredentialByEntityId(stdId);
       final pin = cred?.biometricPin ?? selected['biometricPin']?.toString() ?? '';
 
       setState(() {
         _transferredMadrassaStudentId = stdId;
-        _transferredMadrassaInfo = '${selected['name']} (Madrassa Student)';
-        _nameCtrl.text = selected['name'] ?? '';
-        _guardianNameCtrl.text = selected['guardianName'] ?? selected['fatherName'] ?? '';
-        _bformNoCtrl.text = selected['studentCnic'] ?? selected['bFormNo'] ?? selected['bformNo'] ?? '';
-        _guardianCnicCtrl.text = selected['guardianCnic'] ?? selected['fatherCnic'] ?? '';
-        _guardianPhoneCtrl.text = _formatPhoneDigits(selected['contactPhone'] ?? selected['guardianPhone'] ?? selected['phone'] ?? '');
-        _addressCtrl.text = selected['address'] ?? '';
-        _fatherProfessionCtrl.text = selected['fatherProfession'] ?? '';
+        _transferredMadrassaInfo = '${selected['name']} (Madrassa student)';
+        _nameCtrl.text = selected['name']?.toString() ?? '';
+        _guardianNameCtrl.text = (selected['guardianName'] ?? selected['fatherName'] ?? '').toString();
+        _bformNoCtrl.text = (selected['studentCnic'] ?? selected['bFormNo'] ?? selected['bformNo'] ?? '').toString();
+        _guardianCnicCtrl.text = (selected['guardianCnic'] ?? selected['fatherCnic'] ?? '').toString();
+        _guardianPhoneCtrl.text = _formatPhoneDigits((selected['contactPhone'] ?? selected['guardianPhone'] ?? selected['phone'] ?? '').toString());
+        _addressCtrl.text = (selected['address'] ?? '').toString();
+        _fatherProfessionCtrl.text = (selected['fatherProfession'] ?? '').toString();
         _previousSchoolCtrl.text = 'مدرسہ گلزار مدینہ (Madrassa Gulzar Madina Hifz)';
-        _photoUrl = selected['photoUrl'] ?? _photoUrl;
-        _guardianCnicUrl = selected['guardianCnicUrl'] ?? _guardianCnicUrl;
-        _bformUrl = selected['bFormUrl'] ?? selected['bformUrl'] ?? _bformUrl;
-        if (pin.isNotEmpty) {
-          _biometricPinCtrl.text = pin;
-        }
-        if (selected['dob'] != null && selected['dob'].toString().isNotEmpty) {
-          _dob = DateTime.tryParse(selected['dob'].toString());
-        }
+        _photoUrl = selected['photoUrl']?.toString() ?? _photoUrl;
+        _guardianCnicUrl = selected['guardianCnicUrl']?.toString() ?? _guardianCnicUrl;
+        _bformUrl = (selected['bFormUrl'] ?? selected['bformUrl'])?.toString() ?? _bformUrl;
+        if (pin.isNotEmpty) _biometricPinCtrl.text = pin;
+        final dobRaw = selected['dob']?.toString() ?? '';
+        if (dobRaw.isNotEmpty) _dob = DateTime.tryParse(dobRaw);
       });
 
-      AppToast.showSnackBar(context, 
-        SnackBar(
-          content: Text('✅ Successfully transferred details for "${selected['name']}". Biometric PIN ($pin) preserved.'),
-          backgroundColor: SchoolTheme.primary,
-        ),
-      );
+      AppFeedback.success(context, 'Imported details for "${selected['name']}" (read-only copy).');
     }
   }
 
-  Future<void> _saveStudent() async {
+  Future<void> _save({bool print = false, bool allowDuplicates = false}) async {
     if (!_formKey.currentState!.validate()) return;
-    setState(() => _isSaving = true);
+    setState(() {
+      _isSaving = true;
+      _fieldErrors = const {};
+    });
 
-    final studentId = widget.studentToEdit?.id ?? 'SCH-${DateTime.now().millisecondsSinceEpoch}';
-
+    final isEdit = widget.studentToEdit != null;
     final enteredPin = _biometricPinCtrl.text.trim();
-    if (enteredPin.isNotEmpty) {
-      final conflict = ZkTecoNetworkService.findPinConflict(enteredPin, excludeEntityId: studentId);
-      final isTransferredStudent = conflict != null && (
-        conflict.entityId == _transferredMadrassaStudentId ||
-        conflict.entityName.toLowerCase().trim() == _nameCtrl.text.toLowerCase().trim()
-      );
+    final pinOwnerId = widget.studentToEdit?.id ?? '';
 
-      if (conflict != null && !isTransferredStudent) {
-        AppToast.showSnackBar(context, 
-          SnackBar(
-            content: Text('❌ PIN $enteredPin is already assigned to "${conflict.entityName}" (${conflict.branchId.toUpperCase()} • ${conflict.entityType.toUpperCase()}). Please choose a unique PIN.'),
-            backgroundColor: SoftPalette.red400,
-          ),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
-    }
-
-    final studentData = {
-      'rollNo': _rollNoCtrl.text.trim(),
-      'admissionNo': _rollNoCtrl.text.trim(),
-      'name': _nameCtrl.text.trim(),
-      'guardianName': _guardianNameCtrl.text.trim(),
-      'fatherName': _guardianNameCtrl.text.trim(),
-      'bformNo': _bformNoCtrl.text.trim(),
-      'guardianCnic': _guardianCnicCtrl.text.trim(),
-      'fatherCnic': _guardianCnicCtrl.text.trim(),
-      'dob': _dob != null ? DateFormat('yyyy-MM-dd').format(_dob!) : '',
-      'grade': _selectedGrade,
-      'section': _selectedSection,
-      'academicGroup': _selectedAcademicGroup,
-      'fatherProfession': _fatherProfessionCtrl.text.trim(),
-      'guardianPhone': _guardianPhoneCtrl.text.trim(),
-      'phone': _guardianPhoneCtrl.text.trim(),
-      'address': _addressCtrl.text.trim(),
-      'previousSchool': _previousSchoolCtrl.text.trim(),
-      'biometricPin': enteredPin,
-      'gender': _selectedGender,
-      'status': _status,
-      'photoUrl': _photoUrl ?? '',
-      'guardianCnicUrl': _guardianCnicUrl ?? '',
-      'bformUrl': _bformUrl ?? '',
-      'additionalDocuments': _additionalDocuments,
-      'branchId': widget.branchId,
-      'admissionDate': DateFormat('yyyy-MM-dd').format(_admissionDate),
-      'parentSignatureConfirmed': _parentSignatureConfirmed,
-      'transferredFromMadrassaId': _transferredMadrassaStudentId ?? '',
-    };
-
-    await SchoolLocalStorage.saveStudent(
-      branchId: widget.branchId,
-      studentId: studentId,
-      studentData: studentData,
-    );
-
-    if (enteredPin.isNotEmpty) {
-      await ZkTecoNetworkService.assignPinToEntity(
-        entityId: studentId,
-        entityName: _nameCtrl.text.trim(),
-        entityType: 'school_student',
-        branchId: widget.branchId,
-        customPin: enteredPin,
-      );
-    }
-
-    if (mounted) {
-      setState(() => _isSaving = false);
-      Navigator.of(context).pop(true);
-      AppFeedback.showSuccess(
-        context,
-        widget.studentToEdit != null ? 'Student profile updated successfully!' : 'Student enrolled successfully!',
-        subtitle: 'Saved locally • Syncing to cloud',
-      );
-    }
-  }
-
-  Future<void> _saveAndPrintStudent() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _isSaving = true);
-
-    final enteredPin = _biometricPinCtrl.text.trim();
-    final studentId = widget.studentToEdit?.id ?? 'SCH-${DateTime.now().millisecondsSinceEpoch}';
-
-    // Unique Biometric PIN Validation
-    if (enteredPin.isNotEmpty) {
-      final conflict = ZkTecoNetworkService.findPinConflict(enteredPin, excludeEntityId: studentId);
-      final isTransferredStudent = conflict != null && (
-        conflict.entityId == _transferredMadrassaStudentId ||
-        conflict.entityName.toLowerCase().trim() == _nameCtrl.text.toLowerCase().trim()
-      );
-
-      if (conflict != null && !isTransferredStudent) {
-        if (mounted) {
-          AppToast.showSnackBar(context, 
-            SnackBar(
-              content: Text('❌ PIN $enteredPin is already assigned to "${conflict.entityName}" (${conflict.branchId.toUpperCase()} • ${conflict.entityType.toUpperCase()}). Please choose a unique PIN.'),
-              backgroundColor: SoftPalette.red400,
-            ),
+    try {
+      if (enteredPin.isNotEmpty) {
+        final conflict = ZkTecoNetworkService.findPinConflict(enteredPin, excludeEntityId: pinOwnerId);
+        final isTransferredStudent = conflict != null &&
+            _transferredMadrassaStudentId != null &&
+            conflict.entityId == _transferredMadrassaStudentId;
+        if (conflict != null && !isTransferredStudent) {
+          throw StudentException(
+            'PIN $enteredPin is already assigned to "${conflict.entityName}" (${conflict.branchId.toUpperCase()}). Choose a unique PIN.',
+            fields: const {'biometricPin': 'PIN already in use'},
           );
         }
-        setState(() => _isSaving = false);
+      }
+
+      final form = <String, dynamic>{
+        'admissionNo': _admissionNoCtrl.text.trim(),
+        'rollNo': _rollNoCtrl.text.trim(),
+        'name': _nameCtrl.text.trim(),
+        'guardianName': _guardianNameCtrl.text.trim(),
+        'fatherName': _guardianNameCtrl.text.trim(),
+        'bformNo': _bformNoCtrl.text.trim(),
+        'bForm': _bformNoCtrl.text.trim(),
+        'guardianCnic': _guardianCnicCtrl.text.trim(),
+        'fatherCnic': _guardianCnicCtrl.text.trim(),
+        'dob': _dob != null ? DateFormat('yyyy-MM-dd').format(_dob!) : '',
+        'grade': _selectedGrade,
+        'section': _selectedSection,
+        'academicGroup': _selectedAcademicGroup,
+        'fatherProfession': _fatherProfessionCtrl.text.trim(),
+        'profession': _fatherProfessionCtrl.text.trim(),
+        'guardianPhone': _guardianPhoneCtrl.text.trim(),
+        'phone': _guardianPhoneCtrl.text.trim(),
+        'emergencyContact': _emergencyCtrl.text.trim(),
+        'bloodGroup': _bloodGroup,
+        'address': _addressCtrl.text.trim(),
+        'previousSchool': _previousSchoolCtrl.text.trim(),
+        'prevSchool': _previousSchoolCtrl.text.trim(),
+        'biometricPin': enteredPin,
+        'gender': _selectedGender,
+        'photoUrl': _photoUrl ?? '',
+        'guardianCnicUrl': _guardianCnicUrl ?? '',
+        'bformUrl': _bformUrl ?? '',
+        'additionalDocuments': _additionalDocuments,
+        'admissionDate': DateFormat('yyyy-MM-dd').format(_admissionDate),
+        'parentSignatureConfirmed': _parentSignatureConfirmed,
+        if (!isEdit && _transferredMadrassaStudentId != null) 'transferredFromMadrassaId': _transferredMadrassaStudentId,
+      };
+
+      final studentId = await SchoolStudentService.save(
+        branchId: widget.branchId,
+        existingId: widget.studentToEdit?.id,
+        form: form,
+        editorName: widget.editorName,
+        allowDuplicates: allowDuplicates,
+        canEditAdmissionNo: widget.canEditAdmissionNo,
+      );
+
+      if (enteredPin.isNotEmpty) {
+        try {
+          await ZkTecoNetworkService.assignPinToEntity(
+            entityId: studentId,
+            entityName: _nameCtrl.text.trim(),
+            entityType: 'school_student',
+            branchId: widget.branchId,
+            customPin: enteredPin,
+          );
+        } catch (e) {
+          debugPrint('[SchoolEnrollmentDialog] PIN assignment failed: $e');
+        }
+      }
+
+      final saved = SchoolStudentService.roster(widget.branchId).byId(studentId);
+      if (!mounted) return;
+      final parent = Navigator.of(context);
+      final messengerContext = parent.context;
+      parent.pop(true);
+      if (messengerContext.mounted) {
+        AppFeedback.success(
+          messengerContext,
+          isEdit ? 'Student profile updated' : 'Student enrolled — admission no. ${saved?.admissionNo ?? ''}',
+        );
+      }
+      if (print && saved != null) {
+        await SchoolAdmissionPdfService.printAdmissionSlip(saved);
+      }
+    } on StudentException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _fieldErrors = e.fields;
+      });
+      if (e.duplicates.isNotEmpty) {
+        final again = await showStudentDuplicateDialog(context, e.duplicates);
+        if (again == true && mounted) await _save(print: print, allowDuplicates: true);
         return;
       }
-    }
-
-    final studentData = {
-      'rollNo': _rollNoCtrl.text.trim(),
-      'admissionNo': _rollNoCtrl.text.trim(),
-      'name': _nameCtrl.text.trim(),
-      'guardianName': _guardianNameCtrl.text.trim(),
-      'fatherName': _guardianNameCtrl.text.trim(),
-      'bformNo': _bformNoCtrl.text.trim(),
-      'guardianCnic': _guardianCnicCtrl.text.trim(),
-      'fatherCnic': _guardianCnicCtrl.text.trim(),
-      'dob': _dob != null ? DateFormat('yyyy-MM-dd').format(_dob!) : '',
-      'grade': _selectedGrade,
-      'section': _selectedSection,
-      'academicGroup': _selectedAcademicGroup,
-      'fatherProfession': _fatherProfessionCtrl.text.trim(),
-      'guardianPhone': _guardianPhoneCtrl.text.trim(),
-      'phone': _guardianPhoneCtrl.text.trim(),
-      'address': _addressCtrl.text.trim(),
-      'previousSchool': _previousSchoolCtrl.text.trim(),
-      'biometricPin': enteredPin,
-      'gender': _selectedGender,
-      'status': _status,
-      'photoUrl': _photoUrl ?? '',
-      'guardianCnicUrl': _guardianCnicUrl ?? '',
-      'bformUrl': _bformUrl ?? '',
-      'additionalDocuments': _additionalDocuments,
-      'branchId': widget.branchId,
-      'admissionDate': DateFormat('yyyy-MM-dd').format(_admissionDate),
-      'parentSignatureConfirmed': _parentSignatureConfirmed,
-      'transferredFromMadrassaId': _transferredMadrassaStudentId ?? '',
-    };
-
-    await SchoolLocalStorage.saveStudent(
-      branchId: widget.branchId,
-      studentId: studentId,
-      studentData: studentData,
-    );
-
-    if (enteredPin.isNotEmpty) {
-      await ZkTecoNetworkService.assignPinToEntity(
-        entityId: studentId,
-        entityName: _nameCtrl.text.trim(),
-        entityType: 'school_student',
-        branchId: widget.branchId,
-        customPin: enteredPin,
-      );
-    }
-
-    final savedStudent = SchoolStudent.fromMap(studentId, studentData);
-
-    if (mounted) {
+      AppFeedback.error(context, e.message);
+    } catch (e) {
+      debugPrint('[SchoolEnrollmentDialog] save failed: $e');
+      if (!mounted) return;
       setState(() => _isSaving = false);
-      Navigator.of(context).pop(true);
-      AppFeedback.showSuccess(
-        context,
-        widget.studentToEdit != null ? 'Student profile updated successfully!' : 'Student enrolled successfully!',
-        subtitle: 'Saved locally • Admission slip ready to print',
-      );
+      AppFeedback.error(context, 'Could not save the student: $e');
     }
-
-    // Trigger PDF Print & Download Layout
-    await SchoolAdmissionPdfService.printAdmissionSlip(savedStudent);
   }
 
   Future<void> _addCustomDocumentDialog() async {
     final titleCtrl = TextEditingController();
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(Icons.note_add_rounded, color: context.adapt(SoftPalette.sky700)),
-            SizedBox(width: 10),
-            Text('دیگر دستاویزات / Add Custom Document', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Enter document title (e.g., Previous School Certificate, Medical Certificate, Character Letter):',
-              style: TextStyle(fontSize: 13, color: context.adapt(SoftPalette.slate550)),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: titleCtrl,
-              decoration: InputDecoration(
-                labelText: 'Document Name / نام دستاویز *',
-                hintText: 'e.g. Previous School Leaving Certificate (SLC)',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      builder: (ctx) {
+        final c = ctx.comfort;
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+          title: Row(children: [
+            Icon(GIcons.layers, color: c.brand),
+            const SizedBox(width: Gsp.sp2 + 2),
+            Expanded(child: Text('Add custom document / دیگر دستاویز', style: GText.h3(c.textPrimary))),
+          ]),
+          content: SizedBox(
+            width: 420,
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Text('Enter document title (e.g. School Leaving Certificate, Medical Certificate):', style: GText.body2(c.textSecondary)),
+              const SizedBox(height: Gsp.sp3),
+              TextField(
+                controller: titleCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Document name / نام دستاویز *',
+                  hintText: 'e.g. Previous School Leaving Certificate',
+                  isDense: true,
+                ),
               ),
-              autofocus: true,
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final text = titleCtrl.text.trim();
+                if (text.isNotEmpty) Navigator.pop(ctx, text);
+              },
+              child: const Text('Add document'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: SchoolTheme.primary, foregroundColor: SoftPalette.gray50),
-            onPressed: () {
-              final text = titleCtrl.text.trim();
-              if (text.isNotEmpty) Navigator.pop(ctx, text);
-            },
-            child: const Text('Add & Attach File'),
-          ),
-        ],
-      ),
+        );
+      },
     );
+    titleCtrl.dispose();
 
     if (result != null && result.isNotEmpty) {
-      setState(() {
-        _additionalDocuments.add({'name': result, 'url': ''});
-      });
+      setState(() => _additionalDocuments.add({'name': result, 'url': ''}));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
     final isEditing = widget.studentToEdit != null;
+    final branchName = LocalStorageService.getBranchName(widget.branchId);
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-      backgroundColor: context.adapt(SoftPalette.gray50),
-      child: Container(
-        width: 780,
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.94),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        child: Form(
-          key: _formKey,
-          child: SingleChildScrollView(
+      shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+      backgroundColor: c.surface,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 780,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.94,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(Gsp.sp5),
+          child: Form(
+            key: _formKey,
             child: Column(
-              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // ── Official Authentic Admission Form Card ───────────────────
-                Container(
-                  decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.gray50),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: context.adapt(SoftPalette.slate900), width: 2),
-                    boxShadow: [
-                      BoxShadow(
-                        color: SoftPalette.gray900.withValues(alpha: 0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
+                // Dialog top bar
+                Row(children: [
+                  const GModuleTile(icon: GIcons.student, size: 36),
+                  const SizedBox(width: Gsp.sp3),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(isEditing ? 'Edit student admission' : 'New student admission', style: GText.h3(c.textPrimary)),
+                      Text('Taleem o Tarbiyat School System · $branchName · $_academicYear', style: GText.caption(c.textMuted)),
+                    ]),
                   ),
-                  child: Container(
-                    margin: const EdgeInsets.all(6),
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: context.adapt(SoftPalette.slate700), width: 1.2),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        // Madrassa Student Transfer Top Bar
-                        if (!isEditing) _buildMadrassaTransferTopBar(),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+                    icon: const Icon(GIcons.close),
+                  ),
+                ]),
+                const SizedBox(height: Gsp.sp3),
+                Divider(height: 1, color: c.border),
 
-                        // 1. Header with Urdu Titles & Crest
-                        _buildFormHeader(),
+                // Scrollable body
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(vertical: Gsp.sp4),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                      if (!isEditing) _buildMadrassaTransferBar(c),
+                      _buildFormHeader(c, branchName),
+                      const SizedBox(height: Gsp.sp4),
+                      Divider(height: 1, color: c.border),
+                      const SizedBox(height: Gsp.sp4),
 
-                        const SizedBox(height: 16),
-                        Divider(color: context.adapt(SoftPalette.slate900), thickness: 1.5, height: 1),
-                        const SizedBox(height: 16),
+                      _buildAdmissionNoAndDateRow(c),
+                      const SizedBox(height: Gsp.sp4),
+                      _buildFormFieldsSection(c),
 
-                        // 2. Admission No & Date Row
-                        _buildAdmissionNoAndDateRow(),
+                      const SizedBox(height: Gsp.sp5),
+                      Divider(height: 1, color: c.border),
+                      const SizedBox(height: Gsp.sp4),
 
-                        const SizedBox(height: 16),
+                      _buildDocumentsSection(c),
 
-                        // 3. Form Input Fields (All 11 Fields from Physical Form)
-                        _buildFormFieldsSection(),
+                      const SizedBox(height: Gsp.sp5),
+                      Divider(height: 1, color: c.border),
+                      const SizedBox(height: Gsp.sp3),
 
-                        const SizedBox(height: 20),
-                        Divider(color: context.adapt(SoftPalette.slate200), thickness: 1),
-                        const SizedBox(height: 14),
-
-                        // 4. Documents & Photos Section
-                        _buildDocumentsAndPhotosSection(),
-
-                        const SizedBox(height: 20),
-                        Divider(color: context.adapt(SoftPalette.slate200), thickness: 1),
-                        const SizedBox(height: 14),
-
-                        // 5. Parent Signature & Declaration
-                        _buildParentSignatureRow(),
-                      ],
-                    ),
+                      _buildParentSignatureRow(c),
+                    ]),
                   ),
                 ),
 
-                const SizedBox(height: 16),
+                Divider(height: 1, color: c.border),
+                const SizedBox(height: Gsp.sp3),
 
-                // ── Bottom Action Buttons ────────────────────────────────────
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
+                // Footer action buttons
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: Gsp.sp2,
+                  runSpacing: Gsp.sp2,
                   children: [
                     TextButton(
-                      onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      ),
-                      child: const Text('Cancel / منسوخ', style: TextStyle(fontWeight: FontWeight.bold)),
+                      onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel / منسوخ'),
                     ),
-                    const SizedBox(width: 12),
                     OutlinedButton.icon(
-                      onPressed: _isSaving ? null : _saveAndPrintStudent,
-                      icon: const Icon(Icons.print_rounded, size: 18),
-                      label: const Text('Save & Print PDF / محفوظ و پرنٹ کریں', style: TextStyle(fontWeight: FontWeight.bold)),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: context.adapt(SchoolTheme.primary),
-                        side: BorderSide(color: context.adapt(SchoolTheme.primary), width: 1.2),
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
+                      onPressed: _isSaving ? null : () => _save(print: true),
+                      icon: const Icon(GIcons.print, size: 16),
+                      label: const Text('Save & Print PDF'),
                     ),
-                    const SizedBox(width: 12),
-                    ElevatedButton.icon(
-                      onPressed: _isSaving ? null : _saveStudent,
+                    FilledButton.icon(
+                      onPressed: _isSaving ? null : () => _save(),
                       icon: _isSaving
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2),
-                            )
-                          : const Icon(Icons.check_circle_rounded, size: 20),
-                      label: Text(
-                        _isSaving
-                            ? 'Saving...'
-                            : (isEditing ? 'Save Changes / محفوظ کریں' : 'Enroll Student / داخلہ مکمل کریں'),
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SchoolTheme.primary,
-                        foregroundColor: SoftPalette.gray50,
-                        padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        elevation: 2,
-                      ),
+                          ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 2))
+                          : const Icon(GIcons.checkCircle, size: 16),
+                      label: Text(_isSaving ? 'Saving…' : (isEditing ? 'Save changes' : 'Enroll student')),
                     ),
                   ],
                 ),
@@ -688,326 +577,283 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
     );
   }
 
-  Widget _buildMadrassaTransferTopBar() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: context.adapt(SoftPalette.emerald50m),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: context.adapt(SoftPalette.emerald200)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.school_outlined, size: 20, color: SoftPalette.green400),
-              const SizedBox(width: 8),
+  Widget _buildMadrassaTransferBar(GComfortColors c) => Container(
+        margin: const EdgeInsets.only(bottom: Gsp.sp3),
+        padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+        decoration: BoxDecoration(
+          color: c.brandSoft,
+          borderRadius: SchoolErp.radius,
+          border: Border.all(color: c.brand.withValues(alpha: 0.3)),
+        ),
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: Gsp.sp2,
+          runSpacing: Gsp.sp2,
+          children: [
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(GIcons.madrassa, size: GIconSize.sm, color: c.brand),
+              const SizedBox(width: Gsp.sp2),
               Text(
                 _transferredMadrassaInfo != null
-                    ? 'Transferred from: $_transferredMadrassaInfo'
+                    ? 'Imported from: $_transferredMadrassaInfo'
                     : 'Transfer student from Madrassa (Hifz / Nazra)?',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.bold,
-                  color: _transferredMadrassaInfo != null ? context.adapt(SoftPalette.green550) : context.adapt(SoftPalette.slate700),
-                ),
+                style: GText.body2Bold(c.brand),
               ),
-            ],
-          ),
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: context.adapt(SoftPalette.green550),
-              side: const BorderSide(color: SoftPalette.green400),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              visualDensity: VisualDensity.compact,
-            ),
-            icon: const Icon(Icons.sync_alt_rounded, size: 16),
-            label: Text(
-              _transferredMadrassaInfo != null ? 'Change Madrassa Student' : 'Transfer from Madrassa / مدرسہ سے درآمد',
-              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
-            ),
-            onPressed: _openMadrassaTransferPicker,
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Header Widget ──────────────────────────────────────────────────────────
-  Widget _buildFormHeader() {
-    return Column(
-      children: [
-        // Main Urdu School Name
-        Text(
-          'تعلیم و تربیت سکول سسٹم',
-          textAlign: TextAlign.center,
-          textDirection: TextDirection.rtl,
-          style: GoogleFonts.notoSansArabic(
-            fontSize: 26,
-            fontWeight: FontWeight.w800,
-            color: context.adapt(SoftPalette.slate900),
-            height: 1.3,
-          ),
-        ),
-        const SizedBox(height: 4),
-
-        // Welfare Foundation & Contact
-        Text(
-          'گلزار مدینہ ویلفیئر فاؤنڈیشن گلزار مدینہ روڈ گجرات 0334-4687928',
-          textAlign: TextAlign.center,
-          textDirection: TextDirection.rtl,
-          style: GoogleFonts.notoSansArabic(
-            fontSize: 13.5,
-            fontWeight: FontWeight.w600,
-            color: context.adapt(SoftPalette.slate700),
-            height: 1.3,
-          ),
-        ),
-        const SizedBox(height: 10),
-
-        // School Crest Emblem & Title Badge
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.asset(
-                'assets/logo/twt.webp',
-                height: 48,
-                width: 48,
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => Icon(Icons.school_rounded, size: 40, color: context.adapt(SoftPalette.sky700)),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  'داخلہ فارم',
-                  textAlign: TextAlign.center,
-                  textDirection: TextDirection.rtl,
-                  style: GoogleFonts.notoSansArabic(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: context.adapt(SoftPalette.slate900),
-                    height: 1.1,
-                  ),
-                ),
-                Text(
-                  'STUDENT ADMISSION FORM',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 10,
-                    letterSpacing: 2,
-                    fontWeight: FontWeight.w800,
-                    color: context.adapt(SoftPalette.gray550),
-                  ),
-                ),
-              ],
+            ]),
+            OutlinedButton.icon(
+              icon: const Icon(GIcons.swapDesk, size: 16),
+              label: Text(_transferredMadrassaInfo != null ? 'Change selection' : 'Import from Madrassa'),
+              onPressed: _openMadrassaTransferPicker,
             ),
           ],
         ),
-      ],
-    );
-  }
+      );
 
-  // ── Admission No & Date Row ────────────────────────────────────────────────
-  Widget _buildAdmissionNoAndDateRow() {
-    return Row(
-      children: [
-        // Admission / Roll No (داخلہ نمبر)
-        Expanded(
-          child: Row(
-            children: [
-              Text(
-                'داخلہ نمبر / Roll No:',
-                style: GoogleFonts.notoSansArabic(fontSize: 13.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextFormField(
-                  controller: _rollNoCtrl,
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: context.adapt(SoftPalette.slate900)),
-                  decoration: InputDecoration(
-                    hintText: 'e.g. 101',
-                    hintStyle: TextStyle(fontSize: 13, color: context.adapt(SoftPalette.gray300)),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    border: UnderlineInputBorder(borderSide: BorderSide(color: context.adapt(SoftPalette.slate900), width: 1.5)),
-                    enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: context.adapt(SoftPalette.slate900), width: 1.5)),
-                    focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: context.adapt(SoftPalette.sky700), width: 2.0)),
-                  ),
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Required / ضروری ہے' : null,
-                ),
-              ),
-            ],
-          ),
+  Widget _buildFormHeader(GComfortColors c, String branchName) => Container(
+        padding: const EdgeInsets.all(Gsp.sp3),
+        decoration: BoxDecoration(
+          color: c.surfaceSunken,
+          borderRadius: SchoolErp.radius,
+          border: Border.all(color: c.border),
         ),
-        const SizedBox(width: 24),
-
-        // Admission Date (تاریخ)
-        Expanded(
-          child: InkWell(
-            onTap: () async {
-              final picked = await showDatePicker(
-                context: context,
-                initialDate: _admissionDate,
-                firstDate: DateTime(2015),
-                lastDate: DateTime.now().add(const Duration(days: 365)),
-              );
-              if (picked != null) setState(() => _admissionDate = picked);
-            },
-            child: Row(
-              children: [
-                Text(
-                  'تاریخ / Date:',
-                  style: GoogleFonts.notoSansArabic(fontSize: 13.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-                    decoration: BoxDecoration(
-                      border: Border(bottom: BorderSide(color: context.adapt(SoftPalette.slate900), width: 1.5)),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          DateFormat('dd-MM-yyyy').format(_admissionDate),
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: context.adapt(SoftPalette.slate900)),
-                        ),
-                        Icon(Icons.calendar_today_rounded, size: 16, color: context.adapt(SoftPalette.sky700)),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          ClipRRect(
+            borderRadius: Gr.button,
+            child: Image.asset(
+              'assets/logo/twt.webp',
+              height: 44,
+              width: 44,
+              fit: BoxFit.contain,
+              errorBuilder: (_, _, _) => Icon(GIcons.student, size: 36, color: c.brand),
             ),
           ),
+          const SizedBox(width: Gsp.sp3),
+          Flexible(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              Text(
+                'تعلیم و تربیت سکول سسٹم · داخلہ فارم',
+                textAlign: TextAlign.center,
+                textDirection: TextDirection.rtl,
+                style: GText.urdu(c.textPrimary, size: 20, weight: FontWeight.w700),
+              ),
+              Text(
+                'Gulzar Madina Welfare Foundation · $branchName',
+                textAlign: TextAlign.center,
+                style: GText.caption(c.textMuted),
+              ),
+            ]),
+          ),
+        ]),
+      );
+
+  Widget _numberField({
+    required GComfortColors c,
+    required String label,
+    required TextEditingController controller,
+    required String errorKey,
+    bool readOnly = false,
+    String? helper,
+    ValueChanged<String>? onChanged,
+  }) =>
+      TextFormField(
+        controller: controller,
+        readOnly: readOnly,
+        onChanged: onChanged,
+        style: GText.body2Bold(c.textPrimary),
+        decoration: InputDecoration(
+          labelText: label,
+          helperText: helper,
+          helperMaxLines: 2,
+          errorText: _fieldErrors[errorKey],
+          isDense: true,
+          filled: readOnly,
+          fillColor: readOnly ? c.surfaceSunken : null,
+          suffixIcon: readOnly ? Icon(GIcons.lock, size: 16, color: c.textMuted) : null,
         ),
-      ],
+        validator: (v) => v == null || v.trim().isEmpty ? 'Required / ضروری ہے' : null,
+      );
+
+  Widget _buildAdmissionNoAndDateRow(GComfortColors c) {
+    final isEditing = widget.studentToEdit != null;
+    final admission = _numberField(
+      c: c,
+      label: 'Admission No / داخلہ نمبر',
+      controller: _admissionNoCtrl,
+      errorKey: 'admissionNo',
+      readOnly: !widget.canEditAdmissionNo,
+      helper: isEditing ? null : 'Issued automatically for this branch',
     );
+    final roll = _numberField(
+      c: c,
+      label: 'Roll No / رول نمبر',
+      controller: _rollNoCtrl,
+      errorKey: 'rollNo',
+      helper: 'Class $_selectedGrade-$_selectedSection · $_academicYear',
+      onChanged: (_) => _rollAuto = false,
+    );
+    final date = InkWell(
+      onTap: () async {
+        final picked = await showDatePicker(
+          context: context,
+          initialDate: _admissionDate,
+          firstDate: DateTime(2015),
+          lastDate: DateTime.now().add(const Duration(days: 60)),
+        );
+        if (picked != null) {
+          setState(() => _admissionDate = picked);
+          _suggestRoll();
+        }
+      },
+      child: InputDecorator(
+        decoration: InputDecoration(
+          labelText: 'Admission Date / تاریخ داخلہ',
+          errorText: _fieldErrors['admissionDate'],
+          isDense: true,
+          suffixIcon: Icon(GIcons.calendar, size: 16, color: c.brand),
+        ),
+        child: Text(DateFormat('dd-MM-yyyy').format(_admissionDate), style: GText.body2Bold(c.textPrimary)),
+      ),
+    );
+
+    return LayoutBuilder(builder: (context, box) {
+      if (box.maxWidth < 560) {
+        return Column(children: [admission, const SizedBox(height: Gsp.sp3), roll, const SizedBox(height: Gsp.sp3), date]);
+      }
+      return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(child: admission),
+        const SizedBox(width: Gsp.sp3),
+        Expanded(child: roll),
+        const SizedBox(width: Gsp.sp3),
+        Expanded(child: date),
+      ]);
+    });
   }
 
-  // ── Form Input Fields Section (11 Form Items) ──────────────────────────────
-  Widget _buildFormFieldsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // 1. نام طالب علم (Student Name)
-        _buildBilingualInputRow(
-          urduLabel: 'نام طالب علم',
-          englishLabel: 'Student Full Name',
-          controller: _nameCtrl,
-          isRequired: true,
-          hint: 'Enter student full name in Urdu or English',
-        ),
-        const SizedBox(height: 12),
-
-        // 2. والد کا نام (Father's Name)
-        _buildBilingualInputRow(
-          urduLabel: 'والد کا نام',
-          englishLabel: "Father's / Guardian Name",
-          controller: _guardianNameCtrl,
-          isRequired: true,
-          hint: "Enter father's full name",
-        ),
-        const SizedBox(height: 12),
-
-        // 3. بچے کا ب فارم نمبر (Child's B-Form Number)
-        _buildBilingualInputRow(
-          urduLabel: 'بچے کا ب فارم نمبر',
-          englishLabel: "Child's B-Form / Birth Cert No",
-          controller: _bformNoCtrl,
-          hint: 'XXXXX-XXXXXXX-X',
-          keyboardType: TextInputType.number,
-          inputFormatters: [CNICInputFormatter(), LengthLimitingTextInputFormatter(15)],
-        ),
-        const SizedBox(height: 12),
-
-        // 4. والد کا شناختی کارڈ نمبر (Father's CNIC Number)
-        _buildBilingualInputRow(
-          urduLabel: 'والد کا شناختی کارڈ نمبر',
-          englishLabel: "Father's CNIC Number",
-          controller: _guardianCnicCtrl,
-          hint: 'XXXXX-XXXXXXX-X',
-          keyboardType: TextInputType.number,
-          inputFormatters: [CNICInputFormatter(), LengthLimitingTextInputFormatter(15)],
-        ),
-        const SizedBox(height: 12),
-
-        // 5. تاریخ پیدائش (Date of Birth)
-        _buildDateOfBirthRow(),
-        const SizedBox(height: 12),
-
-        // 6. کلاس اور سیکشن (Class & Section) + Academic Stream
-        _buildClassSectionAndStreamRow(),
-        const SizedBox(height: 12),
-
-        // 7. پیشہ (Father's Profession)
-        _buildBilingualInputRow(
-          urduLabel: 'پیشہ',
-          englishLabel: "Father's Profession / Occupation",
-          controller: _fatherProfessionCtrl,
-          hint: 'e.g. Business / Government Employee / Private Job',
-        ),
-        const SizedBox(height: 12),
-
-        // 8. فون نمبر (Phone Number - strictly 11 digits)
-        _buildBilingualInputRow(
-          urduLabel: 'فون نمبر',
-          englishLabel: 'Contact Phone Number (11 digits)',
-          controller: _guardianPhoneCtrl,
-          isRequired: true,
-          hint: 'e.g. 03001234567 (11 digits)',
-          keyboardType: TextInputType.phone,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
-          customValidator: (v) {
-            if (v == null || v.trim().isEmpty) return 'Contact phone is required';
-            if (v.trim().length != 11) return 'Phone number must be exactly 11 digits';
-            return null;
-          },
-        ),
-        const SizedBox(height: 12),
-
-        // 9. گھر کا پتہ (Home Address)
-        _buildBilingualInputRow(
-          urduLabel: 'گھر کا پتہ',
-          englishLabel: 'Residential Home Address',
-          controller: _addressCtrl,
-          hint: 'Full residential street address / Mohallah',
-        ),
-        const SizedBox(height: 12),
-
-        // 10. سابقہ مدرسہ / سکول کا نام (Previous School / Madrassa Name)
-        _buildBilingualInputRow(
-          urduLabel: 'سابقہ مدرسہ / سکول کا نام',
-          englishLabel: 'Previous School / Madrassa Name',
-          controller: _previousSchoolCtrl,
-          hint: 'Name of previous school, academy or madrassa if any',
-        ),
-        const SizedBox(height: 12),
-
-        // 11. بائیو میٹرک اسکینر پن (Biometric Scanner PIN)
-        _buildBilingualInputRow(
-          urduLabel: 'بائیو میٹرک اسکینر پن',
-          englishLabel: 'Biometric Scanner Device PIN',
-          controller: _biometricPinCtrl,
-          hint: 'e.g. 5012 (Unique PIN for physical biometric attendance machines)',
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          prefixIcon: Icons.fingerprint_rounded,
-        ),
+  Widget _buildGenderAndHealthRow(GComfortColors c) {
+    final gender = DropdownButtonFormField<String>(
+      isExpanded: true,
+      initialValue: _selectedGender,
+      decoration: const InputDecoration(labelText: 'Gender / جنس *', isDense: true),
+      items: const [
+        DropdownMenuItem(value: 'Male', child: Text('Male / لڑکا')),
+        DropdownMenuItem(value: 'Female', child: Text('Female / لڑکی')),
       ],
+      onChanged: (v) => setState(() => _selectedGender = v ?? 'Male'),
     );
+    final blood = DropdownButtonFormField<String>(
+      isExpanded: true,
+      initialValue: _bloodGroup,
+      decoration: const InputDecoration(labelText: 'Blood group (optional)', isDense: true),
+      items: [
+        const DropdownMenuItem(value: '', child: Text('Not known')),
+        for (final g in const ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']) DropdownMenuItem(value: g, child: Text(g)),
+      ],
+      onChanged: (v) => setState(() => _bloodGroup = v ?? ''),
+    );
+    final emergency = TextFormField(
+      controller: _emergencyCtrl,
+      keyboardType: TextInputType.phone,
+      inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
+      decoration: InputDecoration(
+        labelText: 'Emergency contact (optional)',
+        hintText: '03XXXXXXXXX',
+        errorText: _fieldErrors['emergencyContact'],
+        isDense: true,
+      ),
+      validator: (v) {
+        final d = (v ?? '').trim();
+        return d.isNotEmpty && d.length != 11 ? 'Must be 11 digits' : null;
+      },
+    );
+    return LayoutBuilder(builder: (context, box) {
+      if (box.maxWidth < 560) {
+        return Column(children: [gender, const SizedBox(height: Gsp.sp3), blood, const SizedBox(height: Gsp.sp3), emergency]);
+      }
+      return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(child: gender),
+        const SizedBox(width: Gsp.sp2),
+        Expanded(child: blood),
+        const SizedBox(width: Gsp.sp2),
+        Expanded(flex: 2, child: emergency),
+      ]);
+    });
   }
 
-  // ── Helper: Bilingual Input Row ────────────────────────────────────────────
-  Widget _buildBilingualInputRow({
+  Widget _buildFormFieldsSection(GComfortColors c) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _bilingualField(c: c, urduLabel: 'نام طالب علم', englishLabel: 'Student full name', controller: _nameCtrl, errorKey: 'name', isRequired: true, hint: 'Enter student full name'),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(c: c, urduLabel: 'والد کا نام', englishLabel: "Father's / guardian name", controller: _guardianNameCtrl, errorKey: 'guardianName', isRequired: true, hint: "Enter father's full name"),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(
+            c: c,
+            urduLabel: 'بچے کا ب فارم نمبر',
+            englishLabel: "Child's B-Form number",
+            controller: _bformNoCtrl,
+            errorKey: 'bformNo',
+            hint: 'XXXXX-XXXXXXX-X',
+            keyboardType: TextInputType.number,
+            inputFormatters: [CNICInputFormatter(), LengthLimitingTextInputFormatter(15)],
+          ),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(
+            c: c,
+            urduLabel: 'والد کا شناختی کارڈ نمبر',
+            englishLabel: "Father's CNIC number",
+            controller: _guardianCnicCtrl,
+            errorKey: 'guardianCnic',
+            hint: 'XXXXX-XXXXXXX-X',
+            keyboardType: TextInputType.number,
+            inputFormatters: [CNICInputFormatter(), LengthLimitingTextInputFormatter(15)],
+          ),
+          const SizedBox(height: Gsp.sp3),
+          _buildDobRow(c),
+          const SizedBox(height: Gsp.sp3),
+          _buildGenderAndHealthRow(c),
+          const SizedBox(height: Gsp.sp3),
+          _buildClassSectionAndStreamRow(c),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(c: c, urduLabel: 'پیشہ', englishLabel: "Father's profession", controller: _fatherProfessionCtrl, hint: 'e.g. Business / Private job'),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(
+            c: c,
+            urduLabel: 'فون نمبر',
+            englishLabel: 'Contact phone (11 digits)',
+            controller: _guardianPhoneCtrl,
+            errorKey: 'guardianPhone',
+            isRequired: true,
+            hint: '03001234567',
+            keyboardType: TextInputType.phone,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
+            customValidator: (v) {
+              if (v == null || v.trim().isEmpty) return 'Contact phone is required';
+              if (v.trim().length != 11) return 'Phone number must be exactly 11 digits';
+              return null;
+            },
+          ),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(c: c, urduLabel: 'گھر کا پتہ', englishLabel: 'Home address', controller: _addressCtrl, hint: 'Street / Mohallah'),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(c: c, urduLabel: 'سابقہ مدرسہ / سکول کا نام', englishLabel: 'Previous school / madrassa', controller: _previousSchoolCtrl, hint: 'Optional'),
+          const SizedBox(height: Gsp.sp3),
+          _bilingualField(
+            c: c,
+            urduLabel: 'بائیو میٹرک اسکینر پن',
+            englishLabel: 'Biometric scanner PIN',
+            controller: _biometricPinCtrl,
+            errorKey: 'biometricPin',
+            hint: 'Unique numeric PIN for attendance scanner',
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            prefixIcon: GIcons.fingerprint,
+          ),
+        ],
+      );
+
+  Widget _bilingualField({
+    required GComfortColors c,
     required String urduLabel,
     required String englishLabel,
     required TextEditingController controller,
@@ -1017,82 +863,46 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
     List<TextInputFormatter>? inputFormatters,
     IconData? prefixIcon,
     String? Function(String?)? customValidator,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              children: [
-                if (prefixIcon != null) ...[
-                  Icon(prefixIcon, size: 16, color: context.adapt(SchoolTheme.primary)),
-                  const SizedBox(width: 6),
-                ],
-                Text(
-                  '$englishLabel ${isRequired ? '*' : ''}',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.slate600)),
+    String? errorKey,
+  }) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Flexible(
+            child: Row(children: [
+              if (prefixIcon != null) ...[Icon(prefixIcon, size: 15, color: c.brand), const SizedBox(width: Gsp.sp1 + 2)],
+              Flexible(
+                child: Text(
+                  '$englishLabel${isRequired ? ' *' : ''}',
+                  overflow: TextOverflow.ellipsis,
+                  style: GText.label(c.textSecondary),
                 ),
-              ],
-            ),
-            Text(
-              urduLabel,
-              textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 13.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
+              ),
+            ]),
+          ),
+          const SizedBox(width: Gsp.sp2),
+          Text(urduLabel, textDirection: TextDirection.rtl, style: GText.urdu(c.textPrimary, size: 14)),
+        ]),
+        const SizedBox(height: Gsp.sp1),
         TextFormField(
           controller: controller,
           keyboardType: keyboardType,
           inputFormatters: inputFormatters,
-          style: TextStyle(fontSize: 14, color: context.adapt(SoftPalette.slate900)),
+          style: GText.body2(c.textPrimary),
           decoration: InputDecoration(
             hintText: hint,
-            hintStyle: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.gray300)),
+            errorText: errorKey == null ? null : _fieldErrors[errorKey],
             isDense: true,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide(color: context.adapt(SoftPalette.gray150)),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide(color: context.adapt(SoftPalette.gray150)),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide(color: context.adapt(SoftPalette.sky700), width: 1.5),
-            ),
           ),
           validator: customValidator ?? (isRequired ? (v) => v == null || v.trim().isEmpty ? '$englishLabel is required' : null : null),
         ),
-      ],
-    );
-  }
+      ]);
 
-  // ── Helper: Date of Birth Row ──────────────────────────────────────────────
-  Widget _buildDateOfBirthRow() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Date of Birth (DOB)',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.slate600)),
-            ),
-            Text(
-              'تاریخ پیدائش',
-              textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 13.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
+  Widget _buildDobRow(GComfortColors c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text('Date of birth', style: GText.label(c.textSecondary)),
+          Text('تاریخ پیدائش', textDirection: TextDirection.rtl, style: GText.urdu(c.textPrimary, size: 14)),
+        ]),
+        const SizedBox(height: Gsp.sp1),
         InkWell(
           onTap: () async {
             final picked = await showDatePicker(
@@ -1103,289 +913,184 @@ class _SchoolEnrollmentDialogState extends State<SchoolEnrollmentDialog> {
             );
             if (picked != null) setState(() => _dob = picked);
           },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: context.adapt(SoftPalette.gray150)),
+          child: InputDecorator(
+            decoration: InputDecoration(
+              isDense: true,
+              errorText: _fieldErrors['dob'],
+              suffixIcon: Icon(GIcons.calendar, size: 16, color: c.brand),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  _dob != null ? DateFormat('dd-MM-yyyy').format(_dob!) : 'Select Date of Birth (تاریخ پیدائش منتخب کریں)',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _dob != null ? context.adapt(SoftPalette.slate900) : context.adapt(SoftPalette.gray350),
-                    fontWeight: _dob != null ? FontWeight.bold : FontWeight.normal,
-                  ),
-                ),
-                Icon(Icons.cake_outlined, size: 18, color: context.adapt(SoftPalette.sky700)),
-              ],
+            child: Text(
+              _dob != null ? DateFormat('dd-MM-yyyy').format(_dob!) : 'Select date of birth',
+              style: _dob != null ? GText.body2Bold(c.textPrimary) : GText.body2(c.textMuted),
             ),
           ),
         ),
-      ],
-    );
-  }
+      ]);
 
-  // ── Helper: Class, Section & Stream Dropdowns ──────────────────────────────
-  Widget _buildClassSectionAndStreamRow() {
+  Widget _buildClassSectionAndStreamRow(GComfortColors c) {
     final groupOptions = SchoolConstants.getAcademicGroupsForGrade(_selectedGrade);
     final isHigh = SchoolConstants.isHighSchool(_selectedGrade);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Class, Section & Academic Stream',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.slate600)),
-            ),
-            Text(
-              'کلاس اور تعلیمی گروپ',
-              textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 13.5, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-            ),
-          ],
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('Class, section & academic stream', style: GText.label(c.textSecondary)),
+        Text('کلاس اور تعلیمی گروپ', textDirection: TextDirection.rtl, style: GText.urdu(c.textPrimary, size: 14)),
+      ]),
+      const SizedBox(height: Gsp.sp1),
+      Row(children: [
+        Expanded(
+          flex: 2,
+          child: DropdownButtonFormField<String>(
+            isExpanded: true,
+            initialValue: _selectedGrade,
+            decoration: const InputDecoration(labelText: 'Class / کلاس', isDense: true),
+            items: [for (final g in SchoolConstants.grades) DropdownMenuItem(value: g, child: Text(g))],
+            onChanged: (v) {
+              if (v != null) {
+                setState(() {
+                  _selectedGrade = v;
+                  final avail = SchoolConstants.getAcademicGroupsForGrade(v);
+                  if (!avail.contains(_selectedAcademicGroup)) _selectedAcademicGroup = avail.first;
+                  _suggestRoll();
+                });
+              }
+            },
+          ),
         ),
-        const SizedBox(height: 4),
-        Row(
-          children: [
-            // Class / Grade
-            Expanded(
-              flex: 2,
-              child: DropdownButtonFormField<String>(
-                value: _selectedGrade,
-                decoration: InputDecoration(
-                  labelText: 'Class / کلاس',
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                items: _grades.map((g) => DropdownMenuItem(value: g, child: Text(g))).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() {
-                      _selectedGrade = v;
-                      final avail = SchoolConstants.getAcademicGroupsForGrade(v);
-                      if (!avail.contains(_selectedAcademicGroup)) {
-                        _selectedAcademicGroup = avail.first;
-                      }
-                    });
+        const SizedBox(width: Gsp.sp2),
+        Expanded(
+          flex: 1,
+          child: DropdownButtonFormField<String>(
+            isExpanded: true,
+            initialValue: _selectedSection,
+            decoration: const InputDecoration(labelText: 'Section', isDense: true),
+            items: [for (final s in SchoolConstants.sections) DropdownMenuItem(value: s, child: Text('Sec $s'))],
+            onChanged: (v) {
+              if (v != null) {
+                setState(() {
+                  _selectedSection = v;
+                  _suggestRoll();
+                });
+              }
+            },
+          ),
+        ),
+        const SizedBox(width: Gsp.sp2),
+        Expanded(
+          flex: 2,
+          child: DropdownButtonFormField<String>(
+            isExpanded: true,
+            initialValue: groupOptions.contains(_selectedAcademicGroup) ? _selectedAcademicGroup : groupOptions.first,
+            decoration: InputDecoration(labelText: isHigh ? 'Stream / گروپ' : 'General', isDense: true),
+            items: [for (final g in groupOptions) DropdownMenuItem(value: g, child: Text(g, overflow: TextOverflow.ellipsis))],
+            onChanged: isHigh
+                ? (v) {
+                    if (v != null) setState(() => _selectedAcademicGroup = v);
                   }
-                },
-              ),
-            ),
-            const SizedBox(width: 8),
-
-            // Section
-            Expanded(
-              flex: 1,
-              child: DropdownButtonFormField<String>(
-                value: _selectedSection,
-                decoration: InputDecoration(
-                  labelText: 'Section / سیکشن',
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                items: _sections.map((s) => DropdownMenuItem(value: s, child: Text('Sec $s'))).toList(),
-                onChanged: (v) {
-                  if (v != null) setState(() => _selectedSection = v);
-                },
-              ),
-            ),
-            const SizedBox(width: 8),
-
-            // Academic Stream (High school)
-            Expanded(
-              flex: 2,
-              child: DropdownButtonFormField<String>(
-                value: groupOptions.contains(_selectedAcademicGroup) ? _selectedAcademicGroup : groupOptions.first,
-                decoration: InputDecoration(
-                  labelText: isHigh ? 'Stream / گروپ' : 'General / جنرل',
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                items: groupOptions.map((g) => DropdownMenuItem(value: g, child: Text(g, style: const TextStyle(fontSize: 12)))).toList(),
-                onChanged: isHigh
-                    ? (v) {
-                        if (v != null) setState(() => _selectedAcademicGroup = v);
-                      }
-                    : null,
-              ),
-            ),
-          ],
+                : null,
+          ),
         ),
-      ],
-    );
+      ]),
+    ]);
   }
 
-  // ── Documents & Photos Section ─────────────────────────────────────────────
-  Widget _buildDocumentsAndPhotosSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.perm_media_outlined, size: 18, color: context.adapt(SoftPalette.sky700)),
-                SizedBox(width: 8),
-                Text(
-                  'Official Documents & Student Photo',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-                ),
-              ],
-            ),
-            Text(
-              'دستاویزات اور تصویر',
-              textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 14, fontWeight: FontWeight.bold, color: context.adapt(SchoolTheme.primary)),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-
-        // 3 Upload Tiles: Student Photo, Father CNIC, B-Form
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Student Photo (Profile Avatar)
+  Widget _buildDocumentsSection(GComfortColors c) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Row(children: [
+              Icon(GIcons.layers, size: GIconSize.sm, color: c.brand),
+              const SizedBox(width: Gsp.sp2),
+              Text('DOCUMENTS & PHOTO', style: GText.overline(c.textMuted)),
+            ]),
+            Text('دستاویزات اور تصویر', textDirection: TextDirection.rtl, style: GText.urdu(c.brand, size: 14)),
+          ]),
+          const SizedBox(height: Gsp.sp3),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Expanded(
               child: MediaUploadTile(
-                label: 'طالب علم کی تصویر\nStudent Photo (Avatar)',
-                icon: Icons.add_a_photo_outlined,
+                label: 'طالب علم کی تصویر\nStudent photo',
+                icon: GIcons.image,
                 initialValue: _photoUrl,
                 onChanged: (val) => setState(() => _photoUrl = val),
               ),
             ),
-            const SizedBox(width: 10),
-
-            // Father CNIC Document
+            const SizedBox(width: Gsp.sp2 + 2),
             Expanded(
               child: MediaUploadTile(
-                label: 'والد کا شناختی کارڈ\nFather CNIC Document',
-                icon: Icons.badge_outlined,
+                label: 'والد کا شناختی کارڈ\nFather CNIC',
+                icon: GIcons.employee,
                 isDocument: true,
                 initialValue: _guardianCnicUrl,
                 onChanged: (val) => setState(() => _guardianCnicUrl = val),
               ),
             ),
-            const SizedBox(width: 10),
-
-            // B-Form / Birth Certificate
+            const SizedBox(width: Gsp.sp2 + 2),
             Expanded(
               child: MediaUploadTile(
-                label: 'ب فارم / برتھ سرٹیفکیٹ\nB-Form / Birth Certificate',
-                icon: Icons.description_outlined,
+                label: 'ب فارم / برتھ سرٹیفکیٹ\nB-Form / birth cert',
+                icon: GIcons.receiptLong,
                 isDocument: true,
                 initialValue: _bformUrl,
                 onChanged: (val) => setState(() => _bformUrl = val),
               ),
             ),
-          ],
-        ),
-
-        // Custom Additional Documents
-        if (_additionalDocuments.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Text(
-            'Custom Attached Documents / دیگر دستاویزات:',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate550)),
-          ),
-          const SizedBox(height: 6),
-          ..._additionalDocuments.asMap().entries.map((entry) {
-            final index = entry.key;
-            final doc = entry.value;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8.0),
-              child: Row(
-                children: [
+          ]),
+          if (_additionalDocuments.isNotEmpty) ...[
+            const SizedBox(height: Gsp.sp3),
+            Text('Additional documents / دیگر دستاویزات', style: GText.caption(c.textMuted)),
+            const SizedBox(height: Gsp.sp2),
+            for (final (index, doc) in _additionalDocuments.indexed)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Gsp.sp2),
+                child: Row(children: [
                   Expanded(
                     child: MediaUploadTile(
-                      label: doc['name'] ?? 'Custom Document',
-                      icon: Icons.file_present_rounded,
+                      label: doc['name'] ?? 'Custom document',
+                      icon: GIcons.layers,
                       isDocument: true,
                       initialValue: doc['url'],
-                      onChanged: (val) {
-                        setState(() {
-                          _additionalDocuments[index]['url'] = val ?? '';
-                        });
-                      },
+                      onChanged: (val) => setState(() => _additionalDocuments[index]['url'] = val ?? ''),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.delete_outline_rounded, color: SoftPalette.red400, size: 20),
-                    onPressed: () {
-                      setState(() {
-                        _additionalDocuments.removeAt(index);
-                      });
-                    },
+                    tooltip: 'Remove document',
+                    icon: Icon(GIcons.delete, color: c.danger, size: GIconSize.sm),
+                    onPressed: () => setState(() => _additionalDocuments.removeAt(index)),
                   ),
-                ],
+                ]),
               ),
-            );
-          }),
-        ],
-
-        const SizedBox(height: 10),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: context.adapt(SchoolTheme.primary),
-              side: BorderSide(color: context.adapt(SoftPalette.sky700)),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-            icon: const Icon(Icons.add_circle_outline_rounded, size: 16),
-            label: const Text(
-              '+ Add Custom Document (e.g. SLC, Medical, Degree) / دیگر دستاویز منسلک کریں',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-            ),
+          ],
+          const SizedBox(height: Gsp.sp2),
+          OutlinedButton.icon(
+            icon: const Icon(GIcons.add, size: 16),
+            label: const Text('Add custom document / دیگر دستاویز منسلک کریں'),
             onPressed: _addCustomDocumentDialog,
           ),
-        ),
-      ],
-    );
-  }
+        ],
+      );
 
-  // ── Parent Signature & Declaration Row ─────────────────────────────────────
-  Widget _buildParentSignatureRow() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Row(
-          children: [
-            Checkbox(
-              value: _parentSignatureConfirmed,
-              activeColor: SchoolTheme.primary,
-              onChanged: (v) => setState(() => _parentSignatureConfirmed = v ?? true),
-            ),
-            Text(
-              'Parent / Guardian Verified & Declared\n(تصدیق شدہ برائے والدین / سرپرست)',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate700)),
-            ),
-          ],
-        ),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(
-              'دستخط والدین',
-              textDirection: TextDirection.rtl,
-              style: GoogleFonts.notoSansArabic(fontSize: 15, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate900)),
-            ),
-            SizedBox(
-              width: 140,
-              child: Divider(color: context.adapt(SoftPalette.slate900), thickness: 1.5),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
+  Widget _buildParentSignatureRow(GComfortColors c) => Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Flexible(
+            child: Row(children: [
+              Checkbox(
+                value: _parentSignatureConfirmed,
+                onChanged: (v) => setState(() => _parentSignatureConfirmed = v ?? false),
+              ),
+              Flexible(
+                child: Text(
+                  'Parent / guardian verified & declared (تصدیق شدہ)',
+                  style: GText.body2Bold(c.textPrimary),
+                ),
+              ),
+            ]),
+          ),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Text('دستخط والدین', textDirection: TextDirection.rtl, style: GText.urdu(c.textPrimary, size: 15)),
+            SizedBox(width: 130, child: Divider(color: c.textPrimary, thickness: 1)),
+          ]),
+        ],
+      );
 }

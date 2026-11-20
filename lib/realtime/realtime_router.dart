@@ -30,6 +30,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
 
 import '../services/local_storage_service.dart';
+import '../services/master_proforma_service.dart';
 import '../services/pre_login_security_service.dart';
 import '../services/camp_session_service.dart';
 import '../services/sync_service.dart';
@@ -38,6 +39,9 @@ import '../services/donations_local_storage.dart';
 import '../services/donation_box_storage.dart';
 import '../models/donation_box_models.dart';
 import '../services/zkteco_network_service.dart';
+import '../services/stock/stock_ledger.dart';
+import '../services/stock/stock_pool.dart';
+import '../services/stock/stock_sync.dart';
 import '../pages/madrassa/utils/madrassa_local_storage.dart';
 import 'realtime_events.dart';
 import 'realtime_manager.dart';
@@ -379,8 +383,50 @@ Serial: ${data['serial'] ?? 'N/A'}
         await _handleDispenseCompleted(data, message);
         break;
 
+      // Old full-stock push (only sent by a retired server version): totals are never taken
+      // from another PC any more — stock moves only as movements (StockSync).
       case 'inventory_stock_sync':
-        await _handleInventoryStockSync(data, message);
+        break;
+
+      case 'stock_wipe':
+        // Server broadcast: wipe this pool from local Hive and reset the cache.
+        try {
+          final data = (message['data'] ?? const {}) as Map;
+          final poolKey = data['pool']?.toString() ?? '';
+          if (poolKey.isNotEmpty) {
+            await StockLedger.ensureOpen();
+            // Mark every local item in this pool as deleted
+            final items = StockLedger.items(pool: poolKey);
+            for (final item in items) {
+              final id = (item['medicineId'] ?? item['id'] ?? '').toString();
+              if (id.isNotEmpty) {
+                try { await StockLedger.markDeleted(poolKey, id); } catch (_) {}
+              }
+            }
+            // Clear movements for this pool
+            if (Hive.isBoxOpen(StockLedger.movesBoxName)) {
+              final movesBox = Hive.box(StockLedger.movesBoxName);
+              final toDelete = <dynamic>[];
+              for (final k in movesBox.keys) {
+                final v = movesBox.get(k);
+                if (v is Map && (v['pool'] ?? '').toString() == poolKey) toDelete.add(k);
+              }
+              await movesBox.deleteAll(toDelete);
+            }
+            StockLedger.resetCache();
+            debugPrint('[RealtimeRouter] stock_wipe applied for pool $poolKey');
+          }
+        } catch (e) {
+          debugPrint('[RealtimeRouter] stock_wipe handler error: $e');
+        }
+        break;
+
+      case StockSync.evMoves:
+      case StockSync.evSnapshot:
+      case StockSync.evDetails:
+      case StockSync.evChecksum:
+      case StockSync.evDriftReport:
+        await StockSync.handle(type, message);
         break;
 
       case RealtimeEvents.saveEmployee:
@@ -900,11 +946,6 @@ Serial: ${data['serial'] ?? 'N/A'}
       }
     }
 
-    // Stock is deducted once per token per PC: catch-ups replay every dispense of the day
-    // every few minutes, and each replay used to deduct the medicines again.
-    final wasAlreadyDispensed = existing is Map &&
-        (existing['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
-
     if (existing != null) {
       final updated = Map<String, dynamic>.from(existing);
       updated['dispenseStatus'] = 'dispensed';
@@ -986,74 +1027,15 @@ Serial: ${data['serial'] ?? 'N/A'}
       }
     } catch (_) {}
 
-    // Deduct stock locally on peer PCs if deductedBatches or medicines list was provided
-    final deductedBatches = data['deductedBatches'];
-    final medicines = data['medicines'];
-    final isReplay = fullMessage['_serverPush'] == true || fullMessage['isCatchUp'] == true ||
-        fullMessage['_isReplay'] == true || fullMessage['_resent'] == true;
-    if (!wasAlreadyDispensed && !isReplay && Hive.isBoxOpen(LocalStorageService.stockBox)) {
-      try {
-        if (deductedBatches is List && deductedBatches.isNotEmpty) {
-          for (final b in deductedBatches) {
-            if (b is! Map) continue;
-            final medId = (b['medicineId'] ?? b['inventoryId'] ?? b['id'] ?? '').toString().trim();
-            final rawDelta = b['delta'];
-            final delta = rawDelta is num
-                ? rawDelta.toDouble()
-                : double.tryParse(rawDelta?.toString() ?? '') ?? 0.0;
-            if (medId.isNotEmpty && delta != 0) {
-              LocalStorageService.updateLocalStockQuantity(medId, delta);
-            }
-          }
-        } else if (medicines is List && medicines.isNotEmpty) {
-          final stockBox = Hive.box(LocalStorageService.stockBox);
-          final days = (data['daysOfMedicine'] is num)
-              ? (data['daysOfMedicine'] as num).toInt()
-              : (int.tryParse(data['daysOfMedicine']?.toString() ?? '1') ?? 1);
-          for (final m in medicines) {
-            if (m is! Map) continue;
-            final medId = (m['inventoryId'] ?? m['medicineId'] ?? m['id'] ?? '').toString().trim();
-            final perDayRaw = m['quantity'] ?? m['qty'] ?? 0;
-            final perDay = perDayRaw is num ? perDayRaw.toDouble() : double.tryParse(perDayRaw.toString()) ?? 0.0;
-            if (medId.isEmpty || perDay <= 0) continue;
-            final medType = (m['type'] ?? '').toString().toLowerCase().trim();
-            final medName = (m['name'] ?? '').toString().toLowerCase().trim();
-            final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
-                medName.contains('syp') || medName.contains('syrup');
-            final isInj = medType.contains('inj') || medType.contains('drip') || medType.contains('infusion') ||
-                medType == 'iv' || medType == 'i.v' || medType == 'im' || medType == 'i.m' ||
-                medName.startsWith('inj');
-            final qtyDeduct = isSyrup ? 1.0 : (isInj ? perDay : perDay * days);
-
-            dynamic stockKey = 'stock:$medId';
-            var item = stockBox.get(stockKey) ?? stockBox.get(medId);
-            if (item == null && medName.isNotEmpty) {
-              for (final sk in stockBox.keys) {
-                final sv = stockBox.get(sk);
-                if (sv is Map && (sv['name']?.toString().toLowerCase().trim() == medName)) {
-                  item = sv;
-                  stockKey = sk;
-                  break;
-                }
-              }
-            }
-            if (item is Map) {
-              final uItem = Map<String, dynamic>.from(item);
-              final curQ = (uItem['quantity'] as num?)?.toDouble() ?? 0.0;
-              uItem['quantity'] = (curQ - qtyDeduct).clamp(0.0, double.infinity);
-              uItem['updatedAt'] = DateTime.now().toIso8601String();
-              await stockBox.put(stockKey, uItem);
-              final rawId = (uItem['id'] ?? uItem['medicineId'] ?? uItem['docId'] ?? medId).toString().trim();
-              if (rawId.isNotEmpty) {
-                final peerKey = stockKey.toString().startsWith('stock:') ? rawId : 'stock:$rawId';
-                if (stockBox.containsKey(peerKey)) {
-                  await stockBox.put(peerKey, uItem);
-                }
-              }
-            }
-          }
-        }
-      } catch (_) {}
+    // Stock: the dispensing PC sends the exact movements it made (each with its own id), so
+    // applying them here — even twice, or after a catch-up — takes the stock exactly once.
+    // A dispense from an older app version (deductedBatches only) is turned into movements
+    // with ids derived from the token, so its resend is also counted once.
+    try {
+      final moves = StockSync.movesOfDispense(data, fullMessage);
+      if (moves.isNotEmpty) await StockSync.applyIncoming(moves);
+    } catch (e) {
+      if (kDebugMode) print('[Router] dispense stock movements failed: $e');
     }
 
     // [P2] Enqueue serial status patch for direct Firestore upload.
@@ -1110,48 +1092,6 @@ Serial: ${data['serial'] ?? 'N/A'}
     }
   }
 
-  static Future<void> _handleInventoryStockSync(
-    dynamic data,
-    Map<String, dynamic> fullMessage,
-  ) async {
-    try {
-      List items = [];
-      if (data is List) {
-        items = data;
-      } else if (data is Map && data['data'] is List) {
-        items = data['data'] as List;
-      } else if (data is Map && data['items'] is List) {
-        items = data['items'] as List;
-      }
-
-      if (items.isEmpty) return;
-
-      if (!Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
-      }
-      final batchMap = <dynamic, dynamic>{};
-      for (final raw in items) {
-        if (raw is! Map) continue;
-        final item = Map<String, dynamic>.from(raw);
-        final medId = (item['id'] ?? item['medicineId'] ?? item['docId'])?.toString().trim();
-        if (medId == null || medId.isEmpty) continue;
-        batchMap['stock:$medId'] = item;
-        batchMap[medId] = item;
-      }
-
-      if (batchMap.isNotEmpty) {
-        final box = Hive.box(LocalStorageService.stockBox);
-        await box.putAll(batchMap);
-      }
-
-      if (kDebugMode) {
-        print('✅ INVENTORY STOCK SYNC: Received and merged ${items.length} items from LAN Server');
-      }
-    } catch (e) {
-      if (kDebugMode) print('❌ Error handling inventory_stock_sync: $e');
-    }
-  }
-
   // ── INVENTORY: handle incoming stock update from another LAN device ──────────
   //
   // Two sub-cases:
@@ -1191,96 +1131,42 @@ Serial: ${data['serial'] ?? 'N/A'}
     Map<String, dynamic> data,
     Map<String, dynamic> fullMessage,
   ) async {
-    final branchId = (fullMessage['branchId']?.toString() ??
-                     data['branchId']?.toString() ??
-                     '').toLowerCase().trim();
-
-    final medicineId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim();
-
-    if (medicineId == null || medicineId.isEmpty) {
-      if (kDebugMode) print('❌ save_stock_item missing medicineId');
-      return;
-    }
-
-    await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
-
-    // Check whether this is a quantity-only delta update or a full item save
-    final rawDelta = data['_quantityDelta'];
-    // A catch-up / replayed copy is a snapshot of the item (its quantity already includes the
-    // delta), never "+N again": applying it as a delta added the same restock to this desk's
-    // stock on every reconnect.
-    final isReplayCopy = fullMessage['isCatchUp'] == true ||
-        fullMessage['_isReplay'] == true ||
-        fullMessage['_serverPush'] == true ||
-        fullMessage['_resent'] == true;
-    final bool isDelta = rawDelta != null && !isReplayCopy;
-
-    final enrichedData = Map<String, dynamic>.from(data)..remove('_quantityDelta');
-    if (branchId.isNotEmpty) {
-      enrichedData['branchId'] ??= branchId;
-    }
-
-    if (isDelta) {
-      // ── Case (b): add-stock delta ── applied once per operation, also across restarts
-      final opId = (data['_opId'] ?? fullMessage['_messageId'] ?? '').toString();
-      if (opId.isNotEmpty && await stockOpAlreadyApplied(opId)) {
-        if (kDebugMode) print('↩️ Stock delta $opId already applied — skipped');
-        return;
-      }
-      final delta = rawDelta is num
-          ? rawDelta.toDouble()
-          : double.tryParse(rawDelta.toString()) ?? 0.0;
-
-      final existing = LocalStorageService.getLocalInventoryItem(medicineId);
-      if (existing != null) {
-        if (delta != 0) {
-          await LocalStorageService.updateLocalStockQuantity(medicineId, delta);
-        }
-        if (opId.isNotEmpty) await markStockOpApplied(opId);
-      } else {
-        // If this machine does not have the medicine yet, save full record with new quantity!
-        LocalStorageService.saveLocalInventoryItem(enrichedData);
-        if (opId.isNotEmpty) await markStockOpApplied(opId);
-      }
-      if (kDebugMode) {
-        print('✅ STOCK DELTA applied via LAN → $medicineId +$delta');
-      }
-    } else {
-      // ── Case (a): full item (new registration or full replacement) ──
-      LocalStorageService.saveLocalInventoryItem(enrichedData);
-      if (kDebugMode) {
-        print('✅ INVENTORY ITEM saved via LAN → $medicineId');
-      }
-
-      // Enqueue Firestore sync for this registration (offline resilience)
-      if (fullMessage['_serverPush'] != true && branchId.isNotEmpty) {
-        await _queueLanCopy({
-          'type':     'register_medicine',
-          'branchId': branchId,
-          'data':     enrichedData,
-        });
-        if (kDebugMode) print('[Router] Enqueued register_medicine for Firestore sync');
-      }
-    }
+    // Only older app versions still send this (new ones send stock_moves / stock_details).
+    // A full item updates details only; a restock delta becomes one movement, once.
+    await StockSync.handleLegacyStockItem(data, fullMessage);
   }
 
   static Future<void> _handleDeleteStockItem(Map<String, dynamic> data) async {
     final medicineId = (data['id'] ?? data['medicineId'])?.toString().trim();
-    if (medicineId != null && medicineId.isNotEmpty) {
-      await LocalStorageService.deleteLocalStockItem(medicineId);
-      if (kDebugMode) print('✅ STOCK ITEM DELETED via LAN → $medicineId');
-    }
+    if (medicineId == null || medicineId.isEmpty) return;
+    final pool = StockPool.fromKey(data['pool']?.toString()) ?? StockPool.ofLegacyRecord(data);
+    if (pool == null) return;
+    await StockLedger.markDeleted(pool.key, medicineId);
+    if (kDebugMode) print('✅ STOCK ITEM DELETED via LAN → ${pool.key}|$medicineId');
   }
 
   static Future<void> _handleProformaEvent(Map<String, dynamic> data) async {
     try {
-      final code = (data['code'] ?? data['barcode'] ?? '').toString().trim();
+      final code = (data['code'] ?? data['itemCode'] ?? data['barcode'] ?? '').toString().trim();
       if (code.isEmpty) return;
       if (!Hive.isBoxOpen(LocalStorageService.masterProformaBox)) {
         await Hive.openBox(LocalStorageService.masterProformaBox);
       }
       final box = Hive.box(LocalStorageService.masterProformaBox);
       final item = Map<String, dynamic>.from(data);
+      item['code'] = code;
+      item['itemCode'] = (item['itemCode'] ?? code).toString().trim();
+      final rawBar = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+      final normBar = MasterProformaService.normalizeProformaBarcode(rawBar);
+      if (normBar != null) {
+        item['barcode'] = normBar;
+        item['rollNo'] = normBar;
+      } else if (rawBar.isNotEmpty &&
+          !rawBar.startsWith('MED-') &&
+          !rawBar.startsWith('EQUIP-') &&
+          (item['packBarcode'] == null || item['packBarcode'].toString().trim().isEmpty)) {
+        item['packBarcode'] = rawBar;
+      }
       item['isProformaMaster'] = true;
       await box.put('proforma:$code', LocalStorageService.sanitize(item));
       if (kDebugMode) print('✅ Master Proforma item saved via LAN → $code');

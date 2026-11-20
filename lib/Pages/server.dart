@@ -53,6 +53,10 @@ import '../config/constants.dart';
 import '../utils/network_utils.dart';
 import '../services/auth_service.dart';
 import '../services/local_storage_service.dart';
+import '../services/stock/stock_ledger.dart';
+import '../services/stock/stock_pool.dart';
+import '../services/stock/stock_sync.dart';
+import '../services/master_proforma_service.dart';
 import '../services/camp_session_service.dart';
 import '../utils/branch_labels.dart';
 import '../widgets/department_activity_widget.dart';
@@ -75,7 +79,6 @@ import '../services/donations_local_storage.dart';
 import 'madrassa/utils/madrassa_local_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../services/sync_service.dart';
-import '../services/stock_floor.dart';
 import '../services/pre_login_security_service.dart';
 import '../services/quota_service.dart';
 import '../services/cloud/cloud_db.dart';
@@ -85,9 +88,6 @@ import '../main.dart' show AuthHomeWrapper;
 import 'login_page.dart';
 import '../constants/navigator_key.dart';
 import '../services/offline_auth_service.dart';
-import '../services/hourly_dispensary_sync.dart';
-import '../realtime/realtime_manager.dart';
-import '../realtime/realtime_router.dart' show RealtimeRouter;
 import '../widgets/nexus_server_dashboard/nexus_colors.dart';
 import '../widgets/nexus_server_dashboard/nexus_performance_chart.dart';
 import '../widgets/nexus_server_dashboard/nexus_devices_table.dart';
@@ -1798,6 +1798,7 @@ exit 0
                       },
                       onCatchUp: _isRunning ? _triggerCatchUpAndFixMismatch : null,
                       onCloudSync: _isOnline ? _manualSync : null,
+                      onOpenQueueDialog: _showQueueManagementDialog,
                       adminName: 'Server Control Panel',
                       branchDisplay: _resolveBranchAndCampDisplay(),
                       onLocationTap: _showServerLocationDialog,
@@ -1950,6 +1951,8 @@ exit 0
       final purged = await LocalStorageService.purgeBloatedSyncQueue(force: true);
       final flattened = await LocalStorageService.healNestedPrescriptions();
       final healed = await LocalStorageService.healAndRestorePatientCnics(_serverBranch, true);
+      // Older CNICs saved as 13 digits are rewritten with dashes (no-op once done).
+      await LocalStorageService.migrateCnicsToDashedFormat(force: true);
       await LocalStorageService.compactBloatedBoxes();
       if (mounted) {
         setState(() {
@@ -2073,6 +2076,7 @@ exit 0
 
   Widget _buildNexusSettingsView() {
     return NexusSettingsView(
+      branchId: _serverBranch,
       multiServerControl: MultiServerControlWidget(
         branchId: _serverBranch,
         onTriggerSync: _manualSync,
@@ -5656,6 +5660,17 @@ class ServerSyncManager {
     };
 
     server.onMessageReceived = _handleIncomingMessage;
+    // Stock book: the server applies desks' stock movements, uploads them, follows the cloud
+    // and passes new confirmed figures to the desks.
+    StockSync.serverBroadcast = (payload) {
+      try {
+        server.broadcast(jsonEncode(payload));
+      } catch (e) {
+        debugPrint('[SSM] stock broadcast failed: $e');
+      }
+    };
+    StockSync.serverSendTo = _sendToSocket;
+    unawaited(StockSync.start(branchId: branchId));
     // Desk messages are ACKed (and leave the desk's outbox) only from here on.
     server.persistenceReady = true;
 
@@ -5725,6 +5740,16 @@ class ServerSyncManager {
       if (serial.isNotEmpty) _markSerialChanged(serial, senderSocketId: message['_socketId']?.toString());
     }
     await onMessageReceived(message);
+
+    // ── Stock book messages: applied once by id; uploaded by StockSync, never queued here ──
+    if (eventType == StockSync.evMoves ||
+        eventType == StockSync.evDetails ||
+        eventType == StockSync.evChecksum ||
+        eventType == StockSync.evDriftReport ||
+        eventType == StockSync.evSnapshot) {
+      await StockSync.handle(eventType, message);
+      return;
+    }
 
         // ── Handle catch-up / ACK events (do NOT queue for Firestore) ────────────
     if (eventType == 'ack_serials') {
@@ -6176,60 +6201,13 @@ class ServerSyncManager {
               rethrow;
             }
 
-            // Deduct dispensed stock from the LAN server's own stockBox (unless this PC itself was the sender,
-            // in which case PatientForm already deducted from stockBox locally).
+            // Stock: apply the dispensing PC's movements (once by id, also when this PC sent
+            // them itself) and let StockSync upload them. Older versions: see movesOfDispense.
             try {
-              final senderClientId = message['_clientId']?.toString() ?? '';
-              final myClientId = RealtimeManager().clientId ?? '';
-              final isFromSelf = senderClientId.isNotEmpty && myClientId.isNotEmpty && senderClientId == myClientId;
-              final localClaimKey = (entryUid != null && entryUid.isNotEmpty)
-                  ? 'srv_local_stock_${normBranch}_${normSerialUpper}_$entryUid'
-                  : 'srv_local_stock_${normBranch}_$normSerialUpper';
-              if (!isFromSelf &&
-                  Hive.isBoxOpen(LocalStorageService.stockBox) &&
-                  HourlyDispensarySync.claimStockDeduction(localClaimKey)) {
-                final deductedBatches = data['deductedBatches'];
-                if (deductedBatches is List && deductedBatches.isNotEmpty) {
-                  for (final b in deductedBatches) {
-                    if (b is! Map) continue;
-                    final medId = (b['medicineId'] ?? b['inventoryId'] ?? b['id'] ?? '').toString().trim();
-                    final rawDelta = b['delta'];
-                    final delta = rawDelta is num
-                        ? rawDelta.toDouble()
-                        : double.tryParse(rawDelta?.toString() ?? '') ?? 0.0;
-                    if (medId.isNotEmpty && delta != 0) {
-                      LocalStorageService.updateLocalStockQuantity(medId, delta);
-                    }
-                  }
-                } else {
-                  final medicines = data['medicines'];
-                  final days = (data['daysOfMedicine'] is num)
-                      ? (data['daysOfMedicine'] as num).toInt()
-                      : (int.tryParse(data['daysOfMedicine']?.toString() ?? '1') ?? 1);
-                  if (medicines is List && medicines.isNotEmpty) {
-                    for (final m in medicines) {
-                      if (m is! Map) continue;
-                      final medId = (m['inventoryId'] ?? m['medicineId'] ?? m['id'] ?? '').toString().trim();
-                      final perDayRaw = m['quantity'] ?? m['qty'] ?? 0;
-                      final perDay = perDayRaw is num
-                          ? perDayRaw.toDouble()
-                          : double.tryParse(perDayRaw.toString()) ?? 0.0;
-                      if (medId.isEmpty || perDay <= 0) continue;
-                      final medType = (m['type'] ?? '').toString().toLowerCase().trim();
-                      final medName = (m['name'] ?? m['medicineName'] ?? '').toString().toLowerCase().trim();
-                      final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
-                          medName.contains('syp') || medName.contains('syrup');
-                      final isInj = medType.contains('inj') || medType.contains('drip') || medType.contains('infusion') ||
-                          medType == 'iv' || medType == 'i.v' || medType == 'im' || medType == 'i.m' ||
-                          medName.startsWith('inj');
-                      final qtyDeduct = isSyrup ? 1.0 : (isInj ? perDay : perDay * days);
-                      LocalStorageService.updateLocalStockQuantity(medId, -qtyDeduct);
-                    }
-                  }
-                }
-              }
+              final moves = StockSync.movesOfDispense(data, message);
+              if (moves.isNotEmpty) await StockSync.applyIncoming(moves);
             } catch (e) {
-              debugPrint('[SSM] Server local stock deduction warning: $e');
+              debugPrint('[SSM] dispense stock movements failed: $e');
             }
 
             // ── DIRECT CLOUD SYNC & ENQUEUE ON SERVER ──
@@ -6371,43 +6349,14 @@ class ServerSyncManager {
         case 'medicine_registered':
         case 'add_proforma_stock':
         case 'add_stock':
+          // Only older app versions send these now. A restock delta becomes one movement
+          // (once per operation id); a full item updates details only, never the quantity.
           try {
-            final medData = data['data'] is Map
-                ? Map<String, dynamic>.from(data['data'] as Map)
-                : data;
-            final rawDelta = data['_quantityDelta'] ?? medData['_quantityDelta'];
-            final medId = (medData['id'] ?? medData['medicineId'] ?? medData['docId'])?.toString().trim();
-            // Never store the delta inside the item: a stored _quantityDelta was later pushed to
-            // desks with the item and applied again there.
-            medData.remove('_quantityDelta');
-            if (medId != null && medId.isNotEmpty) {
-              medData['branchId'] ??= msgBranch;
-              medData['id'] ??= medId;
-              medData['medicineId'] ??= medId;
-              medData['docId'] ??= medId;
-              if (rawDelta != null) {
-                // Once per operation, also after a server restart (the in-memory message
-                // dedupe is lost then and the desk's resend was applied a second time).
-                final opId = (data['_opId'] ?? medData['_opId'] ?? message['_messageId'] ?? '').toString();
-                if (opId.isNotEmpty && await RealtimeRouter.stockOpAlreadyApplied(opId)) {
-                  debugPrint('[SSM] Stock delta $opId already applied — skipped');
-                  break;
-                }
-                final delta = rawDelta is num ? rawDelta.toDouble() : double.tryParse(rawDelta.toString()) ?? 0.0;
-                final existing = LocalStorageService.getLocalInventoryItem(medId);
-                if (existing != null && delta != 0) {
-                  LocalStorageService.updateLocalStockQuantity(medId, delta);
-                } else {
-                  LocalStorageService.saveLocalInventoryItem(medData);
-                }
-                if (opId.isNotEmpty) await RealtimeRouter.markStockOpApplied(opId);
-              } else {
-                LocalStorageService.saveLocalInventoryItem(medData);
-              }
-              debugPrint('[SSM] ✅ Stock item saved locally on server: $medId');
-            }
+            final msg = Map<String, dynamic>.from(message);
+            msg['branchId'] ??= msgBranch;
+            await StockSync.handleLegacyStockItem(data, msg);
           } catch (e) {
-            debugPrint('[SSM] save_stock_item local save error: $e');
+            debugPrint('[SSM] save_stock_item (older version) error: $e');
           }
           break;
 
@@ -6415,8 +6364,10 @@ class ServerSyncManager {
           try {
             final medId = (data['id'] ?? data['medicineId'] ?? data['docId'])?.toString().trim();
             if (medId != null && medId.isNotEmpty) {
-              LocalStorageService.deleteLocalStockItem(medId);
-              debugPrint('[SSM] ✅ Stock item deleted locally on server: $medId');
+              final pool = StockPool.fromKey(data['pool']?.toString()) ??
+                  StockPool.ofLegacyRecord({...data, 'branchId': data['branchId'] ?? msgBranch});
+              if (pool != null) await StockLedger.markDeleted(pool.key, medId);
+              debugPrint('[SSM] ✅ Stock item hidden on server: $medId');
             }
           } catch (e) {
             debugPrint('[SSM] delete_stock_item local error: $e');
@@ -6545,13 +6496,26 @@ class ServerSyncManager {
         case 'save_proforma_item':
         case 'proforma_item_updated':
           try {
-            final code = (data['code'] ?? data['barcode'] ?? '').toString().trim();
+            final code = (data['code'] ?? data['itemCode'] ?? data['barcode'] ?? '').toString().trim();
             if (code.isNotEmpty) {
               if (!Hive.isBoxOpen(LocalStorageService.masterProformaBox)) {
                 await Hive.openBox(LocalStorageService.masterProformaBox);
               }
               final box = Hive.box(LocalStorageService.masterProformaBox);
               final item = Map<String, dynamic>.from(data);
+              item['code'] = code;
+              item['itemCode'] = (item['itemCode'] ?? code).toString().trim();
+              final rawBar = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+              final normBar = MasterProformaService.normalizeProformaBarcode(rawBar);
+              if (normBar != null) {
+                item['barcode'] = normBar;
+                item['rollNo'] = normBar;
+              } else if (rawBar.isNotEmpty &&
+                  !rawBar.startsWith('MED-') &&
+                  !rawBar.startsWith('EQUIP-') &&
+                  (item['packBarcode'] == null || item['packBarcode'].toString().trim().isEmpty)) {
+                item['packBarcode'] = rawBar;
+              }
               item['isProformaMaster'] = true;
               await box.put('proforma:$code', LocalStorageService.sanitize(item));
               debugPrint('[SSM] ✅ Master Proforma item saved locally on server: $code');
@@ -7369,114 +7333,8 @@ class ServerSyncManager {
           'sync_${DateTime.now().millisecondsSinceEpoch}_$eventType';
 
       if (eventType == 'dispense_completed') {
-        final data = (message['data'] as Map<String, dynamic>?) ??
-            Map<String, dynamic>.from(message);
-
-        final serial = (data['serial']?.toString() ?? '').trim().toUpperCase();
-        final bId = LocalStorageService.sanitizeBranchId((data['branchId'] as String?)?.trim() ?? branchId);
-        final entryUid = (data['entryUid'] ?? message['entryUid'])?.toString().trim();
-
-        if (serial.isNotEmpty) {
-          final deductedBatches = data['deductedBatches'];
-          if (deductedBatches is List && deductedBatches.isNotEmpty) {
-            for (int i = 0; i < deductedBatches.length; i++) {
-              final b = deductedBatches[i];
-              if (b is! Map) continue;
-              final bMap = Map<String, dynamic>.from(b);
-              final medicineId = (bMap['medicineId'] ?? bMap['inventoryId'] ?? bMap['id'] ?? '').toString().trim();
-              final rawDelta = bMap['delta'];
-              final delta = rawDelta is num
-                  ? rawDelta.toDouble()
-                  : double.tryParse(rawDelta?.toString() ?? '') ?? 0.0;
-              if (medicineId.isEmpty || delta == 0) continue;
-
-              final invKey = (entryUid != null && entryUid.isNotEmpty)
-                  ? 'sync_dispense_${bId}_${serial}_${entryUid}_inv_${medicineId.toLowerCase()}'
-                  : 'sync_dispense_${bId}_${serial}_inv_${medicineId.toLowerCase()}';
-              if (!HourlyDispensarySync.claimStockDeduction(invKey)) continue;
-              box.put(invKey, {
-                'type': 'update_inventory',
-                'branchId': bId,
-                'medicineId': medicineId,
-                'inventoryId': medicineId,
-                'delta': delta,
-                'serial': serial,
-                'campId': bMap['campId'] ?? data['campId'] ?? data['dispensaryId'],
-                'dispensaryId': bMap['dispensaryId'] ?? data['dispensaryId'] ?? data['campId'],
-                'data': {
-                  'medicineId': medicineId,
-                  'medicineName': bMap['name'] ?? bMap['medicineName'] ?? '',
-                  'delta': delta,
-                  'serial': serial,
-                  'campId': bMap['campId'] ?? data['campId'] ?? data['dispensaryId'],
-                  'dispensedAt': data['dispensedAt'] ?? DateTime.now().toIso8601String(),
-                  'dispensedBy': data['dispensedBy'] ?? '',
-                },
-                'createdAt': DateTime.now().toIso8601String(),
-                'attempts': 0,
-                'status': 'pending',
-              });
-            }
-          } else {
-            final medicines = data['medicines'];
-            final days = (data['daysOfMedicine'] is num)
-                ? (data['daysOfMedicine'] as num).toInt()
-                : (int.tryParse(data['daysOfMedicine']?.toString() ?? '1') ?? 1);
-            if (medicines is List && medicines.isNotEmpty) {
-              for (int i = 0; i < medicines.length; i++) {
-                final med = medicines[i];
-                if (med is! Map) continue;
-                final medMap = Map<String, dynamic>.from(med);
-                final medicineId = (medMap['inventoryId'] ?? medMap['medicineId'] ?? medMap['id'] ??
-                        medMap['stockItemId'] ?? '').toString().trim();
-                final qty = medMap['quantity'] ?? medMap['qty'] ?? 0;
-                final perDay = qty is num
-                    ? qty.toDouble()
-                    : double.tryParse(qty.toString()) ?? 0.0;
-                if (medicineId.isEmpty || perDay <= 0) continue;
-
-                final medType = (medMap['type'] ?? '').toString().toLowerCase().trim();
-                final medName = (medMap['medicineName'] ?? medMap['name'] ?? '').toString().toLowerCase().trim();
-                final isSyrup = medType.contains('syrup') || medType.contains('syp') || medType.contains('susp') ||
-                    medName.contains('syp') || medName.contains('syrup');
-                final isInj = medType.contains('inj') || medType.contains('drip') || medType.contains('infusion') ||
-                    medType == 'iv' || medType == 'i.v' || medType == 'im' || medType == 'i.m' ||
-                    medName.startsWith('inj');
-                final qtyNum = isSyrup ? 1.0 : (isInj ? perDay : perDay * days);
-
-                final invKey = (entryUid != null && entryUid.isNotEmpty)
-                    ? 'sync_dispense_${bId}_${serial}_${entryUid}_inv_${medicineId.toLowerCase()}'
-                    : 'sync_dispense_${bId}_${serial}_inv_${medicineId.toLowerCase()}';
-                // A dispense reaches the server again when a client re-sends it (its outbox keeps
-                // messages until the server confirms them) or replays it after a restart. Stock
-                // changes are increments, so each dispense line may only ever be queued once.
-                if (!HourlyDispensarySync.claimStockDeduction(invKey)) continue;
-                box.put(invKey, {
-                  'type':       'update_inventory',
-                  'branchId':   bId,
-                  'medicineId': medicineId,
-                  'inventoryId': medicineId,
-                  'delta':      -qtyNum,
-                  'serial':     serial,
-                  'campId':     data['campId'] ?? data['dispensaryId'],
-                  'data': {
-                    'medicineId':   medicineId,
-                    'medicineName': medMap['medicineName'] ?? medMap['name'] ?? '',
-                    'delta':        -qtyNum,
-                    'serial':       serial,
-                    'campId':       data['campId'] ?? data['dispensaryId'],
-                    'dispensedAt':  data['dispensedAt'] ?? DateTime.now().toIso8601String(),
-                    'dispensedBy':  data['dispensedBy'] ?? '',
-                  },
-                  'createdAt': DateTime.now().toIso8601String(),
-                  'attempts':  0,
-                  'status':    'pending',
-                });
-              }
-            }
-          }
-        }
-        unawaited(triggerSync(urgent: true));
+        // Stock for a dispense travels as stock movements (StockSync uploads them once by id);
+        // the dispense status itself is queued in _saveToLocalHive.
         return;
       }
 
@@ -7552,38 +7410,12 @@ class ServerSyncManager {
             (rawB != null && rawB.isNotEmpty) ? rawB : branchId);
 
         if (medicineId != null && medicineId.isNotEmpty) {
-          if (rawDelta != null) {
-            final delta = rawDelta is num
-                ? rawDelta.toDouble()
-                : double.tryParse(rawDelta.toString()) ?? 0.0;
-            if (delta != 0) {
-              // [A3] Replay-safe deterministic key instead of random microseconds timestamp
-              // The message id first: it is unique per restock. Falling back to dateKey made two
-              // restocks of one medicine on the same day share a key, so the second replaced
-              // the first in the cloud queue and one restock never reached Firestore.
-              final txId = (data['_opId'] ?? data['txId'] ?? message['_messageId'] ?? data['requestId'] ?? message['requestId'] ?? message['id'] ?? data['batchId'] ?? data['dateKey'] ?? data['createdAt'])?.toString().trim();
-              final invKey = (txId != null && txId.isNotEmpty)
-                  ? 'sync_stock_delta_${bId}_${medicineId}_$txId'
-                  : 'sync_stock_delta_${bId}_${medicineId}_${DateTime.now().millisecondsSinceEpoch}';
-              box.put(invKey, {
-                'type': 'update_inventory',
-                'branchId': bId,
-                'medicineId': medicineId,
-                'delta': delta,
-                'campId': data['campId'],
-                'dispensaryId': data['dispensaryId'],
-                'data': {
-                  'medicineId': medicineId,
-                  'delta': delta,
-                  'campId': data['campId'],
-                  'dispensaryId': data['dispensaryId'],
-                },
-                'createdAt': DateTime.now().toIso8601String(),
-                'attempts': 0,
-                'status': 'pending',
-              });
-            }
-          } else {
+          // Older-version restock deltas are movements now (StockSync uploads them once by id);
+          // only details (never a quantity) are queued for the cloud here.
+          if (rawDelta == null) {
+            data.remove('quantity');
+            data.remove('quantityRaw');
+            data.remove('stock');
             box.put('sync_stock_full_${bId}_$medicineId', {
               'type': 'register_medicine',
               'branchId': bId,
@@ -9248,17 +9080,11 @@ class ServerSyncManager {
         if (batch != null) {
           batch.set(docRef, incData, SetOptions(merge: true));
           if (markerRef != null) batch.set(markerRef, markerData);
-          // Floor at 0 once the batch has landed (the repair needs the committed value).
-          if (d < 0) {
-            postCommitCallbacks?.add(() async => unawaited(StockFloor.repair(docRef.path)));
-          }
         } else {
           final b = db.batch();
           b.set(docRef, incData, SetOptions(merge: true));
           if (markerRef != null) b.set(markerRef, markerData);
           await b.commit();
-          // A deduction larger than the cloud quantity would leave it negative; floor it at 0.
-          if (d < 0) unawaited(StockFloor.repair(docRef.path));
         }
         debugPrint('✅ update_inventory → $invCol/$mid delta=$d');
         break;
@@ -9280,10 +9106,21 @@ class ServerSyncManager {
           campId: cleanData['campId']?.toString() ?? cleanData['dispensaryId']?.toString(),
           serial: cleanData['serial']?.toString(),
         );
+        // Details only: a quantity here would overwrite every other PC's dispenses and
+        // restocks. Quantity changes reach the cloud only as stock movements (StockCloud).
+        final detailsOnly = Map<String, dynamic>.from(cleanData)
+          ..remove('quantity')
+          ..remove('quantityRaw')
+          ..remove('stock')
+          ..remove('base')
+          ..remove('rev')
+          ..remove('baseOps')
+          ..remove('lastOps')
+          ..remove('_quantityDelta');
         await setDoc(db
             .collection('branches').doc(effectiveBranchId)
-            .collection(invCol2).doc(mid2), cleanData);
-        debugPrint('✅ register_medicine → $invCol2/$mid2 (absolute set/merge, no increment)');
+            .collection(invCol2).doc(mid2), detailsOnly);
+        debugPrint('✅ register_medicine → $invCol2/$mid2 (details only)');
         break;
 
       case 'delete_stock_item':

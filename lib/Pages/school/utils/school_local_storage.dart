@@ -1,18 +1,24 @@
 // lib/pages/school/utils/school_local_storage.dart
+//
+// School storage facade used by the School screens. Since the School ERP
+// Phase 0 (2026-11-14) every read and write goes through `core/school_store.dart`:
+//  * one branch rule (SchoolBranchId) for every key and path,
+//  * saves stamp `lastModified`, write Hive, queue the upload and return at
+//    once (no more 20–30 s freezes offline),
+//  * reads find records stored under branch aliases.
+// The public method names are unchanged so existing screens keep working.
+// This file no longer imports any madrassa code.
 
 import 'dart:async';
 import 'dart:convert';
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:gmwf/services/cloud/cloud_db.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
+
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:collection/collection.dart';
+
 import '../../../services/image_upload_service.dart';
 import '../../../services/local_storage_service.dart';
-import '../../../services/network_health_service.dart';
-import '../../../services/sync_service.dart';
-import '../../madrassa/utils/madrassa_local_storage.dart';
+import '../core/school_branch_id.dart';
+import '../core/school_ids.dart';
+import '../core/school_store.dart';
 
 class SchoolLocalStorage {
   static const String studentsBox  = LocalStorageService.schoolStudentsBox;
@@ -43,10 +49,9 @@ class SchoolLocalStorage {
         await LocalStorageService.openBoxSafe(name);
       }
     }
-    unawaited(MadrassaLocalStorage.healPoisonedMadrassaSyncQueue());
   }
 
-  static String normalizeBranch(String branchId) => MadrassaLocalStorage.normalizeBranch(branchId);
+  static String normalizeBranch(String branchId) => SchoolBranchId.normalize(branchId);
 
   static const Map<String, List<String>> _mediaAliases = {
     'photoUrl': ['photoBase64', 'studentPhotoBase64'],
@@ -175,14 +180,6 @@ class SchoolLocalStorage {
     return out;
   }
 
-  static Box _getStudentsBox()  => Hive.box(studentsBox);
-  static Box _getLogsBox()      => Hive.box(logsBox);
-  static Box _getTeachersBox()  => Hive.box(teachersBox);
-  static Box _getBooksBox()     => Hive.box(booksBox);
-  static Box _getBookLoansBox() => Hive.box(bookLoansBox);
-
-  static const DeepCollectionEquality _deepEq = DeepCollectionEquality();
-
   // ── Sync Metadata ──────────────────────────────────────────────────────────
   static String? getLastSchoolSyncTimestamp() {
     if (!Hive.isBoxOpen(LocalStorageService.syncMetaBox)) return null;
@@ -197,461 +194,270 @@ class SchoolLocalStorage {
     await box.flush();
   }
 
-  // ── Sanitization helpers for Hive ───────────────────────────────────────────
-  static Map<String, dynamic> _sanitize(Map<String, dynamic> input) {
-    final out = <String, dynamic>{};
-    input.forEach((k, v) => out[k] = _val(v));
-    return out;
+  // ── Generic helpers ────────────────────────────────────────────────────────
+  static Stream<T> _watchBox<T>(String boxName, T Function() read) async* {
+    final box = await SchoolStore.openBox(boxName);
+    yield read();
+    yield* box.watch().map((_) => read());
   }
 
-  static dynamic _val(dynamic v) {
-    if (v == null)       return null;
-    if (v is String)     return v;
-    if (v is int)        return v;
-    if (v is double)     return v;
-    if (v is bool)       return v;
-    if (v is DateTime)   return v.toIso8601String();
-    if (v is Timestamp)  return v.toDate().toIso8601String();
-    if (v is Map)        return _sanitize(Map<String, dynamic>.from(v));
-    if (v is List)       return v.map(_val).toList();
-    return null;
-  }
-
-  // ── Cache keys ─────────────────────────────────────────────────────────────
-  static String _studentKey(String branchId, String studentId) =>
-      '${branchId.toLowerCase().trim()}__std__$studentId';
-
-  static String _teacherKey(String branchId, String teacherId) =>
-      '${branchId.toLowerCase().trim()}__tch__$teacherId';
-
-  static String _logKey(String branchId, String dateKey) =>
-      '${branchId.toLowerCase().trim()}__log__$dateKey';
-
-  static String _bookKey(String branchId, String bookId) =>
-      '${branchId.toLowerCase().trim()}__$bookId';
-
-  static String _bookLoanKey(String branchId, String loanId) =>
-      '${branchId.toLowerCase().trim()}__$loanId';
-
-  // ── Students Cache ─────────────────────────────────────────────────────────
-  static Future<void> cacheStudent(String branchId, String studentId, Map<String, dynamic> data) async {
-    final key = _studentKey(branchId, studentId);
-    final box = _getStudentsBox();
-    await box.put(key, _sanitize(data));
-    await box.flush();
-  }
-
-  static Map<String, dynamic>? getStudentCached(String branchId, String studentId) {
-    final key = _studentKey(branchId, studentId);
-    final box = _getStudentsBox();
-    final raw = box.get(key);
-    if (raw == null) return null;
-    return Map<String, dynamic>.from(raw as Map);
-  }
-
-  static List<Map<String, dynamic>> getAllStudentsCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__std__';
-    final box = _getStudentsBox();
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) {
-          final raw = box.get(k);
-          if (raw == null) return null;
-          final m = Map<String, dynamic>.from(raw as Map);
-          m['id'] = k.toString().split('__std__').last;
-          return m;
-        })
-        .whereType<Map<String, dynamic>>()
-        .toList();
-  }
-
-  static Stream<List<Map<String, dynamic>>> streamStudentsCached(String branchId) {
-    Stream<List<Map<String, dynamic>>> source() async* {
-      yield getAllStudentsCached(branchId);
-      await for (final _ in _getStudentsBox().watch()) {
-        yield getAllStudentsCached(branchId);
-      }
+  static bool _sameJson(Object? a, Object? b) {
+    try {
+      return jsonEncode(a) == jsonEncode(b);
+    } catch (_) {
+      return false;
     }
-    return source().distinct((a, b) => _deepEq.equals(a, b));
   }
 
-  // ── Teachers Cache ─────────────────────────────────────────────────────────
-  static Future<void> cacheTeacher(String branchId, String teacherId, Map<String, dynamic> data) async {
-    final key = _teacherKey(branchId, teacherId);
-    final box = _getTeachersBox();
-    await box.put(key, _sanitize(data));
-    await box.flush();
+  // ── Students ───────────────────────────────────────────────────────────────
+  /// Stores a cloud copy locally (no upload). Screens save with [saveStudent].
+  static Future<void> cacheStudent(String branchId, String studentId, Map<String, dynamic> data) =>
+      SchoolStore.putFromCloud(SchoolCollection.students, branchId, studentId, data);
+
+  static Map<String, dynamic>? getStudentCached(String branchId, String studentId) =>
+      SchoolStore.get(SchoolCollection.students, branchId, studentId);
+
+  static List<Map<String, dynamic>> getAllStudentsCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.students, branchId);
+
+  static Stream<List<Map<String, dynamic>>> streamStudentsCached(String branchId) =>
+      _watchBox(studentsBox, () => getAllStudentsCached(branchId)).distinct(_sameJson);
+
+  // ── Teachers ───────────────────────────────────────────────────────────────
+  static Future<void> cacheTeacher(String branchId, String teacherId, Map<String, dynamic> data) =>
+      SchoolStore.putFromCloud(SchoolCollection.teachers, branchId, teacherId, data);
+
+  static Map<String, dynamic>? getTeacherCached(String branchId, String teacherId) =>
+      SchoolStore.get(SchoolCollection.teachers, branchId, teacherId);
+
+  static List<Map<String, dynamic>> getAllTeachersCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.teachers, branchId);
+
+  static Stream<List<Map<String, dynamic>>> streamTeachersCached(String branchId) =>
+      _watchBox(teachersBox, () => getAllTeachersCached(branchId)).distinct(_sameJson);
+
+  // ── Books & Book Loans ─────────────────────────────────────────────────────
+  static Future<void> cacheBook(String branchId, String bookId, Map<String, dynamic> data) =>
+      SchoolStore.putFromCloud(SchoolCollection.books, branchId, bookId, data);
+
+  static Map<String, dynamic>? getBookCached(String branchId, String bookId) =>
+      SchoolStore.get(SchoolCollection.books, branchId, bookId);
+
+  static List<Map<String, dynamic>> getAllBooksCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.books, branchId);
+
+  static Stream<List<Map<String, dynamic>>> streamBooksCached(String branchId) =>
+      _watchBox(booksBox, () => getAllBooksCached(branchId));
+
+  static Future<void> cacheBookLoan(String branchId, String loanId, Map<String, dynamic> data) =>
+      SchoolStore.putFromCloud(SchoolCollection.bookLoans, branchId, loanId, data);
+
+  static Map<String, dynamic>? getBookLoanCached(String branchId, String loanId) =>
+      SchoolStore.get(SchoolCollection.bookLoans, branchId, loanId);
+
+  static List<Map<String, dynamic>> getAllBookLoansCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.bookLoans, branchId);
+
+  static Stream<List<Map<String, dynamic>>> streamBookLoansCached(String branchId) =>
+      _watchBox(bookLoansBox, () => getAllBookLoansCached(branchId));
+
+  /// Copies of [bookId] currently out (loans not yet returned).
+  static int activeLoanCount(String branchId, String bookId) => getAllBookLoansCached(branchId)
+      // Only open loans hold a copy; returned and lost loans don't.
+      .where((l) => l['bookId']?.toString() == bookId && (l['status'] ?? 'borrowed').toString() == 'borrowed')
+      .length;
+
+  /// Available copies are derived from loans, never typed: total − copies out.
+  static int availableCopies(String branchId, Map<String, dynamic> book) {
+    final total = (book['totalCopies'] as num?)?.toInt() ?? int.tryParse('${book['totalCopies']}') ?? 0;
+    final out = activeLoanCount(branchId, book['id']?.toString() ?? '');
+    return (total - out).clamp(0, total < 0 ? 0 : total);
   }
 
-  static Map<String, dynamic>? getTeacherCached(String branchId, String teacherId) {
-    final key = _teacherKey(branchId, teacherId);
-    final box = _getTeachersBox();
-    final raw = box.get(key);
-    if (raw == null) return null;
-    return Map<String, dynamic>.from(raw as Map);
-  }
+  // ── Attendance day logs ────────────────────────────────────────────────────
+  static Future<void> cacheLog(String branchId, String dateKey, Map<String, dynamic> logData) =>
+      SchoolStore.putFromCloud(SchoolCollection.attendance, branchId, dateKey, logData);
 
-  static List<Map<String, dynamic>> getAllTeachersCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__tch__';
-    final box = _getTeachersBox();
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) {
-          final raw = box.get(k);
-          if (raw == null) return null;
-          final m = Map<String, dynamic>.from(raw as Map);
-          m['id'] = k.toString().split('__tch__').last;
-          return m;
-        })
-        .whereType<Map<String, dynamic>>()
-        .toList();
-  }
+  static Future<void> cacheTeacherAttendanceLog(String branchId, String dateKey, Map<String, dynamic> logData) =>
+      SchoolStore.putFromCloud(SchoolCollection.teacherAttendance, branchId, dateKey, logData);
 
-  static Stream<List<Map<String, dynamic>>> streamTeachersCached(String branchId) {
-    Stream<List<Map<String, dynamic>>> source() async* {
-      yield getAllTeachersCached(branchId);
-      await for (final _ in _getTeachersBox().watch()) {
-        yield getAllTeachersCached(branchId);
-      }
-    }
-    return source().distinct((a, b) => _deepEq.equals(a, b));
-  }
-
-  // ── Books & Book Loans Cache ────────────────────────────────────────────────
-  static Future<void> cacheBook(String branchId, String bookId, Map<String, dynamic> data) async {
-    final key = _bookKey(branchId, bookId);
-    final box = _getBooksBox();
-    await box.put(key, _sanitize(data));
-    await box.flush();
-  }
-
-  static Map<String, dynamic>? getBookCached(String branchId, String bookId) {
-    final key = _bookKey(branchId, bookId);
-    final box = _getBooksBox();
-    final raw = box.get(key);
-    if (raw == null) return null;
-    return Map<String, dynamic>.from(raw as Map);
-  }
-
-  static List<Map<String, dynamic>> getAllBooksCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__';
-    final box = _getBooksBox();
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) {
-          final raw = box.get(k);
-          if (raw == null) return null;
-          final m = Map<String, dynamic>.from(raw as Map);
-          return m;
-        })
-        .whereType<Map<String, dynamic>>()
-        .toList();
-  }
-
-  static Stream<List<Map<String, dynamic>>> streamBooksCached(String branchId) async* {
-    yield getAllBooksCached(branchId);
-    yield* _getBooksBox().watch().map((_) => getAllBooksCached(branchId));
-  }
-
-  static Future<void> cacheBookLoan(String branchId, String loanId, Map<String, dynamic> data) async {
-    final key = _bookLoanKey(branchId, loanId);
-    final box = _getBookLoansBox();
-    await box.put(key, _sanitize(data));
-    await box.flush();
-  }
-
-  static List<Map<String, dynamic>> getAllBookLoansCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__';
-    final box = _getBookLoansBox();
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) {
-          final raw = box.get(k);
-          if (raw == null) return null;
-          return Map<String, dynamic>.from(raw as Map);
-        })
-        .whereType<Map<String, dynamic>>()
-        .toList();
-  }
-
-  static Stream<List<Map<String, dynamic>>> streamBookLoansCached(String branchId) async* {
-    yield getAllBookLoansCached(branchId);
-    yield* _getBookLoansBox().watch().map((_) => getAllBookLoansCached(branchId));
-  }
-
-  // ── Attendance Logs Cache ──────────────────────────────────────────────────
-  static Future<void> cacheLog(String branchId, String dateKey, Map<String, dynamic> logData) async {
-    final key = _logKey(branchId, dateKey);
-    final box = _getLogsBox();
-    await box.put(key, _sanitize(logData));
-    await box.flush();
-  }
-
-  static Future<void> cacheTeacherAttendanceLog(String branchId, String dateKey, Map<String, dynamic> logData) async {
-    final key = '${branchId.toLowerCase().trim()}__tchlog__$dateKey';
-    final box = Hive.box(LocalStorageService.schoolLogsBox);
-    await box.put(key, _sanitize(logData));
-    await box.flush();
-  }
-
+  /// The day's log; for "all" every branch's entries are combined.
   static Map<String, dynamic>? getLogCached(String branchId, String dateKey) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final box = _getLogsBox();
-    if (isAll) {
-      final suffix = '__log__$dateKey';
-      final combinedEntries = <String, dynamic>{};
-      for (final k in box.keys) {
-        if (k.toString().endsWith(suffix)) {
-          final raw = box.get(k);
-          if (raw is Map && raw['entries'] is Map) {
-            combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
-          }
-        }
-      }
-      return {
-        'date': dateKey,
-        'entries': combinedEntries,
-      };
-    }
-    final key = _logKey(b, dateKey);
-    final raw = box.get(key);
-    if (raw == null) return null;
-    return Map<String, dynamic>.from(raw as Map);
+    final log = SchoolStore.get(SchoolCollection.attendance, branchId, dateKey);
+    if (log == null && SchoolBranchId.isAll(branchId)) return {'date': dateKey, 'entries': <String, dynamic>{}};
+    return log;
   }
 
-  static Stream<Map<String, dynamic>?> streamLogCached(String branchId, String dateKey) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final targetKey = _logKey(b, dateKey);
-    final suffix = '__log__$dateKey';
-    Stream<Map<String, dynamic>?> source() async* {
-      yield getLogCached(branchId, dateKey);
-      await for (final event in _getLogsBox().watch()) {
-        if (isAll && event.key.toString().endsWith(suffix)) {
-          yield getLogCached(branchId, dateKey);
-        } else if (event.key == targetKey) {
-          yield getLogCached(branchId, dateKey);
-        }
-      }
-    }
-    return source().distinct((a, b) => _deepEq.equals(a, b));
+  static Stream<Map<String, dynamic>?> streamLogCached(String branchId, String dateKey) =>
+      _watchBox(logsBox, () => getLogCached(branchId, dateKey)).distinct(_sameJson);
+
+  static Map<String, dynamic>? getTeacherLogCached(String branchId, String dateKey) {
+    final log = SchoolStore.get(SchoolCollection.teacherAttendance, branchId, dateKey);
+    if (log == null && SchoolBranchId.isAll(branchId)) return {'date': dateKey, 'entries': <String, dynamic>{}};
+    return log;
   }
 
-  // ── Save Student Offline/Firestore ──────────────────────────────────────────
+  static Stream<Map<String, dynamic>?> streamTeacherLogCached(String branchId, String dateKey) =>
+      _watchBox(logsBox, () => getTeacherLogCached(branchId, dateKey)).distinct(_sameJson);
+
+  static int _countPresent(Map<String, dynamic>? log) {
+    final entries = (log?['entries'] as Map?) ?? const {};
+    var count = 0;
+    entries.forEach((_, v) {
+      if (v is Map && (v['status'] ?? '').toString().toLowerCase() == 'present') count++;
+    });
+    return count;
+  }
+
+  static int getPresentStudentsCount(String branchId, String dateKey) => _countPresent(getLogCached(branchId, dateKey));
+
+  static int getPresentTeachersCount(String branchId, String dateKey) =>
+      _countPresent(getTeacherLogCached(branchId, dateKey));
+
+  // ── Saves ──────────────────────────────────────────────────────────────────
   static Future<void> saveStudent({
     required String branchId,
     required String studentId,
     required Map<String, dynamic> studentData,
+    String? editorName,
   }) async {
-    final normBranch = normalizeBranch(branchId);
-    final nowIso = DateTime.now().toIso8601String();
-    studentData['lastModified'] = studentData['lastModified'] ?? nowIso;
-    studentData['syncStatus'] = 'pending';
-    studentData['branchId'] = normBranch;
-
-    final compacted = compactMediaForCloud(studentData);
-    final cleanData = _sanitize(compacted);
-    await cacheStudent(normBranch, studentId, cleanData);
-
-    bool cloudUploaded = false;
-    try {
-      final isOnline = NetworkHealthService().isStableOnline ||
-          (!kIsWeb && (await Connectivity().checkConnectivity()).any((r) => r != ConnectivityResult.none));
-      if (isOnline) {
-        final docRef = CloudDb.instance
-            .collection('branches')
-            .doc(normBranch)
-            .collection('school_students')
-            .doc(studentId);
-        final fsData = LocalStorageService.sanitizeForCloudUpload(cleanData);
-        await docRef.set(fsData, SetOptions(merge: true)).timeout(const Duration(seconds: 5));
-
-        // Mark synced on cloud success
-        cloudUploaded = true;
-        cleanData['syncStatus'] = 'synced';
-        cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
-        cleanData['synced'] = true;
-        cleanData['pendingSync'] = false;
-        await cacheStudent(normBranch, studentId, cleanData);
-      }
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Direct cloud upload deferred to sync queue: $e');
-    }
-
-    if (!cloudUploaded) {
-      await LocalStorageService.enqueueSync({
-        'type': 'save_school_student',
-        'branchId': normBranch,
-        'studentId': studentId,
-        'entityId': studentId,
-        'collection': 'branches/$normBranch/school_students',
-        'docId': studentId,
-        'data': cleanData,
-        'localBox': LocalStorageService.schoolStudentsBox,
-        'localKey': _studentKey(normBranch, studentId),
-      });
-      unawaited(SyncService().triggerUpload(urgent: true));
+    final before = getStudentCached(branchId, studentId);
+    final after = await SchoolStore.put(
+      SchoolCollection.students,
+      branchId: branchId,
+      id: studentId,
+      data: compactMediaForCloud(studentData),
+      updatedBy: editorName,
+    );
+    final (b, a) = SchoolStore.diff(before, after);
+    if (before == null || a.isNotEmpty) {
+      await SchoolStore.audit(
+        branchId: branchId,
+        action: before == null ? 'STUDENT_ENROLLED' : 'STUDENT_UPDATED',
+        user: editorName ?? 'Unknown',
+        details: before == null
+            ? 'Enrolled ${after['name'] ?? studentId}'
+            : 'Updated ${after['name'] ?? studentId}: ${a.keys.join(', ')}',
+        entity: 'student',
+        entityId: studentId,
+        before: before == null ? null : b,
+        after: before == null ? null : a,
+      );
     }
   }
 
-  // ── Save Teacher Offline/Firestore ──────────────────────────────────────────
   static Future<void> saveTeacher({
     required String branchId,
     required String teacherId,
     required Map<String, dynamic> teacherData,
+    String? editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    teacherData['lastModified'] = teacherData['lastModified'] ?? nowIso;
-    teacherData['syncStatus'] = 'pending';
-
-    final cleanData = _sanitize(teacherData);
-    await cacheTeacher(branchId, teacherId, cleanData);
-
-    try {
-      final docRef = CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_teachers')
-          .doc(teacherId);
-      await docRef.set(cleanData, SetOptions(merge: true));
-
-      cleanData['syncStatus'] = 'synced';
-      cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await cacheTeacher(branchId, teacherId, cleanData);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Cloud teacher save failed: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_teachers',
-        'docId': teacherId,
-        'data': cleanData,
-      });
-      SyncService().triggerUpload();
+    // Merge-save: fields the dialog does not know about (homeroomGrade,
+    // homeroomSection) are kept instead of being dropped.
+    final before = getTeacherCached(branchId, teacherId);
+    final after = await SchoolStore.put(
+      SchoolCollection.teachers,
+      branchId: branchId,
+      id: teacherId,
+      data: teacherData,
+      updatedBy: editorName,
+    );
+    final (b, a) = SchoolStore.diff(before, after);
+    if (before == null || a.isNotEmpty) {
+      await SchoolStore.audit(
+        branchId: branchId,
+        action: before == null ? 'TEACHER_ADDED' : 'TEACHER_UPDATED',
+        user: editorName ?? 'Unknown',
+        details: '${before == null ? 'Added' : 'Updated'} teacher ${after['name'] ?? teacherId}',
+        entity: 'teacher',
+        entityId: teacherId,
+        before: before == null ? null : b,
+        after: before == null ? null : a,
+      );
     }
   }
 
-  // ── Save Book Offline/Firestore ─────────────────────────────────────────────
-  static Future<void> saveBook({
+  static Future<Map<String, dynamic>> saveBook({
     required String branchId,
     required String bookId,
     required Map<String, dynamic> bookData,
+    String? editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    bookData['lastModified'] = bookData['lastModified'] ?? nowIso;
-    bookData['syncStatus'] = 'pending';
-
-    final cleanData = _sanitize(bookData);
-    await cacheBook(branchId, bookId, cleanData);
-
-    try {
-      final docRef = CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_books')
-          .doc(bookId);
-      await docRef.set(cleanData, SetOptions(merge: true));
-
-      cleanData['syncStatus'] = 'synced';
-      cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await cacheBook(branchId, bookId, cleanData);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Cloud book save failed: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_books',
-        'docId': bookId,
-        'data': cleanData,
-      });
-      SyncService().triggerUpload();
+    final before = getBookCached(branchId, bookId);
+    final data = Map<String, dynamic>.from(bookData)..remove('lastModified');
+    final after = await SchoolStore.put(
+      SchoolCollection.books,
+      branchId: branchId,
+      id: bookId,
+      data: data,
+      updatedBy: editorName,
+    );
+    final (b, a) = SchoolStore.diff(before, after, ignore: const {
+      'lastModified', 'syncStatus', 'pendingSync', 'synced', 'lastSyncedAt', 'updatedBy', 'updatedAt', 'availableCopies',
+    });
+    if (before == null || a.isNotEmpty) {
+      await SchoolStore.audit(
+        branchId: branchId,
+        action: before == null ? 'BOOK_ADDED' : 'BOOK_UPDATED',
+        user: editorName ?? 'Unknown',
+        details: '${before == null ? 'Added' : 'Updated'} book "${after['title'] ?? bookId}"',
+        entity: 'book',
+        entityId: bookId,
+        before: before == null ? null : b,
+        after: before == null ? null : a,
+      );
     }
+    return after;
   }
 
-  // ── Save Book Loan Offline/Firestore ────────────────────────────────────────
-  static Future<void> saveBookLoan({
+  static Future<Map<String, dynamic>> saveBookLoan({
     required String branchId,
     required String loanId,
     required Map<String, dynamic> loanData,
-  }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    loanData['lastModified'] = loanData['lastModified'] ?? nowIso;
-    loanData['syncStatus'] = 'pending';
-
-    final cleanData = _sanitize(loanData);
-    await cacheBookLoan(branchId, loanId, cleanData);
-
-    try {
-      final docRef = CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_book_loans')
-          .doc(loanId);
-      await docRef.set(cleanData, SetOptions(merge: true));
-
-      cleanData['syncStatus'] = 'synced';
-      cleanData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await cacheBookLoan(branchId, loanId, cleanData);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Cloud book loan save failed: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_book_loans',
-        'docId': loanId,
-        'data': cleanData,
-      });
-      SyncService().triggerUpload();
-    }
+    String? editorName,
+  }) {
+    final data = Map<String, dynamic>.from(loanData)..remove('lastModified');
+    return SchoolStore.put(
+      SchoolCollection.bookLoans,
+      branchId: branchId,
+      id: loanId,
+      data: data,
+      updatedBy: editorName,
+    );
   }
 
-  // ── Save Daily Attendance Log ──────────────────────────────────────────────
+  /// Keeps the book's stored `availableCopies` equal to total − copies out.
+  static Future<void> refreshBookAvailability(String branchId, String bookId, {String? editorName}) async {
+    final book = getBookCached(branchId, bookId);
+    if (book == null) return;
+    final available = availableCopies(branchId, {...book, 'id': bookId});
+    if ((book['availableCopies'] as num?)?.toInt() == available) return;
+    await SchoolStore.put(
+      SchoolCollection.books,
+      branchId: branchId,
+      id: bookId,
+      data: {'availableCopies': available},
+      updatedBy: editorName,
+    );
+  }
+
   static Future<void> saveDailyLog({
     required String branchId,
     required String dateKey,
     required Map<String, dynamic> logEntries,
     required String editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    final logData = {
-      'date': dateKey,
-      'lastUpdated': nowIso,
-      'lastModified': nowIso,
-      'syncStatus': 'pending',
-      'updatedBy': editorName,
-      'entries': _sanitize(logEntries),
-    };
-
-    await cacheLog(branchId, dateKey, logData);
-
-    try {
-      final docRef = CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_attendance')
-          .doc(dateKey);
-      await docRef.set(logData, SetOptions(merge: true));
-
-      logData['syncStatus'] = 'synced';
-      logData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await cacheLog(branchId, dateKey, logData);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Save attendance log failed: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_attendance',
-        'docId': dateKey,
-        'data': logData,
-      });
-      SyncService().triggerUpload();
-    }
-
+    await SchoolStore.put(
+      SchoolCollection.attendance,
+      branchId: branchId,
+      id: dateKey,
+      updatedBy: editorName,
+      data: {
+        'date': dateKey,
+        'lastUpdated': DateTime.now().toIso8601String(),
+        'entries': SchoolStore.sanitize(logEntries),
+      },
+    );
     await logAudit(
       branchId: branchId,
       action: 'UPDATE_ATTENDANCE_LOG',
@@ -660,50 +466,23 @@ class SchoolLocalStorage {
     );
   }
 
-  // ── Save Teacher Daily Attendance Log ─────────────────────────────────────
   static Future<void> saveTeacherDailyLog({
     required String branchId,
     required String dateKey,
     required Map<String, dynamic> logEntries,
     required String editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    final logData = {
-      'date': dateKey,
-      'lastUpdated': nowIso,
-      'lastModified': nowIso,
-      'syncStatus': 'pending',
-      'updatedBy': editorName,
-      'entries': _sanitize(logEntries),
-    };
-
-    final key = '${branchId.toLowerCase().trim()}__tchlog__$dateKey';
-    final box = Hive.box(LocalStorageService.schoolLogsBox);
-    await box.put(key, _sanitize(logData));
-    await box.flush();
-
-    try {
-      final docRef = CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_teacher_attendance')
-          .doc(dateKey);
-      await docRef.set(logData, SetOptions(merge: true));
-
-      logData['syncStatus'] = 'synced';
-      logData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await box.put(key, _sanitize(logData));
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Save teacher attendance log failed: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_teacher_attendance',
-        'docId': dateKey,
-        'data': logData,
-      });
-      SyncService().triggerUpload();
-    }
-
+    await SchoolStore.put(
+      SchoolCollection.teacherAttendance,
+      branchId: branchId,
+      id: dateKey,
+      updatedBy: editorName,
+      data: {
+        'date': dateKey,
+        'lastUpdated': DateTime.now().toIso8601String(),
+        'entries': SchoolStore.sanitize(logEntries),
+      },
+    );
     await logAudit(
       branchId: branchId,
       action: 'UPDATE_TEACHER_ATTENDANCE',
@@ -712,281 +491,76 @@ class SchoolLocalStorage {
     );
   }
 
-  static int getPresentStudentsCount(String branchId, String dateKey) {
-    final log = getLogCached(branchId, dateKey);
-    if (log == null) return 0;
-    final entries = (log['entries'] as Map?) ?? {};
-    int count = 0;
-    entries.forEach((k, v) {
-      if (v is Map && (v['status'] ?? '').toString().toLowerCase() == 'present') {
-        count++;
-      }
-    });
-    return count;
-  }
-
-  static int getPresentTeachersCount(String branchId, String dateKey) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final box = Hive.box(LocalStorageService.schoolLogsBox);
-    if (isAll) {
-      final suffix = '__tchlog__$dateKey';
-      int count = 0;
-      for (final k in box.keys) {
-        if (k.toString().endsWith(suffix)) {
-          final raw = box.get(k);
-          if (raw is Map && raw['entries'] is Map) {
-            (raw['entries'] as Map).forEach((_, v) {
-              if (v is Map && (v['status'] ?? '').toString().toLowerCase() == 'present') {
-                count++;
-              }
-            });
-          }
-        }
-      }
-      return count;
-    }
-    final key = '${b}__tchlog__$dateKey';
-    final raw = box.get(key);
-    if (raw == null) return 0;
-    final log = Map<String, dynamic>.from(raw as Map);
-    final entries = (log['entries'] as Map?) ?? {};
-    int count = 0;
-    entries.forEach((k, v) {
-      if (v is Map && (v['status'] ?? '').toString().toLowerCase() == 'present') {
-        count++;
-      }
-    });
-    return count;
-  }
-
-  static Stream<Map<String, dynamic>?> streamTeacherLogCached(String branchId, String dateKey) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final targetKey = '${b}__tchlog__$dateKey';
-    final suffix = '__tchlog__$dateKey';
-    final box = Hive.box(LocalStorageService.schoolLogsBox);
-    Stream<Map<String, dynamic>?> source() async* {
-      if (isAll) {
-        final combinedEntries = <String, dynamic>{};
-        for (final k in box.keys) {
-          if (k.toString().endsWith(suffix)) {
-            final raw = box.get(k);
-            if (raw is Map && raw['entries'] is Map) {
-              combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
-            }
-          }
-        }
-        yield {'date': dateKey, 'entries': combinedEntries};
-      } else {
-        final raw = box.get(targetKey);
-        yield raw != null ? Map<String, dynamic>.from(raw as Map) : null;
-      }
-
-      await for (final event in box.watch()) {
-        if (isAll && event.key.toString().endsWith(suffix)) {
-          final combinedEntries = <String, dynamic>{};
-          for (final k in box.keys) {
-            if (k.toString().endsWith(suffix)) {
-              final raw = box.get(k);
-              if (raw is Map && raw['entries'] is Map) {
-                combinedEntries.addAll(Map<String, dynamic>.from(raw['entries'] as Map));
-              }
-            }
-          }
-          yield {'date': dateKey, 'entries': combinedEntries};
-        } else if (event.key == targetKey) {
-          final r = box.get(targetKey);
-          yield r != null ? Map<String, dynamic>.from(r as Map) : null;
-        }
-      }
-    }
-    return source().distinct((a, b) => _deepEq.equals(a, b));
-  }
-
   // ── Audit Logging ─────────────────────────────────────────────────────────
   static Future<void> logAudit({
     required String branchId,
     required String action,
     required String user,
     required String details,
-  }) async {
-    final auditId = 'AUD-${DateTime.now().millisecondsSinceEpoch}';
-    final entry = {
-      'id': auditId,
-      'action': action,
-      'user': user,
-      'details': details,
-      'timestamp': DateTime.now().toIso8601String(),
-      'branchId': branchId,
-    };
-
-    final box = Hive.box(LocalStorageService.schoolAuditLogsBox);
-    final key = '${branchId.toLowerCase()}__$auditId';
-    await box.put(key, entry);
-
-    try {
-      await CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_audit_logs')
-          .doc(auditId)
-          .set(entry);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Cloud audit log save failed: $e');
-      // Not lost: the upload queue sends it once Firestore accepts writes again.
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_audit_logs',
-        'docId': auditId,
-        'data': entry,
-      });
-    }
-  }
+  }) =>
+      SchoolStore.audit(branchId: branchId, action: action, user: user, details: details);
 
   static List<Map<String, dynamic>> getAuditLogsCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__';
-    final box = Hive.box(LocalStorageService.schoolAuditLogsBox);
-    final list = box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) => Map<String, dynamic>.from(box.get(k) as Map))
-        .toList();
-
-    list.sort((a, b) => (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
+    final list = SchoolStore.all(SchoolCollection.auditLogs, branchId);
+    list.sort((a, b) => (b['timestamp'] ?? '').toString().compareTo((a['timestamp'] ?? '').toString()));
     return list;
   }
 
-  // ── Grades Storage & Caching ──────────────────────────────────────────────
+  // ── Grades ────────────────────────────────────────────────────────────────
   static Future<void> saveGrade({
     required String branchId,
     required String gradeId,
     required Map<String, dynamic> gradeData,
+    String? editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    final dataToSave = Map<String, dynamic>.from(gradeData);
-    dataToSave['syncStatus'] = 'pending';
-    dataToSave['lastModified'] = nowIso;
-    dataToSave['branchId'] = branchId;
-
-    final box = Hive.box(gradesBox);
-    final key = '${branchId.toLowerCase()}__$gradeId';
-    await box.put(key, dataToSave);
-
-    try {
-      await CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_grades')
-          .doc(gradeId)
-          .set(dataToSave, SetOptions(merge: true));
-
-      dataToSave['syncStatus'] = 'synced';
-      dataToSave['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await box.put(key, dataToSave);
-    } catch (e) {
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_grades',
-        'docId': gradeId,
-        'data': dataToSave,
-      });
-      SyncService().triggerUpload();
+    if (gradeId.trim().isEmpty) {
+      throw ArgumentError('saveGrade called with an empty gradeId');
     }
+    await SchoolStore.put(
+      SchoolCollection.grades,
+      branchId: branchId,
+      id: gradeId,
+      data: Map<String, dynamic>.from(gradeData)..['id'] = gradeId,
+      updatedBy: editorName,
+    );
   }
 
-  static List<Map<String, dynamic>> getAllGradesCached(String branchId) {
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__';
-    final box = Hive.box(gradesBox);
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) => Map<String, dynamic>.from(box.get(k) as Map))
-        .toList();
-  }
+  static List<Map<String, dynamic>> getAllGradesCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.grades, branchId);
 
-  static Stream<List<Map<String, dynamic>>> streamGradesCached(String branchId) async* {
-    yield getAllGradesCached(branchId);
-    final box = Hive.box(gradesBox);
-    yield* box.watch().map((_) => getAllGradesCached(branchId));
-  }
+  static Stream<List<Map<String, dynamic>>> streamGradesCached(String branchId) =>
+      _watchBox(gradesBox, () => getAllGradesCached(branchId));
 
-  // ── Fee Records Storage & Caching ──────────────────────────────────────────
+  // ── Fee Records ───────────────────────────────────────────────────────────
   static Future<void> saveFeeRecord({
     required String branchId,
     required String feeId,
     required Map<String, dynamic> feeData,
     required String editorName,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
-    final dataToSave = Map<String, dynamic>.from(feeData);
-    dataToSave['lastModified'] = nowIso;
-    dataToSave['syncStatus'] = 'pending';
-    dataToSave['branchId'] = branchId;
-
-    final box = Hive.isBoxOpen(feesBox) ? Hive.box(feesBox) : await LocalStorageService.openBoxSafe(feesBox);
-    final key = '${branchId.toLowerCase()}__$feeId';
-    await box.put(key, dataToSave);
-
-    try {
-      await CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_fees')
-          .doc(feeId)
-          .set(dataToSave, SetOptions(merge: true));
-
-      dataToSave['syncStatus'] = 'synced';
-      dataToSave['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await box.put(key, dataToSave);
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Fee record cloud save error: $e');
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_fees',
-        'docId': feeId,
-        'data': dataToSave,
-      });
-      SyncService().triggerUpload();
-    }
-
+    final saved = await SchoolStore.put(
+      SchoolCollection.fees,
+      branchId: branchId,
+      id: feeId,
+      data: feeData,
+      updatedBy: editorName,
+    );
     await logAudit(
       branchId: branchId,
       action: 'UPDATE_FEE_RECORD',
       user: editorName,
-      details: 'Recorded fee payment for ${feeData['studentName']} (Roll: ${feeData['rollNo']}) - Status: ${feeData['status']}',
+      details: 'Recorded fee payment for ${saved['studentName']} (Roll: ${saved['rollNo']}) - '
+          'Paid ${saved['paidAmount']} of ${saved['totalAmount']} - Status: ${saved['status']}',
     );
   }
 
-  static List<Map<String, dynamic>> getAllFeeRecordsCached(String branchId) {
-    if (!Hive.isBoxOpen(feesBox)) return [];
-    final b = branchId.toLowerCase().trim();
-    final isAll = b == 'all' || b == 'global' || b.isEmpty;
-    final prefix = '${b}__';
-    final box = Hive.box(feesBox);
-    return box.keys
-        .where((k) => isAll || k.toString().startsWith(prefix))
-        .map((k) {
-          final val = box.get(k);
-          if (val is Map) return Map<String, dynamic>.from(val);
-          return null;
-        })
-        .whereType<Map<String, dynamic>>()
-        .toList();
-  }
+  static List<Map<String, dynamic>> getAllFeeRecordsCached(String branchId) =>
+      SchoolStore.all(SchoolCollection.fees, branchId);
 
-  static Stream<List<Map<String, dynamic>>> streamFeeRecordsCached(String branchId) async* {
-    if (!Hive.isBoxOpen(feesBox)) {
-      await LocalStorageService.openBoxSafe(feesBox);
-    }
-    final box = Hive.box(feesBox);
-    yield getAllFeeRecordsCached(branchId);
-    yield* box.watch().map((_) => getAllFeeRecordsCached(branchId));
-  }
+  static Stream<List<Map<String, dynamic>>> streamFeeRecordsCached(String branchId) =>
+      _watchBox(feesBox, () => getAllFeeRecordsCached(branchId));
 
-  // ── Homeroom Teacher Assignment & Restrictions ────────────────────────────
+  // ── Homeroom Teacher Assignment ───────────────────────────────────────────
   static Future<void> assignHomeroomTeacher({
     required String branchId,
     required String grade,
@@ -996,57 +570,56 @@ class SchoolLocalStorage {
     required String editorName,
   }) async {
     final classKey = '${grade.trim()}_${section.trim()}';
-    final box = Hive.isBoxOpen(homeroomBox) ? Hive.box(homeroomBox) : await LocalStorageService.openBoxSafe(homeroomBox);
-    final key = '${branchId.toLowerCase()}__$classKey';
+    final nowIso = DateTime.now().toIso8601String();
 
-    final assignmentData = {
-      'grade': grade,
-      'section': section,
-      'teacherId': teacherId ?? '',
-      'teacherName': teacherName ?? 'Unassigned',
-      'assignedAt': DateTime.now().toIso8601String(),
-      'assignedBy': editorName,
-    };
-
-    await box.put(key, assignmentData);
-
-    // Update teacher model in cache & Firestore if teacherId is provided
-    final teachers = getAllTeachersCached(branchId);
-    for (final t in teachers) {
-      final tid = t['id'] ?? '';
-      final curGrade = t['homeroomGrade'] ?? '';
-      final curSec = t['homeroomSection'] ?? '';
-
-      if (teacherId != null && tid == teacherId) {
-        t['homeroomGrade'] = grade;
-        t['homeroomSection'] = section;
-        t['designation'] = 'Class Incharge ($grade - $section)';
-        await saveTeacher(branchId: branchId, teacherId: tid, teacherData: t);
-      } else if (curGrade == grade && curSec == section && tid != teacherId) {
-        // Remove previous homeroom assignment from other teacher
-        t['homeroomGrade'] = '';
-        t['homeroomSection'] = '';
-        t['designation'] = 'Teacher';
-        await saveTeacher(branchId: branchId, teacherId: tid, teacherData: t);
+    // A teacher is homeroom teacher of ONE class: release any other class they held.
+    if (teacherId != null && teacherId.isNotEmpty) {
+      for (final h in SchoolStore.all(SchoolCollection.homerooms, branchId)) {
+        final hid = h['id']?.toString() ?? '';
+        if (hid.isNotEmpty && hid != classKey && h['teacherId']?.toString() == teacherId) {
+          await SchoolStore.put(
+            SchoolCollection.homerooms,
+            branchId: branchId,
+            id: hid,
+            updatedBy: editorName,
+            data: {'teacherId': '', 'teacherName': 'Unassigned', 'assignedAt': nowIso, 'assignedBy': editorName},
+          );
+        }
       }
     }
 
-    try {
-      await CloudDb.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('school_homerooms')
-          .doc(classKey)
-          .set(assignmentData, SetOptions(merge: true));
-    } catch (e) {
-      debugPrint('[SchoolLocalStorage] Homeroom cloud save error: $e');
-      // Not lost: the upload queue sends it once Firestore accepts writes again.
-      await LocalStorageService.enqueueSync({
-        'action': 'set',
-        'collection': 'branches/$branchId/school_homerooms',
-        'docId': classKey,
-        'data': assignmentData,
-      });
+    await SchoolStore.put(
+      SchoolCollection.homerooms,
+      branchId: branchId,
+      id: classKey,
+      updatedBy: editorName,
+      data: {
+        'grade': grade,
+        'section': section,
+        'teacherId': teacherId ?? '',
+        'teacherName': teacherName ?? 'Unassigned',
+        'assignedAt': nowIso,
+        'assignedBy': editorName,
+      },
+    );
+
+    for (final t in getAllTeachersCached(branchId)) {
+      final tid = (t['id'] ?? '').toString();
+      final curGrade = t['homeroomGrade'] ?? '';
+      final curSec = t['homeroomSection'] ?? '';
+      if (teacherId != null && tid == teacherId) {
+        await saveTeacher(branchId: branchId, teacherId: tid, editorName: editorName, teacherData: {
+          'homeroomGrade': grade,
+          'homeroomSection': section,
+          'designation': 'Class Incharge ($grade - $section)',
+        });
+      } else if (curGrade == grade && curSec == section && tid != teacherId) {
+        await saveTeacher(branchId: branchId, teacherId: tid, editorName: editorName, teacherData: {
+          'homeroomGrade': '',
+          'homeroomSection': '',
+          'designation': 'Teacher',
+        });
+      }
     }
 
     await logAudit(
@@ -1059,22 +632,12 @@ class SchoolLocalStorage {
     );
   }
 
-  static Map<String, dynamic>? getHomeroomAssignmentCached(String branchId, String grade, String section) {
-    if (!Hive.isBoxOpen(homeroomBox)) return null;
-    final classKey = '${grade.trim()}_${section.trim()}';
-    final key = '${branchId.toLowerCase()}__$classKey';
-    final box = Hive.box(homeroomBox);
-    final val = box.get(key);
-    if (val is Map) return Map<String, dynamic>.from(val);
-    return null;
-  }
+  static Map<String, dynamic>? getHomeroomAssignmentCached(String branchId, String grade, String section) =>
+      SchoolStore.get(SchoolCollection.homerooms, branchId, '${grade.trim()}_${section.trim()}');
 
-  static Stream<Map<String, dynamic>?> streamHomeroomAssignmentCached(String branchId, String grade, String section) async* {
-    if (!Hive.isBoxOpen(homeroomBox)) {
-      await LocalStorageService.openBoxSafe(homeroomBox);
-    }
-    yield getHomeroomAssignmentCached(branchId, grade, section);
-    final box = Hive.box(homeroomBox);
-    yield* box.watch().map((_) => getHomeroomAssignmentCached(branchId, grade, section));
-  }
+  static Stream<Map<String, dynamic>?> streamHomeroomAssignmentCached(String branchId, String grade, String section) =>
+      _watchBox(homeroomBox, () => getHomeroomAssignmentCached(branchId, grade, section));
+
+  /// New document id for a School record (`PREFIX-branch-millis-random`).
+  static String newId(String prefix, String branchId) => SchoolIds.newId(prefix, branchId);
 }

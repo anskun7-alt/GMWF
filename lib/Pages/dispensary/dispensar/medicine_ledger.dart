@@ -1,9 +1,8 @@
 // lib/pages/dispensary/dispensar/medicine_ledger.dart
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/services.dart';
+import 'package:gmwf/design/design_system.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
@@ -11,6 +10,8 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/stock_pool.dart';
+import 'package:gmwf/services/stock/stock_reader.dart';
 import 'package:gmwf/widgets/global_module_wrapper.dart';
 import '../../../realtime/realtime_manager.dart';
 import 'dart:async';
@@ -32,19 +33,6 @@ class MedicineLedgerPage extends StatefulWidget {
 }
 
 class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
-  // ── Palette ───────────────────────────────────────────────────────────────
-  static const _teal       = SoftPalette.teal600;
-  static const _tealDark   = SoftPalette.teal700;
-  static const _emerald    = SoftPalette.emerald550;
-  static const _indigo     = SoftPalette.indigo600;
-  static const _amber      = SoftPalette.orange400;
-  static const _red        = SoftPalette.red500;
-  static const _bg         = SoftPalette.gray100;
-  static const _white      = SoftPalette.gray50;
-  static const _textDark   = SoftPalette.slate800;
-  static const _textMid    = SoftPalette.slate600;
-  static const _textLight  = SoftPalette.slate500;
-
   bool get _isDark {
     try {
       if (Hive.isBoxOpen('app_settings')) {
@@ -88,11 +76,17 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   Future<void> _loadMedicines() async {
     setState(() => _isSearchingMeds = true);
     try {
-      final items = LocalStorageService.getAllLocalStockItems(
-        branchId: widget.branchId,
-        dispensaryId: _selectedCampFilter != 'all' ? _selectedCampFilter : null,
-        filterByCamp: _selectedCampFilter != 'all',
-      );
+      // Stock book: the batches of the selected camp's pool, or of every pool of the branch.
+      final pools = _selectedCampFilter != 'all'
+          ? [
+              if (StockPool.of(widget.branchId, _selectedCampFilter,
+                      fallbackCamp: CampSessionService.getActiveCamp(widget.branchId)) case final p?)
+                p
+            ]
+          : StockPool.allFor(widget.branchId);
+      final items = <Map<String, dynamic>>[
+        for (final pool in pools) ...StockReader.batches(pool),
+      ];
       setState(() {
         _allMedicines = items.map((m) {
           final copy = Map<String, dynamic>.from(m);
@@ -104,11 +98,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               copy['formula'] = clean;
             }
           }
-          final rawCamp = (copy['campId'] ?? copy['dispensaryId'] ?? '').toString().toLowerCase();
-          if (rawCamp.contains('kapay')) {
-            copy['campId'] = 'saddar';
-            copy['dispensaryId'] = 'saddar';
-          }
+          copy['id'] = (copy['medicineId'] ?? copy['id']).toString();
           return copy;
         }).toList()
           ..sort((a, b) => (a['name'] ?? '').toString().toLowerCase().compareTo((b['name'] ?? '').toString().toLowerCase()));
@@ -577,42 +567,56 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = _isDark;
+    final c = context.comfort;
     final isWrapped = GlobalModuleWrapper.isWrapped(context);
-    final content = _buildBody();
+    final content = Container(
+      color: c.background,
+      child: _buildBody(),
+    );
 
     if (widget.isEmbedded || isWrapped) return content;
 
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : _bg,
+      backgroundColor: c.background,
       appBar: AppBar(
-        backgroundColor: isDark ? SoftPalette.slate800 : _teal,
-        foregroundColor: SoftPalette.gray50,
+        backgroundColor: c.surface,
+        foregroundColor: c.textPrimary,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         title: Text(
-          _selectedMed != null ? '${_selectedMed!['name']} Ledger' : 'Dispensary Medicine Ledger',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          _selectedMed != null
+              ? '${_selectedMed!['name']} Ledger'
+              : 'Dispensary Medicine Ledger',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 17,
+            color: c.textPrimary,
+          ),
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded),
+            icon: Icon(Icons.refresh_rounded, color: c.brand),
             onPressed: () => _loadReport(forceRecalculate: true),
             tooltip: 'Recalculate Report',
           ),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: c.border),
+        ),
       ),
       body: content,
     );
   }
 
   Widget _buildBody() {
-    final isDark = _isDark;
+    final c = context.comfort;
     return Column(
       children: [
         _buildFilterHeader(),
         Expanded(
           child: _isLoading
-              ? const Center(child: CircularProgressIndicator(color: _teal))
+              ? Center(child: CircularProgressIndicator(color: c.brand))
               : _reportData == null
                   ? _buildEmptyState('No records found for this period')
                   : _buildLedgerView(),
@@ -622,189 +626,246 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   }
 
   Widget _buildFilterHeader() {
-    final isDark = _isDark;
+    final c = context.comfort;
+    final isCompact = GBreakpoint.isCompact(context);
     final monthLabel = DateFormat('MMMM yyyy').format(_selectedMonth);
     final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
+    final isAtCurrentMonth =
+        _selectedMonth.year == DateTime.now().year && _selectedMonth.month == DateTime.now().month;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        border: Border(
-          bottom: BorderSide(
-            color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-          ),
+    final medicineSelector = InkWell(
+      onTap: _showMedicinePicker,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: c.surfaceSunken,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: c.borderStrong),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.medication_rounded, size: 17, color: c.brand),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                MasterProformaService.cleanBrandToFormula(
+                  _selectedMed?['name']?.toString() ?? 'All Stock Items (Consolidated)',
+                ),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: c.textPrimary,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: c.textSecondary),
+          ],
         ),
       ),
-      child: Column(
+    );
+
+    final Widget? campSelector = (_hasMultiCamps && branchCamps.isNotEmpty)
+        ? _buildFilterDropdown(
+            value: _selectedCampFilter,
+            items: [
+              {'id': 'all', 'label': '🏥 All Camps'},
+              ...branchCamps.map((camp) => {
+                    'id': (camp['id'] ?? '').toString().toLowerCase().trim(),
+                    'label':
+                        '📍 ${(camp['name'] ?? CampSessionService.getCampLabel((camp['id'] ?? '').toString(), widget.branchId)).toString()}',
+                  }),
+            ],
+            onChanged: (v) {
+              setState(() {
+                _selectedCampFilter = v ?? 'all';
+                _reportData = null;
+              });
+              _loadMedicines();
+              _loadReport();
+            },
+          )
+        : null;
+
+    final monthNavigator = Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              // Medicine Selector Button
-              Expanded(
-                child: InkWell(
-                  onTap: _showMedicinePicker,
-                  borderRadius: BorderRadius.circular(10),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: isDark ? SoftPalette.slate900 : SoftPalette.teal100t,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: isDark ? SoftPalette.slate700 : SoftPalette.teal200,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.medication_rounded, size: 16, color: isDark ? SoftPalette.sky350 : _teal),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            MasterProformaService.cleanBrandToFormula(_selectedMed?['name']?.toString() ?? 'All Stock Items (Consolidated)'),
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: isDark ? SoftPalette.gray50 : _textDark,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        Icon(Icons.arrow_drop_down, size: 18, color: isDark ? SoftPalette.sky350 : _teal),
-                      ],
+          IconButton(
+            icon: Icon(Icons.chevron_left_rounded, size: 18, color: c.brand),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            constraints: const BoxConstraints(minWidth: 34, minHeight: 38),
+            onPressed: () {
+              setState(() {
+                _selectedMonth = DateTime(_selectedMonth.year, _selectedMonth.month - 1);
+                _reportData = null;
+              });
+              _loadReport();
+            },
+            tooltip: 'Previous Month',
+          ),
+          InkWell(
+            onTap: () async {
+              final DateTime? picked = await showDatePicker(
+                context: context,
+                initialDate: _selectedMonth,
+                firstDate: DateTime(2020),
+                lastDate: DateTime.now(),
+                initialDatePickerMode: DatePickerMode.year,
+              );
+              if (picked != null) {
+                setState(() {
+                  _selectedMonth = DateTime(picked.year, picked.month);
+                  _reportData = null;
+                });
+                _loadReport();
+              }
+            },
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.calendar_month_rounded, size: 14, color: c.brand),
+                  const SizedBox(width: 6),
+                  Text(
+                    monthLabel,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: c.textPrimary,
                     ),
                   ),
-                ),
+                ],
               ),
-
-              if (_hasMultiCamps && branchCamps.isNotEmpty) ...[
-                const SizedBox(width: 8),
-                _buildFilterDropdown(
-                  value: _selectedCampFilter,
-                  isDark: isDark,
-                  items: [
-                    {'id': 'all', 'label': '🏥 All Camps'},
-                    ...branchCamps.map((c) => {
-                      'id': (c['id'] ?? '').toString().toLowerCase().trim(),
-                      'label': '📍 ${(c['name'] ?? CampSessionService.getCampLabel((c['id'] ?? '').toString(), widget.branchId)).toString()}',
-                    }),
-                  ],
-                  onChanged: (v) {
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.chevron_right_rounded,
+              size: 18,
+              color: isAtCurrentMonth ? c.textMuted : c.brand,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            constraints: const BoxConstraints(minWidth: 34, minHeight: 38),
+            onPressed: isAtCurrentMonth
+                ? null
+                : () {
                     setState(() {
-                      _selectedCampFilter = v ?? 'all';
+                      _selectedMonth = DateTime(_selectedMonth.year, _selectedMonth.month + 1);
                       _reportData = null;
                     });
-                    _loadMedicines();
                     _loadReport();
                   },
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 10),
-
-          // Month Navigation Row
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              IconButton(
-                icon: Icon(Icons.chevron_left_rounded, color: isDark ? SoftPalette.sky350 : _teal),
-                onPressed: () {
-                  setState(() {
-                    _selectedMonth = DateTime(_selectedMonth.year, _selectedMonth.month - 1);
-                    _reportData = null;
-                  });
-                  _loadReport();
-                },
-                tooltip: 'Previous Month',
-              ),
-              InkWell(
-                onTap: () async {
-                  final DateTime? picked = await showDatePicker(
-                    context: context,
-                    initialDate: _selectedMonth,
-                    firstDate: DateTime(2020),
-                    lastDate: DateTime.now(),
-                    initialDatePickerMode: DatePickerMode.year,
-                  );
-                  if (picked != null) {
-                    setState(() {
-                      _selectedMonth = DateTime(picked.year, picked.month);
-                      _reportData = null;
-                    });
-                    _loadReport();
-                  }
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.teal550.withValues(alpha: 0.2) : _teal.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: isDark ? SoftPalette.teal550.withValues(alpha: 0.4) : _teal.withValues(alpha: 0.2),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.calendar_month_rounded, size: 14, color: isDark ? SoftPalette.sky350 : _teal),
-                      const SizedBox(width: 6),
-                      Text(
-                        monthLabel,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? SoftPalette.sky350 : _tealDark,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: Icon(Icons.chevron_right_rounded, color: isDark ? SoftPalette.sky350 : _teal),
-                onPressed: _selectedMonth.year == DateTime.now().year && _selectedMonth.month == DateTime.now().month
-                    ? null
-                    : () {
-                        setState(() {
-                          _selectedMonth = DateTime(_selectedMonth.year, _selectedMonth.month + 1);
-                          _reportData = null;
-                        });
-                        _loadReport();
-                      },
-                tooltip: 'Next Month',
-              ),
-            ],
+            tooltip: 'Next Month',
           ),
         ],
       ),
     );
+
+    final refreshBtn = Tooltip(
+      message: 'Recalculate Report',
+      child: InkWell(
+        onTap: () => _loadReport(forceRecalculate: true),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: c.surfaceSunken,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.border),
+          ),
+          child: Icon(Icons.refresh_rounded, size: 18, color: c.brand),
+        ),
+      ),
+    );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 10 : 12,
+        vertical: isCompact ? 8 : 10,
+      ),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
+      ),
+      child: isCompact
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: medicineSelector),
+                    if (campSelector != null) ...[
+                      const SizedBox(width: 8),
+                      campSelector,
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: Center(child: monthNavigator)),
+                    const SizedBox(width: 8),
+                    refreshBtn,
+                  ],
+                ),
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(child: medicineSelector),
+                if (campSelector != null) ...[
+                  const SizedBox(width: 8),
+                  campSelector,
+                ],
+                const SizedBox(width: 8),
+                monthNavigator,
+                const SizedBox(width: 8),
+                refreshBtn,
+              ],
+            ),
+    );
   }
 
   Widget _buildLedgerView() {
+    final c = context.comfort;
     final report = _reportData!;
     final logs = (report['logs'] as List?) ?? [];
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
       children: [
         _buildMetricCards(report),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         _buildLiveStockBanner(report),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         _buildConsolidatedBreakdown(report),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
           child: Row(
             children: [
-              Icon(Icons.history_rounded, size: 18, color: _isDark ? SoftPalette.sky350 : _teal),
+              Icon(Icons.history_rounded, size: 18, color: c.brand),
               const SizedBox(width: 8),
               Text(
                 'Audit & Dispensation History (${logs.length})',
                 style: TextStyle(
-                  color: _isDark ? SoftPalette.gray50 : _tealDark,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
+                  color: c.textPrimary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14.5,
                 ),
               ),
             ],
@@ -816,7 +877,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
             child: Center(
               child: Text(
                 'No transactions recorded for this period',
-                style: TextStyle(color: _isDark ? SoftPalette.slate350 : _textLight),
+                style: TextStyle(color: c.textSecondary),
               ),
             ),
           )
@@ -827,6 +888,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   }
 
   Widget _buildMetricCards(Map<String, dynamic> report) {
+    final c = context.comfort;
     final ta = report['totalAdded'];
     final added = (ta is num ? ta.toDouble() : double.tryParse(ta?.toString() ?? '') ?? 0.0);
     final tr = report['totalRemoved'];
@@ -837,38 +899,34 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isNarrow = constraints.maxWidth < 620;
+        final isNarrow = constraints.maxWidth < 640;
         final c1 = _solidSummaryCard(
           label: 'Total Added',
           value: '+${added.toStringAsFixed(0)}',
           icon: Icons.add_circle_outline_rounded,
-          bgGradientStart: _emerald,
-          bgGradientEnd: SoftPalette.emerald600,
-          glowColor: _emerald,
+          accentColor: c.success,
+          bgTint: c.successBg,
         );
         final c2 = _solidSummaryCard(
           label: 'Dispensed',
           value: '-${removed.toStringAsFixed(0)}',
           icon: Icons.medication_outlined,
-          bgGradientStart: _indigo,
-          bgGradientEnd: SoftPalette.indigo700,
-          glowColor: _indigo,
+          accentColor: c.info,
+          bgTint: c.infoBg,
         );
         final c3 = _solidSummaryCard(
           label: 'Adjustments',
-          value: '${adjusted.toStringAsFixed(0)}',
+          value: adjusted.toStringAsFixed(0),
           icon: Icons.tune_rounded,
-          bgGradientStart: _amber,
-          bgGradientEnd: SoftPalette.orange500,
-          glowColor: _amber,
+          accentColor: c.warning,
+          bgTint: c.warningBg,
         );
         final c4 = _solidSummaryCard(
           label: 'Net Flow',
           value: net >= 0 ? '+${net.toStringAsFixed(0)}' : net.toStringAsFixed(0),
           icon: Icons.account_balance_wallet_outlined,
-          bgGradientStart: _teal,
-          bgGradientEnd: SoftPalette.teal600,
-          glowColor: _teal,
+          accentColor: c.brand,
+          bgTint: c.brandSoft,
         );
 
         if (isNarrow) {
@@ -909,28 +967,26 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   }
 
   Widget _buildLiveStockBanner(Map<String, dynamic> report) {
-    final isDark = _isDark;
+    final c = context.comfort;
     final remaining = report['remaining'];
     final remVal = (remaining is num ? remaining.toDouble() : double.tryParse(remaining?.toString() ?? '') ?? 0.0);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-        ),
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
       ),
       child: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(9),
             decoration: BoxDecoration(
-              color: _teal.withValues(alpha: 0.12),
+              color: c.brandSoft,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(Icons.inventory_2_rounded, size: 20, color: isDark ? SoftPalette.sky350 : _teal),
+            child: Icon(Icons.inventory_2_rounded, size: 20, color: c.brand),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -940,14 +996,14 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                 Text(
                   _selectedMed != null ? '${_selectedMed!['name']} Live Stock' : 'Active Stock on Hand',
                   style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.gray50 : _textDark,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    color: c.textPrimary,
                   ),
                 ),
                 Text(
                   'Branch: ${widget.branchId.toUpperCase()}${_selectedCampFilter != 'all' ? ' • Camp: ${(CampSessionService.getCampLabel(_selectedCampFilter).toUpperCase().contains('KAPAY') ? 'SADDAR' : CampSessionService.getCampLabel(_selectedCampFilter).toUpperCase())}' : ' • All Camps'}',
-                  style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.slate350 : _textLight),
+                  style: TextStyle(fontSize: 11.5, color: c.textSecondary),
                 ),
               ],
             ),
@@ -956,8 +1012,8 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
             remVal.toStringAsFixed(0),
             style: TextStyle(
               fontSize: 22,
-              fontWeight: FontWeight.w900,
-              color: isDark ? SoftPalette.sky350 : _teal,
+              fontWeight: FontWeight.w800,
+              color: c.brand,
             ),
           ),
         ],
@@ -968,6 +1024,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   Widget _buildConsolidatedBreakdown(Map<String, dynamic> report) {
     if (_selectedMed != null) return const SizedBox.shrink();
 
+    final c = context.comfort;
     final logs = (report['logs'] as List?) ?? [];
     final Map<String, Map<String, dynamic>> groups = {};
 
@@ -1005,105 +1062,126 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
 
     if (groups.isEmpty) return const SizedBox.shrink();
 
-    final isDark = _isDark;
-    return Card(
-      elevation: 0,
-      color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
       ),
       // Own storage bucket: the tile's open/closed state otherwise collides with the parent
       // ListView's saved scroll offset in PageStorage ("double is not a subtype of bool?").
       child: PageStorage(
-       bucket: PageStorageBucket(),
-       child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          key: const ValueKey('ledger_breakdown_tile'),
-          initiallyExpanded: false,
-          leading: Icon(Icons.analytics_rounded, color: isDark ? SoftPalette.sky350 : _teal),
-          title: Text(
-            'Medicine Breakdown Summary',
-            style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50 : _tealDark, fontSize: 14),
-          ),
-          subtitle: Text('${groups.length} medicines moved this period', style: const TextStyle(fontSize: 11)),
-          children: [
-            const Divider(height: 1),
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              padding: const EdgeInsets.all(12),
-              itemCount: groups.length,
-              separatorBuilder: (_, __) => const Divider(height: 10),
-              itemBuilder: (context, index) {
-                final name = groups.keys.elementAt(index);
-                final counts = groups[name]!;
-                final added = counts['added'] as double;
-                final removed = counts['removed'] as double;
-                final patientSet = counts['patients'] as Set<String>;
-                final net = added - removed;
-
-                return Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            name,
-                            style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50 : _textDark, fontSize: 13),
-                          ),
-                          const SizedBox(height: 3),
-                          Row(
-                            children: [
-                              if (added > 0)
-                                Container(
-                                  margin: const EdgeInsets.only(right: 6),
-                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                                  decoration: BoxDecoration(
-                                    color: _emerald.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text('+${added.toStringAsFixed(0)}', style: const TextStyle(color: _emerald, fontSize: 10, fontWeight: FontWeight.bold)),
-                                ),
-                              if (removed > 0)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                                  decoration: BoxDecoration(
-                                    color: _indigo.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text('-${removed.toStringAsFixed(0)} (${patientSet.length} pts)', style: TextStyle(color: context.adapt(_indigo), fontSize: 10, fontWeight: FontWeight.bold)),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      net >= 0 ? '+${net.toStringAsFixed(0)}' : net.toStringAsFixed(0),
-                      style: TextStyle(
-                        color: net >= 0 ? _emerald : _red,
-                        fontWeight: FontWeight.w900,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                );
-              },
+        bucket: PageStorageBucket(),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            key: const ValueKey('ledger_breakdown_tile'),
+            initiallyExpanded: false,
+            leading: Icon(Icons.analytics_rounded, color: c.brand),
+            title: Text(
+              'Medicine Breakdown Summary',
+              style: TextStyle(fontWeight: FontWeight.w700, color: c.textPrimary, fontSize: 14),
             ),
-          ],
+            subtitle: Text(
+              '${groups.length} medicines moved this period',
+              style: TextStyle(fontSize: 11.5, color: c.textSecondary),
+            ),
+            children: [
+              Divider(height: 1, color: c.border),
+              ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(12),
+                itemCount: groups.length,
+                separatorBuilder: (_, __) => Divider(height: 10, color: c.border),
+                itemBuilder: (context, index) {
+                  final name = groups.keys.elementAt(index);
+                  final counts = groups[name]!;
+                  final added = counts['added'] as double;
+                  final removed = counts['removed'] as double;
+                  final patientSet = counts['patients'] as Set<String>;
+                  final net = added - removed;
+
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              name,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: c.textPrimary,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                if (added > 0)
+                                  Container(
+                                    margin: const EdgeInsets.only(right: 6),
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: c.successBg,
+                                      borderRadius: BorderRadius.circular(5),
+                                      border: Border.all(color: c.success.withValues(alpha: 0.3)),
+                                    ),
+                                    child: Text(
+                                      '+${added.toStringAsFixed(0)}',
+                                      style: TextStyle(
+                                        color: c.success,
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                if (removed > 0)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: c.infoBg,
+                                      borderRadius: BorderRadius.circular(5),
+                                      border: Border.all(color: c.info.withValues(alpha: 0.3)),
+                                    ),
+                                    child: Text(
+                                      '-${removed.toStringAsFixed(0)} (${patientSet.length} pts)',
+                                      style: TextStyle(
+                                        color: c.info,
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      Text(
+                        net >= 0 ? '+${net.toStringAsFixed(0)}' : net.toStringAsFixed(0),
+                        style: TextStyle(
+                          color: net >= 0 ? c.success : c.danger,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
         ),
-       ),
       ),
     );
   }
 
   Widget _buildTransactionTile(Map<dynamic, dynamic> log) {
+    final c = context.comfort;
     final bool isAdded = log['type'] == 'added';
     final isProforma = log['isProforma'] == true;
-    final isDark = _isDark;
     final date = DateTime.tryParse(log['date']?.toString() ?? '') ?? DateTime.now();
     final rawCampTag = (log['campTag'] ?? '').toString().trim().toUpperCase();
     final campTag = (rawCampTag.contains('KAPAY') || rawCampTag == 'KAPAYYA' || rawCampTag == 'KAPAYA')
@@ -1114,23 +1192,16 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     final rawMsg = (log['msg'] ?? (isAdded ? 'Restock' : 'Dispensed')).toString();
     final msg = MasterProformaService.cleanBrandToFormula(rawMsg);
 
+    final Color iconBg = isAdded ? c.successBg : c.infoBg;
+    final Color iconFg = isAdded ? c.success : c.info;
+
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 5),
+      margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.gray100,
-          width: 1,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.03),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1140,20 +1211,16 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
             children: [
               // Action Icon Avatar
               Container(
-                padding: const EdgeInsets.all(7),
+                padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: isAdded
-                      ? (isProforma ? _emerald.withValues(alpha: 0.15) : _teal.withValues(alpha: 0.15))
-                      : _indigo.withValues(alpha: 0.15),
+                  color: iconBg,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Icon(
                   isAdded
                       ? (isProforma ? Icons.inventory_2_rounded : Icons.add_circle_outline_rounded)
                       : Icons.medication_outlined,
-                  color: isAdded
-                      ? (isProforma ? _emerald : (isDark ? SoftPalette.teal300 : _teal))
-                      : context.adapt(_indigo),
+                  color: iconFg,
                   size: 16,
                 ),
               ),
@@ -1165,9 +1232,9 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                       ? msg
                       : '$medName • ${log['patientName'] ?? 'Unknown Patient'}',
                   style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.gray50 : _textDark,
-                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: c.textPrimary,
+                    fontSize: 13.5,
                   ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -1178,64 +1245,70 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               Text(
                 '${isAdded ? "+" : "-"}${log['qty']}',
                 style: TextStyle(
-                  color: isAdded ? (isDark ? SoftPalette.green300 : _emerald) : (isDark ? SoftPalette.indigo400 : _indigo),
-                  fontWeight: FontWeight.w900,
-                  fontSize: 15,
+                  color: iconFg,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15.5,
                 ),
               ),
             ],
           ),
+          if ((!isAdded && log['serial'] != null && log['serial'].toString().isNotEmpty) ||
+              (!isAdded && log['patientCnic'] != null && log['patientCnic'].toString().isNotEmpty) ||
+              (!isAdded && log['days'] != null) ||
+              (campTag.isNotEmpty && campTag != 'ALL')) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (!isAdded && log['serial'] != null && log['serial'].toString().isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: c.brandSoft,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '#${log['serial']}',
+                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: c.brandStrong),
+                    ),
+                  ),
+                if (!isAdded && log['patientCnic'] != null && log['patientCnic'].toString().isNotEmpty)
+                  Text(
+                    'CNIC: ${log['patientCnic']}',
+                    style: TextStyle(fontSize: 11, color: c.textSecondary),
+                  ),
+                if (!isAdded && log['days'] != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: c.warningBg,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(color: c.warning.withValues(alpha: 0.3)),
+                    ),
+                    child: Text(
+                      '${log['days']}d supply',
+                      style: TextStyle(fontSize: 10, color: c.warning, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                if (campTag.isNotEmpty && campTag != 'ALL')
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: c.infoBg,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(color: c.info.withValues(alpha: 0.3)),
+                    ),
+                    child: Text(
+                      '📍 $campTag',
+                      style: TextStyle(color: c.info, fontSize: 10, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+              ],
+            ),
+          ],
           const SizedBox(height: 8),
-          // Sub-details row with Wrap to NEVER overflow
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (!isAdded && log['serial'] != null && log['serial'].toString().isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: _indigo.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    '#${log['serial']}',
-                    style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: context.adapt(_indigo)),
-                  ),
-                ),
-              if (!isAdded && log['patientCnic'] != null && log['patientCnic'].toString().isNotEmpty)
-                Text(
-                  'CNIC: ${log['patientCnic']}',
-                  style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.slate350 : _textLight),
-                ),
-              if (!isAdded && log['days'] != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: SoftPalette.red400.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    '${log['days']}d supply',
-                    style: const TextStyle(fontSize: 10, color: SoftPalette.red400, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              if (campTag.isNotEmpty && campTag != 'ALL')
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: campTag.contains('HAJI') ? SoftPalette.indigo500 : SoftPalette.teal500,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    '📍 $campTag',
-                    style: const TextStyle(color: SoftPalette.gray50, fontSize: 9.5, fontWeight: FontWeight.bold),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 6),
           // Footer: Performed by & Date/Time
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1243,16 +1316,13 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               Expanded(
                 child: Text(
                   'By: ${log['user'] ?? 'System'}',
-                  style: TextStyle(
-                    color: isDark ? SoftPalette.slate550 : _textLight,
-                    fontSize: 10.5,
-                  ),
+                  style: TextStyle(color: c.textMuted, fontSize: 11),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               Text(
                 DateFormat('dd MMM, hh:mm a').format(date),
-                style: TextStyle(color: isDark ? SoftPalette.slate350 : _textLight, fontSize: 10.5, fontWeight: FontWeight.w500),
+                style: TextStyle(color: c.textSecondary, fontSize: 11, fontWeight: FontWeight.w500),
               ),
             ],
           ),
@@ -1265,58 +1335,57 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     required String label,
     required String value,
     required IconData icon,
-    required Color bgGradientStart,
-    required Color bgGradientEnd,
-    required Color glowColor,
+    required Color accentColor,
+    required Color bgTint,
   }) {
+    final c = context.comfort;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [bgGradientStart, bgGradientEnd],
-        ),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: SoftPalette.gray50.withValues(alpha: 0.25),
-          width: 1.0,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: glowColor.withValues(alpha: 0.28),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
+        color: bgTint,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accentColor.withValues(alpha: 0.3)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 14, color: SoftPalette.gray50.withValues(alpha: 0.90)),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w600,
-                    color: SoftPalette.gray50.withValues(alpha: 0.95),
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: accentColor.withValues(alpha: _isDark ? 0.22 : 0.14),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: accentColor, size: 18),
           ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.bold,
-              color: SoftPalette.gray50,
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: c.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    height: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: accentColor,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -1328,29 +1397,26 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
     required String value,
     required List<Map<String, String>> items,
     required ValueChanged<String?> onChanged,
-    required bool isDark,
   }) {
+    final c = context.comfort;
     return Container(
-      height: 34,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900 : SoftPalette.teal100t,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.teal200,
-        ),
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: items.any((i) => i['id'] == value) ? value : items.first['id'],
           isDense: true,
-          icon: Icon(Icons.arrow_drop_down,
-              size: 16, color: isDark ? SoftPalette.sky350 : _teal),
-          dropdownColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+          icon: Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: c.textSecondary),
+          dropdownColor: c.surface,
           style: TextStyle(
-            fontSize: 11,
+            fontSize: 12,
             fontWeight: FontWeight.w600,
-            color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87,
+            color: c.textPrimary,
           ),
           items: items.map((i) {
             return DropdownMenuItem<String>(
@@ -1358,9 +1424,9 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               child: Text(
                 i['label']!,
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87,
+                  color: c.textPrimary,
                 ),
               ),
             );
@@ -1372,7 +1438,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   }
 
   void _showMedicinePicker() {
-    final isDark = _isDark;
+    final c = context.comfort;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1380,8 +1446,9 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
       builder: (_) => Container(
         height: MediaQuery.of(context).size.height * 0.7,
         decoration: BoxDecoration(
-          color: isDark ? SoftPalette.slate800 : _white,
+          color: c.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(top: BorderSide(color: c.border)),
         ),
         child: Column(
           children: [
@@ -1390,13 +1457,20 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate600 : SoftPalette.gray150,
+                color: c.borderStrong,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
-            Text('Select Medicine for Ledger',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isDark ? SoftPalette.gray50 : _tealDark)),
+            Text(
+              'Select Medicine for Ledger',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 16,
+                color: c.textPrimary,
+              ),
+            ),
             const SizedBox(height: 12),
+            Divider(height: 1, color: c.border),
             Expanded(
               child: ListView.builder(
                 itemCount: _allMedicines.length + 1,
@@ -1404,11 +1478,17 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                   if (i == 0) {
                     return ListTile(
                       leading: CircleAvatar(
-                        backgroundColor: _teal.withValues(alpha: 0.1),
-                        child: const Icon(Icons.apps_rounded, size: 16, color: _teal),
+                        backgroundColor: c.brandSoft,
+                        child: Icon(Icons.apps_rounded, size: 16, color: c.brand),
                       ),
-                      title: const Text('All Medicines (Consolidated)', style: TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: const Text('Show ledger for all stock items combined'),
+                      title: Text(
+                        'All Medicines (Consolidated)',
+                        style: TextStyle(fontWeight: FontWeight.w700, color: c.textPrimary),
+                      ),
+                      subtitle: Text(
+                        'Show ledger for all stock items combined',
+                        style: TextStyle(color: c.textSecondary, fontSize: 12),
+                      ),
                       onTap: () {
                         Navigator.pop(ctx);
                         setState(() {
@@ -1423,11 +1503,17 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                   final cleanName = MasterProformaService.cleanBrandToFormula(med['name'] ?? med['formula'] ?? '');
                   return ListTile(
                     leading: CircleAvatar(
-                      backgroundColor: _teal.withValues(alpha: 0.1),
-                      child: const Icon(Icons.medication_rounded, size: 16, color: _teal),
+                      backgroundColor: c.brandSoft,
+                      child: Icon(Icons.medication_rounded, size: 16, color: c.brand),
                     ),
-                    title: Text(cleanName.isNotEmpty ? cleanName : (med['name'] ?? ''), style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('${med['type']} • ${med['dose'] ?? 'No Dose'} • Qty: ${med['quantity']}'),
+                    title: Text(
+                      cleanName.isNotEmpty ? cleanName : (med['name'] ?? ''),
+                      style: TextStyle(fontWeight: FontWeight.w700, color: c.textPrimary),
+                    ),
+                    subtitle: Text(
+                      '${med['type']} • ${med['dose'] ?? 'No Dose'} • Qty: ${med['quantity']}',
+                      style: TextStyle(color: c.textSecondary, fontSize: 12),
+                    ),
                     onTap: () {
                       Navigator.pop(ctx);
                       setState(() {
@@ -1447,14 +1533,14 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
   }
 
   Widget _buildEmptyState(String msg) {
-    final isDark = _isDark;
+    final c = context.comfort;
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.query_stats_rounded, size: 64, color: isDark ? SoftPalette.slate700 : SoftPalette.gray150),
+          Icon(Icons.query_stats_rounded, size: 64, color: c.textMuted),
           const SizedBox(height: 12),
-          Text(msg, style: TextStyle(color: isDark ? SoftPalette.slate350 : _textLight, fontSize: 14)),
+          Text(msg, style: TextStyle(color: c.textSecondary, fontSize: 14)),
         ],
       ),
     );

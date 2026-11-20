@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:gmwf/services/cloud/cloud_db.dart';
 import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/services/network_health_service.dart';
@@ -13,6 +14,9 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../services/sync_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/camp_session_service.dart';
+import '../services/stock/stock_actions.dart';
+import '../services/stock/stock_ledger.dart';
+import '../services/stock/stock_pool.dart';
 import '../realtime/realtime_manager.dart';
 import '../realtime/realtime_events.dart';
 import '../utils/formatters.dart';
@@ -484,6 +488,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
                 .collection('branches')
                 .doc(bId)
                 .collection(col)
+                .limit(100)
                 .get(const GetOptions(source: Source.serverAndCache))
                 .timeout(const Duration(seconds: 8));
 
@@ -543,12 +548,21 @@ class _StableRequestTabState extends State<_StableRequestTab>
               .collection('branches')
               .doc(bId)
               .collection(col)
+              .limit(100)
               .snapshots()
               .listen((snap) {
             if (!Hive.isBoxOpen('local_edit_requests')) return;
             final box = Hive.box('local_edit_requests');
-            for (final doc in snap.docs) {
-              final d = Map<String, dynamic>.from(doc.data());
+            for (final change in snap.docChanges) {
+              final doc = change.doc;
+              if (change.type == DocumentChangeType.removed) {
+                box.delete(doc.id);
+                if (col == 'restock_requests' && Hive.isBoxOpen(LocalStorageService.restockRequestsBox)) {
+                  Hive.box(LocalStorageService.restockRequestsBox).delete(doc.id);
+                }
+                continue;
+              }
+              final d = Map<String, dynamic>.from(doc.data() ?? {});
               d['id'] ??= doc.id;
               d['requestId'] ??= doc.id;
               d['branchId'] ??= bId;
@@ -658,7 +672,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
         : null;
 
     return ValueListenableBuilder<Box>(
-      valueListenable: editBox.listenable(),
+      valueListenable: DebouncedBoxListenable.shared(editBox),
       builder: (context, box, _) {
         final targetBranch = widget.branchId.toLowerCase().trim();
     bool isBranchMatch(Map<String, dynamic> data) {
@@ -2671,7 +2685,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
           : _safeItemList(data['items']);
 
       if (itemsToUse.isNotEmpty) {
-        await _handleAddStock(itemsToUse, campId: reqCampId);
+        await _handleAddStock(itemsToUse, campId: reqCampId, requestId: docId);
       }
     }
     else if (requestType == 'edit_medicine') {
@@ -2739,57 +2753,41 @@ class _StableRequestTabState extends State<_StableRequestTab>
           : _safeItemList(data['items']);
       
       if (itemsToUse.isNotEmpty) {
-        final inventory = FirebaseFirestore.instance
-            .collection('branches')
-            .doc(widget.branchId)
-            .collection('inventory');
-        
+        // Through the stock book: details go everywhere (this PC, LAN, cloud) and the first
+        // stock is one movement whose id comes from this request, so approving it twice (or
+        // on two PCs) adds the stock once. It used to write the full quantity straight into
+        // the branch-wide 'inventory' collection, even for a branch with camps.
+        final regPool = StockPool.of(widget.branchId, reqCampId,
+            fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+
         for (final item in itemsToUse) {
           final name = item['name']?.toString() ?? '';
           final type = item['type'] ?? '';
           final dose = item['dose'] ?? '';
           final exp  = item['expiryDate'] ?? '';
-          
+
           final id = RequestUtils.generateDocId(name, type, dose, exp, campId: reqCampId);
-          
-          final docData = <String, dynamic>{
-            ...item,
-            'addedAt': FieldValue.serverTimestamp(),
-            'updatedAt': FieldValue.serverTimestamp(),
-            'isVerified': true,
-            'createdBy': data['requestedBy'],
-            'createdByName': data['requesterName'],
-            'approvedBy': reviewerUid,
-            'approvedByName': reviewerName ?? 'Supervisor',
-          };
-          if (reqCampId != null && reqCampId.isNotEmpty) {
-            docData['dispensaryId'] = reqCampId;
-            docData['dispensaryTag'] = CampSessionService.getDispensaryKeyword(reqCampId);
+
+          if (regPool != null) {
+            final details = <String, dynamic>{
+              ...item,
+              'isVerified': true,
+              'createdBy': data['requestedBy'],
+              'createdByName': data['requesterName'],
+              'approvedBy': reviewerUid,
+              'approvedByName': reviewerName ?? 'Supervisor',
+              'addedAt': DateTime.now().toIso8601String(),
+            }..remove('quantity');
+            await StockActions.addBatch(
+              regPool,
+              id,
+              details,
+              initialQty: _safeInt(item['quantity']).toDouble(),
+              ref: 'registered (request $docId)',
+              opKey: 'req-$docId-$id',
+            );
           }
-          
-          unawaited(_bestEffort(inventory.doc(id).set(docData), 'register medicine'));
 
-          // Save locally to Hive stockBox and broadcast immediately via LAN/WebSocket
-          final localStockData = <String, dynamic>{
-            ...item,
-            'id': id,
-            'branchId': widget.branchId,
-            'isVerified': true,
-            'addedAt': DateTime.now().toIso8601String(),
-            'updatedAt': DateTime.now().toIso8601String(),
-            if (reqCampId != null && reqCampId.isNotEmpty) 'dispensaryId': reqCampId,
-            if (reqCampId != null && reqCampId.isNotEmpty) 'dispensaryTag': CampSessionService.getDispensaryKeyword(reqCampId),
-          };
-          LocalStorageService.saveLocalInventoryItem(localStockData);
-
-          RealtimeManager().sendMessage({
-            ...RealtimeEvents.payload(
-              type: RealtimeEvents.saveStockItem,
-              branchId: widget.branchId,
-              data: localStockData,
-            ),
-          });
-          
           unawaited(_bestEffort(FirebaseFirestore.instance
               .collection('branches')
               .doc(widget.branchId)
@@ -2998,7 +2996,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
     }
   }
 
-  Future<void> _handleAddStock(List<Map<String, dynamic>> items, {String? campId}) async {
+  Future<void> _handleAddStock(List<Map<String, dynamic>> items, {String? campId, String? requestId}) async {
     debugPrint('handleAddStock started with ${items.length} items (Target Camp: $campId)');
 
     if (items.isEmpty) {
@@ -3009,10 +3007,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
     final branchRef = FirebaseFirestore.instance
         .collection('branches')
         .doc(widget.branchId);
-    // The collection dispensing deducts from (Karachi camps: inventory_haji / inventory_saddar);
-    // approvals used to add to plain 'inventory', so for Karachi the two drifted apart.
-    final inventory = branchRef.collection(
-        CampSessionService.getCampInventoryPath(branchId: widget.branchId, campId: campId));
+    // Dispensary stock goes through the stock book below (the camp's own pool); only the
+    // warehouse record is written here.
     final warehouse  = branchRef.collection('warehouse');
     final batch      = FirebaseFirestore.instance.batch();
 
@@ -3089,104 +3085,47 @@ class _StableRequestTabState extends State<_StableRequestTab>
         batch.set(warehouse.doc(warehouseId), fullWarehouseData);
       }
 
-      Query invQuery = inventory
-          .where('name_lower', isEqualTo: nameLower)
-          .where('type',       isEqualTo: type);
-
-      if (campId != null && campId.isNotEmpty && campId != 'all') {
-        invQuery = invQuery.where('dispensaryId', isEqualTo: campId);
+      // Stock book: the batch in this camp's pool gets "+qty" as ONE movement whose id comes
+      // from the request, so approving it twice (or on two PCs) adds the stock once. The
+      // record itself only gets details; a quantity is never written as a figure. (This used
+      // to write into the branch-wide 'inventory' collection even for a branch with camps.)
+      final addPool = StockPool.of(widget.branchId, campId,
+          fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+      if (addPool == null) {
+        debugPrint('Skipping item "$name" - no camp/pool for this branch');
+        continue;
       }
-      if (type != 'Nebulization' && dose.isNotEmpty) {
-        invQuery = invQuery.where('dose', isEqualTo: dose);
-      }
-      if (expiry.isNotEmpty) {
-        invQuery = invQuery.where('expiryDate', isEqualTo: expiry);
-      }
-
-      final existingQuery = await invQuery.limit(1).get().timeout(const Duration(seconds: 5));
-
-      final Map<String, dynamic> fullInventoryData = Map.from(commonFields);
+      final details = Map<String, dynamic>.from(commonFields)..remove('quantity');
       if (type == 'Nebulization') {
-        fullInventoryData['distilledWater'] = distilledWater ?? 0;
-        fullInventoryData['drops']          = drops ?? 0;
+        details['distilledWater'] = distilledWater ?? 0;
+        details['drops']          = drops ?? 0;
       } else {
-        fullInventoryData['dose'] = dose;
+        details['dose'] = dose;
       }
-
-      final isExistingMedicine = existingQuery.docs.isNotEmpty;
-      if (isExistingMedicine) {
-        final existingDoc = existingQuery.docs.first;
-        // Details only. The quantity is NOT written here: it goes up as "+qty" through the
-        // stock queue below (like the proforma restock), applied once per operation. Writing
-        // "cloud quantity read a moment ago + qty" lost any dispense made in between, and the
-        // LAN server then overwrote the cloud with its own figure.
-        batch.update(existingDoc.reference, {
-          'formula':        formula,
-          'formula_lower':  formulaLower,
-          'classification': classification,
-          'price':          price,
-        });
-      } else {
-        final inventoryId = RequestUtils.generateDocId(
-          name, type, variantForId, expiry,
-          distilledWater: distilledWater, drops: drops, campId: campId,
-        );
-        fullInventoryData['addedAt'] = FieldValue.serverTimestamp();
-        batch.set(inventory.doc(inventoryId), fullInventoryData);
+      final newBatchId = RequestUtils.generateDocId(
+        name, type, variantForId, expiry,
+        distilledWater: distilledWater, drops: drops, campId: campId,
+      );
+      // An existing batch of the same medicine, strength and expiry in this pool, if any.
+      var targetId = newBatchId;
+      for (final b in StockLedger.items(pool: addPool.key)) {
+        final sameName = (b['name'] ?? '').toString().toLowerCase().trim() == nameLower.trim();
+        final sameType = (b['type'] ?? '').toString() == type;
+        final sameDose = type == 'Nebulization' || dose.isEmpty || (b['dose'] ?? '').toString() == dose;
+        final sameExpiry = expiry.isEmpty || (b['expiryDate'] ?? '').toString() == expiry;
+        if (sameName && sameType && sameDose && sameExpiry) {
+          targetId = (b['medicineId'] ?? b['id']).toString();
+          break;
+        }
       }
-
-      // Local-first: apply to Hive and tell every device on the LAN right away.
-      final localId = existingQuery.docs.isNotEmpty
-          ? existingQuery.docs.first.id
-          : RequestUtils.generateDocId(
-              name, type, variantForId, expiry,
-              distilledWater: distilledWater, drops: drops, campId: campId,
-            );
-      final localExisting = LocalStorageService.getLocalInventoryItem(localId);
-      final cloudQty = existingQuery.docs.isNotEmpty
-          ? _safeInt((existingQuery.docs.first.data() as Map<String, dynamic>? ?? {})['quantity'])
-          : 0;
-      final baseQty = localExisting != null ? _safeInt(localExisting['quantity']) : cloudQty;
-      final localItem = <String, dynamic>{
-        ...fullInventoryData,
-        if (localExisting != null) ...localExisting,
-        'id': localId,
-        'branchId': widget.branchId,
-        'quantity': baseQty + qty,
-        'price': price,
-        'formula': formula,
-        'classification': classification,
-        'updatedAt': DateTime.now().toIso8601String(),
-      };
-      LocalStorageService.saveLocalInventoryItem(localItem);
-      if (isExistingMedicine) {
-        // Same as the proforma restock: other PCs and the LAN server apply "+qty" once
-        // (_quantityDelta + _opId), and the cloud gets the increment through the stock queue
-        // (a LAN desk hands it to the server; the server PC or a standalone PC uploads it).
-        final opId = 'approve_${localId}_${DateTime.now().microsecondsSinceEpoch}';
-        RealtimeManager().sendMessage({
-          'event_type': RealtimeEvents.saveStockItem,
-          'branchId': widget.branchId,
-          'data': {...localItem, '_quantityDelta': qty, '_opId': opId},
-        });
-        await LocalStorageService.enqueueSync({
-          'type': 'add_inventory_stock',
-          'branchId': widget.branchId,
-          'medicineId': localId,
-          'quantity': qty,
-          'campId': campId,
-          'dispensaryId': campId,
-          'txId': opId,
-          'data': localItem,
-        });
-      } else {
-        // A new medicine is created in the cloud with its full quantity by the batch below.
-        RealtimeManager().sendMessage({
-          'event_type': RealtimeEvents.saveStockItem,
-          'branchId': widget.branchId,
-          'data': localItem,
-        });
-      }
+      await StockActions.restock(
+        addPool,
+        targetId,
+        qty.toDouble(),
+        details: details,
+        ref: 'approved request',
+        opKey: 'req-${requestId ?? DateTime.now().microsecondsSinceEpoch}-$targetId',
+      );
 
       operationCount++;
     }
@@ -3205,12 +3144,6 @@ class _StableRequestTabState extends State<_StableRequestTab>
       List<Map<String, dynamic>> items, String reviewerUid, String? reviewerName, {String? campId}) async {
     if (items.isEmpty) return;
 
-    final inventory = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('inventory');
-    final batch = FirebaseFirestore.instance.batch();
-
     for (final item in items) {
       final oldId = item['oldId']?.toString();
       if (oldId == null) continue;
@@ -3228,7 +3161,9 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
       final effCamp = (campId != null && campId.isNotEmpty) ? campId : (item['campId'] ?? item['dispensaryId'])?.toString();
 
-      final barcode = (item['barcode'] ?? item['code'] ?? '').toString().trim();
+      final barcode = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+      final itemCode = (item['code'] ?? item['itemCode'] ?? '').toString().trim();
+      final packBarcode = (item['packBarcode'] ?? '').toString().trim();
       final newData = <String, dynamic>{
         'name':           name,
         'name_lower':     name.toLowerCase(),
@@ -3239,8 +3174,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'quantity':       qty,
         'price':          price,
         'expiryDate':     expiry,
-        if (barcode.isNotEmpty) 'code': barcode,
+        if (itemCode.isNotEmpty) 'code': itemCode,
+        if (itemCode.isNotEmpty) 'itemCode': itemCode,
         if (barcode.isNotEmpty) 'barcode': barcode,
+        if (barcode.isNotEmpty) 'rollNo': barcode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
         'classification': classification,
         'approvedBy':     reviewerUid,
         'approvedByName': reviewerName ?? 'Supervisor',
@@ -3264,36 +3202,24 @@ class _StableRequestTabState extends State<_StableRequestTab>
         distilledWater: distilledWater, drops: drops, campId: effCamp,
       );
 
+      // Stock book: details are saved without quantity; a changed quantity is recorded as the
+      // difference from what this PC shows (so dispenses made meanwhile on other PCs are kept).
+      // A changed id (name/strength/expiry edited) hides the old batch and opens the new one
+      // with the approved quantity, once per request.
+      final editPool = StockPool.of(widget.branchId, effCamp,
+          fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+      if (editPool == null) continue;
+      final details = Map<String, dynamic>.from(newData)
+        ..remove('quantity')
+        ..remove('updatedAt');
       if (cleanOldId.isNotEmpty && cleanOldId == newId) {
-        batch.update(inventory.doc(cleanOldId), newData);
+        await StockActions.saveDetails(editPool, newId, details);
+        await StockActions.setCounted(editPool, newId, qty.toDouble(), reason: 'edit approved');
       } else {
-        if (cleanOldId.isNotEmpty) {
-          batch.delete(inventory.doc(cleanOldId));
-          LocalStorageService.deleteLocalStockItem(cleanOldId);
-          
-          // Broadcast delete to LAN so others remove the old ghost record immediately
-          RealtimeManager().sendMessage({
-            'event_type': RealtimeEvents.deleteStockItem,
-            'id': cleanOldId,
-            'branchId': widget.branchId,
-          });
-        }
-
-        newData['addedAt'] = FieldValue.serverTimestamp();
-        batch.set(inventory.doc(newId), newData);
+        if (cleanOldId.isNotEmpty) await StockActions.deleteBatch(editPool, cleanOldId);
+        await StockActions.addBatch(editPool, newId, details,
+            initialQty: qty.toDouble(), ref: 'edit approved', opKey: 'edit-$cleanOldId-$newId');
       }
-
-      final finalMedId = (cleanOldId.isNotEmpty && cleanOldId == newId) ? cleanOldId : newId;
-      final hiveData = Map<String, dynamic>.from(newData);
-      hiveData['id'] = finalMedId;
-      hiveData['branchId'] = widget.branchId;
-      LocalStorageService.saveLocalInventoryItem(hiveData);
-
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.saveStockItem,
-        'branchId': widget.branchId,
-        'data': hiveData,
-      });
 
       // Add to log
       FirebaseFirestore.instance
@@ -3313,18 +3239,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
         if (campId != null) 'dispensaryId': campId,
       });
     }
-    unawaited(_bestEffort(batch.commit(), 'edit_medicine commit'));
   }
 
   Future<void> _handleDeleteMedicine(
       List<Map<String, dynamic>> items, {String? campId}) async {
     if (items.isEmpty) return;
-
-    final inventory = FirebaseFirestore.instance
-        .collection('branches')
-        .doc(widget.branchId)
-        .collection('inventory');
-    final batch = FirebaseFirestore.instance.batch();
 
     for (final item in items) {
       final name = item['name']?.toString();
@@ -3339,15 +3258,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
         name, type, dose, expiry,
         distilledWater: distilledWater, drops: drops, campId: campId,
       );
-      batch.delete(inventory.doc(id));
-      await LocalStorageService.deleteLocalStockItem(id);
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.deleteStockItem,
-        'id': id,
-        'branchId': widget.branchId,
-      });
+      // Hidden everywhere (this PC, LAN, cloud) through the stock book; history is kept.
+      final delPool = StockPool.of(widget.branchId, campId,
+          fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+      if (delPool != null) await StockActions.deleteBatch(delPool, id);
     }
-    unawaited(_bestEffort(batch.commit(), 'delete_medicine commit'));
   }
 
   Future<void> _handleChangePrescription(Map<String, dynamic> data,

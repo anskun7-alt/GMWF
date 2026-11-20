@@ -1,5 +1,7 @@
 // lib/pages/office/finance_page.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gmwf/design/design_system.dart';
@@ -85,6 +87,16 @@ class _FinancePageState extends State<FinancePage> {
   }
 
   @override
+  void didUpdateWidget(covariant FinancePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The app shell's sidebar switches sections by passing a new tab index;
+    // keep the loaded data and just change the section.
+    if (widget.initialTabIndex != oldWidget.initialTabIndex) {
+      setState(() => _selectedIndex = widget.initialTabIndex.clamp(0, 7));
+    }
+  }
+
+  @override
   void initState() {
     super.initState();
     _activeBranchId = _getEffectiveUserBranch();
@@ -95,13 +107,13 @@ class _FinancePageState extends State<FinancePage> {
     if (Hive.isBoxOpen(LocalStorageService.syncBox)) {
       _syncBox = Hive.box(LocalStorageService.syncBox);
       _updateSyncCount();
-      _syncListenable = _syncBox.listenable()..addListener(_updateSyncCount);
+      _syncListenable = DebouncedBoxListenable.shared(_syncBox)..addListener(_updateSyncCount);
     } else {
       LocalStorageService.ensureBoxOpen(LocalStorageService.syncBox).then((box) {
         if (!mounted) return;
         _syncBox = box;
         _updateSyncCount();
-        _syncListenable = _syncBox.listenable()..addListener(_updateSyncCount);
+        _syncListenable = DebouncedBoxListenable.shared(_syncBox)..addListener(_updateSyncCount);
       });
     }
     FinanceLedgerStorage.initEngine();
@@ -123,8 +135,7 @@ class _FinancePageState extends State<FinancePage> {
 
   void _updateSyncCount() {
     if (!mounted) return;
-    setState(() {
-      _pendingSyncCount = _syncBox.values.where((v) =>
+    final pending = _syncBox.values.where((v) =>
         v is Map && (
           v['type']?.toString().startsWith('save_employee') == true ||
           v['type']?.toString().startsWith('save_salary') == true ||
@@ -140,7 +151,12 @@ class _FinancePageState extends State<FinancePage> {
       final conflicts = Hive.isBoxOpen(LocalStorageService.financeSettingsBox)
           ? Hive.box(LocalStorageService.financeSettingsBox).get('sync_conflicts') as List?
           : null;
-      _hasConflicts = conflicts != null && conflicts.isNotEmpty;
+    final hasConflicts = conflicts != null && conflicts.isNotEmpty;
+    // Rebuild the whole Finance page only when the badge really changes.
+    if (pending == _pendingSyncCount && hasConflicts == _hasConflicts) return;
+    setState(() {
+      _pendingSyncCount = pending;
+      _hasConflicts = hasConflicts;
     });
   }
 
@@ -350,10 +366,14 @@ class _FinancePageState extends State<FinancePage> {
   }
 
   Widget _buildHeader(BuildContext ctx, bool canViewAudits, RoleThemeData t) {
+    // Inside the executive shell its header already shows the section title,
+    // so only this page's own actions stay, in a slim row.
+    final hosted = HomeModuleHost.isModuleRoot(ctx);
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 14, 24, 6),
+      padding: EdgeInsets.fromLTRB(24, hosted ? 8 : 14, 24, 6),
       child: Row(
         children: [
+          if (!hosted) ...[
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
@@ -378,6 +398,7 @@ class _FinancePageState extends State<FinancePage> {
               ),
             ],
           ),
+          ],
           const Spacer(),
           _buildSyncChip(),
           const SizedBox(width: 10),

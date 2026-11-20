@@ -1,12 +1,26 @@
 // lib/pages/school/views/school_teacher_attendance_view.dart
+//
+// Staff attendance (ERP layout, 2026-11-17). One day at a time: Present /
+// Absent / Leave per teacher, check-in time (biometric punches fill it in),
+// and a remark. Only changed teachers are written, each stamped with
+// `updatedAt`, so two computers marking different teachers on the same day
+// both keep their marks (before, the whole day was overwritten).
+// Holidays, weekly days off and future days cannot be marked.
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/design_system.dart';
-import 'package:gmwf/design/components/app_toast.dart';
-import 'package:intl/intl.dart';
-import '../theme/school_theme.dart';
-import '../utils/school_local_storage.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:intl/intl.dart' show DateFormat;
+
+import '../../../utils/debounced_box_listenable.dart';
+import '../core/school_store.dart';
+import '../daily/daily_rules.dart';
+import '../daily/school_daily_service.dart';
+import '../daily/views/daily_common.dart';
+import '../models/school_teacher.dart';
 import '../utils/school_auth_helper.dart';
+import '../utils/school_local_storage.dart';
+import '../widgets/erp/school_erp.dart';
 
 class SchoolTeacherAttendanceView extends StatefulWidget {
   final String branchId;
@@ -24,527 +38,258 @@ class SchoolTeacherAttendanceView extends StatefulWidget {
   State<SchoolTeacherAttendanceView> createState() => _SchoolTeacherAttendanceViewState();
 }
 
+const _statuses = [('present', 'P', 'Present'), ('absent', 'A', 'Absent'), ('leave', 'L', 'Leave')];
+
 class _SchoolTeacherAttendanceViewState extends State<SchoolTeacherAttendanceView> {
-  DateTime _selectedDate = DateTime.now();
-  String _selectedDeptFilter = 'All';
-  bool _isSaving = false;
-  final Map<String, Map<String, dynamic>> _localChanges = {};
+  late final Future<void> _ready = SchoolLocalStorage.ensureBoxesOpen();
+  DateTime _date = DateTime.now();
+  String _department = 'All';
+  final Map<String, Map<String, dynamic>> _changes = {};
+  bool _saving = false;
 
-  bool get _isTeacher => SchoolAuthHelper.isTeacher(widget.userRole);
+  bool get _canEdit => !SchoolAuthHelper.isTeacher(widget.userRole);
+  bool get _isPrincipal => SchoolAuthHelper.isAdminOrPrincipal(widget.userRole);
+  String get _key => SchoolDailyRules.ymd(_date);
 
-  final List<String> _departments = [
-    'All',
-    'Science & IT',
-    'Mathematics',
-    'Languages & English',
-    'Social Studies & Humanities',
-    'Arts & Commerce',
-    'Primary Education',
-    'Administration',
-  ];
-
-  Future<bool> _confirmDiscardChanges() async {
-    if (_localChanges.isEmpty) return true;
-    final confirm = await showDialog<bool>(
+  Future<bool> _confirmDiscard() async {
+    if (_changes.isEmpty) return true;
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: const [
-            Icon(Icons.warning_amber_rounded, color: SoftPalette.amber350),
-            SizedBox(width: 10),
-            Text('Unsaved Faculty Attendance Edits'),
-          ],
-        ),
-        content: const Text(
-          'You have unsaved faculty attendance edits for this date. If you leave now, these changes will be lost.',
-        ),
+        title: const Text('Unsaved marks'),
+        content: Text('${_changes.length} unsaved ${_changes.length == 1 ? 'mark' : 'marks'}. Discard them?'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Stay & Edit'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: SoftPalette.red500,
-              foregroundColor: SoftPalette.gray50,
-            ),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Discard Changes'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep editing')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Discard')),
         ],
       ),
     );
-    return confirm ?? false;
+    if (ok == true) setState(_changes.clear);
+    return ok == true;
   }
 
-  void _markAllPresent(List<Map<String, dynamic>> teachers) {
-    for (final t in teachers) {
-      final tId = t['id']?.toString() ?? '';
-      if (tId.isNotEmpty) {
-        _localChanges[tId] = {
-          'status': 'present',
-          'checkIn': DateFormat('hh:mm a').format(DateTime.now()),
-          'remarks': _localChanges[tId]?['remarks'] ?? '',
-          'timestamp': DateTime.now().toIso8601String(),
-        };
-      }
-    }
-    setState(() {});
+  Future<void> _goTo(DateTime d) async {
+    if (await _confirmDiscard()) setState(() => _date = d);
   }
 
-  Future<void> _saveAttendance(Map<String, dynamic> currentEntries) async {
-    if (_localChanges.isEmpty) {
-      AppToast.showSnackBar(context, 
-        const SnackBar(content: Text('No changes to save.'), duration: Duration(seconds: 1)),
-      );
-      return;
-    }
+  Map<String, dynamic> _entry(String id, Map<String, dynamic> saved) =>
+      _changes[id] ?? (saved[id] is Map ? Map<String, dynamic>.from(saved[id] as Map) : <String, dynamic>{});
 
-    setState(() => _isSaving = true);
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+  void _mark(String id, Map<String, dynamic> saved, Map<String, dynamic> patch) {
+    setState(() => _changes[id] = {..._entry(id, saved), ...patch});
+  }
 
-    final mergedEntries = Map<String, dynamic>.from(currentEntries);
-    _localChanges.forEach((k, v) {
-      mergedEntries[k] = v;
-    });
-
+  Future<void> _save(Map<String, dynamic> saved) async {
+    setState(() => _saving = true);
     try {
-      await SchoolLocalStorage.saveTeacherDailyLog(
-        branchId: widget.branchId,
-        dateKey: dateKey,
-        logEntries: mergedEntries,
-        editorName: widget.editorName,
-      );
-
-      _localChanges.clear();
-      if (mounted) {
-        AppToast.showSnackBar(context, 
-          SnackBar(
-            backgroundColor: SchoolTheme.statusPresent,
-            content: Text('Faculty attendance saved for $dateKey!'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
+      final stamp = DateTime.now().toIso8601String();
+      final merged = {
+        ...saved,
+        for (final e in _changes.entries) e.key: {...e.value, 'updatedAt': stamp, 'updatedBy': widget.editorName},
+      };
+      await SchoolLocalStorage.saveTeacherDailyLog(branchId: widget.branchId, dateKey: _key, logEntries: merged, editorName: widget.editorName);
+      if (!mounted) return;
+      final n = _changes.length;
+      setState(_changes.clear);
+      AppFeedback.success(context, 'Saved $n staff ${n == 1 ? 'mark' : 'marks'} for ${dailyDayLabel(_date)}');
     } catch (e) {
-      if (mounted) {
-        AppToast.showSnackBar(context, 
-          SnackBar(
-            backgroundColor: SchoolTheme.statusAbsent,
-            content: Text('Error saving faculty attendance: $e'),
-          ),
-        );
-      }
+      if (mounted) AppFeedback.error(context, 'Could not save: $e');
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-
-    return PopScope(
-      canPop: _localChanges.isEmpty,
-      onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return;
-        final shouldPop = await _confirmDiscardChanges();
-        if (shouldPop && context.mounted) {
-          Navigator.pop(context);
-        }
+    return FutureBuilder<void>(
+      future: _ready,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+        final boxes = [SchoolCollection.teacherAttendance.box, SchoolCollection.teachers.box]
+            .toSet()
+            .where(Hive.isBoxOpen)
+            .map((b) => DebouncedBoxListenable.shared(Hive.box(b)))
+            .toList();
+        return ListenableBuilder(listenable: Listenable.merge(boxes), builder: (context, _) => _build(context));
       },
-      child: Scaffold(
-        backgroundColor: context.adapt(SchoolTheme.bgLight),
-        body: Column(
-          children: [
-            // Filter & Date Toolbar
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-              decoration: BoxDecoration(
-                color: context.adapt(SoftPalette.gray50),
-                border: Border(bottom: BorderSide(color: context.adapt(SchoolTheme.borderLight))),
-              ),
-              child: Wrap(
-                spacing: 12,
-                runSpacing: 10,
-                alignment: WrapAlignment.spaceBetween,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  // Left filters
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      // Date selector
-                      InkWell(
-                        onTap: () async {
-                          final picked = await showDatePicker(
-                            context: context,
-                            initialDate: _selectedDate,
-                            firstDate: DateTime(2020),
-                            lastDate: DateTime.now().add(const Duration(days: 14)),
-                          );
-                          if (picked != null && picked != _selectedDate) {
-                            if (await _confirmDiscardChanges()) {
-                              setState(() {
-                                _selectedDate = picked;
-                                _localChanges.clear();
-                              });
-                            }
-                          }
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: context.adapt(SchoolTheme.primaryLight),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: context.adapt(SchoolTheme.primary).withValues(alpha: 0.3)),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.calendar_today_rounded, color: context.adapt(SchoolTheme.primary), size: 16),
-                              const SizedBox(width: 8),
-                              Text(
-                                DateFormat('EEEE, dd MMM yyyy').format(_selectedDate),
-                                style: TextStyle(
-                                  color: context.adapt(SchoolTheme.primary),
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12.5,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      // Department Filter (Admins/Principals only)
-                      if (!_isTeacher)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: context.adapt(SoftPalette.slate100),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: context.adapt(SchoolTheme.borderLight)),
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              value: _selectedDeptFilter,
-                              icon: Icon(Icons.arrow_drop_down_rounded, color: context.adapt(SchoolTheme.textMid)),
-                              items: _departments.map((d) {
-                                return DropdownMenuItem(value: d, child: Text('Dept: $d', style: const TextStyle(fontSize: 12.5)));
-                              }).toList(),
-                              onChanged: (v) {
-                                if (v != null) setState(() => _selectedDeptFilter = v);
-                              },
-                            ),
-                          ),
-                        )
-                      else
-                        SchoolBadge(
-                          label: 'My Attendance Record',
-                          color: context.adapt(SchoolTheme.primary),
-                        ),
-                    ],
-                  ),
-
-                  // Right actions
-                  StreamBuilder<List<Map<String, dynamic>>>(
-                    stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
-                    builder: (context, snapshot) {
-                      final teachers = snapshot.data ?? [];
-                      return StreamBuilder<Map<String, dynamic>?>(
-                        stream: SchoolLocalStorage.streamTeacherLogCached(widget.branchId, dateKey),
-                        builder: (context, logSnap) {
-                          final currentEntries = (logSnap.data?['entries'] as Map?) ?? {};
-                          final hasChanges = _localChanges.isNotEmpty;
-
-                          return Wrap(
-                            spacing: 8,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              if (!_isTeacher)
-                                OutlinedButton.icon(
-                                  onPressed: teachers.isEmpty ? null : () => _markAllPresent(teachers),
-                                  icon: const Icon(Icons.done_all_rounded, size: 15),
-                                  label: const Text('Mark All Present', style: TextStyle(fontSize: 12)),
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: context.adapt(SchoolTheme.primary),
-                                    side: BorderSide(color: context.adapt(SchoolTheme.primary)),
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  ),
-                                ),
-                              ElevatedButton.icon(
-                                onPressed: (_isSaving || !hasChanges)
-                                    ? null
-                                    : () => _saveAttendance(Map<String, dynamic>.from(currentEntries)),
-                                icon: _isSaving
-                                    ? const SizedBox(
-                                        width: 14,
-                                        height: 14,
-                                        child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2),
-                                      )
-                                    : const Icon(Icons.save_rounded, size: 15),
-                                label: Text(
-                                  hasChanges ? 'Save Changes (${_localChanges.length})' : 'Saved',
-                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                                ),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: SchoolTheme.primary,
-                                  foregroundColor: SoftPalette.gray50,
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  elevation: 0,
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-
-            // Teachers List Stream
-            Expanded(
-              child: StreamBuilder<List<Map<String, dynamic>>>(
-                stream: SchoolLocalStorage.streamTeachersCached(widget.branchId),
-                builder: (context, snapshot) {
-                  final allTeachers = snapshot.data ?? [];
-
-                  // Strict Teacher Isolation:
-                  // A teacher CANNOT see other teachers' attendance!
-                  List<Map<String, dynamic>> visibleTeachers;
-                  if (_isTeacher) {
-                    final myRecord = SchoolAuthHelper.findTeacherRecord(widget.branchId, widget.editorName);
-                    if (myRecord != null) {
-                      visibleTeachers = [myRecord];
-                    } else {
-                      visibleTeachers = allTeachers.where((t) {
-                        final n = (t['name'] ?? '').toString().toLowerCase().trim();
-                        final e = (t['email'] ?? '').toString().toLowerCase().trim();
-                        return n == widget.editorName.toLowerCase().trim() ||
-                            e == widget.editorName.toLowerCase().trim();
-                      }).toList();
-                    }
-                  } else {
-                    visibleTeachers = _selectedDeptFilter == 'All'
-                        ? allTeachers
-                        : allTeachers.where((t) => t['department'] == _selectedDeptFilter).toList();
-                  }
-
-                  if (visibleTeachers.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.person_off_rounded, size: 56, color: context.adapt(SoftPalette.gray150)),
-                          const SizedBox(height: 12),
-                          Text(
-                            _isTeacher
-                                ? 'No faculty record found matching username @${widget.editorName}.'
-                                : 'No faculty records found for department: $_selectedDeptFilter',
-                            style: TextStyle(color: context.adapt(SchoolTheme.textMid), fontSize: 14, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-
-                  return StreamBuilder<Map<String, dynamic>?>(
-                    stream: SchoolLocalStorage.streamTeacherLogCached(widget.branchId, dateKey),
-                    builder: (context, logSnap) {
-                      final currentEntries = (logSnap.data?['entries'] as Map?) ?? {};
-
-                      return ListView.separated(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: visibleTeachers.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 8),
-                        itemBuilder: (context, index) {
-                          final teacher = visibleTeachers[index];
-                          final tId = teacher['id']?.toString() ?? '';
-                          final name = teacher['name']?.toString() ?? 'Faculty Member';
-                          final designation = teacher['designation']?.toString() ?? 'Teacher';
-                          final department = teacher['department']?.toString() ?? 'Academics';
-
-                          final savedEntry = currentEntries[tId] as Map?;
-                          final localEntry = _localChanges[tId];
-
-                          final status = (localEntry?['status'] ?? savedEntry?['status'] ?? 'unmarked')
-                              .toString()
-                              .toLowerCase();
-                          final checkIn = (localEntry?['checkIn'] ?? savedEntry?['checkIn'] ?? '').toString();
-
-                          return Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            decoration: BoxDecoration(
-                              color: context.adapt(SoftPalette.gray50),
-                              borderRadius: SchoolTheme.radius14,
-                              border: Border.all(
-                                color: _localChanges.containsKey(tId)
-                                    ? context.adapt(SchoolTheme.primary).withValues(alpha: 0.5)
-                                    : context.adapt(SchoolTheme.borderLight),
-                                width: _localChanges.containsKey(tId) ? 1.5 : 1.0,
-                              ),
-                              boxShadow: SchoolTheme.cardShadow,
-                            ),
-                            child: Row(
-                              children: [
-                                // Faculty Avatar
-                                Container(
-                                  width: 42,
-                                  height: 42,
-                                  decoration: BoxDecoration(
-                                    color: context.adapt(SchoolTheme.primaryLight),
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: context.adapt(SchoolTheme.primary).withValues(alpha: 0.2)),
-                                  ),
-                                  child: Icon(Icons.person_rounded, color: context.adapt(SchoolTheme.primary), size: 22),
-                                ),
-                                const SizedBox(width: 14),
-
-                                // Details
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        name,
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                          color: context.adapt(SchoolTheme.textDark),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Row(
-                                        children: [
-                                          Text(
-                                            '$designation • $department',
-                                            style: TextStyle(color: context.adapt(SchoolTheme.textMuted), fontSize: 11.5),
-                                          ),
-                                          if (checkIn.isNotEmpty) ...[
-                                            const SizedBox(width: 8),
-                                            Text(
-                                              '• In: $checkIn',
-                                              style: const TextStyle(
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w600,
-                                                color: SchoolTheme.statusPresent,
-                                              ),
-                                            ),
-                                          ],
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-
-                                // Status Chips (P, A, L)
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    _buildStatusButton(
-                                      label: 'P',
-                                      tooltip: 'Present',
-                                      isSelected: status == 'present',
-                                      activeColor: SchoolTheme.statusPresent,
-                                      onTap: () => setState(() {
-                                        _localChanges[tId] = {
-                                          'status': 'present',
-                                          'checkIn': checkIn.isNotEmpty ? checkIn : DateFormat('hh:mm a').format(DateTime.now()),
-                                          'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
-                                          'timestamp': DateTime.now().toIso8601String(),
-                                        };
-                                      }),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    _buildStatusButton(
-                                      label: 'A',
-                                      tooltip: 'Absent',
-                                      isSelected: status == 'absent',
-                                      activeColor: SchoolTheme.statusAbsent,
-                                      onTap: () => setState(() {
-                                        _localChanges[tId] = {
-                                          'status': 'absent',
-                                          'checkIn': '',
-                                          'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
-                                          'timestamp': DateTime.now().toIso8601String(),
-                                        };
-                                      }),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    _buildStatusButton(
-                                      label: 'L',
-                                      tooltip: 'On Leave',
-                                      isSelected: status == 'leave',
-                                      activeColor: SchoolTheme.statusLeave,
-                                      onTap: () => setState(() {
-                                        _localChanges[tId] = {
-                                          'status': 'leave',
-                                          'checkIn': '',
-                                          'remarks': localEntry?['remarks'] ?? savedEntry?['remarks'] ?? '',
-                                          'timestamp': DateTime.now().toIso8601String(),
-                                        };
-                                      }),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 
-  Widget _buildStatusButton({
-    required String label,
-    required String tooltip,
-    required bool isSelected,
-    required Color activeColor,
-    required VoidCallback onTap,
-  }) {
+  Widget _build(BuildContext context) {
+    final c = context.comfort;
+    final cal = SchoolDailyService.calendar(widget.branchId);
+    final teachers = SchoolLocalStorage.getAllTeachersCached(widget.branchId)
+        .map((m) => SchoolTeacher.fromMap((m['id'] ?? '').toString(), m))
+        .where((t) => t.status.toLowerCase() != 'inactive' && t.status.toLowerCase() != 'revoked')
+        .toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final departments = {for (final t in teachers) if (t.department.isNotEmpty) t.department}.toList()..sort();
+    final visible = teachers.where((t) => _department == 'All' || t.department == _department).toList();
+    final doc = SchoolLocalStorage.getTeacherLogCached(widget.branchId, _key);
+    final saved = doc?['entries'] is Map ? Map<String, dynamic>.from(doc!['entries'] as Map) : <String, dynamic>{};
+
+    final block = SchoolDailyRules.editBlock(date: _date, now: DateTime.now(), cal: cal, isPrincipal: _isPrincipal);
+    final readOnly = !_canEdit || block != null;
+    String statusOf(SchoolTeacher t) => (_entry(t.id, saved)['status'] ?? '').toString().toLowerCase();
+    final present = visible.where((t) => statusOf(t) == 'present').length;
+    final absent = visible.where((t) => statusOf(t) == 'absent').length;
+    final leave = visible.where((t) => statusOf(t) == 'leave').length;
+    final unmarked = visible.length - present - absent - leave;
+
+    final toolbar = SchoolErpToolbar(
+      filters: [
+        DailyStepper(
+          label: dailyDayLabel(_date),
+          onPrev: () => _goTo(_date.subtract(const Duration(days: 1))),
+          onNext: SchoolDailyRules.day(_date).isBefore(SchoolDailyRules.day(DateTime.now())) ? () => _goTo(_date.add(const Duration(days: 1))) : null,
+          onTap: () async {
+            final p = await showDatePicker(context: context, initialDate: _date, firstDate: DateTime(2020), lastDate: DateTime.now());
+            if (p != null) await _goTo(p);
+          },
+        ),
+        SchoolErpFilter<String>(
+          label: 'Department',
+          value: _department,
+          width: 200,
+          options: {'All': 'All departments', for (final d in departments) d: d},
+          onChanged: (v) => setState(() => _department = v),
+        ),
+      ],
+      trailing: [
+        if (!readOnly && unmarked > 0)
+          OutlinedButton.icon(
+            onPressed: () => setState(() {
+              for (final t in visible) {
+                if (statusOf(t).isEmpty) {
+                  _changes[t.id] = {..._entry(t.id, saved), 'status': 'present', 'checkIn': DateFormat('hh:mm a').format(DateTime.now())};
+                }
+              }
+            }),
+            icon: const Icon(GIcons.checkCircle),
+            label: Text('Mark $unmarked present'),
+          ),
+        if (!readOnly)
+          FilledButton.icon(
+            onPressed: _saving || _changes.isEmpty ? null : () => _save(saved),
+            icon: const Icon(GIcons.save),
+            label: Text(_changes.isEmpty ? 'Saved' : 'Save ${_changes.length}'),
+          ),
+      ],
+    );
+
+    final table = SchoolErpTable<SchoolTeacher>(
+      rows: visible,
+      rowKey: (t) => t.id,
+      minWidth: 760,
+      rowColor: (t) => _changes.containsKey(t.id) ? c.brandSoft : null,
+      empty: const AppEmptyState(icon: GIcons.teacher, title: 'No teachers', subtitle: 'Add teachers in the Teachers page first.'),
+      columns: [
+        SchoolErpColumn(label: 'Emp. ID', width: 96, sortValue: (t) => t.employeeId, cell: (t) => SchoolErpCell.mono(context, t.employeeId)),
+        SchoolErpColumn(label: 'Teacher', flex: 4, sortValue: (t) => t.name.toLowerCase(), cell: (t) => SchoolErpCell.primary(context, t.name, sub: t.designation)),
+        SchoolErpColumn(label: 'Department', flex: 3, hideBelow: 900, cell: (t) => SchoolErpCell.text(context, t.department)),
+        SchoolErpColumn(
+          label: 'Check-in',
+          width: 110,
+          cell: (t) {
+            final e = _entry(t.id, saved);
+            final time = (e['time'] ?? e['checkIn'] ?? '').toString();
+            return Row(mainAxisSize: MainAxisSize.min, children: [
+              if ((e['source'] ?? '').toString().isNotEmpty) ...[Icon(GIcons.fingerprint, size: 14, color: c.textMuted), const SizedBox(width: 4)],
+              SchoolErpCell.mono(context, time),
+            ]);
+          },
+        ),
+        SchoolErpColumn(
+          label: 'Attendance',
+          width: 140,
+          sortValue: (t) => statusOf(t),
+          cell: (t) => Row(mainAxisSize: MainAxisSize.min, children: [
+            for (final (value, short, label) in _statuses)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(end: 4),
+                child: _StatusButton(
+                  short: short,
+                  tooltip: label,
+                  selected: statusOf(t) == value,
+                  color: switch (value) {
+                    'present' => c.success,
+                    'absent' => c.danger,
+                    _ => c.info,
+                  },
+                  onTap: readOnly
+                      ? null
+                      : () => _mark(t.id, saved, {
+                            'status': value,
+                            if (value == 'present' && (_entry(t.id, saved)['checkIn'] ?? _entry(t.id, saved)['time']) == null)
+                              'checkIn': DateFormat('hh:mm a').format(DateTime.now()),
+                          }),
+                ),
+              ),
+          ]),
+        ),
+        SchoolErpColumn(
+          label: 'Remark',
+          flex: 3,
+          hideBelow: 1000,
+          cell: (t) => SchoolErpCell.text(context, (_entry(t.id, saved)['remarks'] ?? '').toString(), muted: true),
+        ),
+      ],
+    );
+
+    return PopScope(
+      canPop: _changes.isEmpty,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (await _confirmDiscard() && context.mounted) Navigator.of(context).maybePop();
+      },
+      child: SchoolErpPage(
+        breadcrumbs: const ['School', 'Staff'],
+        title: 'Staff attendance',
+        subtitle: 'Daily attendance for teachers and staff',
+        icon: GIcons.fingerprint,
+        banner: !_canEdit
+            ? const DailyBanner(text: 'View only.', tone: AppChipState.info, icon: GIcons.lock)
+            : block == null
+                ? null
+                : DailyBanner(text: SchoolDailyRules.explainBlock(block, cal, _date), tone: AppChipState.warning, icon: GIcons.lock),
+        stats: SchoolErpStatStrip([
+          SchoolErpStat(label: 'Present', value: '$present', caption: 'of ${visible.length}', color: c.success, icon: GIcons.checkCircle),
+          SchoolErpStat(label: 'Absent', value: '$absent', color: absent > 0 ? c.danger : c.textMuted, icon: GIcons.cancel),
+          SchoolErpStat(label: 'On leave', value: '$leave', color: c.info, icon: GIcons.event),
+          SchoolErpStat(label: 'Not marked', value: '$unmarked', color: unmarked > 0 ? c.warning : c.success, icon: GIcons.warning),
+        ]),
+        child: SchoolErpCard(toolbar: toolbar, child: table),
+      ),
+    );
+  }
+}
+
+class _StatusButton extends StatelessWidget {
+  const _StatusButton({required this.short, required this.tooltip, required this.selected, required this.color, this.onTap});
+  final String short;
+  final String tooltip;
+  final bool selected;
+  final Color color;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
     return Tooltip(
       message: tooltip,
       child: InkWell(
+        borderRadius: Gr.input,
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          width: 36,
-          height: 36,
+        child: Container(
+          width: 34,
+          height: 28,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: isSelected ? activeColor : context.adapt(SoftPalette.slate100),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: isSelected ? activeColor : context.adapt(SchoolTheme.borderLight),
-              width: 1.2,
-            ),
+            color: selected ? color : c.surface,
+            borderRadius: Gr.input,
+            border: Border.all(color: selected ? color : c.borderStrong),
           ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.bold,
-              color: isSelected ? SoftPalette.gray50 : context.adapt(SchoolTheme.textMid),
-            ),
-          ),
+          child: Text(short, style: GText.label(selected ? GColor.onAccent(color) : c.textSecondary)),
         ),
       ),
     );

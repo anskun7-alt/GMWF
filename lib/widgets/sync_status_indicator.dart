@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -24,7 +25,7 @@ class SyncStatusIndicator extends StatelessWidget {
     return ValueListenableBuilder<bool>(
       valueListenable: QuotaService.isQuotaExhaustedNotifier,
       builder: (context, _, _) => ValueListenableBuilder(
-        valueListenable: Hive.box(LocalStorageService.syncBox).listenable(),
+        valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.syncBox)),
         builder: (context, box, widget) {
           final pendingCount = box.length;
           final isSynced = pendingCount == 0;

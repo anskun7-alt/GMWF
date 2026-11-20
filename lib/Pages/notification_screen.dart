@@ -1,5 +1,6 @@
 // lib/pages/notification_screen.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -17,12 +18,14 @@ class NotificationScreen extends StatefulWidget {
   final String branchId;
   final String userId;
   final String role; // admin, supervisor, doctor, receptionist, dispenser, cashier, guardian, etc.
+  final bool embedded;
 
   const NotificationScreen({
     super.key,
     required this.branchId,
     required this.userId,
     required this.role,
+    this.embedded = false,
   });
 
   @override
@@ -30,6 +33,7 @@ class NotificationScreen extends StatefulWidget {
 }
 
 class _NotificationScreenState extends State<NotificationScreen> {
+  late final Future<void> _notificationsBoxReady = LocalStorageService.openBoxSafe(LocalStorageService.notificationsBox);
   final TextEditingController _messageController = TextEditingController();
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
@@ -506,6 +510,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: !widget.embedded,
         title: Row(
           children: [
             Container(
@@ -560,7 +565,8 @@ class _NotificationScreenState extends State<NotificationScreen> {
             )
           : null,
       body: FutureBuilder(
-        future: LocalStorageService.openBoxSafe(LocalStorageService.notificationsBox),
+        // Opened once; a future made in build re-ran on every rebuild.
+        future: _notificationsBoxReady,
         builder: (context, snapshot) {
           if (!Hive.isBoxOpen(LocalStorageService.notificationsBox)) {
             return const Center(child: CircularProgressIndicator());
@@ -569,7 +575,7 @@ class _NotificationScreenState extends State<NotificationScreen> {
           final box = Hive.box(LocalStorageService.notificationsBox);
 
           return ValueListenableBuilder<Box>(
-            valueListenable: box.listenable(),
+            valueListenable: DebouncedBoxListenable.shared(box),
             builder: (context, box, _) {
               final rawItems = <Map<String, dynamic>>[];
               for (final key in box.keys) {
@@ -583,12 +589,11 @@ class _NotificationScreenState extends State<NotificationScreen> {
                 }
               }
 
-              // Sort latest first
-              rawItems.sort((a, b) {
-                final tsA = DateTime.tryParse(a['timestamp']?.toString() ?? '') ?? DateTime(1970);
-                final tsB = DateTime.tryParse(b['timestamp']?.toString() ?? '') ?? DateTime(1970);
-                return tsB.compareTo(tsA);
-              });
+              // Sort latest first (each timestamp parsed once, not twice per comparison).
+              final stamps = <Map<String, dynamic>, DateTime>{
+                for (final m in rawItems) m: DateTime.tryParse(m['timestamp']?.toString() ?? '') ?? DateTime(1970),
+              };
+              rawItems.sort((a, b) => stamps[b]!.compareTo(stamps[a]!));
 
               // Filter by status & search
               final items = rawItems.where((item) {

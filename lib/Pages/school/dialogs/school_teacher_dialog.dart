@@ -1,23 +1,27 @@
 // lib/pages/school/dialogs/school_teacher_dialog.dart
+//
+// Add / edit faculty member profile and credentials (Phase 6: gmwf_ui tokens,
+// consistent typography/spacing, try/catch save, collision-free IDs).
 
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/services.dart';
+import 'package:gmwf_ui/gmwf_ui.dart';
+
 import '../../../widgets/media_upload_tile.dart';
+import '../constants/school_constants.dart';
 import '../models/school_teacher.dart';
 import '../utils/school_local_storage.dart';
-import '../constants/school_constants.dart';
-import '../../../widgets/app_feedback.dart';
 
 class SchoolTeacherDialog extends StatefulWidget {
   final String branchId;
   final SchoolTeacher? teacherToEdit;
+  final String editorName;
 
   const SchoolTeacherDialog({
     super.key,
     required this.branchId,
     this.teacherToEdit,
+    this.editorName = 'School Admin',
   });
 
   @override
@@ -27,16 +31,16 @@ class SchoolTeacherDialog extends StatefulWidget {
 class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
   final _formKey = GlobalKey<FormState>();
 
-  late TextEditingController _employeeIdCtrl;
-  late TextEditingController _nameCtrl;
-  late TextEditingController _emailCtrl;
-  late TextEditingController _phoneCtrl;
-  late TextEditingController _cnicCtrl;
-  late TextEditingController _degreeCtrl;
-  late TextEditingController _qualificationCtrl;
-  late TextEditingController _designationCtrl;
-  late TextEditingController _subjectsCtrl;
-  late TextEditingController _salaryGradeCtrl;
+  late final TextEditingController _employeeIdCtrl;
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _emailCtrl;
+  late final TextEditingController _phoneCtrl;
+  late final TextEditingController _cnicCtrl;
+  late final TextEditingController _degreeCtrl;
+  late final TextEditingController _qualificationCtrl;
+  late final TextEditingController _designationCtrl;
+  late final TextEditingController _subjectsCtrl;
+  late final TextEditingController _salaryGradeCtrl;
 
   String _selectedDepartment = 'Science & IT';
   String _status = 'active';
@@ -48,7 +52,7 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
   List<Map<String, String>> _additionalDocuments = [];
   bool _isSaving = false;
 
-  final List<String> _departments = [
+  static const List<String> _departments = [
     'Science & IT',
     'Mathematics',
     'Languages & English',
@@ -57,8 +61,6 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
     'Primary Education',
     'Administration',
   ];
-
-  final List<String> _allGrades = SchoolConstants.grades;
 
   List<String> _selectedGrades = [];
 
@@ -109,53 +111,51 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
     final titleCtrl = TextEditingController();
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(Icons.note_add_rounded, color: context.adapt(SoftPalette.sky700)),
-            SizedBox(width: 10),
-            Text('Add Faculty Document', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Enter the document name (e.g., Degree Certificate, Appointment Letter, Experience Certificate):',
-              style: TextStyle(fontSize: 13, color: context.adapt(SoftPalette.slate550)),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: titleCtrl,
-              decoration: InputDecoration(
-                labelText: 'Document Name *',
-                hintText: 'e.g. Master Degree Certificate',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      builder: (ctx) {
+        final c = ctx.comfort;
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+          title: Row(children: [
+            Icon(GIcons.layers, color: c.brand),
+            const SizedBox(width: Gsp.sp2),
+            Expanded(child: Text('Add faculty document', style: GText.h3(c.textPrimary))),
+          ]),
+          content: SizedBox(
+            width: 420,
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Text(
+                'Enter the document name (e.g. Degree Certificate, Appointment Letter, Experience Certificate):',
+                style: GText.body2(c.textSecondary),
               ),
-              autofocus: true,
+              const SizedBox(height: Gsp.sp3),
+              TextField(
+                controller: titleCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Document name *',
+                  hintText: 'e.g. Master Degree Certificate',
+                  isDense: true,
+                ),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final text = titleCtrl.text.trim();
+                if (text.isNotEmpty) Navigator.pop(ctx, text);
+              },
+              child: const Text('Add document'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: SoftPalette.sky700, foregroundColor: SoftPalette.gray50),
-            onPressed: () {
-              final text = titleCtrl.text.trim();
-              if (text.isNotEmpty) Navigator.pop(ctx, text);
-            },
-            child: const Text('Add & Attach File'),
-          ),
-        ],
-      ),
+        );
+      },
     );
+    titleCtrl.dispose();
 
     if (result != null && result.isNotEmpty) {
-      setState(() {
-        _additionalDocuments.add({'name': result, 'url': ''});
-      });
+      setState(() => _additionalDocuments.add({'name': result, 'url': ''}));
     }
   }
 
@@ -163,460 +163,349 @@ class _SchoolTeacherDialogState extends State<SchoolTeacherDialog> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isSaving = true);
 
-    final teacherId = widget.teacherToEdit?.id ?? 'TCH-${DateTime.now().millisecondsSinceEpoch}';
-    final subjectsList = _subjectsCtrl.text
-        .split(',')
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
+    try {
+      final teacherId = widget.teacherToEdit?.id ?? SchoolLocalStorage.newId('TCH', widget.branchId);
+      final subjectsList = _subjectsCtrl.text
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
 
-    final teacherData = {
-      'employeeId': _employeeIdCtrl.text.trim(),
-      'name': _nameCtrl.text.trim(),
-      'email': _emailCtrl.text.trim().toLowerCase(),
-      'phone': _phoneCtrl.text.trim(),
-      'cnic': _cnicCtrl.text.trim(),
-      'degree': _degreeCtrl.text.trim(),
-      'qualification': _qualificationCtrl.text.trim(),
-      'designation': _designationCtrl.text.trim(),
-      'department': _selectedDepartment,
-      'assignedGrades': _selectedGrades,
-      'subjects': subjectsList,
-      'salaryGrade': _salaryGradeCtrl.text.trim(),
-      'status': _status,
-      'photoUrl': _photoUrl ?? '',
-      'cnicUrl': _cnicUrl ?? '',
-      'experienceLetterUrl': _experienceLetterUrl ?? '',
-      'joiningLetterUrl': _joiningLetterUrl ?? '',
-      'degreesUrl': _degreesUrl ?? '',
-      'additionalDocuments': _additionalDocuments,
-      'branchId': widget.branchId,
-    };
+      final teacherData = <String, dynamic>{
+        'employeeId': _employeeIdCtrl.text.trim(),
+        'name': _nameCtrl.text.trim(),
+        'email': _emailCtrl.text.trim().toLowerCase(),
+        'phone': _phoneCtrl.text.trim(),
+        'cnic': _cnicCtrl.text.trim(),
+        'degree': _degreeCtrl.text.trim(),
+        'qualification': _qualificationCtrl.text.trim(),
+        'designation': _designationCtrl.text.trim(),
+        'department': _selectedDepartment,
+        'assignedGrades': _selectedGrades,
+        'subjects': subjectsList,
+        'salaryGrade': _salaryGradeCtrl.text.trim(),
+        'status': _status,
+        'photoUrl': _photoUrl ?? '',
+        'cnicUrl': _cnicUrl ?? '',
+        'experienceLetterUrl': _experienceLetterUrl ?? '',
+        'joiningLetterUrl': _joiningLetterUrl ?? '',
+        'degreesUrl': _degreesUrl ?? '',
+        'additionalDocuments': _additionalDocuments,
+        'branchId': widget.branchId,
+      };
 
-    await SchoolLocalStorage.saveTeacher(
-      branchId: widget.branchId,
-      teacherId: teacherId,
-      teacherData: teacherData,
-    );
-
-    if (mounted) {
-      setState(() => _isSaving = false);
-      Navigator.of(context).pop(true);
-      AppFeedback.showSuccess(
-        context,
-        widget.teacherToEdit != null ? 'Teacher profile updated successfully!' : 'Teacher profile created successfully!',
-        subtitle: 'Saved locally • Syncing to cloud',
+      await SchoolLocalStorage.saveTeacher(
+        branchId: widget.branchId,
+        teacherId: teacherId,
+        teacherData: teacherData,
+        editorName: widget.editorName,
       );
+
+      if (!mounted) return;
+      final nav = Navigator.of(context);
+      final parentCtx = nav.context;
+      nav.pop(true);
+      if (parentCtx.mounted) {
+        AppFeedback.success(
+          parentCtx,
+          widget.teacherToEdit != null ? 'Teacher profile updated' : 'Teacher profile created',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSaving = false);
+        AppFeedback.error(context, 'Could not save teacher: $e');
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
     final isEditing = widget.teacherToEdit != null;
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      backgroundColor: context.adapt(SoftPalette.gray50),
+      shape: RoundedRectangleBorder(borderRadius: Gr.modal),
+      backgroundColor: c.surface,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 620),
+        constraints: BoxConstraints(maxWidth: 640, maxHeight: MediaQuery.sizeOf(context).height * 0.9),
         child: Padding(
-          padding: const EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(Gsp.sp5),
           child: Form(
             key: _formKey,
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // Header
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: SoftPalette.teal500.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(Icons.person_add_alt_1_rounded, color: SoftPalette.teal500),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        isEditing ? 'Edit Faculty Profile & Documents' : 'Register New Faculty Member',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: context.adapt(SoftPalette.slate800),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Divider(height: 28),
-
-                  // SECTION: Faculty Documents
-                  Text(
-                    'Faculty Profile & Official Credentials',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate600)),
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Row 1: Profile Photo & CNIC
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Profile Photo
-                      Expanded(
-                        child: MediaUploadTile(
-                          label: 'Faculty Photo',
-                          icon: Icons.account_box_outlined,
-                          initialValue: _photoUrl,
-                          onChanged: (val) => setState(() => _photoUrl = val),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-
-                      // CNIC Document
-                      Expanded(
-                        child: MediaUploadTile(
-                          label: 'CNIC / ID Card',
-                          icon: Icons.badge_outlined,
-                          isDocument: true,
-                          initialValue: _cnicUrl,
-                          onChanged: (val) => setState(() => _cnicUrl = val),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Row 2: Experience Letter & Job Joining Letter
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Experience Letter (Optional)
-                      Expanded(
-                        child: MediaUploadTile(
-                          label: 'Experience Letter (تجربہ سرٹیفکیٹ)',
-                          icon: Icons.history_edu_outlined,
-                          isDocument: true,
-                          initialValue: _experienceLetterUrl,
-                          onChanged: (val) => setState(() => _experienceLetterUrl = val),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-
-                      // Joining / Job Appointment Letter (Optional)
-                      Expanded(
-                        child: MediaUploadTile(
-                          label: 'Job Joining Letter (تقرری نامہ)',
-                          icon: Icons.assignment_turned_in_outlined,
-                          isDocument: true,
-                          initialValue: _joiningLetterUrl,
-                          onChanged: (val) => setState(() => _joiningLetterUrl = val),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Row 3: Degrees & Educational Transcripts (Optional)
-                  MediaUploadTile(
-                    label: 'Degrees & Certificates (تعلیمی اسناد و ڈگریاں)',
-                    icon: Icons.school_outlined,
-                    isDocument: true,
-                    initialValue: _degreesUrl,
-                    onChanged: (val) => setState(() => _degreesUrl = val),
-                  ),
-
-                  // Additional Custom Documents List
-                  if (_additionalDocuments.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    Text('Custom Documents:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.slate550))),
-                    const SizedBox(height: 6),
-                    ..._additionalDocuments.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final doc = entry.value;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: MediaUploadTile(
-                                label: doc['name'] ?? 'Custom Document',
-                                icon: Icons.file_present_rounded,
-                                isDocument: true,
-                                initialValue: doc['url'],
-                                onChanged: (val) {
-                                  setState(() {
-                                    _additionalDocuments[index]['url'] = val ?? '';
-                                  });
-                                },
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline_rounded, color: SoftPalette.red400, size: 20),
-                              onPressed: () {
-                                setState(() {
-                                  _additionalDocuments.removeAt(index);
-                                });
-                              },
-                            ),
-                          ],
-                        ),
-                      );
-                    }),
-                  ],
-
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: SoftPalette.teal500,
-                        side: const BorderSide(color: SoftPalette.teal500),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                      icon: const Icon(Icons.add_circle_outline_rounded, size: 16),
-                      label: const Text('+ Add Custom Document (e.g. Degree, Experience Letter)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                      onPressed: _addCustomDocumentDialog,
+                  Row(children: [
+                    const GModuleTile(icon: GIcons.teacher, size: 36),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(isEditing ? 'Edit faculty profile' : 'Register faculty member', style: GText.h3(c.textPrimary)),
+                        Text('Profile details, class assignments and credentials', style: GText.caption(c.textMuted)),
+                      ]),
                     ),
-                  ),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+                      icon: const Icon(GIcons.close),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
+                  Divider(height: 1, color: c.border),
+                  const SizedBox(height: Gsp.sp4),
 
-                  const Divider(height: 32),
+                  // Identity & Contact
+                  Text('IDENTITY & CONTACT', style: GText.overline(c.textMuted)),
+                  const SizedBox(height: Gsp.sp2),
+                  Row(children: [
+                    Expanded(
+                      flex: 1,
+                      child: TextFormField(
+                        controller: _employeeIdCtrl,
+                        decoration: const InputDecoration(labelText: 'Employee ID *', hintText: 'EMP-101', isDense: true),
+                        validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      flex: 2,
+                      child: TextFormField(
+                        controller: _nameCtrl,
+                        decoration: const InputDecoration(labelText: 'Teacher full name *', isDense: true),
+                        validator: (v) => v == null || v.trim().isEmpty ? 'Enter teacher name' : null,
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
+                  Row(children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _emailCtrl,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: const InputDecoration(labelText: 'Email address', isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _phoneCtrl,
+                        keyboardType: TextInputType.phone,
+                        inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
+                        decoration: const InputDecoration(labelText: 'Phone (11 digits) *', hintText: '03001234567', isDense: true),
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Enter phone';
+                          if (v.trim().length != 11) return 'Must be 11 digits';
+                          return null;
+                        },
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
+                  Row(children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _cnicCtrl,
+                        decoration: const InputDecoration(labelText: 'CNIC', hintText: '35201-xxxxxxx-x', isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _degreeCtrl,
+                        decoration: const InputDecoration(labelText: 'Degree (e.g. M.Sc, B.Ed)', isDense: true),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp4),
 
-                  // Employee ID & Full Name
-                  Row(
-                    children: [
-                      Expanded(
-                        flex: 1,
-                        child: TextFormField(
-                          controller: _employeeIdCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Employee ID *',
-                            hintText: 'EMP-101',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
+                  // Role & Classes
+                  Text('ROLE & ASSIGNMENTS', style: GText.overline(c.textMuted)),
+                  const SizedBox(height: Gsp.sp2),
+                  Row(children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _selectedDepartment,
+                        isExpanded: true,
+                        decoration: const InputDecoration(labelText: 'Department', isDense: true),
+                        items: [for (final d in _departments) DropdownMenuItem(value: d, child: Text(d))],
+                        onChanged: (v) {
+                          if (v != null) setState(() => _selectedDepartment = v);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _designationCtrl,
+                        decoration: const InputDecoration(labelText: 'Designation', isDense: true),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
+                  Row(children: [
+                    Expanded(
+                      flex: 2,
+                      child: TextFormField(
+                        controller: _subjectsCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Teaching subjects (comma separated)',
+                          hintText: 'Physics, Mathematics',
+                          isDense: true,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        flex: 2,
-                        child: TextFormField(
-                          controller: _nameCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Teacher Full Name *',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          validator: (v) => v == null || v.trim().isEmpty ? 'Enter teacher name' : null,
-                        ),
+                    ),
+                    const SizedBox(width: Gsp.sp3),
+                    Expanded(
+                      flex: 1,
+                      child: TextFormField(
+                        controller: _salaryGradeCtrl,
+                        decoration: const InputDecoration(labelText: 'Pay grade', hintText: 'BPS-16', isDense: true),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Email & Phone
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: _emailCtrl,
-                          keyboardType: TextInputType.emailAddress,
-                          decoration: InputDecoration(
-                            labelText: 'Email Address',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: TextFormField(
-                          controller: _phoneCtrl,
-                          keyboardType: TextInputType.phone,
-                          inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(11)],
-                          decoration: InputDecoration(
-                            labelText: 'Phone Number (11 digits) *',
-                            hintText: 'e.g. 03001234567',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          validator: (v) {
-                            if (v == null || v.trim().isEmpty) return 'Enter phone';
-                            if (v.trim().length != 11) return 'Phone must be exactly 11 digits';
-                            return null;
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // CNIC & Degree
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: _cnicCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'CNIC / National ID',
-                            hintText: '35201-xxxxxxx-x',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: TextFormField(
-                          controller: _degreeCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Degree (e.g. M.Sc, B.Ed, M.A)',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Department & Designation
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          value: _selectedDepartment,
-                          decoration: InputDecoration(
-                            labelText: 'Department',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                          items: _departments.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList(),
-                          onChanged: (v) {
-                            if (v != null) setState(() => _selectedDepartment = v);
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: TextFormField(
-                          controller: _designationCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Designation',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Subjects Taught & Salary Grade
-                  Row(
-                    children: [
-                      Expanded(
-                        flex: 2,
-                        child: TextFormField(
-                          controller: _subjectsCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Main Teaching Subjects (comma separated)',
-                            hintText: 'Physics, Computer Science, Mathematics',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        flex: 1,
-                        child: TextFormField(
-                          controller: _salaryGradeCtrl,
-                          decoration: InputDecoration(
-                            labelText: 'Salary Grade',
-                            hintText: 'e.g. BPS-16',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Status
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp3),
                   DropdownButtonFormField<String>(
-                    value: _status,
-                    decoration: InputDecoration(
-                      labelText: 'Account Status',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
+                    initialValue: _status,
+                    decoration: const InputDecoration(labelText: 'Status', isDense: true),
                     items: const [
                       DropdownMenuItem(value: 'active', child: Text('Active')),
-                      DropdownMenuItem(value: 'on leave', child: Text('On Leave')),
+                      DropdownMenuItem(value: 'on leave', child: Text('On leave')),
                       DropdownMenuItem(value: 'inactive', child: Text('Inactive')),
-                      DropdownMenuItem(value: 'revoked', child: Text('Access Revoked')),
+                      DropdownMenuItem(value: 'revoked', child: Text('Access revoked')),
                     ],
                     onChanged: (v) {
                       if (v != null) setState(() => _status = v);
                     },
                   ),
-                  const SizedBox(height: 16),
-
-                  // Assigned Grades Checklist
-                  Text(
-                    'Assigned Classes / Grades',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(SoftPalette.slate600)),
-                  ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: Gsp.sp3),
+                  Text('Assigned classes', style: GText.label(c.textSecondary)),
+                  const SizedBox(height: Gsp.sp2),
                   Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: _allGrades.map((grade) {
-                      final isSelected = _selectedGrades.contains(grade);
-                      return FilterChip(
-                        label: Text(grade),
-                        selected: isSelected,
-                        selectedColor: SoftPalette.teal500.withValues(alpha: 0.2),
-                        checkmarkColor: SoftPalette.teal500,
-                        labelStyle: TextStyle(
-                          color: isSelected ? context.adapt(SoftPalette.emerald550) : context.adapt(SoftPalette.slate600),
-                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                        ),
-                        onSelected: (selected) {
-                          setState(() {
-                            if (selected) {
-                              _selectedGrades.add(grade);
-                            } else {
-                              _selectedGrades.remove(grade);
-                            }
-                          });
-                        },
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Actions
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                    spacing: Gsp.sp1 + 2,
+                    runSpacing: Gsp.sp1,
                     children: [
-                      TextButton(
-                        onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: 12),
-                      ElevatedButton(
-                        onPressed: _isSaving ? null : _saveTeacher,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: SoftPalette.teal500,
-                          foregroundColor: SoftPalette.gray50,
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      for (final grade in SchoolConstants.grades)
+                        FilterChip(
+                          label: Text(grade),
+                          selected: _selectedGrades.contains(grade),
+                          onSelected: (sel) => setState(() {
+                            sel ? _selectedGrades.add(grade) : _selectedGrades.remove(grade);
+                          }),
                         ),
-                        child: _isSaving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2),
-                              )
-                            : Text(isEditing ? 'Save Changes' : 'Register Teacher'),
-                      ),
                     ],
                   ),
+                  const SizedBox(height: Gsp.sp4),
+                  Divider(height: 1, color: c.border),
+                  const SizedBox(height: Gsp.sp4),
+
+                  // Credentials & documents
+                  Text('CREDENTIALS & DOCUMENTS', style: GText.overline(c.textMuted)),
+                  const SizedBox(height: Gsp.sp2),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Expanded(
+                      child: MediaUploadTile(
+                        label: 'Faculty photo',
+                        icon: GIcons.profile,
+                        initialValue: _photoUrl,
+                        onChanged: (val) => setState(() => _photoUrl = val),
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp2 + 2),
+                    Expanded(
+                      child: MediaUploadTile(
+                        label: 'CNIC / ID card',
+                        icon: GIcons.employee,
+                        isDocument: true,
+                        initialValue: _cnicUrl,
+                        onChanged: (val) => setState(() => _cnicUrl = val),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp2 + 2),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Expanded(
+                      child: MediaUploadTile(
+                        label: 'Experience letter (تجربہ سرٹیفکیٹ)',
+                        icon: GIcons.history,
+                        isDocument: true,
+                        initialValue: _experienceLetterUrl,
+                        onChanged: (val) => setState(() => _experienceLetterUrl = val),
+                      ),
+                    ),
+                    const SizedBox(width: Gsp.sp2 + 2),
+                    Expanded(
+                      child: MediaUploadTile(
+                        label: 'Joining letter (تقرری نامہ)',
+                        icon: GIcons.checklist,
+                        isDocument: true,
+                        initialValue: _joiningLetterUrl,
+                        onChanged: (val) => setState(() => _joiningLetterUrl = val),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: Gsp.sp2 + 2),
+                  MediaUploadTile(
+                    label: 'Degrees & certificates (تعلیمی اسناد و ڈگریاں)',
+                    icon: GIcons.student,
+                    isDocument: true,
+                    initialValue: _degreesUrl,
+                    onChanged: (val) => setState(() => _degreesUrl = val),
+                  ),
+                  if (_additionalDocuments.isNotEmpty) ...[
+                    const SizedBox(height: Gsp.sp3),
+                    Text('Additional documents', style: GText.caption(c.textMuted)),
+                    const SizedBox(height: Gsp.sp2),
+                    for (final (index, doc) in _additionalDocuments.indexed)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: Gsp.sp2),
+                        child: Row(children: [
+                          Expanded(
+                            child: MediaUploadTile(
+                              label: doc['name'] ?? 'Custom document',
+                              icon: GIcons.layers,
+                              isDocument: true,
+                              initialValue: doc['url'],
+                              onChanged: (val) => setState(() => _additionalDocuments[index]['url'] = val ?? ''),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Remove document',
+                            icon: Icon(GIcons.delete, color: c.danger, size: GIconSize.sm),
+                            onPressed: () => setState(() => _additionalDocuments.removeAt(index)),
+                          ),
+                        ]),
+                      ),
+                  ],
+                  const SizedBox(height: Gsp.sp2),
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(GIcons.add, size: 16),
+                      label: const Text('Add custom document'),
+                      onPressed: _addCustomDocumentDialog,
+                    ),
+                  ),
+                  const SizedBox(height: Gsp.sp5),
+
+                  // Actions
+                  Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    TextButton(
+                      onPressed: _isSaving ? null : () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: Gsp.sp2),
+                    FilledButton.icon(
+                      onPressed: _isSaving ? null : _saveTeacher,
+                      icon: _isSaving
+                          ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 2))
+                          : const Icon(GIcons.save, size: 16),
+                      label: Text(_isSaving ? 'Saving…' : (isEditing ? 'Save changes' : 'Register teacher')),
+                    ),
+                  ]),
                 ],
               ),
             ),

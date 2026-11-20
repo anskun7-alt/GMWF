@@ -1,6 +1,7 @@
 // lib/pages/branches_register.dart
 
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -732,7 +733,8 @@ class _BranchesRegisterState extends State<BranchesRegister>
             child: Column(
               children: [
                 // ── Integrated Clean Page Header (No duplicate app bar banner) ──
-                _buildHeaderBar(t),
+                // The executive shell already shows the title (and navigation).
+                if (!HomeModuleHost.isModuleRoot(context)) _buildHeaderBar(t),
 
                 // ── Responsive Form Area ──────────────────────────────────────
                 Expanded(

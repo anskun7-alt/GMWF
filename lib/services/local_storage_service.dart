@@ -21,11 +21,15 @@ import 'package:uuid/uuid.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:gmwf/services/sync_service.dart';
-import 'package:gmwf/services/hourly_dispensary_sync.dart';
 import 'camp_session_service.dart';
 import 'master_proforma_service.dart';
 import 'serials_service.dart';
-import 'stock_floor.dart';
+import '../utils/cnic_parser_util.dart';
+import 'stock/stock_ledger.dart';
+import 'stock/stock_movement.dart';
+import 'stock/stock_pool.dart';
+import 'stock/stock_reader.dart';
+import 'stock/stock_sync.dart';
 import 'offline_auth_service.dart';
 import 'finance_local_storage.dart';
 import 'network_health_service.dart';
@@ -771,6 +775,63 @@ class LocalStorageService {
     final defaults = getDefaultBranchFacilities(branchId);
     final defaultSchools = defaults['schools'];
     return defaultSchools != null && defaultSchools.isNotEmpty;
+  }
+
+  /// Returns whether [branchId] (including Karachi sub-camps like
+  /// `karachi_haji` / `karachi_saddar`) operates [department]
+  /// (`'dispensary'`, `'dasterkhwaan'`, `'madrassa'`, or `'school'`).
+  static bool hasBranchFacility(String branchId, String department) {
+    final b = branchId.toLowerCase().trim();
+    if (b == 'all' || b == 'global' || b.isEmpty) return true;
+
+    final dept = department.toLowerCase().trim();
+    final facilityKey = switch (dept) {
+      'dispensary' => 'dispensaries',
+      'dasterkhwaan' => 'dasterkhwaans',
+      'madrassa' => 'madrassas',
+      'school' => 'schools',
+      _ => dept,
+    };
+
+    // Sub-camp handling (e.g. karachi_haji -> haji_camp, karachi_saddar -> saddar)
+    if (b == 'karachi_haji' || b == 'karachi_saddar') {
+      final campId = b == 'karachi_haji' ? 'haji_camp' : 'saddar';
+      List? camps;
+      if (Hive.isBoxOpen(branchesBox)) {
+        final raw = Hive.box(branchesBox).get('branch:karachi');
+        if (raw is Map && raw['facilities'] is Map) {
+          final c = (raw['facilities'] as Map)['camps'];
+          if (c is List) camps = c;
+        }
+      }
+      camps ??= getDefaultBranchFacilities('karachi')['camps'];
+      if (camps != null) {
+        for (final entry in camps) {
+          if (entry is Map && (entry['id']?.toString().toLowerCase().trim() == campId)) {
+            final depts = entry['departments'];
+            if (depts is List) {
+              return depts.any((d) => d.toString().toLowerCase().trim() == dept);
+            }
+          }
+        }
+      }
+      return dept == 'dispensary';
+    }
+
+    if (Hive.isBoxOpen(branchesBox)) {
+      final raw = Hive.box(branchesBox).get('branch:$b');
+      if (raw is Map && raw['facilities'] is Map) {
+        final facs = raw['facilities'] as Map;
+        if (facs.containsKey(facilityKey)) {
+          final list = facs[facilityKey];
+          return list is List && list.isNotEmpty;
+        }
+      }
+    }
+
+    final defaults = getDefaultBranchFacilities(b);
+    final defaultList = defaults[facilityKey];
+    return defaultList != null && defaultList.isNotEmpty;
   }
 
   static String getBranchName(String branchId) {
@@ -2379,32 +2440,11 @@ class LocalStorageService {
 
   static Future<void> clearAllInventory(String branchId, {String? dispensaryId}) async {
     try {
-      if (!Hive.isBoxOpen(stockBox)) {
-        await Hive.openBox(stockBox);
-      }
-      final box = Hive.box(stockBox);
-      final activeCamp = dispensaryId?.trim().toLowerCase() ?? '';
-      final keysToRemove = <dynamic>[];
-
-      for (final k in box.keys) {
-        final val = box.get(k);
-        if (val is Map) {
-          final itemBranch = (val['branchId'] ?? '').toString().trim().toLowerCase();
-          final itemCamp = (val['dispensaryId'] ?? val['campId'] ?? '').toString().trim().toLowerCase();
-
-          bool matchBranch = branchId.isEmpty || branchId == 'default' || itemBranch.isEmpty || itemBranch == 'default' || itemBranch == branchId.toLowerCase();
-          bool matchCamp = activeCamp.isEmpty || activeCamp == 'all' || itemCamp.isEmpty || itemCamp == 'all' || itemCamp == activeCamp;
-
-          if (matchBranch && matchCamp) {
-            keysToRemove.add(k);
-          }
-        } else {
-          keysToRemove.add(k);
-        }
-      }
-
-      await box.deleteAll(keysToRemove);
-      debugPrint('[LocalStorageService] 🗑️ Cleared ${keysToRemove.length} inventory items locally.');
+      // This PC only; the records come back from the cloud / LAN server on the next read.
+      final camp = StockPool.normalizeCamp(dispensaryId);
+      final pools = StockPool.allFor(branchId).where((p) => camp == null || p.camp == null || p.camp == camp);
+      final n = await _clearLocalPools(pools);
+      debugPrint('[LocalStorageService] 🗑️ Cleared $n inventory items locally.');
     } catch (e) {
       debugPrint('[LocalStorageService] Error clearing inventory: $e');
     }
@@ -3748,25 +3788,23 @@ class LocalStorageService {
         await openBoxSafe(usersBox);
       }
       final box = Hive.box(usersBox);
-      // 30-minute cooldown unless the local user list is empty. Each run is 20+ Firestore
-      // queries (~2,000 user docs, many with embedded images) and it was triggered by role
-      // resolution, every SyncService.start, every forced sync and Ctrl+R.
-      // The cooldown is also kept on disk: each app start used to download every user again.
+      // 24-hour cooldown if the local user list is already populated. Staff accounts change
+      // infrequently; repeated sweeps across 25+ branch subcollections burned thousands of reads per boot.
       final flagBox = Hive.isBoxOpen('app_flags') ? Hive.box('app_flags') : null;
       final lastUsers = _lastUsersDownloadAt ??
           DateTime.tryParse(flagBox?.get('users_download_at')?.toString() ?? '');
-      if (box.isNotEmpty && lastUsers != null && DateTime.now().difference(lastUsers) < const Duration(minutes: 30)) {
+      if (box.isNotEmpty && lastUsers != null && DateTime.now().difference(lastUsers) < const Duration(hours: 24)) {
         return;
       }
       _lastUsersDownloadAt = DateTime.now();
       unawaited(flagBox?.put('users_download_at', _lastUsersDownloadAt!.toIso8601String()));
       final List<DocumentSnapshot> allDocs = [];
 
-      // 1. Download from root /users collection
+      // 1. Download canonical users from root /users collection
       try {
         final rootSnap = await FirebaseFirestore.instance
             .collection('users')
-            .limit(500)
+            .limit(300)
             .get(const GetOptions(source: Source.serverAndCache))
             .timeout(const Duration(seconds: 8));
         allDocs.addAll(rootSnap.docs);
@@ -3774,70 +3812,36 @@ class LocalStorageService {
         debugPrint('[LS] Download root users error: $e');
       }
 
-      // 2. Candidate branches
-      final candidateBranches = <String>{};
-      if (branchId != null && branchId.isNotEmpty && branchId != 'all' && branchId != 'global') {
-        candidateBranches.add(branchId.toLowerCase().trim());
-      }
-      try {
-        final customBranches = FinanceLocalStorage.getAllBranches([]);
-        for (final b in customBranches) {
-          final id = (b['id'] ?? '').toString().toLowerCase().trim();
-          if (id.isNotEmpty && id != 'all' && id != 'global') {
-            candidateBranches.add(id);
-          }
-        }
-      } catch (_) {}
-      candidateBranches.addAll([
-        'karachi', 'khi', 'saddar', 'haji_camp', 'main',
-        'gujrat', 'grt', 'sialkot', 'skt', 'rawalpindi', 'rwp',
-        'lahore', 'lhr', 'islamabad', 'isb', 'jalalpurjattan', 'jlj',
-      ]);
-
-      try {
-        final branchesSnap = await FirebaseFirestore.instance
-            .collection('branches')
-            .limit(50)
-            .get(const GetOptions(source: Source.serverAndCache))
-            .timeout(const Duration(seconds: 5));
-        for (final bDoc in branchesSnap.docs) {
-          final id = bDoc.id.toLowerCase().trim();
-          if (id.isNotEmpty && id != 'all' && id != 'global') {
-            candidateBranches.add(id);
-          }
-        }
-      } catch (_) {}
-
-      // 3. Scan branches/{bId}/users
-      for (final bId in candidateBranches) {
+      // 2. If a specific branch was requested, download that branch's users
+      final cleanBranch = (branchId ?? '').toLowerCase().trim();
+      if (cleanBranch.isNotEmpty && cleanBranch != 'all' && cleanBranch != 'global') {
         try {
           final bSnap = await FirebaseFirestore.instance
               .collection('branches')
-              .doc(bId)
+              .doc(cleanBranch)
               .collection('users')
+              .limit(150)
+              .get(const GetOptions(source: Source.serverAndCache))
+              .timeout(const Duration(seconds: 6));
+          final seenPaths = {for (final d in allDocs) d.reference.path};
+          for (final doc in bSnap.docs) {
+            if (seenPaths.add(doc.reference.path)) allDocs.add(doc);
+          }
+        } catch (_) {}
+      } else if (allDocs.isEmpty) {
+        // 3. Fallback to collectionGroup('users') only if root collection returned zero users
+        try {
+          final groupSnap = await FirebaseFirestore.instance
+              .collectionGroup('users')
               .limit(300)
               .get(const GetOptions(source: Source.serverAndCache))
               .timeout(const Duration(seconds: 6));
-          allDocs.addAll(bSnap.docs);
-        } catch (e) {
-          debugPrint('[LS] Download users for branch $bId error: $e');
-        }
+          final seenPaths = {for (final d in allDocs) d.reference.path};
+          for (final doc in groupSnap.docs) {
+            if (seenPaths.add(doc.reference.path)) allDocs.add(doc);
+          }
+        } catch (_) {}
       }
-
-      // 4. Collection group query fallback
-      try {
-        final groupSnap = await FirebaseFirestore.instance
-            .collectionGroup('users')
-            .limit(500)
-            .get(const GetOptions(source: Source.serverAndCache))
-            .timeout(const Duration(seconds: 6));
-        // Set lookup: comparing every group doc against every doc already collected was
-        // ~1 million comparisons on the UI thread for an HQ user (2,000 user docs).
-        final seenPaths = {for (final d in allDocs) d.reference.path};
-        for (final doc in groupSnap.docs) {
-          if (seenPaths.add(doc.reference.path)) allDocs.add(doc);
-        }
-      } catch (_) {}
 
       // 5. Pre-scan active users across allDocs: active accounts must NEVER be deleted by stale branch duplicates!
       final activeUserUids = <String>{};
@@ -4111,34 +4115,62 @@ class LocalStorageService {
 
   static String getPatientKey(Map<String, dynamic> patient) {
     final patientId = (patient['patientId'] ?? patient['id'])?.toString().trim();
-    if (patientId != null && patientId.isNotEmpty && !_isDummyCnicValue(patientId)) {
-      return patientId;
+    if (patientId != null && patientId.isNotEmpty && !patientId.startsWith('unknown_')) {
+      final cleanPid = patientId.replaceAll(RegExp(r'\D'), '');
+      if (cleanPid.length == 13 && !RegExp(r'^0+$').hasMatch(cleanPid)) {
+        return '${cleanPid.substring(0, 5)}-${cleanPid.substring(5, 12)}-${cleanPid.substring(12, 13)}';
+      }
+      if (patientId.contains('_child_')) {
+        final parts = patientId.split('_child_');
+        final gDigits = parts[0].replaceAll(RegExp(r'\D'), '');
+        if (gDigits.length == 13 && !RegExp(r'^0+$').hasMatch(gDigits)) {
+          final gFormatted = '${gDigits.substring(0, 5)}-${gDigits.substring(5, 12)}-${gDigits.substring(12, 13)}';
+          return '${gFormatted}_child_${parts.sublist(1).join('_child_')}';
+        }
+      }
+      if (!_isDummyCnicValue(patientId)) {
+        return patientId;
+      }
     }
 
     final rawAge = patient['age'];
     final age = (rawAge is num) ? rawAge.toInt() : (int.tryParse(rawAge?.toString() ?? '') ?? 0);
     final explicitAdult = patient['isAdult'] is bool ? patient['isAdult'] as bool : null;
-    final cnic         = (patient['cnic'] ?? patient['patientCnic'])?.toString().replaceAll('-', '').trim();
-    final guardianCnic = (patient['guardianCnic'] ?? patient['guardian_cnic'])?.toString().replaceAll('-', '').trim();
-    final name         = (patient['name'] ?? patient['patientName'] ?? patient['fullName'])?.toString().trim() ?? '';
+    final cnicDigits = (patient['cnic'] ?? patient['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim();
+    final guardianDigits = (patient['guardianCnic'] ?? patient['guardian_cnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim();
+    final name = (patient['name'] ?? patient['patientName'] ?? patient['fullName'])?.toString().trim() ?? '';
 
     final bool isChild = (explicitAdult == false) ||
-        (explicitAdult == null && (guardianCnic != null && guardianCnic.isNotEmpty)) ||
+        (explicitAdult == null && (guardianDigits != null && guardianDigits.isNotEmpty)) ||
         (explicitAdult == null && age > 0 && age < 18);
 
     if (isChild) {
-      final effGuardian = (guardianCnic != null && guardianCnic.isNotEmpty)
-          ? guardianCnic
-          : (cnic != null && cnic.isNotEmpty && !_isDummyCnicValue(cnic) ? cnic : 'child');
-      final safeName = name.isNotEmpty ? _normalizeName(name) : const Uuid().v4().substring(0, 6);
+      String effGuardian;
+      if (guardianDigits != null && guardianDigits.length == 13 && !RegExp(r'^0+$').hasMatch(guardianDigits)) {
+        effGuardian = '${guardianDigits.substring(0, 5)}-${guardianDigits.substring(5, 12)}-${guardianDigits.substring(12, 13)}';
+      } else if (cnicDigits != null && cnicDigits.length == 13 && !RegExp(r'^0+$').hasMatch(cnicDigits)) {
+        effGuardian = '${cnicDigits.substring(0, 5)}-${cnicDigits.substring(5, 12)}-${cnicDigits.substring(12, 13)}';
+      } else {
+        effGuardian = 'child';
+      }
+      final safeName = name.isNotEmpty ? _normalizeName(name) : 'unnamed';
       return '${effGuardian}_child_$safeName';
     }
 
-    if (cnic != null && cnic.isNotEmpty && !_isDummyCnicValue(cnic)) {
-      return cnic;
+    // Adult with 13-digit CNIC
+    if (cnicDigits != null && cnicDigits.length == 13 && !RegExp(r'^0+$').hasMatch(cnicDigits)) {
+      return '${cnicDigits.substring(0, 5)}-${cnicDigits.substring(5, 12)}-${cnicDigits.substring(12, 13)}';
     }
 
-    final newId = const Uuid().v4();
+    if (cnicDigits != null && cnicDigits.isNotEmpty && !_isDummyCnicValue(cnicDigits)) {
+      return cnicDigits;
+    }
+
+    if (patientId != null && patientId.isNotEmpty) {
+      return patientId;
+    }
+
+    final newId = 'unknown_${const Uuid().v4().substring(0, 8)}';
     patient['patientId'] = newId;
     return newId;
   }
@@ -5766,27 +5798,15 @@ class LocalStorageService {
 
     await box.put(key, sanitized);
     final cleanKey = key.replaceAll('-', '').trim();
-    if (cleanKey != key) {
-      await box.put(cleanKey, sanitized);
+    if (cleanKey != key && box.containsKey(cleanKey)) {
+      await box.delete(cleanKey);
     }
-    // Also ensure formatted hyphenated key is stored if key is raw 13 digits
-    if (cleanKey.length == 13 && RegExp(r'^\d{13}$').hasMatch(cleanKey)) {
-      final formatted = '${cleanKey.substring(0, 5)}-${cleanKey.substring(5, 12)}-${cleanKey.substring(12)}';
-      if (formatted != key) {
-        await box.put(formatted, sanitized);
-      }
-    } else if (key.contains('_child_')) {
+    if (key.contains('_child_')) {
       final parts = key.split('_child_');
       final gClean = parts[0].replaceAll('-', '').trim();
-      if (gClean.length == 13 && RegExp(r'^\d{13}$').hasMatch(gClean)) {
-        final gFormatted = '${gClean.substring(0, 5)}-${gClean.substring(5, 12)}-${gClean.substring(12)}_child_${parts[1]}';
-        if (gFormatted != key) {
-          await box.put(gFormatted, sanitized);
-        }
-        final gRaw = '${gClean}_child_${parts[1]}';
-        if (gRaw != key) {
-          await box.put(gRaw, sanitized);
-        }
+      final gRaw = '${gClean}_child_${parts[1]}';
+      if (gRaw != key && box.containsKey(gRaw)) {
+        await box.delete(gRaw);
       }
     }
     await box.flush();
@@ -6120,7 +6140,38 @@ class LocalStorageService {
           s['synced'] = true;
           s['pendingSync'] = false;
         }
-        updates[key] = s;
+
+        // MERGE with existing record in Hive so partial objects (sync stubs) never wipe genuine patient data
+        final existing = box.get(key) ?? box.get(key.replaceAll('-', '').trim());
+        if (existing is Map) {
+          bool blank(dynamic v) {
+            if (v == null) return true;
+            if (v is String) {
+              final t = v.trim();
+              return t.isEmpty || t == '0' || t.toLowerCase() == 'null';
+            }
+            return false;
+          }
+          final merged = Map<String, dynamic>.from(existing.map((k, v) => MapEntry(k.toString(), v)));
+          s.forEach((k, v) {
+            if (!blank(v) || blank(merged[k])) merged[k] = v;
+          });
+          s = merged;
+          s['patientId'] = key;
+        }
+
+        // Standardize internal CNIC fields to dashed format
+        _standardizePatientCnicFields(s);
+        final canonicalKey = getPatientKey(s);
+        s['patientId'] = canonicalKey;
+        s['id'] = canonicalKey;
+
+        updates[canonicalKey] = s;
+        final cleanKey = canonicalKey.replaceAll('-', '').trim();
+        // Purge any old un-dashed key alias so Hive only holds canonical dashed records
+        if (cleanKey != canonicalKey && box.containsKey(cleanKey)) {
+          await box.delete(cleanKey);
+        }
       } catch (e) {
         debugPrint('[LocalStorage] Skipped invalid patient: $e');
       }
@@ -6327,7 +6378,6 @@ class LocalStorageService {
         final isCorruptCnic = rawCnic.isEmpty ||
             rawCnic.startsWith('unknown_cnic_') ||
             rawCnic.startsWith('unknown_') ||
-            rawCnic == '00000-0000000-0' ||
             rawCnic == '-';
 
         if (!isCorruptCnic && rawGuard.isNotEmpty && !rawGuard.startsWith('unknown_')) {
@@ -6350,8 +6400,9 @@ class LocalStorageService {
         }
 
         if (matched != null) {
-          final realCnic = (matched['cnic'] ?? matched['patientCnic'])?.toString().trim() ?? '';
-          final realGuard = (matched['guardianCnic'])?.toString().trim() ?? '';
+          // CNICs are stored with dashes (42101-1234567-1); a restored one is written that way too.
+          final realCnic = CnicParserUtil.formatCnic((matched['cnic'] ?? matched['patientCnic'])?.toString().trim() ?? '');
+          final realGuard = CnicParserUtil.formatCnic((matched['guardianCnic'])?.toString().trim() ?? '');
           final effectiveCnic = realCnic.isNotEmpty && !realCnic.startsWith('unknown_')
               ? realCnic
               : realGuard.isNotEmpty && !realGuard.startsWith('unknown_')
@@ -6368,7 +6419,7 @@ class LocalStorageService {
             if (entry['prescription'] is Map) {
               final presc = Map<String, dynamic>.from(entry['prescription'] as Map);
               final pC = (presc['patientCnic'] ?? presc['cnic'])?.toString().trim() ?? '';
-              if (pC.isEmpty || pC.startsWith('unknown_') || pC == '00000-0000000-0') {
+              if (pC.isEmpty || pC.startsWith('unknown_')) {
                 presc['patientCnic'] = effectiveCnic;
                 presc['cnic'] = effectiveCnic;
                 if (realGuard.isNotEmpty) presc['guardianCnic'] = realGuard;
@@ -6392,6 +6443,67 @@ class LocalStorageService {
       debugPrint('[LocalStorage] Error in healAndRestorePatientCnics: $e');
     }
     return healed;
+  }
+
+  /// One-time (per PC): every CNIC saved before the dash format (13 digits, "4210112345671")
+  /// is rewritten as "42101-1234567-1" in patients, tokens and prescriptions, including the
+  /// prescription kept inside a token. Only the CNIC fields change: record keys and patient
+  /// ids stay as they are. Anything that is not exactly 13 digits is left untouched.
+  /// Returns how many records changed.
+  static Future<int> migrateCnicsToDashedFormat({bool force = false}) async {
+    const flag = 'cnic_dashed_format_v1';
+    var changed = 0;
+    try {
+      final flags = await ensureBoxOpen('app_flags');
+      if (!force && flags.get(flag) != null) return 0;
+      const fields = ['cnic', 'patientCnic', 'guardianCnic', 'parentCnic', 'fatherCnic'];
+      bool fix(Map<String, dynamic> m) {
+        var any = false;
+        for (final f in fields) {
+          final v = m[f];
+          if (v is! String) continue;
+          final s = v.trim();
+          if (RegExp(r'^\d{13}$').hasMatch(s)) {
+            m[f] = CnicParserUtil.formatCnic(s);
+            any = true;
+          }
+        }
+        return any;
+      }
+
+      for (final name in [patientsBox, entriesBox, prescriptionsBox, dispensaryBox]) {
+        final box = await ensureBoxOpen(name);
+        final updates = <dynamic, dynamic>{};
+        var scanned = 0;
+        for (final k in box.keys) {
+          if (++scanned % 300 == 0) await Future<void>.delayed(Duration.zero);
+          final v = box.get(k);
+          if (v is! Map) continue;
+          final m = Map<String, dynamic>.from(v);
+          var any = fix(m);
+          for (final nestedKey in const ['prescription', 'patient', 'data']) {
+            if (m[nestedKey] is Map) {
+              final n = Map<String, dynamic>.from(m[nestedKey] as Map);
+              if (fix(n)) {
+                m[nestedKey] = n;
+                any = true;
+              }
+            }
+          }
+          if (any) updates[k] = m;
+        }
+        if (updates.isNotEmpty) {
+          await box.putAll(updates);
+          changed += updates.length;
+        }
+      }
+      invalidateLocalEntriesCache();
+      await flags.put(flag, DateTime.now().toIso8601String());
+      if (changed > 0) debugPrint('[LocalStorage] CNIC format: $changed record(s) now use dashes');
+    } catch (e) {
+      debugPrint('[LocalStorage] migrateCnicsToDashedFormat failed (will retry next start): $e');
+    }
+    return changed;
   }
 
   static bool hasEnoughLocalPatients({String? branchId, int minCount = 5}) {
@@ -6453,13 +6565,30 @@ class LocalStorageService {
             idNorm == normalized ||
             idNorm.startsWith('${normalized}_child_');
         if (!stillMatches) return;
+
+        // Skip ghost / stub records: no name AND no real (non-dummy) CNIC — these
+        // are partial sync stubs that have only an ID but no patient identity.
+        final recName = (val['name'] ?? val['patientName'] ?? val['fullName'])?.toString().trim() ?? '';
+        final recCnic = (val['cnic'] ?? val['patientCnic'])?.toString().trim() ?? '';
+        final recGuard = (val['guardianCnic'])?.toString().trim() ?? '';
+        final hasName = recName.isNotEmpty;
+        final hasRealCnic = !_isDummyCnicValue(recCnic) || !_isDummyCnicValue(recGuard);
+        if (!hasName && !hasRealCnic) return;  // ghost record — skip
+
         final p = Map<String, dynamic>.from(val);
+        _standardizePatientCnicFields(p);
         // For direct key lookups (exact CNIC / ID), we always accept to prevent "Patient not found" -> "Already exists" deadlocks!
         final pid = (p['patientId'] ?? getPatientKey(p)).toString();
         p['patientId'] = pid;
+        p['id'] = pid;
         if (!seenIds.contains(pid)) {
           seenIds.add(pid);
           results.add(p);
+        } else {
+          final idx = results.indexWhere((r) => (r['patientId'] ?? r['id'])?.toString() == pid);
+          if (idx != -1) {
+            results[idx] = mergePatientMaps(results[idx], p);
+          }
         }
       }
     }
@@ -6540,12 +6669,26 @@ class LocalStorageService {
       }
 
       if (match) {
+        // Skip ghost / stub records: no name AND no real CNIC
+        final recName = (raw['name'] ?? raw['patientName'] ?? raw['fullName'])?.toString().trim() ?? '';
+        final recCnic = (raw['cnic'] ?? raw['patientCnic'])?.toString().trim() ?? '';
+        final recGuard = (raw['guardianCnic'])?.toString().trim() ?? '';
+        final isGhost = recName.isEmpty && _isDummyCnicValue(recCnic) && _isDummyCnicValue(recGuard);
+        if (isGhost) continue;
+
         final p = Map<String, dynamic>.from(raw);
+        _standardizePatientCnicFields(p);
         final pid = (p['patientId'] ?? getPatientKey(p)).toString();
         p['patientId'] = pid;
+        p['id'] = pid;
         if (!seenIds.contains(pid)) {
           seenIds.add(pid);
           results.add(p);
+        } else {
+          final idx = results.indexWhere((r) => (r['patientId'] ?? r['id'])?.toString() == pid);
+          if (idx != -1) {
+            results[idx] = mergePatientMaps(results[idx], p);
+          }
         }
       }
     }
@@ -6693,7 +6836,7 @@ class LocalStorageService {
       return false;
     }
     final digits = s.replaceAll(RegExp(r'[^0-9]'), '');
-    if (digits.isEmpty || RegExp(r'^0+$').hasMatch(digits)) {
+    if (digits.isEmpty || (digits.length < 13 && RegExp(r'^0+$').hasMatch(digits))) {
       return false;
     }
     return true;
@@ -6703,7 +6846,12 @@ class LocalStorageService {
   static String resolveFirstValidCnic(Iterable<dynamic> candidates) {
     for (final c in candidates) {
       if (isValidCnicValue(c)) {
-        return c.toString().trim();
+        final trimmed = c.toString().trim();
+        final digits = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+        if (digits.length == 13 && !trimmed.contains('-')) {
+          return '${digits.substring(0, 5)}-${digits.substring(5, 12)}-${digits.substring(12, 13)}';
+        }
+        return trimmed;
       }
     }
     return '';
@@ -6732,7 +6880,12 @@ class LocalStorageService {
     final canonicalKey    = '$normBranch-$normSerialUpper';
     var sanitized         = sanitize(entryData);
     final todayKey        = getTodayDateKey();
-    sanitized['dateKey']  = sanitized['dateKey'] ?? todayKey;
+    // The token's own date, else the date in its serial, else today. "Today" first filed a
+    // token that reached this PC late (after midnight, a night session, a resend) under the
+    // wrong day, and the doctor's prescription (filed by the serial's date) then became a
+    // separate record while the token stayed "waiting".
+    final serialDateKey   = CampSessionService.getDateKeyFromSerial(normSerialUpper);
+    sanitized['dateKey']  = sanitized['dateKey'] ?? (serialDateKey.isNotEmpty ? serialDateKey : todayKey);
     sanitized['branchId'] = normBranch;
     sanitized['serial']   = normSerialUpper;
 
@@ -8595,7 +8748,7 @@ class LocalStorageService {
         var cnic = (prescMap?['cnic'] ?? prescMap?['patientCnic'] ?? dispMap?['cnic'] ?? dispMap?['patientCnic'] ?? '').toString();
         var pId = (prescMap?['patientId'] ?? dispMap?['patientId'] ?? cnic).toString();
 
-        if ((cnic.isEmpty || cnic.startsWith('unknown_cnic_') || cnic == '00000-0000000-0') &&
+        if ((cnic.isEmpty || cnic.startsWith('unknown_cnic_')) &&
             patientName.isNotEmpty && patientName.toLowerCase() != 'unknown patient') {
           final matched = findPatientByName(patientName);
           if (matched != null) {
@@ -8848,7 +9001,7 @@ class LocalStorageService {
     String? cnicRaw;
     for (final field in cnicFields) {
       final v = prescription[field]?.toString();
-      if (v != null && v.trim().isNotEmpty && v != '00000-0000000-0' && !v.startsWith('unknown_')) {
+      if (v != null && v.trim().isNotEmpty && !v.startsWith('unknown_')) {
         cnicRaw = v;
         break;
       }
@@ -8866,7 +9019,7 @@ class LocalStorageService {
           final existing = entriesBoxRef.get(k);
           if (existing is Map) {
             final exCnic = (existing['patientCnic'] ?? existing['cnic'] ?? existing['guardianCnic'])?.toString().trim();
-            if (exCnic != null && exCnic.isNotEmpty && !exCnic.startsWith('unknown_') && exCnic != '00000-0000000-0' && exCnic != '-') {
+            if (exCnic != null && exCnic.isNotEmpty && !exCnic.startsWith('unknown_') && exCnic != '-') {
               cnicRaw = exCnic;
               break;
             }
@@ -9093,7 +9246,7 @@ class LocalStorageService {
 
       // CRITICAL: NEVER overwrite an existing legitimate CNIC with a synthetic fallback!
       final existingCnic = (existing is Map ? (existing['patientCnic'] ?? existing['cnic'] ?? existing['guardianCnic']) : null)?.toString().trim();
-      if (existingCnic != null && existingCnic.isNotEmpty && !existingCnic.startsWith('unknown_') && existingCnic != '00000-0000000-0' && existingCnic != '-') {
+      if (existingCnic != null && existingCnic.isNotEmpty && !existingCnic.startsWith('unknown_') && existingCnic != '-') {
         updatedEntry['patientCnic'] = existingCnic;
         updatedEntry['cnic'] = existingCnic;
         sanitized['patientCnic'] = existingCnic;
@@ -9276,7 +9429,9 @@ class LocalStorageService {
     base['serial']         = normSerialUpper;
     base['branchId']       = normBranch;
     base['dispenseStatus'] = status;
-    base['dateKey']        ??= todayKey;
+    // Same date rule as saveEntryLocal: the serial's date before today.
+    final serialDk = CampSessionService.getDateKeyFromSerial(normSerialUpper);
+    base['dateKey']        ??= serialDk.isNotEmpty ? serialDk : todayKey;
     base['createdAt']      ??= nowIso;
     if (base['campId'] == null || base['campId'] == '') {
       if (normSerialUpper.contains('SADD')) {
@@ -9730,116 +9885,19 @@ class LocalStorageService {
   static double _qtyOf(dynamic q) =>
       q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
 
-  static Future<void> saveAllLocalStockItems(
-      List<Map<String, dynamic>> items) async {
-    final box = Hive.box(stockBox);
-    final sBox = Hive.box(syncBox);
+  // The functions below keep their old names so every caller keeps working, but stock now
+  // lives in the stock book (lib/services/stock/). They never write a quantity: details go
+  // to StockLedger.saveDetails, quantity changes become movements (StockLedger.record).
 
-    // Stock changes still queued for upload are not in the downloaded cloud figures yet.
-    // They are added back here ONLY (downloadInventory used to add them too, so a refresh
-    // subtracted every pending dispense twice). Dispense/restock deltas come from the same
-    // reader the hourly upload uses, which also finds ids nested under 'data'.
-    final pendingDeltas = <String, double>{
-      for (final e in HourlyDispensarySync.pendingStockChanges().entries)
-        if (e.value != 0) e.key: e.value,
-    };
-    for (final key in sBox.keys) {
-      final val = sBox.get(key);
-      if (val is Map) {
-        final type = val['type'];
-        if (type == 'add_inventory_stock') {
-          final medId = val['medicineId']?.toString();
-          final qty = (val['quantity'] as num?)?.toDouble() ?? 0.0;
-          if (medId != null && qty > 0) {
-            pendingDeltas[medId] = (pendingDeltas[medId] ?? 0.0) + qty;
-          }
-        }
-      }
-    }
+  /// The ledger record for [stockItem] (by its pool, or this PC's current pool).
+  static StockPool? _poolForLegacy(Map item) =>
+      StockPool.ofLegacyRecord(item) ?? StockPool.current((item['branchId'] ?? getActiveUserBranchId()).toString());
 
-    final pendingRegistrations = sBox.values
-        .whereType<Map>()
-        .where((v) => v['type'] == 'register_medicine')
-        .map((v) {
-          final dataMap = v['data'] is Map ? Map<String, dynamic>.from(v['data'] as Map) : <String, dynamic>{};
-          return (dataMap['id'] ?? dataMap['medicineId'])?.toString();
-        })
-        .whereType<String>()
-        .toSet();
-
-    final Map<String, dynamic> updatedMap = {};
-    final downloadedIds = <String>{};
-
-    final currentLocalItems = <String, dynamic>{};
-    for (final key in box.keys) {
-      final val = box.get(key);
-      if (val is Map) {
-        final itemMap = Map<String, dynamic>.from(val);
-        final id = (itemMap['id'] ?? itemMap['medicineId'])?.toString().trim() ?? '';
-        if (id.isNotEmpty && itemMap['status'] != 'deleted') {
-          currentLocalItems[id] = itemMap;
-        }
-      }
-    }
-
-    for (final item in items) {
-      final id = (item['id'] ?? item['medicineId'])?.toString().trim() ?? '';
-      if (id.isEmpty) continue;
-      downloadedIds.add(id);
-
-      if (pendingDeltas.containsKey(id)) {
-        final rawDl = item['quantity'];
-        final downloadedQty = rawDl is num ? rawDl.toDouble() : double.tryParse(rawDl?.toString() ?? '') ?? 0.0;
-        item['quantity'] = (downloadedQty + pendingDeltas[id]!).clamp(0.0, double.infinity);
-        debugPrint('[LocalStorage] Re-applied pending local delta of ${pendingDeltas[id]} to downloaded stock of $id');
-      } else if (currentLocalItems.containsKey(id)) {
-        final localItem = currentLocalItems[id] as Map<String, dynamic>;
-        final localUpdated = localItem['updatedAt'] ?? localItem['lastUpdated'];
-        final remoteUpdated = item['updatedAt'] ?? item['lastUpdated'];
-        if (localUpdated != null && remoteUpdated != null) {
-          final localDt = DateTime.tryParse(localUpdated.toString());
-          final remoteDt = DateTime.tryParse(remoteUpdated.toString());
-          if (localDt != null && remoteDt != null && localDt.isAfter(remoteDt)) {
-            // Local item has more recent edits (dispensing/restock); preserve local quantity & timestamp
-            item['quantity'] = localItem['quantity'];
-            item['updatedAt'] = localItem['updatedAt'];
-            if (localItem['lastUpdated'] != null) item['lastUpdated'] = localItem['lastUpdated'];
-          }
-        } else if (localItem['quantity'] != null &&
-            (item['quantity'] == null || (_qtyOf(item['quantity']) == 0 && _qtyOf(localItem['quantity']) > 0))) {
-          // Avoid wiping non-zero local stock with zero remote stock if timestamps are missing
-          item['quantity'] = localItem['quantity'];
-        }
-      }
-      // Stock is never below 0, and a quantity stored as text is read as a number.
-      item['quantity'] = _qtyOf(item['quantity']).clamp(0.0, double.infinity);
-      updatedMap['stock:$id'] = item;
-      updatedMap[id] = item;
-    }
-
-    // Preserve ALL local and LAN-received items that were not present in downloaded Firestore snapshot
-    int preservedCount = 0;
-    for (final entry in currentLocalItems.entries) {
-      final locId = entry.key;
-      final locItem = entry.value;
-      if (!downloadedIds.contains(locId)) {
-        updatedMap['stock:$locId'] = locItem;
-        updatedMap[locId] = locItem;
-        preservedCount++;
-      }
-    }
-    if (preservedCount > 0) {
-      debugPrint('[LocalStorage] Preserved $preservedCount local/LAN stock item(s) (not in remote snapshot)');
-    }
-
-    // Do NOT call box.clear() — putAll overwrites updated items while keeping any other valid keys intact
-    await box.putAll(updatedMap);
-    await box.flush();
-  }
-
-  static Future<void> saveLocalStockItem(
-      Map<String, dynamic> stockItem) async {
-    final id = (stockItem['id'] ?? stockItem['medicineId'] ?? stockItem['docId'])?.toString();
+  /// Saves medicine details only (name, type, dose, expiry, price, code…). The quantity in
+  /// [stockItem] is used only when the batch is new everywhere: then it becomes one
+  /// "initial count" movement whose id is the same on every PC, so it counts once.
+  static Future<void> saveLocalStockItem(Map<String, dynamic> stockItem) async {
+    final id = (stockItem['id'] ?? stockItem['medicineId'] ?? stockItem['docId'])?.toString().trim();
     if (id == null || id.isEmpty) return;
     final item = Map<String, dynamic>.from(stockItem);
     final isCustom = item['isCustomized'] == true || item['userEdited'] == true;
@@ -9847,194 +9905,112 @@ class LocalStorageService {
       if (item['name'] != null) item['name'] = MasterProformaService.cleanBrandToFormula(item['name'].toString());
       if (item['formula'] != null) item['formula'] = MasterProformaService.cleanBrandToFormula(item['formula'].toString());
     }
-    item['quantity'] = _qtyOf(item['quantity']).clamp(0.0, double.infinity);
-    final activeCamp = CampSessionService.getActiveCamp();
-    if (activeCamp != null && activeCamp.isNotEmpty) {
-      item['dispensaryId'] = item['dispensaryId'] ?? activeCamp;
-      item['campId']       = item['campId']       ?? activeCamp;
+    final pool = _poolForLegacy(item);
+    if (pool == null) return;
+    final isNew = StockLedger.item(pool.key, id) == null;
+    await StockLedger.saveDetails(pool.key, id, item);
+    final q = _qtyOf(item['quantity']);
+    if (isNew && q > 0) {
+      await StockLedger.record(StockMovement(
+        opId: StockMovement.deterministicId('seed', [pool.key, id]),
+        pool: pool.key,
+        medicineId: id,
+        delta: q,
+        kind: StockMoveKind.count,
+        at: DateTime.now(),
+        by: getActiveUsername(),
+        ref: 'new batch',
+        name: (item['name'] ?? '').toString(),
+      ));
     }
-    final box = await ensureBoxOpen(stockBox);
-    await box.put('stock:$id', sanitize(item));
-    await box.put(id, sanitize(item));
-    await box.flush();
   }
 
   static void saveLocalInventoryItem(Map<String, dynamic> item) {
     final rawId = (item['id'] ?? item['medicineId'] ?? item['docId'] ?? item['code'] ?? item['barcode'])?.toString().trim();
     if (rawId == null || rawId.isEmpty) return;
-    final normalised = Map<String, dynamic>.from(item);
-    normalised['id']         = rawId;
-    normalised['medicineId'] = rawId;
-    final isCustom = normalised['isCustomized'] == true || normalised['userEdited'] == true;
-    if (!isCustom) {
-      if (normalised['name'] != null) normalised['name'] = MasterProformaService.cleanBrandToFormula(normalised['name'].toString());
-      if (normalised['formula'] != null) normalised['formula'] = MasterProformaService.cleanBrandToFormula(normalised['formula'].toString());
-    }
-    normalised['quantity']   = _qtyOf(normalised['quantity']).clamp(0.0, double.infinity);
-    final activeCamp = CampSessionService.getActiveCamp();
-    final explicitCamp = (normalised['dispensaryId'] ?? normalised['campId'] ?? normalised['dispensaryTag'])
-      ?.toString()
-      .trim();
-    if ((explicitCamp == null || explicitCamp.isEmpty) &&
-      activeCamp != null && activeCamp.isNotEmpty) {
-      normalised['dispensaryId'] = activeCamp;
-      normalised['campId']       = activeCamp;
-    }
-    if (Hive.isBoxOpen(stockBox)) {
-      final box = Hive.box(stockBox);
-      box.put('stock:$rawId', sanitize(normalised));
-      box.put(rawId, sanitize(normalised));
-      box.flush();
-    } else {
-      openBoxSafe(stockBox).then((box) {
-        box.put('stock:$rawId', sanitize(normalised));
-        box.put(rawId, sanitize(normalised));
-        box.flush();
-      });
-    }
+    unawaited(saveLocalStockItem({...item, 'id': rawId, 'medicineId': rawId}).catchError((Object e) {
+      debugPrint('[LocalStorage] saveLocalInventoryItem failed: $e');
+    }));
   }
 
+  /// The batch with this medicine id, preferring this PC's current pool.
   static Map<String, dynamic>? getLocalInventoryItem(String id) {
-    if (!Hive.isBoxOpen(stockBox)) return null;
-    final box = Hive.box(stockBox);
-    var val = box.get('stock:$id') ?? box.get(id);
-    if (val != null) return Map<String, dynamic>.from(val as Map);
-    for (final k in box.keys) {
-      final v = box.get(k);
-      if (v is Map) {
-        final mId = (v['id'] ?? v['medicineId'] ?? v['docId'] ?? v['code'] ?? v['barcode'])?.toString();
-        if (mId == id) {
-          return Map<String, dynamic>.from(v);
-        }
-      }
+    final cur = StockPool.current();
+    if (cur != null) {
+      final it = StockLedger.item(cur.key, id);
+      if (it != null) return it;
     }
-    return null;
+    final branch = StockPool.normalizeBranch(getActiveUserBranchId());
+    Map<String, dynamic>? any;
+    for (final it in StockLedger.items()) {
+      if ((it['medicineId'] ?? it['id']).toString() != id) continue;
+      if (it['branchId'] == branch) return it;
+      any ??= it;
+    }
+    return any;
   }
 
+  /// Adds [delta] to a batch as a movement (kept for older callers).
   static Future<void> updateLocalStockQuantity(String id, double delta) async {
-    final box = await ensureBoxOpen(stockBox);
-    dynamic targetKey = 'stock:$id';
-    dynamic raw = box.get(targetKey);
-    if (raw == null) {
-      targetKey = id;
-      raw = box.get(targetKey);
-    }
-    if (raw == null) {
-      for (final k in box.keys) {
-        final v = box.get(k);
-        if (v is Map) {
-          final mId = (v['id'] ?? v['medicineId'] ?? v['docId'] ?? v['code'] ?? v['barcode'])?.toString();
-          if (mId == id) {
-            targetKey = k;
-            raw = v;
-            break;
-          }
-        }
-      }
-    }
-    if (raw == null) return;
-    final item = Map<String, dynamic>.from(raw as Map);
-
-    final currentQty = _qtyOf(item['quantity']);
-    item['quantity'] = (currentQty + delta).clamp(0.0, double.infinity);
-    item['updatedAt'] = DateTime.now().toIso8601String();
-    await box.put(targetKey, sanitize(item));
-    final rawId = (item['id'] ?? item['medicineId'] ?? id).toString();
-    await box.put('stock:$rawId', sanitize(item));
-    await box.put(rawId, sanitize(item));
-    await box.flush();
+    if (delta == 0) return;
+    final it = getLocalInventoryItem(id);
+    final pool = it == null ? StockPool.current() : StockPool.fromKey(it['pool']?.toString());
+    if (pool == null) return;
+    await StockLedger.record(StockMovement(
+      opId: StockMovement.newId('adj'),
+      pool: pool.key,
+      medicineId: id,
+      delta: delta,
+      kind: delta > 0 ? StockMoveKind.restock : StockMoveKind.adjust,
+      at: DateTime.now(),
+      by: getActiveUsername(),
+      ref: 'adjustment',
+      name: (it?['name'] ?? '').toString(),
+    ));
   }
 
+  /// Hides the batch(es) with this id in this PC's branch (history is kept).
   static Future<void> deleteLocalStockItem(String id) async {
-    final box = Hive.box(stockBox);
-    await box.delete('stock:$id');
-    await box.delete(id);
-    final normId = id.toLowerCase().trim();
-    final toDelete = <dynamic>[];
-    for (final key in box.keys) {
-      final kStr = key.toString().toLowerCase();
-      if (kStr == normId || kStr == 'stock:$normId' || kStr.endsWith(':$normId')) {
-        toDelete.add(key);
-      }
+    final branch = StockPool.normalizeBranch(getActiveUserBranchId());
+    for (final it in StockLedger.items()) {
+      if ((it['medicineId'] ?? it['id']).toString() != id) continue;
+      if (branch.isNotEmpty && it['branchId'] != branch) continue;
+      await StockLedger.markDeleted(it['pool'].toString(), id);
     }
-    for (final k in toDelete) {
-      await box.delete(k);
-    }
-    await box.flush();
   }
 
-  static Future<int> clearLocalBranchStock(String branchId) async {
-    final box = Hive.box(stockBox);
-    final targetBranch = branchId.toLowerCase().trim();
-    final keysToDelete = <dynamic>[];
-
-    for (final key in box.keys) {
-      final val = box.get(key);
-      if (val is Map) {
-        final bId = (val['branchId'] ?? '').toString().toLowerCase().trim();
-        if (bId == targetBranch ||
-            bId.contains('karachi') ||
-            bId.contains('khi') ||
-            targetBranch.contains('karachi') ||
-            targetBranch.isEmpty ||
-            bId.isEmpty) {
-          keysToDelete.add(key);
-        }
-      } else {
-        keysToDelete.add(key);
-      }
-    }
-
-    for (final k in keysToDelete) {
-      await box.delete(k);
-    }
-    await box.flush();
-    return keysToDelete.length;
-  }
+  /// Removes this branch's stock records from THIS PC only (they come back from the cloud or
+  /// the LAN server on the next full read). Returns how many were removed.
+  static Future<int> clearLocalBranchStock(String branchId) => _clearLocalPools(StockPool.allFor(branchId));
 
   static Future<int> clearLocalCampStock(String branchId, String campId) async {
-    final box = Hive.box(stockBox);
-    final targetBranch = branchId.toLowerCase().trim();
-    final targetCamp = campId.toLowerCase().trim();
-    if (targetCamp == 'all' || targetCamp.isEmpty) return 0; // Strict safety guard!
+    final c = StockPool.normalizeCamp(campId);
+    if (c == null) return 0; // never "all"
+    return _clearLocalPools(StockPool.allFor(branchId).where((p) => p.camp == c));
+  }
 
-    final keysToDelete = <dynamic>[];
-
-    for (final key in box.keys) {
-      final val = box.get(key);
-      if (val is Map) {
-        final bId = (val['branchId'] ?? '').toString().toLowerCase().trim();
-        final matchesBranch = bId == targetBranch ||
-            (targetBranch.contains('karachi') && bId.contains('karachi')) ||
-            bId.isEmpty;
-        if (!matchesBranch) continue;
-
-        final matches = CampSessionService.matchesCamp(
-          selectedCamp: targetCamp,
-          dispensaryId: val['dispensaryId']?.toString(),
-          campId: val['campId']?.toString(),
-          dispensaryTag: val['dispensaryTag']?.toString(),
-          serial: (val['barcode'] ?? val['code'] ?? val['id'] ?? key)?.toString(),
-        );
-        if (matches) {
-          keysToDelete.add(key);
-        }
-      }
+  static Future<int> _clearLocalPools(Iterable<StockPool> pools) async {
+    final keys = pools.map((p) => p.key).toSet();
+    if (keys.isEmpty) return 0;
+    final box = await ensureBoxOpen(stockBox);
+    final drop = <dynamic>[];
+    for (final k in box.keys) {
+      final v = box.get(k);
+      if (v is Map && keys.contains(v['pool'])) drop.add(k);
     }
-
-    for (final k in keysToDelete) {
-      await box.delete(k);
+    await box.deleteAll(drop);
+    for (final p in keys) {
+      await setLastSyncedServerTimestamp('stock_v2_${p.replaceAll('/', '_')}', '');
     }
-    await box.flush();
-    return keysToDelete.length;
+    return drop.length;
   }
 
   static bool _isDummyCnicValue(String? cnic) {
     if (cnic == null || cnic.trim().isEmpty) return true;
     final clean = cnic.replaceAll(RegExp(r'[^0-9]'), '');
     if (clean.length < 9) return true;
+    // All-zeros or known placeholder values
     if (RegExp(r'^0+$').hasMatch(clean)) return true;
-    if (RegExp(r'^1+$').hasMatch(clean)) return true;
     if (clean == '1234567890123' || clean == '0000000000000') return true;
     return false;
   }
@@ -10205,161 +10181,34 @@ class LocalStorageService {
     };
   }
 
+  /// Stock records of a branch (and camp), read from the stock book. Each record is one real
+  /// batch in one pool; callers that show one row per medicine add batches together
+  /// (StockReader.groups does that).
   static List<Map<String, dynamic>> getAllLocalStockItems(
       {String? branchId, String? dispensaryId, bool filterByCamp = true}) {
-    if (!Hive.isBoxOpen(stockBox)) return [];
-
-    final Map<String, Map<String, dynamic>> uniqueItems = {};
-    for (final raw in Hive.box(stockBox).values) {
-      if (raw is! Map) continue;
-      final item = Map<String, dynamic>.from(raw);
-      final rawId = (item['id'] ?? item['medicineId'] ?? item['docId'] ?? item['code'] ?? item['barcode'])?.toString().trim();
-
-      // Auto-heal empty names from rawId / key
-      var rawName = (item['name'] ?? item['formula'] ?? item['medicineName'] ?? '').toString().trim();
-      if ((rawName.isEmpty || rawName.toLowerCase() == 'null') && rawId != null && rawId.isNotEmpty) {
-        final healed = healStockItemFromKeyOrId(rawId);
-        if (healed != null) {
-          rawName = healed['name']!;
-          item['name'] = rawName;
-          item['formula'] = rawName;
-          if ((item['type'] ?? '').toString().trim().isEmpty || item['type'].toString().toLowerCase() == 'null') {
-            item['type'] = healed['type'];
-          }
-          if ((item['dose'] ?? '').toString().trim().isEmpty || item['dose'].toString().toLowerCase() == 'null') {
-            item['dose'] = healed['dose'];
-          }
-          if ((item['expiryDate'] ?? '').toString().trim().isEmpty) {
-            item['expiryDate'] = healed['expiryDate'];
-          }
-        }
-      }
-
-      // Filter out completely corrupt items with empty names so ghost items never appear!
-      if (rawName.isEmpty || rawName.toLowerCase() == 'null') {
-        continue;
-      }
-
-      // Ensure item['name'] and item['formula'] are always populated
-      if (item['name'] == null || item['name'].toString().trim().isEmpty || item['name'].toString().toLowerCase() == 'null') {
-        item['name'] = rawName;
-      }
-      if (item['formula'] == null || item['formula'].toString().trim().isEmpty || item['formula'].toString().toLowerCase() == 'null') {
-        item['formula'] = rawName;
-      }
-
-      // Normalize brand to formula for stable deduplication
-      final isCustom = item['isCustomized'] == true || item['userEdited'] == true;
-      final cleanFormulaName = isCustom ? rawName : MasterProformaService.cleanBrandToFormula(rawName);
-      final name = cleanFormulaName.toLowerCase().trim();
-      final dose = (item['dose'] ?? '').toString().trim().toLowerCase();
-      final type = (item['type'] ?? item['dosageForm'] ?? item['form'] ?? '').toString().trim().toLowerCase();
-      final camp = (item['campId'] ?? item['dispensaryId'] ?? '').toString().trim().toLowerCase();
-
-      // Normalize camp tag for Haji Camp partitioned items
-      final rawIdLower = rawId?.toLowerCase() ?? '';
-      if (rawIdLower.startsWith('hajicamp--') || rawIdLower.startsWith('stock:hajicamp--') || camp == 'haji_camp') {
-        if (item['campId'] != 'haji_camp') item['campId'] = 'haji_camp';
-        if (item['dispensaryId'] != 'haji_camp') item['dispensaryId'] = 'haji_camp';
-        if (item['dispensaryTag'] == 'SADD' || item['dispensaryTag'] == 'KAP') {
-          item['dispensaryTag'] = 'HAJI';
-        }
-      }
-
-      final expiry = (item['expiryDate'] ?? '').toString().trim();
-      String monthYear = '';
-      if (expiry.length == 10 && expiry[2] == '-' && expiry[5] == '-') {
-        monthYear = expiry.substring(3);
-      } else {
-        monthYear = expiry;
-      }
-
-      // Deduplicate by clean batch composite key: name + type + dose + monthYear + camp.
-      // This prevents ghost copies (created under different docId variations) from appearing as duplicates
-      // and causing double counting in stock quantities!
-      final batchKey = '$name|$type|$dose|$monthYear|$camp';
-      final dedupKey = (name.isNotEmpty && type.isNotEmpty)
-          ? 'batch:$batchKey'
-          : ((rawId != null && rawId.isNotEmpty && rawId != 'unknown' && rawId != 'null')
-              ? 'id:${rawId.toLowerCase()}'
-              : 'composite:$batchKey');
-
-      if (!uniqueItems.containsKey(dedupKey)) {
-        uniqueItems[dedupKey] = item;
-      } else {
-        final existing = uniqueItems[dedupKey]!;
-        final existingQty = (existing['quantity'] as num?)?.toDouble() ?? 0.0;
-        final newQty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
-        final existingUp = existing['updatedAt'] ?? existing['lastUpdated'];
-        final newUp = item['updatedAt'] ?? item['lastUpdated'];
-
-        bool itemIsNewer = false;
-        if (newUp != null && existingUp != null) {
-          final nDt = DateTime.tryParse(newUp.toString());
-          final eDt = DateTime.tryParse(existingUp.toString());
-          if (nDt != null && eDt != null) {
-            itemIsNewer = nDt.isAfter(eDt);
-          }
-        } else if (newUp != null && existingUp == null) {
-          itemIsNewer = true;
-        }
-
-        if (itemIsNewer) {
-          uniqueItems[dedupKey] = item;
-        } else if (existingUp == null && newUp == null && newQty > 0 && existingQty == 0) {
-          uniqueItems[dedupKey] = item;
-        }
-      }
+    final branch = (branchId == null || branchId.trim().isEmpty) ? null : StockPool.normalizeBranch(branchId);
+    String? camp;
+    if (filterByCamp && branch != null && CampSessionService.hasCampsForBranch(branch)) {
+      final sel = (dispensaryId != null && dispensaryId.trim().isNotEmpty && dispensaryId.toLowerCase() != 'all')
+          ? dispensaryId
+          : CampSessionService.getActiveCamp(branch);
+      camp = StockPool.normalizeCamp(sel);
     }
-
-    var items = uniqueItems.values.toList();
-    if (branchId != null && branchId.isNotEmpty) {
-      final norm = branchId.toLowerCase().trim();
-      items = items.where((i) {
-        final b = i['branchId']?.toString().toLowerCase().trim();
-        if (b == null || b.isEmpty) return true; // Branch stock fallback
-        if (CampSessionService.areBranchesMatching(norm, b)) return true;
-        if (CampSessionService.isKarachiFamily(norm) && (b.isEmpty || CampSessionService.isKarachiFamily(b))) return true;
-        return b == norm ||
-            b == 'branch_$norm' ||
-            'branch_$b' == norm ||
-            (norm.isNotEmpty && b.contains(norm)) ||
-            (b.isNotEmpty && norm.contains(b));
-      }).toList();
-    }
-    if (filterByCamp && CampSessionService.hasCampsForBranch(branchId)) {
-      final activeCamp = (dispensaryId != null && dispensaryId.isNotEmpty && dispensaryId.toLowerCase() != 'all')
-          ? dispensaryId.toLowerCase().trim()
-          : CampSessionService.getActiveCamp(branchId);
-
-      if (activeCamp != null && activeCamp.isNotEmpty && activeCamp != 'all') {
-        final campFiltered = items.where((i) {
-          return CampSessionService.matchesCamp(
-            selectedCamp: activeCamp,
-            dispensaryId: i['dispensaryId']?.toString(),
-            campId: i['campId']?.toString(),
-            dispensaryTag: i['dispensaryTag']?.toString(),
-            serial: (i['barcode'] ?? i['code'] ?? i['id'])?.toString(),
-          );
-        }).toList();
-        items = campFiltered;
+    final out = <Map<String, dynamic>>[];
+    for (final it in StockLedger.items()) {
+      if (!StockReader.hasUsableName(it)) continue;
+      final pool = StockPool.fromKey(it['pool']?.toString());
+      if (pool == null) continue;
+      if (branch != null && pool.branch != branch) continue;
+      if (camp != null && pool.camp != null && pool.camp != camp) continue;
+      final isCustom = it['isCustomized'] == true || it['userEdited'] == true;
+      if (!isCustom) {
+        it['name'] = MasterProformaService.cleanBrandToFormula((it['name'] ?? '').toString());
+        if (it['formula'] != null) it['formula'] = MasterProformaService.cleanBrandToFormula(it['formula'].toString());
       }
+      out.add(it);
     }
-    return items.map((i) {
-      final isCustom = i['isCustomized'] == true || i['userEdited'] == true;
-      if (isCustom) return i;
-      final name = i['name']?.toString() ?? '';
-      final formula = i['formula']?.toString() ?? '';
-      final cleanN = MasterProformaService.cleanBrandToFormula(name);
-      final cleanF = MasterProformaService.cleanBrandToFormula(formula);
-      if (cleanN != name || cleanF != formula) {
-        final copy = Map<String, dynamic>.from(i);
-        copy['name'] = cleanN;
-        copy['formula'] = cleanF;
-        return copy;
-      }
-      return i;
-    }).toList();
+    return out;
   }
 
   // ─── Inventory Audit Logs ───────────────────────────────────────────────────
@@ -11041,439 +10890,29 @@ class LocalStorageService {
     }
   }
 
-  static DateTime? _lastInventoryDownloadTime;
-  static const Duration _inventoryDownloadCooldown = Duration(minutes: 5);
-
   /// Upper bound for one background Firestore read (downloads, catch-ups).
   static const Duration _cloudReadTimeout = Duration(seconds: 45);
 
+  /// Reads this branch's stock from the cloud (or, on a LAN desk, asks the LAN server).
+  /// Only the pool's own collection is read and every document goes through the stock book,
+  /// so nothing is double counted, overwritten or floored. Never throws.
   static Future<void> downloadInventory(String branchId, {bool forceFull = false, String? campId}) async {
-    if (LanFirestoreGate.isLanDesk) return; // a dispensary desk on the LAN gets this from the LAN server
     branchId = branchId.toLowerCase().trim();
     if (branchId.isEmpty) return;
-
-    // Zero-Quota Guard: If connected to LAN server, live stock updates arrive via WebSocket
-    if (!forceFull && RealtimeManager().hasServerLink) {
-      debugPrint('[LocalStorage] LAN server is connected — skipping direct cloud downloadInventory');
-      return;
-    }
-
-    final now = DateTime.now();
-    if (!forceFull && _lastInventoryDownloadTime != null && now.difference(_lastInventoryDownloadTime!) < _inventoryDownloadCooldown) {
-      debugPrint('[LocalStorage] Skipping downloadInventory: within ${_inventoryDownloadCooldown.inMinutes}m cooldown');
-      return;
-    }
-    _lastInventoryDownloadTime = now;
     try {
-      final invPaths = CampSessionService.getAllCampInventoryPaths(
-        branchId: branchId,
-        selectedCamp: campId ?? CampSessionService.getActiveCamp(),
-      );
-
-      final effectiveFirestoreBranch = CampSessionService.isKarachiFamily(branchId) ? 'karachi' : branchId;
-
-      for (final invCol in invPaths) {
-        // Stock cannot be below 0: set any negative cloud quantities (left by older versions
-        // or by a deduction larger than the stock) back to 0. Reads only negative documents.
-        unawaited(StockFloor.repairCollection('branches/$effectiveFirestoreBranch/$invCol'));
-        final syncKey = 'inventory_${branchId}_$invCol';
-        final lastSyncedStr = getLastSyncedServerTimestamp(syncKey);
-        final currentCount = Hive.box(stockBox).length;
-
-        Query query = FirebaseFirestore.instance
-            .collection('branches')
-            .doc(effectiveFirestoreBranch)
-            .collection(invCol);
-
-        if (!forceFull && currentCount >= 15 && lastSyncedStr != null && lastSyncedStr.isNotEmpty) {
-          final dt = DateTime.tryParse(lastSyncedStr);
-          if (dt != null) {
-            query = query.where('updatedAt', isGreaterThan: Timestamp.fromDate(dt));
-          }
-        }
-
-        final isDelta = !forceFull && currentCount >= 15 && lastSyncedStr != null && lastSyncedStr.isNotEmpty;
-        // Bounded: on a half-working Wi-Fi the Windows SDK can leave a get() pending for many
-        // minutes, and the screens that start this (dispenser, receptionist) wait on it.
-        var snapshot = await query.get().timeout(_cloudReadTimeout);
-        // Full fallback only when a FULL read came back empty (e.g. wrong branch casing). An
-        // empty delta just means "nothing changed" — it used to trigger a full re-download of
-        // the whole inventory every time.
-        if (snapshot.docs.isEmpty && !isDelta) {
-          snapshot = await FirebaseFirestore.instance
-              .collection('branches')
-              .doc(effectiveFirestoreBranch)
-              .collection(invCol)
-              .get()
-              .timeout(_cloudReadTimeout);
-        }
-        if (snapshot.docs.isEmpty && effectiveFirestoreBranch == 'karachi') {
-          snapshot = await FirebaseFirestore.instance
-              .collection('branches')
-              .doc('Karachi')
-              .collection(invCol)
-              .get()
-              .timeout(_cloudReadTimeout);
-        }
-
-        if (snapshot.docs.isNotEmpty) {
-          final items = snapshot.docs.map((doc) {
-            final d = doc.data() as Map<String, dynamic>;
-            d['id'] = doc.id;
-            d['branchId'] = branchId;
-            final docIdUpper = doc.id.toUpperCase();
-            final rawCamp = (d['campId'] ?? d['dispensaryId'] ?? '').toString().toLowerCase();
-            if (invCol == 'inventory_saddar' || docIdUpper.startsWith('KAPAYYA') || docIdUpper.startsWith('SADDAR') || rawCamp.contains('kap') || rawCamp.contains('sadd')) {
-              d['campId'] = 'saddar';
-              d['dispensaryId'] = 'saddar';
-            } else if (invCol == 'inventory_haji' || invCol == 'inventory_haji_camp' || docIdUpper.startsWith('HAJI') || docIdUpper.startsWith('HAJICAMP') || rawCamp.contains('haji')) {
-              d['campId'] = 'haji_camp';
-              d['dispensaryId'] = 'haji_camp';
-            }
-
-            // Heal Diclofenac Sodium 50mg Tablet barcode mismatch (MED-DIC-INJ -> MED-DIC-50)
-            final name = (d['name'] ?? '').toString().toLowerCase();
-            final dose = (d['dose'] ?? '').toString().toLowerCase();
-            final type = (d['type'] ?? d['dosageForm'] ?? '').toString().toLowerCase();
-            final code = (d['code'] ?? d['barcode'] ?? '').toString();
-            if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab') && code == 'MED-DIC-INJ') {
-              d['code'] = 'MED-DIC-50';
-              d['barcode'] = 'MED-DIC-50';
-            }
-            return d;
-          }).toList();
-          // Stock changes still waiting in this PC's queue (uploaded hourly, see
-          // HourlyDispensarySync) are re-applied inside saveAllLocalStockItems — once.
-          await saveAllLocalStockItems(items);
-
-          Timestamp? maxTs;
-          for (final doc in snapshot.docs) {
-            final data = doc.data() as Map<String, dynamic>?;
-            final ts = data?['updatedAt'] ?? data?['addedAt'] ?? data?['timestamp'];
-            if (ts is Timestamp) {
-              if (maxTs == null || ts.compareTo(maxTs) > 0) {
-                maxTs = ts;
-              }
-            }
-          }
-          if (maxTs != null) {
-            await setLastSyncedServerTimestamp(
-              syncKey,
-              maxTs.toDate().toUtc().toIso8601String(),
-            );
-          }
-        }
-      }
-
-      if (CampSessionService.isKarachiFamily(branchId) && !_isRestoringKarachiInventory) {
-        if (forceFull) {
-          unawaited(restoreAndSyncKarachiInventory(branchId));
-        } else {
-          unawaited(healKarachiSplitInventory());
-        }
-      }
+      await StockLedger.ensureOpen();
+      await StockSync.refresh(branchId, full: forceFull);
     } catch (e) {
       debugPrint('[LocalStorage] downloadInventory error: $e');
     }
   }
 
-  /// Consolidates Karachi's split inventory across Firestore & Hive:
-  /// - Migrates hajicamp-- docs into inventory_haji
-  /// - Migrates saddar-- docs into inventory_saddar
-  /// - Fixes Diclofenac 50mg barcode from MED-DIC-INJ to MED-DIC-50
-  /// - Removes redundant duplicates from generic inventory
-  static Future<void> healKarachiSplitInventory({bool force = false}) async {
-    if (LanFirestoreGate.isLanDesk) return; // a dispensary desk on the LAN gets this from the LAN server
-    try {
-      if (!Hive.isBoxOpen('app_settings')) {
-        await Hive.openBox('app_settings');
-      }
-      final settings = Hive.box('app_settings');
-      if (!force && settings.get('karachi_split_inventory_healed_v3', defaultValue: false) == true) {
-        return;
-      }
-      debugPrint('[LocalStorage] 🩺 Starting healKarachiSplitInventory...');
+  /// Retired (2026-11-19). It copied Saddar / generic quantities into Haji Camp and is one of
+  /// the causes of the stock mismatch. Kept as a no-op so old callers still compile.
+  static Future<void> healKarachiSplitInventory({bool force = false}) async {}
 
-      final db = FirebaseFirestore.instance;
-      final karachiRef = db.collection('branches').doc('karachi');
-
-      final invSnap = await karachiRef.collection('inventory').get().catchError((_) => karachiRef.collection('inventory').limit(1).get());
-      final hajiBatch = db.batch();
-      final saddarBatch = db.batch();
-      final deleteBatch = db.batch();
-
-      int hajiCount = 0;
-      int saddarCount = 0;
-      int deleteCount = 0;
-
-      if (invSnap.docs.isNotEmpty) {
-        for (final doc in invSnap.docs) {
-          final d = Map<String, dynamic>.from(doc.data());
-          final docId = doc.id;
-          final docIdLower = docId.toLowerCase();
-          final rawCamp = (d['campId'] ?? d['dispensaryId'] ?? '').toString().toLowerCase();
-
-          // Fix Diclofenac barcode
-          final name = (d['name'] ?? '').toString().toLowerCase();
-          final dose = (d['dose'] ?? '').toString().toLowerCase();
-          final type = (d['type'] ?? d['dosageForm'] ?? '').toString().toLowerCase();
-          if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab')) {
-            d['code'] = 'MED-DIC-50';
-            d['barcode'] = 'MED-DIC-50';
-          }
-
-          if (docIdLower.startsWith('hajicamp--') || docIdLower.startsWith('haji--') || rawCamp.contains('haji')) {
-            d['campId'] = 'haji_camp';
-            d['dispensaryId'] = 'haji_camp';
-            hajiBatch.set(karachiRef.collection('inventory_haji').doc(docId), d, SetOptions(merge: true));
-            hajiCount++;
-            deleteBatch.delete(doc.reference);
-            deleteCount++;
-          } else if (docIdLower.startsWith('saddar--') || docIdLower.startsWith('kapayya--') || rawCamp.contains('sadd') || rawCamp.contains('kap')) {
-            d['campId'] = 'saddar';
-            d['dispensaryId'] = 'saddar';
-            saddarBatch.set(karachiRef.collection('inventory_saddar').doc(docId), d, SetOptions(merge: true));
-            saddarCount++;
-            deleteBatch.delete(doc.reference);
-            deleteCount++;
-          } else {
-            // General syrup / non-prefixed doc -> provide isolated copy for each camp
-            final hajiDocId = 'hajicamp--$docId';
-            final saddarDocId = 'saddar--$docId';
-            final hajiData = Map<String, dynamic>.from(d)..['campId'] = 'haji_camp'..['dispensaryId'] = 'haji_camp'..['id'] = hajiDocId;
-            final saddarData = Map<String, dynamic>.from(d)..['campId'] = 'saddar'..['dispensaryId'] = 'saddar'..['id'] = saddarDocId;
-            hajiBatch.set(karachiRef.collection('inventory_haji').doc(hajiDocId), hajiData, SetOptions(merge: true));
-            saddarBatch.set(karachiRef.collection('inventory_saddar').doc(saddarDocId), saddarData, SetOptions(merge: true));
-            hajiCount++;
-            saddarCount++;
-            deleteBatch.delete(doc.reference);
-            deleteCount++;
-          }
-        }
-      }
-
-      // Check misplaced items in inventory_saddar that have hajicamp prefix
-      try {
-        final saddarSnap = await karachiRef.collection('inventory_saddar').get();
-        for (final doc in saddarSnap.docs) {
-          final docId = doc.id;
-          final docIdLower = docId.toLowerCase();
-          if (docIdLower.startsWith('hajicamp--') || docIdLower.startsWith('haji--')) {
-            final d = Map<String, dynamic>.from(doc.data());
-            d['campId'] = 'haji_camp';
-            d['dispensaryId'] = 'haji_camp';
-            hajiBatch.set(karachiRef.collection('inventory_haji').doc(docId), d, SetOptions(merge: true));
-            hajiCount++;
-            deleteBatch.delete(doc.reference);
-            deleteCount++;
-          }
-        }
-      } catch (_) {}
-
-      // Commit batches
-      if (hajiCount > 0) await hajiBatch.commit();
-      if (saddarCount > 0) await saddarBatch.commit();
-      if (deleteCount > 0) await deleteBatch.commit();
-
-      // Heal local Hive stockBox
-      if (Hive.isBoxOpen(stockBox)) {
-        final box = Hive.box(stockBox);
-        for (final key in box.keys.toList()) {
-          final val = box.get(key);
-          if (val is Map) {
-            final m = Map<String, dynamic>.from(val);
-            final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'] ?? key).toString().toLowerCase();
-            final name = (m['name'] ?? '').toString().toLowerCase();
-            final dose = (m['dose'] ?? '').toString().toLowerCase();
-            final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase();
-            bool changed = false;
-
-            if (rawId.startsWith('hajicamp--') || rawId.startsWith('haji--')) {
-              if (m['campId'] != 'haji_camp') {
-                m['campId'] = 'haji_camp';
-                m['dispensaryId'] = 'haji_camp';
-                changed = true;
-              }
-              if (m['dispensaryTag'] == 'SADD' || m['dispensaryTag'] == 'KAP') {
-                m['dispensaryTag'] = 'HAJI';
-                changed = true;
-              }
-            } else if (rawId.startsWith('saddar--') || rawId.startsWith('kapayya--')) {
-              if (m['campId'] != 'saddar') {
-                m['campId'] = 'saddar';
-                m['dispensaryId'] = 'saddar';
-                changed = true;
-              }
-            }
-
-            final rawName = (m['name'] ?? m['formula'] ?? m['medicineName'] ?? '').toString().trim();
-            if (rawName.isEmpty || rawName.toLowerCase() == 'null') {
-              final healed = healStockItemFromKeyOrId(key.toString());
-              if (healed != null) {
-                m['name'] = healed['name']!;
-                m['formula'] = healed['name']!;
-                m['type'] = healed['type']!;
-                m['dose'] = healed['dose']!;
-                if ((m['expiryDate'] ?? '').toString().isEmpty) {
-                  m['expiryDate'] = healed['expiryDate']!;
-                }
-                changed = true;
-              }
-            }
-
-            if (name.contains('diclofenac') && dose.contains('50') && type.contains('tab') && m['code'] == 'MED-DIC-INJ') {
-              m['code'] = 'MED-DIC-50';
-              m['barcode'] = 'MED-DIC-50';
-              changed = true;
-            }
-
-            if (changed) {
-              await box.put(key, m);
-            }
-          }
-        }
-      }
-
-      await settings.put('karachi_split_inventory_healed_v3', true);
-      debugPrint('[LocalStorage] ✅ Successfully healed Karachi inventory ($hajiCount haji, $saddarCount saddar migrated, $deleteCount cleaned)');
-    } catch (e) {
-      debugPrint('[LocalStorage] healKarachiSplitInventory error: $e');
-    }
-  }
-
-  /// Comprehensively heals and restores Karachi inventory across Firestore, Hive, and LAN:
-  /// 1. Queries inventory, inventory_haji, inventory_haji_camp, and inventory_saddar from Firestore.
-  /// 2. If Haji Camp has 0 or fewer items than Saddar/inventory/local Hive, it mirrors/restores them
-  ///    into branches/karachi/inventory_haji with campId: 'haji_camp'.
-  static bool _isRestoringKarachiInventory = false;
-
-  /// 3. Updates local stockBox so Haji Camp has full inventory records.
-  /// 4. Broadcasts inventory_stock_sync via RealtimeManager over LAN to any connected hybrid desk (e.g. Kashif).
-  /// 5. Ensures downloadInventory completes a full refresh.
-  static Future<void> restoreAndSyncKarachiInventory(String branchId) async {
-    if (LanFirestoreGate.isLanDesk) return; // a dispensary desk on the LAN gets this from the LAN server
-    if (_isRestoringKarachiInventory) return;
-    _isRestoringKarachiInventory = true;
-    try {
-      final b = branchId.toLowerCase().trim();
-      final effBranch = b.isEmpty || b == 'all' || CampSessionService.isKarachiFamily(b) ? 'karachi' : b;
-      debugPrint('[LocalStorage] 🚀 Starting restoreAndSyncKarachiInventory for $effBranch...');
-
-      final db = FirebaseFirestore.instance;
-      final branchRef = db.collection('branches').doc('karachi');
-
-      // 1. Gather all existing docs across all Karachi collections
-      final hajiSnap = await branchRef.collection('inventory_haji').get().catchError((_) => branchRef.collection('inventory_haji').limit(1).get());
-      final hajiCampSnap = await branchRef.collection('inventory_haji_camp').get().catchError((_) => branchRef.collection('inventory_haji_camp').limit(1).get());
-      final saddarSnap = await branchRef.collection('inventory_saddar').get().catchError((_) => branchRef.collection('inventory_saddar').limit(1).get());
-      final genericSnap = await branchRef.collection('inventory').get().catchError((_) => branchRef.collection('inventory').limit(1).get());
-
-      final List<Map<String, dynamic>> hajiItems = [
-        ...hajiSnap.docs.map((d) => {...d.data(), 'id': d.id}),
-        ...hajiCampSnap.docs.map((d) => {...d.data(), 'id': d.id}),
-      ];
-      final List<Map<String, dynamic>> saddarItems = saddarSnap.docs.map((d) => {...d.data(), 'id': d.id}).toList();
-      final List<Map<String, dynamic>> genericItems = genericSnap.docs.map((d) => {...d.data(), 'id': d.id}).toList();
-
-      // Also gather from local Hive stockBox
-      final List<Map<String, dynamic>> localItems = [];
-      if (Hive.isBoxOpen(stockBox)) {
-        final box = Hive.box(stockBox);
-        for (final k in box.keys) {
-          final v = box.get(k);
-          if (v is Map) {
-            localItems.add(Map<String, dynamic>.from(v));
-          }
-        }
-      }
-
-      debugPrint('[LocalStorage] Found in Firestore: ${hajiItems.length} Haji, ${saddarItems.length} Saddar, ${genericItems.length} Generic. Local Hive: ${localItems.length}');
-
-      // If Haji is missing or empty in Firestore, restore from Saddar, Generic, or Local Hive
-      if (hajiItems.length < 5 && (saddarItems.isNotEmpty || genericItems.isNotEmpty || localItems.isNotEmpty)) {
-        final sourcePool = <String, Map<String, dynamic>>{};
-
-        // Gather from genericItems, saddarItems, localItems
-        for (final item in [...genericItems, ...saddarItems, ...localItems]) {
-          final rawName = (item['name'] ?? item['formula'] ?? '').toString().trim().toLowerCase();
-          final rawType = (item['type'] ?? item['dosageForm'] ?? '').toString().trim().toLowerCase();
-          final rawDose = (item['dose'] ?? '').toString().trim().toLowerCase();
-          if (rawName.isEmpty) continue;
-          final key = '$rawName|$rawType|$rawDose';
-          if (!sourcePool.containsKey(key)) {
-            sourcePool[key] = item;
-          }
-        }
-
-        if (sourcePool.isNotEmpty) {
-          debugPrint('[LocalStorage] 🩹 Restoring ${sourcePool.length} medicines into inventory_haji...');
-          final batch = db.batch();
-          int batchCount = 0;
-
-          for (final entry in sourcePool.entries) {
-            final src = Map<String, dynamic>.from(entry.value);
-            final origId = (src['id'] ?? src['medicineId'] ?? src['code'] ?? src['barcode'] ?? '').toString();
-            final cleanDocId = origId.toLowerCase().startsWith('hajicamp--')
-                ? origId
-                : 'hajicamp--${origId.replaceAll(RegExp(r'^(saddar--|kapayya--)'), '')}';
-
-            final hajiData = Map<String, dynamic>.from(src);
-            hajiData['id'] = cleanDocId;
-            hajiData['branchId'] = 'karachi';
-            hajiData['campId'] = 'haji_camp';
-            hajiData['dispensaryId'] = 'haji_camp';
-            hajiData['lastUpdated'] = DateTime.now().toIso8601String();
-
-            batch.set(branchRef.collection('inventory_haji').doc(cleanDocId), hajiData, SetOptions(merge: true));
-            batchCount++;
-
-            // Also save locally
-            saveLocalInventoryItem(hajiData);
-          }
-
-          if (batchCount > 0) {
-            await batch.commit().timeout(const Duration(seconds: 10));
-            debugPrint('[LocalStorage] ✅ Successfully committed $batchCount medicines to Firestore inventory_haji!');
-          }
-        }
-      }
-
-      // Ensure local stockBox has copies for both camps for any existing medicines
-      if (Hive.isBoxOpen(stockBox)) {
-        final box = Hive.box(stockBox);
-        final toAdd = <Map<String, dynamic>>[];
-        for (final k in box.keys.toList()) {
-          final v = box.get(k);
-          if (v is Map) {
-            final m = Map<String, dynamic>.from(v);
-            final bId = (m['branchId'] ?? '').toString().toLowerCase();
-            if (bId.isEmpty || bId.contains('karachi')) {
-              final cId = (m['campId'] ?? m['dispensaryId'] ?? '').toString().toLowerCase();
-              if (cId != 'haji_camp' && !cId.contains('haji')) {
-                final id = (m['id'] ?? k).toString();
-                final hajiCloneId = id.startsWith('hajicamp--') ? id : 'hajicamp--$id';
-                final clone = Map<String, dynamic>.from(m);
-                clone['id'] = hajiCloneId;
-                clone['campId'] = 'haji_camp';
-                clone['dispensaryId'] = 'haji_camp';
-                toAdd.add(clone);
-              }
-            }
-          }
-        }
-        for (final clone in toAdd) {
-          saveLocalInventoryItem(clone);
-        }
-      }
-
-      // Download full inventory
-      await downloadInventory('karachi', forceFull: false, campId: 'all');
-    } catch (e) {
-      debugPrint('[LocalStorage] restoreAndSyncKarachiInventory error: $e');
-    } finally {
-      _isRestoringKarachiInventory = false;
-    }
-  }
+  /// Retired (2026-11-19), see healKarachiSplitInventory. Now only a normal stock read.
+  static Future<void> restoreAndSyncKarachiInventory(String branchId) => downloadInventory(branchId, forceFull: true);
 
   static Future<void> refreshPrescriptions(String branchId) async {
     if (LanFirestoreGate.isLanDesk) return; // a dispensary desk on the LAN gets this from the LAN server
@@ -12060,82 +11499,336 @@ class LocalStorageService {
     return newId;
   }
 
-  /// Scans local patient records and formats any 13-digit raw CNIC ('4210112345671')
-  /// into the standardized Pakistani CNIC format: '42101-1234567-1' (xxxxx-xxxxxxx-x).
-  /// Updates local patient profile, linked entries, and enqueues Firestore background sync.
-  static Future<int> formatAllRawCnics({String? branchId}) async {
-    if (!Hive.isBoxOpen(patientsBox)) return 0;
-    final pBox = Hive.box(patientsBox);
-    final eBox = Hive.isBoxOpen(entriesBox) ? Hive.box(entriesBox) : null;
-    int updatedCount = 0;
+  /// Formats all CNIC fields in a patient map into standard 13-digit Pakistani format:
+  /// 'xxxxx-xxxxxxx-x' (XXXXX-XXXXXXX-X), and ensures canonical patientId.
+  static bool _standardizePatientCnicFields(Map<String, dynamic> p) {
+    bool changed = false;
 
-    for (final k in pBox.keys.toList()) {
-      final val = pBox.get(k);
-      if (val is! Map) continue;
-      final p = Map<String, dynamic>.from(val);
-      final bId = (p['branchId'] ?? '').toString().trim();
-      if (branchId != null && branchId.isNotEmpty && branchId != 'all' && bId.isNotEmpty && bId.toLowerCase() != branchId.toLowerCase()) {
-        continue;
+    String? formatField(String key) {
+      final val = p[key]?.toString().trim();
+      if (val != null && RegExp(r'^\d{13}$').hasMatch(val)) {
+        final formatted = '${val.substring(0, 5)}-${val.substring(5, 12)}-${val.substring(12, 13)}';
+        p[key] = formatted;
+        changed = true;
+        return formatted;
       }
+      return val;
+    }
 
-      bool changed = false;
-      final rawCnic = (p['cnic'] ?? p['patientCnic'])?.toString().trim();
-      if (rawCnic != null && RegExp(r'^\d{13}$').hasMatch(rawCnic)) {
-        final formatted = '${rawCnic.substring(0, 5)}-${rawCnic.substring(5, 12)}-${rawCnic.substring(12, 13)}';
-        p['cnic'] = formatted;
-        if (p.containsKey('patientCnic')) {
-          p['patientCnic'] = formatted;
+    final cnicFormatted = formatField('cnic') ?? formatField('patientCnic');
+    formatField('guardianCnic');
+    formatField('guardian_cnic');
+    formatField('parentCnic');
+    formatField('fatherCnic');
+    formatField('cNic');
+
+    if (cnicFormatted != null && !p.containsKey('patientCnic')) {
+      p['patientCnic'] = cnicFormatted;
+    }
+    if (p['patientCnic'] != null && !p.containsKey('cnic')) {
+      p['cnic'] = p['patientCnic'];
+    }
+
+    // Canonicalize patientId
+    final pid = (p['patientId'] ?? p['id'])?.toString().trim();
+    if (pid != null && pid.isNotEmpty) {
+      if (RegExp(r'^\d{13}$').hasMatch(pid)) {
+        final dashed = '${pid.substring(0, 5)}-${pid.substring(5, 12)}-${pid.substring(12, 13)}';
+        p['patientId'] = dashed;
+        p['id'] = dashed;
+        changed = true;
+      } else if (pid.contains('_child_')) {
+        final parts = pid.split('_child_');
+        final gDigits = parts[0].replaceAll(RegExp(r'\D'), '');
+        if (gDigits.length == 13) {
+          final gDashed = '${gDigits.substring(0, 5)}-${gDigits.substring(5, 12)}-${gDigits.substring(12, 13)}';
+          final dashedChild = '${gDashed}_child_${parts.sublist(1).join('_child_')}';
+          p['patientId'] = dashedChild;
+          p['id'] = dashedChild;
+          changed = true;
         }
-        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /// Safely merges two patient records for the same individual, combining all genuine fields
+  /// and guaranteeing that no valid data (name, phone, dob, etc.) is overwritten with empty/null/dummy stubs.
+  static Map<String, dynamic> mergePatientMaps(Map<String, dynamic> a, Map<String, dynamic> b) {
+    bool blank(dynamic v) {
+      if (v == null) return true;
+      final s = v.toString().trim();
+      return s.isEmpty || s == '0' || s.toLowerCase() == 'null' || s == '-';
+    }
+
+    bool isDummyVal(dynamic v) {
+      if (blank(v)) return true;
+      final s = v.toString().trim();
+      return _isDummyCnicValue(s) || s == '0300-0000000' || s.toLowerCase() == 'unknown' || s.toLowerCase() == 'unknown patient';
+    }
+
+    final merged = Map<String, dynamic>.from(a);
+
+    b.forEach((k, v) {
+      final existingVal = merged[k];
+      if (blank(existingVal)) {
+        merged[k] = v;
+      } else if (isDummyVal(existingVal) && !isDummyVal(v)) {
+        merged[k] = v;
+      } else if (v is String && existingVal is String) {
+        if (existingVal.trim().length < v.trim().length && !isDummyVal(v)) {
+          merged[k] = v;
+        }
+      }
+    });
+
+    _standardizePatientCnicFields(merged);
+    final canonicalId = getPatientKey(merged);
+    merged['patientId'] = canonicalId;
+    merged['id'] = canonicalId;
+
+    return merged;
+  }
+
+  /// Performs full standardization and deduplication of patient CNICs and duplicate accounts,
+  /// both locally in Hive and remotely on Firestore:
+  /// 1. Converts all raw 13-digit CNICs (own & guardian) into 'xxxxx-xxxxxxx-x' format.
+  /// 2. Merges duplicate patient records (e.g. one with dashes and one without dashes) into a single canonical record.
+  /// 3. Locally: saves merged canonical record under dashed key, deletes un-dashed keys from patientsBox,
+  ///    and updates token references in entriesBox.
+  /// 4. Remotely on Firestore: saves canonical document, deletes un-dashed duplicate document,
+  ///    and updates entries/tokens in Firestore.
+  static Future<Map<String, int>> standardizeAndDeduplicateAllPatients({
+    String? branchId,
+    bool processRemote = true,
+    void Function(String message)? onProgress,
+  }) async {
+    final stats = <String, int>{
+      'localProcessed': 0,
+      'localUpdated': 0,
+      'localDuplicatesMerged': 0,
+      'localKeysDeleted': 0,
+      'tokensUpdated': 0,
+      'remoteScanned': 0,
+      'remoteUpdated': 0,
+      'remoteDuplicatesMerged': 0,
+      'remoteDocsDeleted': 0,
+    };
+
+    void log(String msg) {
+      debugPrint('[PatientDeduplication] $msg');
+      onProgress?.call(msg);
+    }
+
+    log('🔍 [1/3] Scanning local patientsBox for un-dashed CNICs and duplicate records...');
+
+    if (Hive.isBoxOpen(patientsBox)) {
+      final pBox = Hive.box(patientsBox);
+      final eBox = Hive.isBoxOpen(entriesBox) ? Hive.box(entriesBox) : null;
+
+      // Group all local records by canonical patient key
+      final groups = <String, List<({dynamic oldKey, Map<String, dynamic> data})>>{};
+
+      for (final k in pBox.keys.toList()) {
+        final val = pBox.get(k);
+        if (val is! Map) continue;
+        final p = Map<String, dynamic>.from(val);
+        final bId = (p['branchId'] ?? '').toString().trim();
+        if (branchId != null && branchId.isNotEmpty && branchId != 'all' && bId.isNotEmpty && bId.toLowerCase() != branchId.toLowerCase()) {
+          continue;
+        }
+
+        stats['localProcessed'] = (stats['localProcessed'] ?? 0) + 1;
+        _standardizePatientCnicFields(p);
+        final canonicalKey = getPatientKey(p);
+        groups.putIfAbsent(canonicalKey, () => []).add((oldKey: k, data: p));
       }
 
-      final rawGuard = p['guardianCnic']?.toString().trim();
-      if (rawGuard != null && RegExp(r'^\d{13}$').hasMatch(rawGuard)) {
-        final formattedGuard = '${rawGuard.substring(0, 5)}-${rawGuard.substring(5, 12)}-${rawGuard.substring(12, 13)}';
-        p['guardianCnic'] = formattedGuard;
-        changed = true;
-      }
+      final keyRedirects = <String, String>{}; // oldKey -> canonicalKey
 
-      if (changed) {
-        final sanitized = sanitize(p);
-        await pBox.put(k, sanitized);
+      for (final entry in groups.entries) {
+        final canonicalKey = entry.key;
+        final list = entry.value;
 
-        // Update active token entries if open
-        if (eBox != null) {
-          final pid = (sanitized['patientId'] ?? k).toString();
-          for (final ek in eBox.keys) {
-            final eval = eBox.get(ek);
-            if (eval is Map) {
-              final ePid = (eval['patientId'] ?? eval['id'] ?? '').toString();
-              if (ePid == pid || (rawCnic != null && eval['cnic'] == rawCnic)) {
-                final updatedE = Map<String, dynamic>.from(eval);
-                if (p['cnic'] != null) updatedE['cnic'] = p['cnic'];
-                if (p['patientCnic'] != null) updatedE['patientCnic'] = p['patientCnic'];
-                if (p['guardianCnic'] != null) updatedE['guardianCnic'] = p['guardianCnic'];
-                await eBox.put(ek, updatedE);
-              }
-            }
+        Map<String, dynamic> merged;
+        if (list.length == 1) {
+          merged = list.first.data;
+        } else {
+          // Multiple records mapped to the same canonical key! Merge them!
+          merged = list.first.data;
+          for (int i = 1; i < list.length; i++) {
+            merged = mergePatientMaps(merged, list[i].data);
+            stats['localDuplicatesMerged'] = (stats['localDuplicatesMerged'] ?? 0) + 1;
           }
         }
 
-        // Enqueue background sync to Firestore
-        await enqueueSync({
-          'type': 'save_patient',
-          'branchId': bId.isNotEmpty ? bId : getActiveUserBranchId(),
-          'patientId': (sanitized['patientId'] ?? k).toString(),
-          'data': sanitized,
-        });
+        _standardizePatientCnicFields(merged);
+        merged['patientId'] = canonicalKey;
+        merged['id'] = canonicalKey;
+        final sanitized = sanitize(merged);
 
-        updatedCount++;
+        // Put canonical record under canonical key
+        await pBox.put(canonicalKey, sanitized);
+        stats['localUpdated'] = (stats['localUpdated'] ?? 0) + 1;
+
+        // Delete any old key that doesn't match canonicalKey
+        for (final item in list) {
+          final oldK = item.oldKey.toString();
+          if (oldK != canonicalKey) {
+            keyRedirects[oldK] = canonicalKey;
+            await pBox.delete(item.oldKey);
+            stats['localKeysDeleted'] = (stats['localKeysDeleted'] ?? 0) + 1;
+          }
+        }
+
+        // Also clean raw cleanKey if it existed in pBox
+        final rawKey = canonicalKey.replaceAll('-', '').trim();
+        if (rawKey != canonicalKey && pBox.containsKey(rawKey)) {
+          keyRedirects[rawKey] = canonicalKey;
+          await pBox.delete(rawKey);
+          stats['localKeysDeleted'] = (stats['localKeysDeleted'] ?? 0) + 1;
+        }
+      }
+
+      // Update tokens in entriesBox
+      if (eBox != null && keyRedirects.isNotEmpty) {
+        for (final ek in eBox.keys.toList()) {
+          final eval = eBox.get(ek);
+          if (eval is! Map) continue;
+          final ePid = (eval['patientId'] ?? eval['id'] ?? '').toString();
+          final eCnic = (eval['patientCnic'] ?? eval['cnic'] ?? '').toString();
+          final eCnicRaw = eCnic.replaceAll('-', '').trim();
+
+          bool tokenChanged = false;
+          final updatedE = Map<String, dynamic>.from(eval);
+
+          if (keyRedirects.containsKey(ePid)) {
+            updatedE['patientId'] = keyRedirects[ePid];
+            tokenChanged = true;
+          }
+          if (RegExp(r'^\d{13}$').hasMatch(eCnicRaw)) {
+            final dashed = '${eCnicRaw.substring(0, 5)}-${eCnicRaw.substring(5, 12)}-${eCnicRaw.substring(12, 13)}';
+            if (updatedE['cnic'] != dashed || updatedE['patientCnic'] != dashed) {
+              updatedE['cnic'] = dashed;
+              updatedE['patientCnic'] = dashed;
+              tokenChanged = true;
+            }
+          }
+
+          if (tokenChanged) {
+            await eBox.put(ek, updatedE);
+            stats['tokensUpdated'] = (stats['tokensUpdated'] ?? 0) + 1;
+          }
+        }
+        await eBox.flush();
+        invalidateLocalEntriesCache();
+      }
+
+      await pBox.flush();
+      log('✅ Local cleanup done: ${stats['localUpdated']} updated, ${stats['localDuplicatesMerged']} duplicates merged, ${stats['localKeysDeleted']} old keys purged, ${stats['tokensUpdated']} tokens aligned.');
+    }
+
+    // 2. Firestore Remote Phase
+    if (processRemote) {
+      log('🌐 [2/3] Checking Firestore connectivity for remote standardization & deduplication...');
+      try {
+        final fs = FirebaseFirestore.instance;
+        final branchesToProcess = <String>{};
+        if (branchId != null && branchId.isNotEmpty && branchId != 'all') {
+          branchesToProcess.add(branchId.toLowerCase().trim());
+        } else {
+          final activeB = getActiveUserBranchId().toLowerCase().trim();
+          if (activeB.isNotEmpty) branchesToProcess.add(activeB);
+          branchesToProcess.addAll(['karachi', 'karachi_saddar', 'saddar', 'karachi_haji', 'lodhran', 'jalalpur', 'headquarters']);
+        }
+
+        for (final b in branchesToProcess) {
+          log('🔍 Processing Firestore collection: branches/$b/patients...');
+          QuerySnapshot<Map<String, dynamic>> snap;
+          try {
+            snap = await fs.collection('branches').doc(b).collection('patients').get().timeout(const Duration(seconds: 45));
+          } catch (e) {
+            log('⚠️ Skipping branch $b (unavailable or offline): $e');
+            continue;
+          }
+
+          stats['remoteScanned'] = (stats['remoteScanned'] ?? 0) + snap.docs.length;
+
+          // Group remote docs by canonical key
+          final remoteGroups = <String, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
+          for (final doc in snap.docs) {
+            final data = Map<String, dynamic>.from(doc.data());
+            data['patientId'] = doc.id;
+            _standardizePatientCnicFields(data);
+            final canonicalId = getPatientKey(data);
+            remoteGroups.putIfAbsent(canonicalId, () => []).add(doc);
+          }
+
+          for (final rEntry in remoteGroups.entries) {
+            final canonicalId = rEntry.key;
+            final docs = rEntry.value;
+
+            // Merge data from all docs in group
+            Map<String, dynamic> merged = Map<String, dynamic>.from(docs.first.data());
+            merged['patientId'] = canonicalId;
+            merged['id'] = canonicalId;
+
+            if (docs.length > 1) {
+              for (int i = 1; i < docs.length; i++) {
+                merged = mergePatientMaps(merged, docs[i].data());
+                stats['remoteDuplicatesMerged'] = (stats['remoteDuplicatesMerged'] ?? 0) + 1;
+              }
+            }
+            _standardizePatientCnicFields(merged);
+            merged['patientId'] = canonicalId;
+            merged['id'] = canonicalId;
+
+            final cloudData = sanitizeForCloudUpload(merged);
+
+            // Save canonical doc
+            await fs.collection('branches').doc(b).collection('patients').doc(canonicalId).set(cloudData, SetOptions(merge: true));
+            stats['remoteUpdated'] = (stats['remoteUpdated'] ?? 0) + 1;
+
+            // Delete non-canonical duplicate documents
+            for (final doc in docs) {
+              if (doc.id != canonicalId) {
+                try {
+                  await fs.collection('branches').doc(b).collection('patients').doc(doc.id).delete();
+                  stats['remoteDocsDeleted'] = (stats['remoteDocsDeleted'] ?? 0) + 1;
+                } catch (e) {
+                  log('⚠️ Failed to delete duplicate doc ${doc.id}: $e');
+                }
+              }
+            }
+
+            // Also check if raw un-dashed doc exists
+            final rawDocId = canonicalId.replaceAll('-', '').trim();
+            if (rawDocId != canonicalId) {
+              try {
+                final rawDoc = await fs.collection('branches').doc(b).collection('patients').doc(rawDocId).get();
+                if (rawDoc.exists) {
+                  await fs.collection('branches').doc(b).collection('patients').doc(rawDocId).delete();
+                  stats['remoteDocsDeleted'] = (stats['remoteDocsDeleted'] ?? 0) + 1;
+                }
+              } catch (_) {}
+            }
+          }
+        }
+        log('🎉 [3/3] Firestore standardization complete! Updated: ${stats['remoteUpdated']}, Duplicates merged: ${stats['remoteDuplicatesMerged']}, Duplicate docs deleted: ${stats['remoteDocsDeleted']}.');
+      } catch (e) {
+        log('⚠️ Firestore cleanup encountered an error: $e');
       }
     }
 
-    if (updatedCount > 0) {
-      await pBox.flush();
-      if (eBox != null) await eBox.flush();
-    }
+    return stats;
+  }
 
-    return updatedCount;
+  /// Scans local patient records and formats any 13-digit raw CNIC ('4210112345671')
+  /// into the standardized Pakistani CNIC format: '42101-1234567-1' (xxxxx-xxxxxxx-x).
+  /// Updates local patient profiles, merges duplicates, and syncs changes to Firestore.
+  static Future<int> formatAllRawCnics({String? branchId}) async {
+    final stats = await standardizeAndDeduplicateAllPatients(branchId: branchId, processRemote: true);
+    return (stats['localUpdated'] ?? 0) + (stats['remoteUpdated'] ?? 0);
   }
 
   static Future<void> saveMedicineRestriction({

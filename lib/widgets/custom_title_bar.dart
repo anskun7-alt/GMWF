@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf/services/user_theme_service.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' as ui show GTheme, GComfortColors;
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'sync_status_indicator.dart';
@@ -7,108 +9,128 @@ import 'sync_status_indicator.dart';
 class CustomTitleBar extends StatelessWidget {
   const CustomTitleBar({super.key});
 
+  /// The bar takes the sidebar colour of the user's theme (GMWF / Nexus /
+  /// Twilight) and dark mode, from the shared design system.
+  static ui.GComfortColors _colors() {
+    final dark = UserThemeService.isDarkMode();
+    Color? custom;
+    if (Hive.isBoxOpen('app_settings')) {
+      final hex = (Hive.box('app_settings').get('custom_accent_color') as String?)?.replaceAll('#', '');
+      if (hex != null && hex.isNotEmpty) custom = Color(int.tryParse('FF$hex', radix: 16) ?? 0xFF0B7A5B);
+    }
+    return ui.GTheme.colors(dark ? Brightness.dark : Brightness.light,
+        family: UserThemeService.getThemeChoice().family, brandOverride: custom);
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (!Hive.isBoxOpen('app_settings')) {
-      return WindowTitleBarBox(
-        child: Container(
-          color: SoftPalette.teal600,
-          child: Row(
-            children: [
-              Expanded(
-                child: MoveWindow(
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        "GMWF",
-                        style: TextStyle(color: SoftPalette.gray50, fontSize: 12, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const WindowButtons(
-                mouseOver: SoftPalette.teal600,
-                mouseDown: SoftPalette.teal700,
-              ),
-            ],
-          ),
-        ),
+    Widget bar() {
+      final c = _colors();
+      return _buildBar(
+        barColor: c.sidebarBg,
+        borderColor: c.sidebarBorder,
+        isDarkBar: c.sidebarBg.computeLuminance() < 0.45,
+        textPrimary: c.textPrimary,
       );
     }
-    return ValueListenableBuilder(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['custom_accent_color']),
-      builder: (context, Box box, child) {
-        final colorHex = box.get('custom_accent_color') as String?;
-        Color barColor = SoftPalette.teal600; // default teal
-        if (colorHex != null && colorHex.isNotEmpty) {
-          try {
-            final hex = colorHex.replaceAll('#', '');
-            barColor = Color(int.parse('FF$hex', radix: 16));
-          } catch (_) {}
-        }
 
-        final mouseOverColor = Color.alphaBlend(SoftPalette.gray50.withValues(alpha: 0.15), barColor);
-        final mouseDownColor = Color.alphaBlend(SoftPalette.gray900.withValues(alpha: 0.15), barColor);
+    if (!Hive.isBoxOpen('app_settings')) return bar();
 
-        return WindowTitleBarBox(
-          child: Container(
-            color: barColor,
-            child: Row(
-              children: [
-                Expanded(
-                  child: MoveWindow(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Row(
-                        children: [
-                          Image.asset(
-                            'assets/logo/gmwf-1.webp',
-                            height: 20,
-                            cacheHeight: 60,
-                            errorBuilder: (context, error, stackTrace) =>
-                                const Icon(Icons.business, color: SoftPalette.gray50, size: 20),
-                          ),
-                          const SizedBox(width: 12),
-                          const Text(
-                            "GMWF",
-                            style: TextStyle(
-                              color: SoftPalette.gray50,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ],
+    return ValueListenableBuilder<bool>(
+      valueListenable: UserThemeService.currentThemeNotifier,
+      builder: (context, _, _) => ValueListenableBuilder(
+        valueListenable: Hive.box('app_settings').listenable(keys: [
+          'custom_accent_color',
+          'is_dark_mode',
+          'visual_theme',
+          'theme_choice',
+          UserThemeService.getStorageKey(),
+          UserThemeService.getVisualThemeKey(),
+          UserThemeService.getThemeChoiceKey(),
+        ]),
+        builder: (context, Box box, child) => bar(),
+      ),
+    );
+  }
+  Widget _buildBar({
+    required Color barColor,
+    required Color borderColor,
+    required bool isDarkBar,
+    Color textPrimary = SoftPalette.slate900,
+  }) {
+    final fgColor = isDarkBar ? SoftPalette.gray50 : textPrimary;
+    final mouseOverColor = Color.alphaBlend(
+      (isDarkBar ? SoftPalette.gray50 : SoftPalette.slate900).withValues(alpha: 0.12),
+      barColor,
+    );
+    final mouseDownColor = Color.alphaBlend(
+      (isDarkBar ? SoftPalette.gray50 : SoftPalette.slate900).withValues(alpha: 0.22),
+      barColor,
+    );
+
+    return WindowTitleBarBox(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          color: barColor,
+          border: Border(
+            bottom: BorderSide(color: borderColor, width: 1),
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: MoveWindow(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Row(
+                    children: [
+                      Image.asset(
+                        'assets/logo/gmwf-1.webp',
+                        height: 20,
+                        cacheHeight: 60,
+                        errorBuilder: (context, error, stackTrace) =>
+                            Icon(Icons.business, color: fgColor, size: 20),
                       ),
-                    ),
+                      const SizedBox(width: 12),
+                      Text(
+                        "GMWF",
+                        style: TextStyle(
+                          color: fgColor,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 8),
-                  child: SyncStatusIndicator(isDark: true),
-                ),
-                WindowButtons(
-                  mouseOver: mouseOverColor,
-                  mouseDown: mouseDownColor,
-                ),
-              ],
+              ),
             ),
-          ),
-        );
-      },
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: SyncStatusIndicator(isDark: isDarkBar),
+            ),
+            WindowButtons(
+              iconColor: fgColor,
+              mouseOver: mouseOverColor,
+              mouseDown: mouseDownColor,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
 class WindowButtons extends StatelessWidget {
+  final Color iconColor;
   final Color mouseOver;
   final Color mouseDown;
 
   const WindowButtons({
     super.key,
+    this.iconColor = SoftPalette.gray50,
     required this.mouseOver,
     required this.mouseDown,
   });
@@ -116,17 +138,17 @@ class WindowButtons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final buttonColors = WindowButtonColors(
-      iconNormal: SoftPalette.gray50,
+      iconNormal: iconColor,
       mouseOver: mouseOver,
       mouseDown: mouseDown,
-      iconMouseOver: SoftPalette.gray50,
-      iconMouseDown: SoftPalette.gray50,
+      iconMouseOver: iconColor,
+      iconMouseDown: iconColor,
     );
 
     final closeButtonColors = WindowButtonColors(
       mouseOver: SoftPalette.red500,
       mouseDown: SoftPalette.red550,
-      iconNormal: SoftPalette.gray50,
+      iconNormal: iconColor,
       iconMouseOver: SoftPalette.gray50,
     );
 

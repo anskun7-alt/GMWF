@@ -1,5 +1,6 @@
 // lib/pages/office/attendance_tab.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
@@ -192,10 +193,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
               _buildDatePickerStrip(t),
               Expanded(
                 child: ValueListenableBuilder(
-                  valueListenable: FinanceLocalStorage.employeesBox.listenable(),
+                  valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.employeesBox),
                   builder: (ctx, Box empBox, _) {
                     return ValueListenableBuilder(
-                      valueListenable: FinanceLocalStorage.attendanceBox.listenable(),
+                      valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.attendanceBox),
                       builder: (ctx, Box box, _) {
                     final allEmployeesOfBranch = FinanceLocalStorage.getEmployees(widget.branchId).where((e) {
                   final isActive = e['isActive'] as bool? ?? true;
@@ -653,7 +654,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
       return const SizedBox.shrink();
     }
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.crossBranchPunchesBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.crossBranchPunchesBox)),
       builder: (context, box, _) {
         final pendingList = ZkTecoNetworkService.getPendingCrossBranchPunches(
           branchId: widget.branchId,
@@ -779,7 +780,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
       return const SizedBox.shrink();
     }
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.unmappedPunchesBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.unmappedPunchesBox)),
       builder: (context, box, _) {
         final unmappedList = ZkTecoNetworkService.getUnmappedPunches();
         if (unmappedList.isEmpty) return const SizedBox.shrink();

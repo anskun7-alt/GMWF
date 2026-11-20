@@ -5,6 +5,8 @@
 //   • widgets/cook_dialog.dart   — food logging (cook / received / saved)
 //   • widgets/stock_dialogs.dart — inventory add / adjust
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/design/components/decorative_image.dart' show GDecor;
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -21,6 +23,7 @@ import '../../models/stock_item.dart';
 import 'widgets/cook_dialog.dart';
 import 'widgets/stock_dialogs.dart';
 import '../../widgets/global_module_wrapper.dart';
+import '../home/home_module_host.dart';
 import '../../services/auth_service.dart';
 import '../../services/local_storage_service.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -284,7 +287,9 @@ class _DasterkhwaanKitchenState extends State<DasterkhwaanKitchen>
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
+    );
+    // Same as office_boy: no endless pulse with reduced motion (every pulse frame repaints).
+    if (!GDecor.reduceMotion) _pulseCtrl.repeat(reverse: true);
     _pulseAnim = Tween<double>(begin: 1.0, end: 1.025).animate(
       CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
     );
@@ -1783,7 +1788,7 @@ class _KitchenIssueTokenTabState extends State<_KitchenIssueTokenTab> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    if (Navigator.canPop(context)) ...[
+                    if (Navigator.canPop(context) && !HomeModuleHost.isModuleRoot(context)) ...[
                       IconButton(
                         icon: const Icon(Icons.arrow_back_rounded, color: SoftPalette.gray50, size: 20),
                         onPressed: () => Navigator.maybePop(context),
@@ -2559,14 +2564,15 @@ class _KitchenIssueTokenTabState extends State<_KitchenIssueTokenTab> {
             }
             final box = boxSnap.data!;
             return ValueListenableBuilder(
-              valueListenable: box.listenable(),
+              valueListenable: DebouncedBoxListenable.shared(box),
               builder: (ctx, Box box, _) {
                 final List<Map<String, dynamic>> tokenList = [];
                 final Set<int> seenTokenNumbers = {};
+                // Filter on the raw record first; copy only today's tokens (the box holds every day and branch).
                 for (final raw in box.values) {
-                  if (raw is Map) {
+                  if (raw is Map && raw['dateKey'] == widget.today && raw['branchId'] == widget.branchId) {
                     final t = Map<String, dynamic>.from(raw);
-                    if (t['dateKey'] == widget.today && t['branchId'] == widget.branchId) {
+                    {
                       final tokenNum = (t['number'] as num?)?.toInt() ?? 0;
                       if (tokenNum > 0 && !seenTokenNumbers.add(tokenNum)) continue;
                       final rawSession = _kitchenNormalizeSession(t['session'] as String?);
@@ -2893,16 +2899,17 @@ class _KitchenServeQueueTabState extends State<_KitchenServeQueueTab> {
               // ValueListenable for dynamic counts inside filter chips
               if (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox))
                 ValueListenableBuilder<Box>(
-                  valueListenable: Hive.box(LocalStorageService.dasterkhwaanTokensBox).listenable(),
+                  valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.dasterkhwaanTokensBox)),
                   builder: (_, box, __) {
                     int unservedCount = 0;
                     int bfCount = 0;
                     int lunchCount = 0;
                     int dinCount = 0;
 
-                    for (final entry in box.toMap().entries) {
-                      if (entry.value is Map) {
-                        final m = Map<String, dynamic>.from(entry.value as Map);
+                    // Counting only: read the records in place, no copy of the whole box.
+                    for (final value in box.values) {
+                      if (value is Map) {
+                        final m = value;
                         final dateMatches = m['dateKey'] == widget.today || m['date'] == widget.today;
                         final branchMatches = m['branchId'] == null || m['branchId'] == widget.branchId;
                         if (dateMatches && branchMatches && m['served'] != true) {
@@ -2942,13 +2949,15 @@ class _KitchenServeQueueTabState extends State<_KitchenServeQueueTab> {
                   ),
                 )
               : ValueListenableBuilder<Box>(
-                  valueListenable: Hive.box(LocalStorageService.dasterkhwaanTokensBox).listenable(),
+                  valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.dasterkhwaanTokensBox)),
                   builder: (_, box, __) {
                     final allItems = <Map<String, dynamic>>[];
-                    for (final entry in box.toMap().entries) {
-                      if (entry.value is Map) {
-                        final m = Map<String, dynamic>.from(entry.value as Map);
-                        m['id'] ??= entry.key.toString();
+                    // Check today's date before copying a record (the box holds every day).
+                    for (final key in box.keys) {
+                      final raw = box.get(key);
+                      if (raw is Map && (raw['dateKey'] == widget.today || raw['date'] == widget.today)) {
+                        final m = Map<String, dynamic>.from(raw);
+                        m['id'] ??= key.toString();
                         final dateMatches = m['dateKey'] == widget.today || m['date'] == widget.today;
                         final branchMatches = m['branchId'] == null || m['branchId'] == widget.branchId;
                         if (dateMatches && branchMatches) {
@@ -3137,7 +3146,7 @@ class _KitchenServeQueueTabState extends State<_KitchenServeQueueTab> {
                   Expanded(
                     child: Row(
                       children: [
-                        if (Navigator.canPop(context)) ...[
+                        if (Navigator.canPop(context) && !HomeModuleHost.isModuleRoot(context)) ...[
                           IconButton(
                             icon: const Icon(Icons.arrow_back_rounded, color: SoftPalette.gray50, size: 20),
                             onPressed: () => Navigator.maybePop(context),
@@ -3270,20 +3279,20 @@ class _KitchenServeQueueTabState extends State<_KitchenServeQueueTab> {
 
               // Live Realtime Stat Strip
               ValueListenableBuilder(
-                valueListenable: (Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)
-                        ? Hive.box(LocalStorageService.dasterkhwaanTokensBox)
-                        : Hive.box(LocalStorageService.usersBox))
-                    .listenable(),
+                valueListenable: DebouncedBoxListenable.shared(Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)
+                    ? Hive.box(LocalStorageService.dasterkhwaanTokensBox)
+                    : Hive.box(LocalStorageService.usersBox)),
                 builder: (_, Box box, __) {
                   final allTokensBox = Hive.isBoxOpen(LocalStorageService.dasterkhwaanTokensBox)
                       ? Hive.box(LocalStorageService.dasterkhwaanTokensBox)
                       : null;
                   final all = (allTokensBox?.values ?? [])
                       .whereType<Map>()
-                      .map((m) => Map<String, dynamic>.from(m))
+                      // Filter first, copy only the matches.
                       .where((m) =>
                           (m['dateKey'] == widget.today || m['date'] == widget.today) &&
                           (m['branchId'] == null || m['branchId'] == widget.branchId))
+                      .map((m) => Map<String, dynamic>.from(m))
                       .toList();
                   final pending = all.where((d) => d['served'] != true).length;
                   final served  = all.length - pending;
@@ -3713,7 +3722,7 @@ class _HistoryTabState extends State<_HistoryTab> {
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                   Row(children: [
-                    if (Navigator.canPop(context)) ...[
+                    if (Navigator.canPop(context) && !HomeModuleHost.isModuleRoot(context)) ...[
                       IconButton(
                         icon: const Icon(Icons.arrow_back_rounded, color: SoftPalette.gray50, size: 20),
                         onPressed: () => Navigator.maybePop(context),

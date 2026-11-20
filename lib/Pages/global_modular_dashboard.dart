@@ -13,6 +13,7 @@ import 'package:lottie/lottie.dart';
 
 import '../models/module_registry.dart';
 import '../theme/app_theme.dart';
+import '../theme/app_visual_theme.dart';
 import '../theme/role_theme_provider.dart';
 import '../services/user_theme_service.dart';
 import 'settings_page.dart';
@@ -37,6 +38,9 @@ import '../services/finance_local_storage.dart';
 import '../utils/formatters.dart';
 import '../realtime/realtime_manager.dart';
 import '../realtime/realtime_events.dart';
+import '../services/home_dashboard_service.dart' show RecentActivityService;
+import 'home/home_shell.dart';
+import 'home/home_theme.dart';
 
 const String _kGlobalBranchId = 'all';
 
@@ -56,6 +60,11 @@ enum DashboardCategoryFilter {
   dasterkhwaan,
   madrassa,
   school,
+}
+
+enum _HqUtilityView {
+  notifications,
+  settings,
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
@@ -206,6 +215,14 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
   final TextEditingController _searchCtrl = TextEditingController();
   String _searchQuery = '';
   bool _searchOpen = false;
+  bool _hqRailCollapsed = false;
+  bool _sidebarCollapsed = false;
+  _HqUtilityView? _hqUtilityView;
+
+  bool get _isHqManager => _role == 'hq manager' || _role == 'hq_manager';
+  void _toggleHqRail() => setState(() => _hqRailCollapsed = !_hqRailCollapsed);
+  void _toggleSidebar() => setState(() => _sidebarCollapsed = !_sidebarCollapsed);
+  void _openHqUtility(_HqUtilityView view) => setState(() => _hqUtilityView = view);
 
   List<AppModule> _cachedFilteredModules = [];
   Timer? _searchDebounce;
@@ -249,6 +266,14 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
   @override
   void initState() {
     super.initState();
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final saved = Hive.box('app_settings').get('selected_branch')?.toString().trim().toLowerCase();
+        if (saved != null && saved.isNotEmpty) {
+          _selectedExecutiveBranch = saved;
+        }
+      }
+    } catch (_) {}
     _updateCachedUserData();
     _loadAvailableModules();
 
@@ -565,6 +590,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
   void _changeCategory(DashboardCategoryFilter cat) {
     setState(() {
+      _hqUtilityView = null;
       _selectedCategory = cat;
       _searchCtrl.clear();
       _searchQuery = '';
@@ -573,16 +599,23 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     });
   }
 
-  void _openModule(AppModule module) {
+  /// The page a module opens: inside the branch wrapper for wrapped roles,
+  /// otherwise its plain builder. Used by the push path (legacy home,
+  /// supervisor) and by the redesigned shell, which shows it in place.
+  Widget _moduleDestination(AppModule module) {
     const wrappedRoles = [
       'admin', 'global admin', 'ceo', 'chairman',
       'global user', 'manager', 'hq manager',
       'supervisor', 'branch manager',
     ];
     final isWrapped = wrappedRoles.contains(_role);
-    final dest = (isWrapped && module.supportsGlobalWrapper)
+    return (isWrapped && module.supportsGlobalWrapper)
         ? GlobalModuleWrapper(module: module, userData: widget.userData)
         : module.builder(context, widget.userData);
+  }
+
+  void _openModule(AppModule module) {
+    final dest = _moduleDestination(module);
 
     Navigator.push(
       context,
@@ -601,9 +634,12 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     // Guard against Hive lock contention (e.g. two app instances running simultaneously).
     // Extracts the body build into a local closure so it can be called with default
     // or loaded settings, without duplicating scaffold code.
-    Widget buildBody(Color? customColor, bool isDark) {
-      RoleThemeData t = RoleThemeData.of(roleTheme, customColor);
-      t = isDark ? t.toDarkMode() : t.toLightMode();
+    Widget buildBody(Color? customColor, bool isDark, AppVisualTheme visualTheme) {
+      final RoleThemeData t = RoleThemeData.of(roleTheme).withVisualTheme(
+        visualTheme,
+        customAccent: customColor,
+        isDark: isDark,
+      );
       return RoleThemeScope(
         role: roleTheme,
         child: Builder(builder: (ctx) {
@@ -614,13 +650,18 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
               child: _SupervisorScaffold(state: this, t: t),
             );
           }
+          if (!_useLegacyHome) {
+            return FadeTransition(opacity: _pageOpacity, child: _buildRedesignedHome(ctx, t));
+          }
           return FadeTransition(
             opacity: _pageOpacity,
             child: Scaffold(
               backgroundColor: t.bg,
               body: isDesktop
                   ? Row(children: [
-                      _Sidebar(state: this, t: t),
+                      _isHqManager
+                          ? _HqCollapsibleRail(state: this, t: t)
+                          : _Sidebar(state: this, t: t),
                       Expanded(child: _MainContent(state: this, t: t, isDesktop: true)),
                     ])
                   : _MobileLayout(state: this, t: t),
@@ -632,7 +673,7 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
     if (!Hive.isBoxOpen('app_settings')) {
       // Box not yet open — render with default theme; will rebuild when box opens
-      return buildBody(null, false);
+      return buildBody(null, false, UserThemeService.defaultVisualTheme);
     }
 
     return ValueListenableBuilder<bool>(
@@ -642,7 +683,9 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
           valueListenable: Hive.box('app_settings').listenable(keys: [
             'custom_accent_color',
             'is_dark_mode',
+            'visual_theme',
             UserThemeService.getStorageKey(),
+            UserThemeService.getVisualThemeKey(),
           ]),
           builder: (context, Box box, child) {
             Color? customColor;
@@ -668,10 +711,116 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
             }
 
             final isDark = UserThemeService.isDarkMode();
-            return buildBody(customColor, isDark);
+            final visualTheme = UserThemeService.getVisualTheme();
+            return buildBody(customColor, isDark, visualTheme);
           },
         );
       },
+    );
+  }
+
+  // ── Redesigned home (gmwf_ui) ───────────────────────────────────────────────
+
+  /// Escape hatch for one release: `app_settings['use_legacy_dashboard'] = true`
+  /// brings back the old sidebar and snapshot.
+  bool get _useLegacyHome {
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        return Hive.box('app_settings').get('use_legacy_dashboard') == true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  String? _selectedExecutiveBranch;
+
+  List<Map<String, String>> get _availableBranchesForExecutive {
+    if (!(_isFullExecutive || _isGlobalExecutive)) return const [];
+    final list = <Map<String, String>>[
+      {'id': 'all', 'name': 'All Branches'},
+    ];
+    try {
+      if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
+        final bBox = Hive.box(LocalStorageService.branchesBox);
+        for (final val in bBox.values) {
+          if (val is Map) {
+            final id = (val['id'] ?? '').toString().trim().toLowerCase();
+            final name = (val['name'] ?? val['branchName'] ?? id).toString().trim();
+            final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
+            if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
+              list.add({'id': id, 'name': name.isNotEmpty ? name : id.toUpperCase()});
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return list;
+  }
+
+  void _onExecutiveBranchChanged(String newBranchId) async {
+    setState(() {
+      _selectedExecutiveBranch = newBranchId;
+      if (newBranchId != 'all') {
+        widget.userData['branchId'] = newBranchId;
+        widget.userData['branch'] = newBranchId;
+      }
+    });
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final box = Hive.box('app_settings');
+        await box.put('selected_branch', newBranchId);
+        await box.put('current_branch', newBranchId);
+      }
+      if (newBranchId != 'all') {
+        SyncService().start(newBranchId);
+      }
+    } catch (_) {}
+  }
+
+  String get _branchLabel {
+    if (_isFullExecutive || _isGlobalExecutive) {
+      if (_selectedExecutiveBranch != null && _selectedExecutiveBranch!.isNotEmpty && _selectedExecutiveBranch != 'all') {
+        return RecentActivityService.resolveBranchName(_selectedExecutiveBranch!);
+      }
+      return 'All branches';
+    }
+    return RecentActivityService.resolveBranchName(_branchId);
+  }
+
+  bool get _showNotifications {
+    final r = (widget.userData['role'] ?? '').toString().toLowerCase();
+    return !(r.contains('madrassa') || r.contains('guardian') || r.contains('parent') || r == 'teacher');
+  }
+
+  Widget _buildRedesignedHome(BuildContext ctx, RoleThemeData t) {
+    final role = widget.userData['role']?.toString();
+    return HomeThemeScope(
+      userData: widget.userData,
+      child: HomeShell(
+        userData: widget.userData,
+        userName: _userName,
+        photoUrl: _userPhotoUrl,
+        role: _role,
+        branchLabel: _branchLabel,
+        version: AutoUpdateService.resolvedVersion,
+        modules: _availableModules,
+        legacyTheme: Theme.of(ctx),
+        showNotifications: _showNotifications,
+        moduleBuilder: _moduleDestination,
+        availableBranches: (_isFullExecutive || _isGlobalExecutive) ? _availableBranchesForExecutive : null,
+        selectedBranchId: _selectedExecutiveBranch ?? (_branchId.isNotEmpty && _branchId != 'all' ? _branchId : 'all'),
+        onBranchChanged: _onExecutiveBranchChanged,
+        onLogout: _logout,
+        onEditPhoto: () => _showEnlargedAvatarDialog(context, this, t),
+        onSupport: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SupportPage())),
+        onForceSync: (_isFullExecutive || _isGlobalExecutive) ? () => _confirmAndTriggerForceGlobalSync(context) : null,
+        onRoleSimulator: RoleSimulatorService.canAccessSimulator(role)
+            ? () => RoleSimulatorService.showRoleSelectorModal(context)
+            : null,
+        onDataIntegrity: _canAccessDataIntegrity(role)
+            ? () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DataCleanupScreen()))
+            : null,
+      ),
     );
   }
 
@@ -772,7 +921,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
     return Scaffold(
       backgroundColor: t.bg,
       appBar: AppBar(
-        backgroundColor: isDark ? SoftPalette.slate900 : t.bgCard,
+        backgroundColor: t.bgCard,
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         automaticallyImplyLeading: false,
@@ -792,7 +941,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
                     style: TextStyle(
                       fontSize: 16.5,
                       fontWeight: FontWeight.w900,
-                      color: isDark ? SoftPalette.gray50 : t.textPrimary,
+                      color: t.textPrimary,
                       letterSpacing: -0.2,
                     ),
                     overflow: TextOverflow.ellipsis,
@@ -802,7 +951,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
                     _getSupervisorTabSubtitle(navIndex, userName, branchName),
                     style: TextStyle(
                       fontSize: 11,
-                      color: isDark ? SoftPalette.slate400 : t.textTertiary,
+                      color: t.textSecondary,
                       fontWeight: FontWeight.w600,
                     ),
                     overflow: TextOverflow.ellipsis,
@@ -818,7 +967,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
             tooltip: isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode',
             icon: Icon(
               isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-              color: isDark ? SoftPalette.amber200 : t.textSecondary,
+              color: isDark ? SoftPalette.brightGold : t.textSecondary,
               size: 20,
             ),
             onPressed: () async {
@@ -828,7 +977,11 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
           ),
           IconButton(
             tooltip: 'Sign Out',
-            icon: const Icon(Icons.logout_rounded, color: SoftPalette.red400, size: 20),
+            icon: Icon(
+              Icons.logout_rounded,
+              color: isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+              size: 20,
+            ),
             onPressed: widget.state._logout,
           ),
           const SizedBox(width: 8),
@@ -837,7 +990,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
           preferredSize: const Size.fromHeight(1),
           child: Divider(
             height: 1,
-            color: isDark ? SoftPalette.slate750 : t.bgRule,
+            color: t.bgRule,
           ),
         ),
       ),
@@ -862,7 +1015,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
       ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
-          color: isDark ? SoftPalette.slate900 : t.bgCard,
+          color: t.bgCard,
           boxShadow: [
             BoxShadow(
               color: SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.05),
@@ -872,7 +1025,7 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
           ],
           border: Border(
             top: BorderSide(
-              color: isDark ? SoftPalette.slate750 : t.bgRule,
+              color: t.bgRule,
               width: 1,
             ),
           ),
@@ -889,46 +1042,52 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
                   isSelected: navIndex == 0,
                   accentColor: t.accent,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(0),
                 ),
                 _SupervisorNavItem(
                   icon: Icons.dashboard_rounded,
                   label: 'Summary',
                   isSelected: navIndex == 1,
-                  accentColor: SoftPalette.indigo500,
+                  accentColor: isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(1),
                 ),
                 _SupervisorNavItem(
                   icon: Icons.inventory_2_rounded,
                   label: 'Inventory',
                   isSelected: navIndex == 2,
-                  accentColor: SoftPalette.emerald350,
+                  accentColor: isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(2),
                 ),
                 _SupervisorNavItem(
                   icon: Icons.rule_rounded,
                   label: 'Requests',
                   isSelected: navIndex == 3,
-                  accentColor: SoftPalette.amber300,
+                  accentColor: isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(3),
                 ),
                 _SupervisorNavItem(
                   icon: Icons.receipt_long_rounded,
-                  label: 'Ledger',
+                  label: 'Report',
                   isSelected: navIndex == 4,
-                  accentColor: SoftPalette.violet500,
+                  accentColor: isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(4),
                 ),
                 _SupervisorNavItem(
                   icon: Icons.person_rounded,
                   label: 'Account',
                   isSelected: navIndex == 5,
-                  accentColor: SoftPalette.cyan350,
+                  accentColor: isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan,
                   isDark: isDark,
+                  t: t,
                   onTap: () => widget.state.setSupervisorTab(5),
                 ),
               ],
@@ -946,6 +1105,7 @@ class _SupervisorNavItem extends StatelessWidget {
   final bool isSelected;
   final Color accentColor;
   final bool isDark;
+  final RoleThemeData t;
   final VoidCallback onTap;
 
   const _SupervisorNavItem({
@@ -954,6 +1114,7 @@ class _SupervisorNavItem extends StatelessWidget {
     required this.isSelected,
     required this.accentColor,
     required this.isDark,
+    required this.t,
     required this.onTap,
   });
 
@@ -969,7 +1130,7 @@ class _SupervisorNavItem extends StatelessWidget {
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             decoration: BoxDecoration(
-              color: isSelected ? accentColor.withValues(alpha: 0.12) : Colors.transparent,
+              color: isSelected ? accentColor.withValues(alpha: isDark ? 0.18 : 0.12) : Colors.transparent,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Column(
@@ -978,9 +1139,7 @@ class _SupervisorNavItem extends StatelessWidget {
                 Icon(
                   icon,
                   size: 20,
-                  color: isSelected
-                      ? accentColor
-                      : (isDark ? SoftPalette.slate400 : SoftPalette.slate550),
+                  color: isSelected ? accentColor : t.textSecondary,
                 ),
                 const SizedBox(height: 2),
                 FittedBox(
@@ -991,9 +1150,7 @@ class _SupervisorNavItem extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 10.5,
                       fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
-                      color: isSelected
-                          ? accentColor
-                          : (isDark ? SoftPalette.slate400 : SoftPalette.slate550),
+                      color: isSelected ? accentColor : t.textSecondary,
                       letterSpacing: 0.1,
                     ),
                   ),
@@ -1029,7 +1186,7 @@ class _SupervisorHomeHub extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = state._isDark;
+    final isDark = t.isDarkCanvas || state._isDark;
     final branchName = state._branchId.toUpperCase();
 
     return LayoutBuilder(
@@ -1163,7 +1320,10 @@ class _SupervisorHomeHub extends StatelessWidget {
         title: 'Summary & Overview',
         subtitle: 'Live token queue, prescriptions status, and dispensary stats',
         icon: Icons.dashboard_rounded,
-        gradient: const [SoftPalette.indigo500, SoftPalette.indigo600],
+        gradient: [
+          isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+          isDark ? SoftPalette.softIndigo : SoftPalette.luminousIndigo,
+        ],
         badgeText: 'Live Queue',
         isDark: isDark,
         isVertical: isDesktopRow,
@@ -1175,7 +1335,10 @@ class _SupervisorHomeHub extends StatelessWidget {
         title: 'Medicine Inventory',
         subtitle: 'Track clinical stock levels, batch updates & stock adjustments',
         icon: Icons.inventory_2_rounded,
-        gradient: const [SoftPalette.emerald350, SoftPalette.emerald550],
+        gradient: [
+          isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+          isDark ? SoftPalette.emerald350 : SoftPalette.teal600,
+        ],
         badgeText: 'Stock In/Out',
         isDark: isDark,
         isVertical: isDesktopRow,
@@ -1187,7 +1350,10 @@ class _SupervisorHomeHub extends StatelessWidget {
         title: 'Requests & Approvals',
         subtitle: 'Review and approve supervisor token exceptions and void requests',
         icon: Icons.rule_rounded,
-        gradient: const [SoftPalette.amber300, SoftPalette.orange400],
+        gradient: [
+          isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+          SoftPalette.orange400,
+        ],
         badgeText: 'Approvals',
         isDark: isDark,
         isVertical: isDesktopRow,
@@ -1199,7 +1365,10 @@ class _SupervisorHomeHub extends StatelessWidget {
         title: 'Medicine Stock Ledger',
         subtitle: 'Complete registers of medicine consumption & category records',
         icon: Icons.receipt_long_rounded,
-        gradient: const [SoftPalette.violet500, SoftPalette.violet550],
+        gradient: [
+          isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+          isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid,
+        ],
         badgeText: 'Consumption',
         isDark: isDark,
         isVertical: isDesktopRow,
@@ -1211,7 +1380,10 @@ class _SupervisorHomeHub extends StatelessWidget {
         title: 'Account & Preferences',
         subtitle: 'User profile, app preferences, dark mode & password',
         icon: Icons.person_rounded,
-        gradient: const [SoftPalette.cyan350, SoftPalette.sky550],
+        gradient: [
+          isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan,
+          isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+        ],
         badgeText: 'Account',
         isDark: isDark,
         isVertical: isDesktopRow,
@@ -1257,7 +1429,8 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
   @override
   Widget build(BuildContext context) {
     final primaryColor = widget.gradient.first;
-    final isDark = widget.isDark;
+    final t = widget.t;
+    final isDark = t.isDarkCanvas || widget.isDark;
 
     if (widget.isVertical) {
       // ── Desktop 5-Across Vertical Tile ──
@@ -1272,36 +1445,29 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
             curve: Curves.easeOutCubic,
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+              color: t.bgCard,
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: isDark
-                    ? [
-                        SoftPalette.slate800,
-                        SoftPalette.slate900,
-                      ]
-                    : [
-                        SoftPalette.gray50,
-                        SoftPalette.gray50,
-                      ],
+                colors: [
+                  t.bgCard,
+                  Color.alphaBlend(primaryColor.withValues(alpha: isDark ? 0.08 : 0.03), t.bgCard),
+                ],
               ),
               borderRadius: BorderRadius.circular(18),
               border: Border.all(
                 color: _isHovered
-                    ? primaryColor.withValues(alpha: isDark ? 0.7 : 0.5)
-                    : (isDark
-                        ? SoftPalette.gray50.withValues(alpha: 0.12)
-                        : SoftPalette.slate150),
+                    ? primaryColor.withValues(alpha: isDark ? 0.72 : 0.55)
+                    : t.bgRule,
                 width: _isHovered ? 1.5 : 1.0,
               ),
               boxShadow: [
                 BoxShadow(
                   color: _isHovered
-                      ? primaryColor.withValues(alpha: isDark ? 0.30 : 0.16)
+                      ? primaryColor.withValues(alpha: isDark ? 0.28 : 0.16)
                       : (isDark
                           ? SoftPalette.gray900.withValues(alpha: 0.25)
-                          : primaryColor.withValues(alpha: 0.05)),
+                          : primaryColor.withValues(alpha: 0.06)),
                   blurRadius: _isHovered ? 16 : 8,
                   offset: Offset(0, _isHovered ? 6 : 2),
                 ),
@@ -1333,15 +1499,15 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                           ),
                         ],
                       ),
-                      child: Icon(widget.icon, color: SoftPalette.gray50, size: 20),
+                      child: Icon(widget.icon, color: SoftPalette.pureWhiteSoft, size: 20),
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                       decoration: BoxDecoration(
-                        color: primaryColor.withValues(alpha: isDark ? 0.20 : 0.10),
+                        color: primaryColor.withValues(alpha: isDark ? 0.22 : 0.12),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
-                          color: primaryColor.withValues(alpha: isDark ? 0.4 : 0.25),
+                          color: primaryColor.withValues(alpha: isDark ? 0.42 : 0.28),
                           width: 0.8,
                         ),
                       ),
@@ -1368,7 +1534,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                       style: TextStyle(
                         fontSize: 13.5,
                         fontWeight: FontWeight.w800,
-                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                        color: t.textPrimary,
                         letterSpacing: -0.2,
                         height: 1.15,
                       ),
@@ -1380,7 +1546,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                       widget.subtitle,
                       style: TextStyle(
                         fontSize: 10.5,
-                        color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
+                        color: t.textSecondary,
                         height: 1.2,
                       ),
                       maxLines: 2,
@@ -1398,7 +1564,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                       child: Icon(
                         Icons.arrow_forward_rounded,
                         size: 14,
-                        color: _isHovered ? primaryColor : (isDark ? SoftPalette.gray50A38 : SoftPalette.slate350),
+                        color: _isHovered ? primaryColor : t.textTertiary,
                       ),
                     ),
                   ],
@@ -1421,36 +1587,29 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
             curve: Curves.easeOutCubic,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(
-              color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+              color: t.bgCard,
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: isDark
-                    ? [
-                        SoftPalette.slate800,
-                        SoftPalette.slate900,
-                      ]
-                    : [
-                        SoftPalette.gray50,
-                        SoftPalette.gray50,
-                      ],
+                colors: [
+                  t.bgCard,
+                  Color.alphaBlend(primaryColor.withValues(alpha: isDark ? 0.08 : 0.03), t.bgCard),
+                ],
               ),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
                 color: _isHovered
-                    ? primaryColor.withValues(alpha: isDark ? 0.7 : 0.5)
-                    : (isDark
-                        ? SoftPalette.gray50.withValues(alpha: 0.12)
-                        : SoftPalette.slate150),
+                    ? primaryColor.withValues(alpha: isDark ? 0.72 : 0.55)
+                    : t.bgRule,
                 width: _isHovered ? 1.5 : 1.0,
               ),
               boxShadow: [
                 BoxShadow(
                   color: _isHovered
-                      ? primaryColor.withValues(alpha: isDark ? 0.25 : 0.12)
+                      ? primaryColor.withValues(alpha: isDark ? 0.25 : 0.14)
                       : (isDark
                           ? SoftPalette.gray900.withValues(alpha: 0.20)
-                          : primaryColor.withValues(alpha: 0.04)),
+                          : primaryColor.withValues(alpha: 0.05)),
                   blurRadius: _isHovered ? 12 : 6,
                   offset: Offset(0, _isHovered ? 4 : 2),
                 ),
@@ -1477,7 +1636,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                       ),
                     ],
                   ),
-                  child: Icon(widget.icon, color: SoftPalette.gray50, size: 22),
+                  child: Icon(widget.icon, color: SoftPalette.pureWhiteSoft, size: 22),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -1493,7 +1652,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                               style: TextStyle(
                                 fontSize: 14.5,
                                 fontWeight: FontWeight.w800,
-                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                                color: t.textPrimary,
                                 letterSpacing: -0.2,
                               ),
                               overflow: TextOverflow.ellipsis,
@@ -1503,10 +1662,10 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                              color: primaryColor.withValues(alpha: isDark ? 0.20 : 0.12),
+                              color: primaryColor.withValues(alpha: isDark ? 0.22 : 0.12),
                               borderRadius: BorderRadius.circular(6),
                               border: Border.all(
-                                color: primaryColor.withValues(alpha: isDark ? 0.4 : 0.25),
+                                color: primaryColor.withValues(alpha: isDark ? 0.42 : 0.28),
                                 width: 0.6,
                               ),
                             ),
@@ -1526,7 +1685,7 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                         widget.subtitle,
                         style: TextStyle(
                           fontSize: 11,
-                          color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
+                          color: t.textSecondary,
                           height: 1.2,
                         ),
                         maxLines: 1,
@@ -1542,13 +1701,13 @@ class _SupervisorModuleCardState extends State<_SupervisorModuleCard> {
                   decoration: BoxDecoration(
                     color: _isHovered
                         ? primaryColor
-                        : primaryColor.withValues(alpha: isDark ? 0.15 : 0.08),
+                        : primaryColor.withValues(alpha: isDark ? 0.16 : 0.10),
                     shape: BoxShape.circle,
                   ),
                   child: Center(
                     child: Icon(
                       Icons.arrow_forward_rounded,
-                      color: _isHovered ? SoftPalette.gray50 : primaryColor,
+                      color: _isHovered ? SoftPalette.pureWhiteSoft : primaryColor,
                       size: 15,
                     ),
                   ),
@@ -1571,12 +1730,13 @@ class _Sidebar extends StatelessWidget {
   final RoleThemeData t;
   const _Sidebar({required this.state, required this.t});
 
-  bool get _dark => t.isDarkCanvas || state._isDark;
-  Color get _divider => _dark ? SoftPalette.gray50.withValues(alpha: 0.10) : t.accent.withValues(alpha: 0.15);
-  Color get _muted => _dark ? SoftPalette.slate350 : SoftPalette.slate550;
+  bool get _dark => t.isDarkSidebar || t.isDarkCanvas || state._isDark;
+  Color get _divider => t.sidebarBorder;
+  Color get _muted => t.sidebarText;
 
   @override
   Widget build(BuildContext context) {
+    final collapsed = state._sidebarCollapsed;
     return AnimatedBuilder(
       animation: state._sidebarCtrl,
       builder: (ctx, _) => FadeTransition(
@@ -1587,18 +1747,20 @@ class _Sidebar extends StatelessWidget {
               .animate(CurvedAnimation(
                   parent: state._sidebarCtrl,
                   curve: Curves.easeOutCubic)),
-          child: Container(
-            width: 260,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            width: collapsed ? 72.0 : 260.0,
             decoration: BoxDecoration(
               border: Border(
                 right: BorderSide(
-                  color: _dark ? SoftPalette.gray50.withValues(alpha: 0.12) : SoftPalette.gray50.withValues(alpha: 0.65),
+                  color: t.sidebarBorder,
                   width: 1.2,
                 ),
               ),
               boxShadow: [
                 BoxShadow(
-                  color: t.accent.withValues(alpha: _dark ? 0.10 : 0.05),
+                  color: t.accent.withValues(alpha: _dark ? 0.12 : 0.05),
                   blurRadius: 28,
                   offset: const Offset(6, 0),
                 ),
@@ -1617,15 +1779,10 @@ class _Sidebar extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: _dark
-                          ? [
-                              SoftPalette.slate800.withValues(alpha: 0.95),
-                              SoftPalette.slate900.withValues(alpha: 0.92),
-                            ]
-                          : [
-                              SoftPalette.gray50.withValues(alpha: 0.98),
-                              SoftPalette.slate100.withValues(alpha: 0.94),
-                            ],
+                      colors: [
+                        t.sidebarBg,
+                        t.sidebarBgSecondary,
+                      ],
                     ),
                   ),
                   child: Stack(
@@ -1642,7 +1799,7 @@ class _Sidebar extends StatelessWidget {
                               shape: BoxShape.circle,
                               gradient: RadialGradient(
                                 colors: [
-                                  t.accent.withValues(alpha: _dark ? 0.28 : 0.14),
+                                  t.accent.withValues(alpha: _dark ? 0.24 : 0.12),
                                   t.accent.withValues(alpha: 0.0),
                                 ],
                               ),
@@ -1651,7 +1808,7 @@ class _Sidebar extends StatelessWidget {
                         ),
                       ),
 
-                      // Bottom-Right Cyan Glow
+                      // Bottom-Right Secondary Glow
                       Positioned(
                         bottom: -40,
                         right: -40,
@@ -1663,8 +1820,8 @@ class _Sidebar extends StatelessWidget {
                               shape: BoxShape.circle,
                               gradient: RadialGradient(
                                 colors: [
-                                  SoftPalette.sky400.withValues(alpha: _dark ? 0.16 : 0.08),
-                                  SoftPalette.sky400.withValues(alpha: 0.0),
+                                  t.chartBar2.withValues(alpha: _dark ? 0.16 : 0.08),
+                                  t.chartBar2.withValues(alpha: 0.0),
                                 ],
                               ),
                             ),
@@ -1673,30 +1830,69 @@ class _Sidebar extends StatelessWidget {
                       ),
 
                       // Sidebar Layout
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _SidebarBrand(state: state, t: t, dark: _dark),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            child: SingleChildScrollView(
-                              physics: const BouncingScrollPhysics(),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  _buildNav(context),
-                                  const SizedBox(height: 12),
-                                ],
-                              ),
+                      collapsed
+                          ? Column(
+                              children: [
+                                const SizedBox(height: 18),
+                                Tooltip(
+                                  message: 'Expand Sidebar',
+                                  child: IconButton(
+                                    onPressed: state._toggleSidebar,
+                                    icon: Icon(
+                                      Icons.keyboard_double_arrow_right_rounded,
+                                      color: t.accent,
+                                      size: 22,
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  child: Divider(color: _divider, height: 1),
+                                ),
+                                const Spacer(),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                                  child: Divider(color: _divider, height: 1),
+                                ),
+                                const SizedBox(height: 8),
+                                Tooltip(
+                                  message: 'Expand Sidebar',
+                                  child: IconButton(
+                                    onPressed: state._toggleSidebar,
+                                    icon: Icon(
+                                      Icons.chevron_right_rounded,
+                                      color: _muted,
+                                      size: 22,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                              ],
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _SidebarBrand(state: state, t: t, dark: _dark),
+                                const SizedBox(height: 6),
+                                Expanded(
+                                  child: SingleChildScrollView(
+                                    physics: const BouncingScrollPhysics(),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        _buildNav(context),
+                                        const SizedBox(height: 12),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                                  child: Divider(color: _divider, height: 1),
+                                ),
+                                _SidebarActions(state: state, t: t, dark: _dark),
+                              ],
                             ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            child: Divider(color: _divider, height: 1),
-                          ),
-                          _SidebarActions(state: state, t: t, dark: _dark),
-                        ],
-                      ),
                     ],
                   ),
                 ),
@@ -1773,17 +1969,23 @@ class _SidebarBrand extends StatelessWidget {
   Widget build(BuildContext context) {
     final isChairman = state._role == 'chairman';
     final isCeo = state._role == 'ceo';
+    final onlineColor = dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+    final accentInk = dark ? GColor.accentOnDark(t.accent) : t.accent;
+    final rolePillColor = (isChairman || isCeo)
+        ? (dark ? SoftPalette.brightGold : SoftPalette.warmMarigold)
+        : accentInk;
+    final cardSurface = dark
+        ? Color.alphaBlend(t.accent.withValues(alpha: 0.10), t.sidebarBgSecondary)
+        : t.bgCard;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 14, 12, 6),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: dark
-            ? SoftPalette.slate800.withValues(alpha: 0.65)
-            : SoftPalette.gray50.withValues(alpha: 0.92),
+        color: cardSurface,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: dark ? SoftPalette.gray50.withValues(alpha: 0.12) : SoftPalette.slate150.withValues(alpha: 0.90),
+          color: dark ? t.sidebarBorder : t.bgRule,
           width: 1.0,
         ),
         boxShadow: [
@@ -1809,7 +2011,7 @@ class _SidebarBrand extends StatelessWidget {
                     Text(
                       'GMWF',
                       style: TextStyle(
-                        color: dark ? SoftPalette.gray50 : SoftPalette.slate900,
+                        color: dark ? t.sidebarTextActive : t.textPrimary,
                         fontWeight: FontWeight.w900,
                         fontSize: 15,
                         letterSpacing: 1.0,
@@ -1820,23 +2022,23 @@ class _SidebarBrand extends StatelessWidget {
                         Text(
                           'Enterprise ERP',
                           style: TextStyle(
-                            color: dark ? SoftPalette.slate350 : SoftPalette.slate550,
+                            color: t.sidebarText,
                             fontSize: 9.5,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
                         const SizedBox(width: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1),
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                           decoration: BoxDecoration(
-                            color: SoftPalette.emerald350.withValues(alpha: dark ? 0.20 : 0.12),
+                            color: onlineColor.withValues(alpha: dark ? 0.20 : 0.12),
                             borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: SoftPalette.emerald350.withValues(alpha: 0.35), width: 0.8),
+                            border: Border.all(color: onlineColor.withValues(alpha: 0.40), width: 0.8),
                           ),
-                          child: const Text(
+                          child: Text(
                             'Online',
                             style: TextStyle(
-                              color: SoftPalette.emerald350,
+                              color: onlineColor,
                               fontSize: 8,
                               fontWeight: FontWeight.w800,
                             ),
@@ -1853,7 +2055,7 @@ class _SidebarBrand extends StatelessWidget {
           // Divider rule inside card
           Container(
             height: 1,
-            color: dark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.slate150,
+            color: t.sidebarBorder,
           ),
           const SizedBox(height: 10),
           // User Role Pill & Full Name
@@ -1863,21 +2065,14 @@ class _SidebarBrand extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: (isChairman || isCeo)
-                        ? [
-                            SoftPalette.amber300.withValues(alpha: dark ? 0.30 : 0.20),
-                            SoftPalette.orange400.withValues(alpha: dark ? 0.20 : 0.12),
-                          ]
-                        : [
-                            t.accent.withValues(alpha: dark ? 0.30 : 0.18),
-                            t.accent.withValues(alpha: dark ? 0.15 : 0.08),
-                          ],
+                    colors: [
+                      rolePillColor.withValues(alpha: dark ? 0.28 : 0.16),
+                      rolePillColor.withValues(alpha: dark ? 0.14 : 0.08),
+                    ],
                   ),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: (isChairman || isCeo)
-                        ? SoftPalette.amber300.withValues(alpha: dark ? 0.40 : 0.45)
-                        : t.accent.withValues(alpha: dark ? 0.35 : 0.40),
+                    color: rolePillColor.withValues(alpha: dark ? 0.45 : 0.35),
                     width: 0.8,
                   ),
                 ),
@@ -1887,13 +2082,13 @@ class _SidebarBrand extends StatelessWidget {
                     Icon(
                       (isChairman || isCeo) ? Icons.workspace_premium_rounded : Icons.verified_user_rounded,
                       size: 10,
-                      color: (isChairman || isCeo) ? (dark ? SoftPalette.amber200 : SoftPalette.orange500) : t.accent,
+                      color: rolePillColor,
                     ),
                     const SizedBox(width: 3.5),
                     Text(
                       state._role.toUpperCase(),
                       style: TextStyle(
-                        color: (isChairman || isCeo) ? (dark ? SoftPalette.amber200 : SoftPalette.orange500) : t.accent,
+                        color: rolePillColor,
                         fontSize: 8.5,
                         fontWeight: FontWeight.w800,
                         letterSpacing: 1.0,
@@ -1906,7 +2101,7 @@ class _SidebarBrand extends StatelessWidget {
               Text(
                 'v${AutoUpdateService.resolvedVersion}',
                 style: TextStyle(
-                  color: dark ? SoftPalette.slate550 : SoftPalette.slate350,
+                  color: t.sidebarText.withValues(alpha: 0.78),
                   fontSize: 8.5,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1917,7 +2112,7 @@ class _SidebarBrand extends StatelessWidget {
           Text(
             state._userName,
             style: TextStyle(
-              color: dark ? SoftPalette.gray50 : SoftPalette.slate900,
+              color: dark ? t.sidebarTextActive : t.textPrimary,
               fontSize: 13,
               fontWeight: FontWeight.w800,
               height: 1.2,
@@ -1949,7 +2144,7 @@ class _SidebarActions extends StatelessWidget {
           _ActionTile(
             icon: Icons.preview_rounded,
             label: 'Role Simulator',
-            accentColor: SoftPalette.violet500,
+            accentColor: dark ? SoftPalette.softLavender : SoftPalette.royalViolet,
             t: t,
             dark: dark,
             onTap: () => RoleSimulatorService.showRoleSelectorModal(context),
@@ -1961,7 +2156,7 @@ class _SidebarActions extends StatelessWidget {
           _ActionTile(
             icon: Icons.notifications_outlined,
             label: 'Notifications',
-            accentColor: SoftPalette.amber300,
+            accentColor: dark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
             t: t,
             dark: dark,
             onTap: () => Navigator.push(
@@ -1979,7 +2174,7 @@ class _SidebarActions extends StatelessWidget {
           _ActionTile(
             icon: Icons.cloud_upload_rounded,
             label: 'Force Global Sync',
-            accentColor: SoftPalette.emerald350,
+            accentColor: dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
             t: t,
             dark: dark,
             onTap: () => state._confirmAndTriggerForceGlobalSync(context),
@@ -1987,7 +2182,7 @@ class _SidebarActions extends StatelessWidget {
         _ActionTile(
           icon: Icons.settings_outlined,
           label: 'Settings',
-          accentColor: SoftPalette.sky350,
+          accentColor: dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
           t: t,
           dark: dark,
           onTap: () => Navigator.push(
@@ -2002,7 +2197,7 @@ class _SidebarActions extends StatelessWidget {
           _ActionTile(
             icon: Icons.cleaning_services_outlined,
             label: 'Data Integrity',
-            accentColor: SoftPalette.emerald350,
+            accentColor: dark ? SoftPalette.brightCyan : SoftPalette.deepCyan,
             t: t,
             dark: dark,
             onTap: () => Navigator.push(
@@ -2013,20 +2208,19 @@ class _SidebarActions extends StatelessWidget {
         _ActionTile(
           icon: Icons.help_outline_rounded,
           label: 'Support',
-          accentColor: SoftPalette.amber300,
+          accentColor: dark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
           t: t,
           dark: dark,
           onTap: () => Navigator.push(context,
               MaterialPageRoute(builder: (_) => const SupportPage())),
         ),
         _ActionTile(
-          icon: Icons.logout_rounded,
-          label: 'Sign Out',
-          accentColor: SoftPalette.red400,
+          icon: Icons.chevron_left_rounded,
+          label: 'Collapse Sidebar',
+          accentColor: t.accent,
           t: t,
           dark: dark,
-          danger: true,
-          onTap: state._logout,
+          onTap: state._toggleSidebar,
         ),
       ]),
     );
@@ -2134,17 +2328,17 @@ class _LogoPulse extends StatelessWidget {
 Color _getCatColor(DashboardCategoryFilter cat, {bool dark = false}) {
   switch (cat) {
     case DashboardCategoryFilter.overall:
-      return SoftPalette.sky400; // Sky Blue
+      return dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
     case DashboardCategoryFilter.office:
-      return SoftPalette.indigo500; // Royal Indigo / Purple
+      return dark ? SoftPalette.softLavender : SoftPalette.royalViolet;
     case DashboardCategoryFilter.dispensary:
-      return SoftPalette.teal500; // Teal / Emerald
+      return dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
     case DashboardCategoryFilter.dasterkhwaan:
-      return SoftPalette.orange350; // Warm Amber / Orange
+      return dark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
     case DashboardCategoryFilter.madrassa:
-      return SoftPalette.red500; // Berry Rose
+      return dark ? SoftPalette.brightCoral : SoftPalette.roseCoral;
     case DashboardCategoryFilter.school:
-      return dark ? SoftPalette.sky350 : SoftPalette.sky700; // Deep Ocean Navy (SchoolTheme)
+      return dark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
   }
 }
 
@@ -2184,7 +2378,13 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
   Widget build(BuildContext context) {
     final sel = widget.selected;
     final dark = widget.dark;
-    final catColor = _getCatColor(widget.cat, dark: dark);
+    final t = widget.t;
+    final catColor = widget.cat == DashboardCategoryFilter.overall
+        ? (dark ? GColor.accentOnDark(t.accent) : t.accent)
+        : _getCatColor(widget.cat, dark: dark);
+    final activeBarColor = widget.cat == DashboardCategoryFilter.overall
+        ? t.sidebarActiveLine
+        : catColor;
     final label = widget.cat == DashboardCategoryFilter.overall
         ? 'Dashboard'
         : widget.cat.name[0].toUpperCase() + widget.cat.name.substring(1);
@@ -2201,23 +2401,28 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7.5),
           decoration: BoxDecoration(
             color: sel
-                ? (dark ? catColor.withValues(alpha: 0.22) : catColor.withValues(alpha: 0.16))
+                ? (widget.cat == DashboardCategoryFilter.overall
+                    ? t.sidebarActiveBg
+                    : Color.alphaBlend(
+                        catColor.withValues(alpha: dark ? 0.22 : 0.14),
+                        t.sidebarBg,
+                      ))
                 : (_hov
-                    ? (dark ? SoftPalette.gray50.withValues(alpha: 0.06) : catColor.withValues(alpha: 0.08))
+                    ? (dark ? t.sidebarTextActive.withValues(alpha: 0.08) : catColor.withValues(alpha: 0.08))
                     : Colors.transparent),
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
               color: sel
-                  ? catColor.withValues(alpha: dark ? 0.50 : 0.45)
+                  ? catColor.withValues(alpha: dark ? 0.52 : 0.42)
                   : (_hov
-                      ? (dark ? SoftPalette.gray50.withValues(alpha: 0.10) : catColor.withValues(alpha: 0.20))
+                      ? (dark ? t.sidebarTextActive.withValues(alpha: 0.14) : catColor.withValues(alpha: 0.22))
                       : Colors.transparent),
               width: 1.0,
             ),
             boxShadow: sel
                 ? [
                     BoxShadow(
-                      color: catColor.withValues(alpha: dark ? 0.25 : 0.16),
+                      color: catColor.withValues(alpha: dark ? 0.22 : 0.14),
                       blurRadius: 10,
                       offset: const Offset(0, 3),
                     ),
@@ -2232,11 +2437,11 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
                 height: 16,
                 margin: const EdgeInsets.only(right: 7),
                 decoration: BoxDecoration(
-                  color: catColor,
+                  color: activeBarColor,
                   borderRadius: BorderRadius.circular(3),
                   boxShadow: [
                     BoxShadow(
-                      color: catColor.withValues(alpha: 0.6),
+                      color: activeBarColor.withValues(alpha: 0.6),
                       blurRadius: 6,
                     ),
                   ],
@@ -2257,14 +2462,14 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
                     : null,
                 color: !sel
                     ? (dark
-                        ? SoftPalette.slate800
-                        : catColor.withValues(alpha: 0.10))
+                        ? t.sidebarBgSecondary
+                        : catColor.withValues(alpha: 0.11))
                     : null,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
                   color: sel
-                      ? SoftPalette.gray50.withValues(alpha: 0.35)
-                      : (dark ? SoftPalette.gray50.withValues(alpha: 0.06) : catColor.withValues(alpha: 0.20)),
+                      ? SoftPalette.pureWhiteSoft.withValues(alpha: 0.35)
+                      : (dark ? t.sidebarBorder : catColor.withValues(alpha: 0.22)),
                   width: 0.8,
                 ),
                 boxShadow: sel
@@ -2280,8 +2485,8 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
               child: Icon(
                 _icons[widget.cat] ?? Icons.circle_outlined,
                 color: sel
-                    ? SoftPalette.gray50
-                    : (dark ? SoftPalette.slate200 : catColor),
+                    ? SoftPalette.pureWhiteSoft
+                    : catColor,
                 size: 15,
               ),
             ),
@@ -2291,10 +2496,10 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
                 label,
                 style: TextStyle(
                   color: sel
-                      ? (dark ? SoftPalette.gray50 : catColor)
+                      ? (dark ? t.sidebarTextActive : catColor)
                       : (_hov
-                          ? (dark ? SoftPalette.slate100 : SoftPalette.slate900)
-                          : (dark ? SoftPalette.slate200 : SoftPalette.slate700)),
+                          ? (dark ? t.sidebarTextActive : t.textPrimary)
+                          : t.sidebarText),
                   fontWeight: sel ? FontWeight.w900 : FontWeight.w600,
                   fontSize: 13,
                 ),
@@ -2305,11 +2510,11 @@ class _SidebarCatItemState extends State<_SidebarCatItem> {
                 width: 6,
                 height: 6,
                 decoration: BoxDecoration(
-                  color: catColor,
+                  color: activeBarColor,
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
-                      color: catColor.withValues(alpha: 0.6),
+                      color: activeBarColor.withValues(alpha: 0.6),
                       blurRadius: 6,
                       spreadRadius: 1,
                     ),
@@ -2361,7 +2566,7 @@ class _SidebarModuleTileState extends State<_SidebarModuleTile> {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
             color: _hov
-                ? (dark ? t.accent.withValues(alpha: 0.16) : t.accent.withValues(alpha: 0.08))
+                ? t.accent.withValues(alpha: dark ? 0.18 : 0.08)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
@@ -2379,11 +2584,11 @@ class _SidebarModuleTileState extends State<_SidebarModuleTile> {
               decoration: BoxDecoration(
                 gradient: _hov ? t.accentGradient : null,
                 color: !_hov
-                    ? (dark ? SoftPalette.slate800 : t.accent.withValues(alpha: 0.08))
+                    ? (dark ? t.sidebarBgSecondary : t.accent.withValues(alpha: 0.08))
                     : null,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: _hov ? SoftPalette.gray50.withValues(alpha: 0.3) : Colors.transparent,
+                  color: _hov ? SoftPalette.pureWhiteSoft.withValues(alpha: 0.3) : Colors.transparent,
                   width: 0.8,
                 ),
                 boxShadow: _hov
@@ -2399,8 +2604,8 @@ class _SidebarModuleTileState extends State<_SidebarModuleTile> {
               child: Icon(
                 widget.module.icon,
                 color: _hov
-                    ? SoftPalette.gray50
-                    : (dark ? SoftPalette.slate350 : SoftPalette.slate550),
+                    ? SoftPalette.pureWhiteSoft
+                    : t.sidebarText,
                 size: 15,
               ),
             ),
@@ -2410,8 +2615,8 @@ class _SidebarModuleTileState extends State<_SidebarModuleTile> {
                 widget.module.title,
                 style: TextStyle(
                   color: _hov
-                      ? (dark ? SoftPalette.gray50 : SoftPalette.slate900)
-                      : (dark ? SoftPalette.slate200 : SoftPalette.slate600),
+                      ? (dark ? t.sidebarTextActive : t.textPrimary)
+                      : t.sidebarText,
                   fontWeight: _hov ? FontWeight.w800 : FontWeight.w600,
                   fontSize: 13,
                 ),
@@ -2471,12 +2676,12 @@ class _ActionTileState extends State<_ActionTile> {
   @override
   Widget build(BuildContext context) {
     final effectiveAccent = widget.danger
-        ? SoftPalette.red400
+        ? (widget.dark ? SoftPalette.brightCoral : SoftPalette.roseCoral)
         : (widget.accentColor ?? widget.t.accent);
 
     final col = widget.danger
-        ? SoftPalette.red400
-        : (widget.dark ? SoftPalette.slate350 : SoftPalette.slate550);
+        ? (widget.dark ? SoftPalette.brightCoral : SoftPalette.roseCoral)
+        : widget.t.sidebarText;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hov = true),
@@ -2490,12 +2695,12 @@ class _ActionTileState extends State<_ActionTile> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7.5),
           decoration: BoxDecoration(
             color: _hov
-                ? effectiveAccent.withValues(alpha: widget.dark ? 0.16 : 0.08)
+                ? effectiveAccent.withValues(alpha: widget.dark ? 0.18 : 0.09)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: _hov
-                  ? effectiveAccent.withValues(alpha: widget.dark ? 0.35 : 0.25)
+                  ? effectiveAccent.withValues(alpha: widget.dark ? 0.38 : 0.25)
                   : Colors.transparent,
               width: 1.0,
             ),
@@ -2508,8 +2713,8 @@ class _ActionTileState extends State<_ActionTile> {
               style: TextStyle(
                 color: _hov
                     ? (widget.danger
-                        ? SoftPalette.red400
-                        : (widget.dark ? SoftPalette.gray50 : SoftPalette.slate900))
+                        ? effectiveAccent
+                        : (widget.dark ? widget.t.sidebarTextActive : widget.t.textPrimary))
                     : col,
                 fontSize: 13,
                 fontWeight: widget.danger || _hov ? FontWeight.w700 : FontWeight.w500,
@@ -2531,7 +2736,7 @@ class _MobileLayout extends StatelessWidget {
   final RoleThemeData t;
   const _MobileLayout({required this.state, required this.t});
 
-  bool get _dark => state._isDark;
+  bool get _dark => t.isDarkCanvas || state._isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -2545,9 +2750,12 @@ class _MobileLayout extends StatelessWidget {
   AppBar _buildAppBar(BuildContext context) {
     final isChairman = state._role == 'chairman';
     final isCeo = state._role == 'ceo';
+    final roleBadgeColor = (isChairman || isCeo)
+        ? (_dark ? SoftPalette.brightGold : SoftPalette.warmMarigold)
+        : t.accent;
 
     return AppBar(
-      backgroundColor: _dark ? SoftPalette.slate900 : t.bgCard,
+      backgroundColor: t.bgCard,
       elevation: 0,
       surfaceTintColor: Colors.transparent,
       automaticallyImplyLeading: false,
@@ -2568,7 +2776,7 @@ class _MobileLayout extends StatelessWidget {
                     Text(
                       'GMWF',
                       style: TextStyle(
-                        color: _dark ? SoftPalette.gray50 : t.textPrimary,
+                        color: t.textPrimary,
                         fontWeight: FontWeight.w900,
                         fontSize: 16.5,
                         letterSpacing: 0.8,
@@ -2597,7 +2805,7 @@ class _MobileLayout extends StatelessWidget {
                 Text(
                   'Healthcare & Community System',
                   style: TextStyle(
-                    color: _dark ? SoftPalette.slate400 : t.textTertiary,
+                    color: t.textSecondary,
                     fontSize: 10.5,
                     fontWeight: FontWeight.w500,
                   ),
@@ -2615,21 +2823,14 @@ class _MobileLayout extends StatelessWidget {
           margin: const EdgeInsets.symmetric(vertical: 14),
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: (isChairman || isCeo)
-                  ? [
-                      SoftPalette.amber300.withValues(alpha: _dark ? 0.25 : 0.18),
-                      SoftPalette.orange400.withValues(alpha: _dark ? 0.15 : 0.08),
-                    ]
-                  : [
-                      t.accent.withValues(alpha: _dark ? 0.25 : 0.15),
-                      t.accent.withValues(alpha: _dark ? 0.12 : 0.06),
-                    ],
+              colors: [
+                roleBadgeColor.withValues(alpha: _dark ? 0.25 : 0.16),
+                roleBadgeColor.withValues(alpha: _dark ? 0.12 : 0.06),
+              ],
             ),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: (isChairman || isCeo)
-                  ? SoftPalette.amber300.withValues(alpha: 0.4)
-                  : t.accent.withValues(alpha: 0.3),
+              color: roleBadgeColor.withValues(alpha: 0.38),
               width: 0.8,
             ),
           ),
@@ -2639,13 +2840,13 @@ class _MobileLayout extends StatelessWidget {
               Icon(
                 (isChairman || isCeo) ? Icons.workspace_premium_rounded : Icons.verified_user_rounded,
                 size: 11,
-                color: (isChairman || isCeo) ? SoftPalette.amber300 : t.accent,
+                color: roleBadgeColor,
               ),
               const SizedBox(width: 4),
               Text(
                 state._role.toUpperCase(),
                 style: TextStyle(
-                  color: (isChairman || isCeo) ? SoftPalette.amber300 : t.accent,
+                  color: roleBadgeColor,
                   fontSize: 9.5,
                   fontWeight: FontWeight.w800,
                   letterSpacing: 0.8,
@@ -2657,20 +2858,28 @@ class _MobileLayout extends StatelessWidget {
         if (RoleSimulatorService.canAccessSimulator(state._role))
           IconButton(
             tooltip: 'Live Role Simulator',
-            icon: const Icon(Icons.preview_rounded, color: SoftPalette.yellow200, size: 20),
+            icon: Icon(
+              Icons.preview_rounded,
+              color: _dark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+              size: 20,
+            ),
             onPressed: () => RoleSimulatorService.showRoleSelectorModal(context),
           ),
         if (state._isFullExecutive || state._isGlobalExecutive)
           IconButton(
             tooltip: 'Force Global Cloud Sync',
-            icon: const Icon(Icons.cloud_upload_rounded, color: SoftPalette.emerald350, size: 21),
+            icon: Icon(
+              Icons.cloud_upload_rounded,
+              color: _dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+              size: 21,
+            ),
             onPressed: () => state._confirmAndTriggerForceGlobalSync(context),
           ),
         IconButton(
           tooltip: 'Settings',
           icon: Icon(
             Icons.settings_outlined,
-            color: _dark ? SoftPalette.gray50A70 : t.textSecondary,
+            color: t.textSecondary,
             size: 20,
           ),
           onPressed: () => Navigator.push(
@@ -2686,7 +2895,7 @@ class _MobileLayout extends StatelessWidget {
         preferredSize: const Size.fromHeight(1),
         child: Divider(
           height: 1,
-          color: _dark ? SoftPalette.slate750 : t.bgRule,
+          color: t.bgRule,
         ),
       ),
     );
@@ -2709,6 +2918,26 @@ class _MainContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (state._isHqManager && isDesktop && state._hqUtilityView != null) {
+      switch (state._hqUtilityView!) {
+        case _HqUtilityView.notifications:
+          return NotificationScreen(
+            branchId: (state.widget.userData['branchId'] ?? 'all').toString(),
+            userId: (state.widget.userData['uid'] ??
+                    state.widget.userData['id'] ??
+                    'user')
+                .toString(),
+            role: (state.widget.userData['role'] ?? 'hq manager').toString(),
+            embedded: true,
+          );
+        case _HqUtilityView.settings:
+          return SettingsPage(
+            userData: state.widget.userData,
+            embedded: true,
+          );
+      }
+    }
+
     final filtered = state._cachedFilteredModules;
     final double hPad = isDesktop ? 36 : 20;
 
@@ -2717,7 +2946,9 @@ class _MainContent extends StatelessWidget {
     return Column(
       children: [
         // Built ONCE at the top — never re-animates or rebuilds on category tab changes
-        _HeroHeader(state: state, t: t, isDesktop: isDesktop),
+        state._isHqManager
+            ? _HqSlimTopBar(state: state, t: t, isDesktop: isDesktop)
+            : _HeroHeader(state: state, t: t, isDesktop: isDesktop),
         Expanded(
           child: CustomScrollView(
             physics: const BouncingScrollPhysics(),
@@ -2799,7 +3030,7 @@ class _SectionLabel extends StatelessWidget {
     required this.isDesktop,
   });
 
-  bool get _dark => state._isDark;
+  bool get _dark => t.isDarkCanvas || state._isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -2809,7 +3040,7 @@ class _SectionLabel extends StatelessWidget {
         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Your Modules',
               style: TextStyle(
-                  color: _dark ? SoftPalette.slate150 : t.textPrimary,
+                  color: t.textPrimary,
                   fontSize: isDesktop ? 20 : 17,
                   fontWeight: FontWeight.w800,
                   letterSpacing: -0.5)),
@@ -2819,7 +3050,7 @@ class _SectionLabel extends StatelessWidget {
             child: Text('$count available',
                 key: ValueKey(count),
                 style: TextStyle(
-                    color: _dark ? SoftPalette.slate400 : t.textTertiary,
+                    color: _dark ? t.textSecondary : t.textTertiary,
                     fontSize: 12,
                     fontWeight: FontWeight.w500)),
           ),
@@ -2928,459 +3159,396 @@ Widget _buildProfileHeroCard({
       ? '$timeEmoji GOOD $timeOfDayUpper • $userRole'
       : '$timeEmoji GOOD $timeOfDayUpper';
 
-  final avatarSize = isDesktop ? 76.0 : 64.0;
+  final avatarSize = isDesktop ? 64.0 : 56.0;
   final primaryThemeColor = t.accent;
+  final secondaryThemeColor = t.chartBar2;
+  final pillRoleColor = (isChairman || isCeo)
+      ? (isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold)
+      : primaryThemeColor;
+  final pillModulesColor =
+      isDark ? SoftPalette.softLavender : SoftPalette.royalViolet;
+  final pillScopeColor =
+      isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
+  final pillLiveColor =
+      isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
 
   return Container(
-    margin: EdgeInsets.fromLTRB(hPad, isDesktop ? 22 : 16, hPad, 0),
+    margin: EdgeInsets.fromLTRB(hPad, isDesktop ? 16 : 14, hPad, 0),
     decoration: BoxDecoration(
-      borderRadius: BorderRadius.circular(28.0),
-      color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+      borderRadius: BorderRadius.circular(Gr.r5),
+      color: t.bgCard,
       gradient: LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
-        colors: isDark
-            ? [
-                SoftPalette.slate800,
-                SoftPalette.slate900,
-              ]
-            : [
-                SoftPalette.yellow50m,
-                SoftPalette.gray50,
-                SoftPalette.gray50,
-              ],
+        colors: [
+          Color.alphaBlend(
+            primaryThemeColor.withValues(alpha: isDark ? 0.16 : 0.085),
+            t.bgCard,
+          ),
+          t.bgCard,
+          Color.alphaBlend(
+            secondaryThemeColor.withValues(alpha: isDark ? 0.10 : 0.045),
+            t.bgCard,
+          ),
+        ],
       ),
       border: Border.all(
-        color: isDark
-            ? SoftPalette.gray50.withValues(alpha: 0.16)
-            : SoftPalette.amber300.withValues(alpha: 0.25),
-        width: 1.2,
+        color: primaryThemeColor.withValues(alpha: isDark ? 0.28 : 0.18),
+        width: 1.0,
       ),
-      boxShadow: [
-        BoxShadow(
-          color: primaryThemeColor.withValues(alpha: isDark ? 0.25 : 0.12),
-          blurRadius: 24,
-          offset: const Offset(0, 6),
-        ),
-        BoxShadow(
-          color: SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.04),
-          blurRadius: 10,
-          offset: const Offset(0, 3),
-        ),
-      ],
+      boxShadow: GShadow.s2(isDark),
     ),
     child: ClipRRect(
-      borderRadius: BorderRadius.circular(28.0),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(28.0),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: isDark
-                ? [
-                    SoftPalette.slate800.withValues(alpha: 0.90),
-                    SoftPalette.slate900.withValues(alpha: 0.82),
-                  ]
-                : [
-                    SoftPalette.yellow50m.withValues(alpha: 0.98),
-                    SoftPalette.gray50.withValues(alpha: 0.94),
-                    SoftPalette.gray50.withValues(alpha: 0.98),
-                  ],
+      borderRadius: BorderRadius.circular(Gr.r5),
+      child: Stack(
+        children: [
+          // Ambient Radial Glow Spot (Subtle accent wash top-left)
+          Positioned(
+            top: -50,
+            left: -50,
+            width: 220,
+            height: 220,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      primaryThemeColor.withValues(alpha: isDark ? 0.22 : 0.12),
+                      primaryThemeColor.withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ),
-          border: Border.all(
-            color: isDark
-                ? SoftPalette.gray50.withValues(alpha: 0.16)
-                : SoftPalette.amber300.withValues(alpha: 0.25),
-            width: 1.2,
+
+          // Ambient Radial Glow Spot (Subtle accent wash right)
+          Positioned(
+            top: -40,
+            right: 40,
+            width: 200,
+            height: 200,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      secondaryThemeColor.withValues(alpha: isDark ? 0.16 : 0.09),
+                      secondaryThemeColor.withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: SoftPalette.amber300.withValues(alpha: isDark ? 0.25 : 0.08),
-              blurRadius: 20,
-              offset: const Offset(0, 6),
-            ),
-            BoxShadow(
-              color: SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.03),
-              blurRadius: 10,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Stack(
-          children: [
-            // Ambient Radial Glow Spot (Top-Left behind greeting/avatar)
+
+          // Seamlessly Dissolved Islamic Pattern Watermark on Right
+          if (GDecor.patternsEnabled)
             Positioned(
-              top: -50,
-              left: -50,
-              width: 240,
-              height: 240,
+              right: -20,
+              top: -20,
+              bottom: -20,
+              width: isDesktop ? 300 : 210,
               child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
+                child: ShaderMask(
+                  shaderCallback: (rect) {
+                    return RadialGradient(
+                      center: Alignment.centerRight,
+                      radius: 0.85,
                       colors: [
-                        SoftPalette.amber300.withValues(alpha: isDark ? 0.35 : 0.18),
-                        primaryThemeColor.withValues(alpha: 0.0),
+                        SoftPalette.gray900.withValues(alpha: isDark ? 0.30 : 0.14),
+                        Colors.transparent,
                       ],
+                      stops: const [0.2, 1.0],
+                    ).createShader(rect);
+                  },
+                  blendMode: BlendMode.dstIn,
+                  child: Opacity(
+                    opacity: isDark ? 0.25 : 0.12,
+                    child: GDecorativeImage.asset(
+                      'assets/images/1.webp',
+                      color: isDark ? t.textPrimary : primaryThemeColor,
+                      colorBlendMode: BlendMode.srcIn,
+                      fit: BoxFit.contain,
+                      alignment: Alignment.centerRight,
+                      errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
                     ),
                   ),
                 ),
               ),
             ),
 
-            // Ambient Radial Glow Spot (Top-Right sky-blue accent glow)
-            Positioned(
-              top: -40,
-              right: 40,
-              width: 220,
-              height: 220,
-              child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [
-                        SoftPalette.sky400.withValues(alpha: isDark ? 0.22 : 0.12),
-                        SoftPalette.sky400.withValues(alpha: 0.0),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+          // Hero Content
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: isDesktop ? 22 : 16,
+              vertical: isDesktop ? 16 : 14,
             ),
-
-            // Seamlessly Dissolved Islamic Pattern Watermark on Right
-            if (GDecor.patternsEnabled)
-              Positioned(
-                right: -20,
-                top: -20,
-                bottom: -20,
-                width: isDesktop ? 340 : 220,
-                child: IgnorePointer(
-                  child: ShaderMask(
-                    shaderCallback: (rect) {
-                      return RadialGradient(
-                        center: Alignment.centerRight,
-                        radius: 0.85,
-                        colors: [
-                          SoftPalette.gray900.withValues(alpha: isDark ? 0.35 : 0.18),
-                          Colors.transparent,
-                        ],
-                        stops: const [0.2, 1.0],
-                      ).createShader(rect);
-                    },
-                    blendMode: BlendMode.dstIn,
-                    child: Opacity(
-                      opacity: isDark ? 0.30 : 0.15,
-                      child: GDecorativeImage.asset(
-                        'assets/images/1.webp',
-                        color: isDark ? SoftPalette.gray50 : primaryThemeColor,
-                        colorBlendMode: BlendMode.srcIn,
-                        fit: BoxFit.contain,
-                        alignment: Alignment.centerRight,
-                        errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-            // Hero Content
-            Padding(
-              padding: EdgeInsets.all(isDesktop ? 24 : 18),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  // Main Left Column: Greeting, Avatar, User Info & Metadata Badges
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Top Greeting Badge Pill
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: SoftPalette.amber300.withValues(alpha: isDark ? 0.18 : 0.10),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: SoftPalette.amber300.withValues(alpha: isDark ? 0.45 : 0.35),
-                              width: 1.0,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: SoftPalette.amber300.withValues(alpha: isDark ? 0.20 : 0.08),
-                                blurRadius: 8,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                greetingBadgeText,
-                                style: TextStyle(
-                                  color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1.3,
-                                ),
-                              ),
-                            ],
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Main Left Column: Greeting, Avatar, User Info & Metadata Badges
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Top Greeting Badge Pill
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: primaryThemeColor.withValues(alpha: isDark ? 0.18 : 0.10),
+                          borderRadius: BorderRadius.circular(Gr.rFull),
+                          border: Border.all(
+                            color: primaryThemeColor.withValues(alpha: isDark ? 0.42 : 0.28),
+                            width: 1.0,
                           ),
                         ),
-                        const SizedBox(height: 16),
+                        child: Text(
+                          greetingBadgeText,
+                          style: TextStyle(
+                            color: primaryThemeColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.1,
+                          ),
+                        ),
+                      ),
+                      SizedBox(height: isDesktop ? 11 : 12),
 
-                        // Profile Avatar, User Name & Date Row
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            // Interactive Avatar with Luxury Gold Halo & Online Indicator
-                            MouseRegion(
-                              cursor: SystemMouseCursors.click,
-                              child: GestureDetector(
-                                onTap: () => _showEnlargedAvatarDialog(state.context, state, t),
-                                child: Tooltip(
-                                  message: 'Tap to view, change or remove profile picture',
-                                  child: Stack(
-                                    clipBehavior: Clip.none,
-                                    children: [
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          gradient: const LinearGradient(
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                            colors: [
-                                              SoftPalette.amber200,
-                                              SoftPalette.orange400,
-                                            ],
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: SoftPalette.amber300.withValues(alpha: 0.40),
-                                              blurRadius: 12,
-                                              spreadRadius: 1,
-                                            ),
+                      // Profile Avatar, User Name & Date Row
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          // Interactive Avatar with Halo & Online Indicator
+                          MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(
+                              onTap: () => _showEnlargedAvatarDialog(state.context, state, t),
+                              child: Tooltip(
+                                message: 'Tap to view, change or remove profile picture',
+                                child: Stack(
+                                  clipBehavior: Clip.none,
+                                  children: [
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topLeft,
+                                          end: Alignment.bottomRight,
+                                          colors: [
+                                            primaryThemeColor,
+                                            secondaryThemeColor,
                                           ],
                                         ),
-                                        padding: const EdgeInsets.all(2.5),
-                                        child: ClipOval(
-                                          child: _buildUserHeroAvatar(userPhotoUrl, userName, t, size: avatarSize),
-                                        ),
                                       ),
-                                      Positioned(
-                                        right: 2,
-                                        bottom: 2,
-                                        child: Container(
-                                          width: 15,
-                                          height: 15,
-                                          decoration: BoxDecoration(
-                                            color: SoftPalette.emerald350,
-                                            shape: BoxShape.circle,
-                                            border: Border.all(
-                                              color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                                              width: 2.0,
-                                            ),
-                                            boxShadow: [
-                                              BoxShadow(
-                                                color: SoftPalette.emerald350.withValues(alpha: 0.6),
-                                                blurRadius: 6,
-                                              ),
-                                            ],
+                                      padding: const EdgeInsets.all(2.0),
+                                      child: ClipOval(
+                                        child: _buildUserHeroAvatar(userPhotoUrl, userName, t, size: avatarSize),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      right: 1,
+                                      bottom: 1,
+                                      child: Container(
+                                        width: 13,
+                                        height: 13,
+                                        decoration: BoxDecoration(
+                                          color: GColor.successOf(isDark),
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: t.bgCard,
+                                            width: 2.0,
                                           ),
                                         ),
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 18),
-                            // User Display Name & Date Subtitle
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    userName,
-                                    style: TextStyle(
-                                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                                      fontSize: isDesktop ? 24 : 19,
-                                      fontWeight: FontWeight.w900,
-                                      letterSpacing: -0.3,
-                                      height: 1.15,
+                          ),
+                          const SizedBox(width: 15),
+                          // User Display Name & Date Subtitle
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  userName,
+                                  style: TextStyle(
+                                    color: t.textPrimary,
+                                    fontSize: isDesktop ? 22 : 18,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.35,
+                                    height: 1.15,
+                                  ),
+                                  softWrap: true,
+                                  maxLines: 2,
+                                ),
+                                const SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.calendar_today_outlined,
+                                      size: 12.5,
+                                      color: t.textSecondary,
                                     ),
-                                    softWrap: true,
-                                    maxLines: 2,
-                                  ),
-                                  const SizedBox(height: 5),
-                                  Row(
-                                    children: [
-                                      Icon(
-                                        Icons.calendar_today_outlined,
-                                        size: 13,
-                                        color: isDark
-                                            ? SoftPalette.slate350
-                                            : SoftPalette.slate550,
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      dateStr,
+                                      style: TextStyle(
+                                        color: t.textSecondary,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
                                       ),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        dateStr,
-                                        style: TextStyle(
-                                          color: isDark
-                                              ? SoftPalette.slate350
-                                              : SoftPalette.slate550,
-                                          fontSize: 12.5,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 18),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: isDesktop ? 13 : 14),
 
-                        // Bottom Metadata Badges Row (Strict Single-Line on Mobile)
-                        FittedBox(
-                          alignment: Alignment.centerLeft,
-                          fit: BoxFit.scaleDown,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
+                      // Bottom Metadata Badges Row (Strict Single-Line on Mobile)
+                      FittedBox(
+                        alignment: Alignment.centerLeft,
+                        fit: BoxFit.scaleDown,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _ExecutiveGlassPill(
+                              t: t,
+                              label: userRole,
+                              icon: (isChairman || isCeo)
+                                  ? Icons.workspace_premium_rounded
+                                  : Icons.shield_outlined,
+                              accentColor: pillRoleColor,
+                              isDark: isDark,
+                              isCompact: !isDesktop,
+                            ),
+                            SizedBox(width: isDesktop ? 8 : 5),
+                            _ExecutiveGlassPill(
+                              t: t,
+                              label: '${state._availableModules.length} Modules',
+                              icon: Icons.grid_view_rounded,
+                              accentColor: pillModulesColor,
+                              isDark: isDark,
+                              isCompact: !isDesktop,
+                            ),
+                            if (state._isSupervisor) ...[
+                              if ((state.widget.userData['branchId'] ?? '').toString().isNotEmpty) ...[
+                                SizedBox(width: isDesktop ? 8 : 5),
+                                _ExecutiveGlassPill(
+                                  t: t,
+                                  label: (state.widget.userData['branchId'] ?? '').toString().toUpperCase(),
+                                  icon: Icons.storefront_rounded,
+                                  accentColor: pillLiveColor,
+                                  isDark: isDark,
+                                  isCompact: !isDesktop,
+                                ),
+                              ],
+                            ] else ...[
+                              SizedBox(width: isDesktop ? 8 : 5),
                               _ExecutiveGlassPill(
-                                label: userRole,
-                                icon: (isChairman || isCeo)
-                                    ? Icons.workspace_premium_rounded
-                                    : Icons.shield_outlined,
-                                accentColor: SoftPalette.amber300,
+                                t: t,
+                                label: 'Global Access',
+                                icon: Icons.public_rounded,
+                                accentColor: pillScopeColor,
                                 isDark: isDark,
                                 isCompact: !isDesktop,
                               ),
                               SizedBox(width: isDesktop ? 8 : 5),
                               _ExecutiveGlassPill(
-                                label: '${state._availableModules.length} Modules',
-                                icon: Icons.grid_view_rounded,
-                                accentColor: SoftPalette.indigo500,
+                                t: t,
+                                label: 'Live Network',
+                                icon: Icons.sensors_rounded,
+                                accentColor: pillLiveColor,
                                 isDark: isDark,
+                                isPulse: true,
                                 isCompact: !isDesktop,
                               ),
-                              if (state._isSupervisor) ...[
-                                if ((state.widget.userData['branchId'] ?? '').toString().isNotEmpty) ...[
-                                  SizedBox(width: isDesktop ? 8 : 5),
-                                  _ExecutiveGlassPill(
-                                    label: (state.widget.userData['branchId'] ?? '').toString().toUpperCase(),
-                                    icon: Icons.storefront_rounded,
-                                    accentColor: SoftPalette.emerald350,
-                                    isDark: isDark,
-                                    isCompact: !isDesktop,
-                                  ),
-                                ],
-                              ] else ...[
-                                SizedBox(width: isDesktop ? 8 : 5),
-                                _ExecutiveGlassPill(
-                                  label: 'Global Access',
-                                  icon: Icons.public_rounded,
-                                  accentColor: SoftPalette.sky400,
-                                  isDark: isDark,
-                                  isCompact: !isDesktop,
-                                ),
-                                SizedBox(width: isDesktop ? 8 : 5),
-                                _ExecutiveGlassPill(
-                                  label: 'Live Network',
-                                  icon: Icons.sensors_rounded,
-                                  accentColor: SoftPalette.emerald350,
-                                  isDark: isDark,
-                                  isPulse: true,
-                                  isCompact: !isDesktop,
-                                ),
-                              ],
                             ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Right Column on Desktop: Seamless Dashboard Animation with In-Engine Theming
+                if (isDesktop)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16, right: 6),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        // Subtle contextual ambient aura behind animation
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: Container(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: RadialGradient(
+                                  colors: [
+                                    primaryThemeColor
+                                        .withValues(alpha: isDark ? 0.16 : 0.09),
+                                    Colors.transparent,
+                                  ],
+                                  radius: 0.72,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 230,
+                          height: 158,
+                          child: RepaintBoundary(
+                            child: ColorFiltered(
+                              colorFilter: isDark
+                                  ? const ColorFilter.matrix(<double>[
+                                      0.78, 0.00, 0.00, 0, -20, // Tones down harsh white base
+                                      0.00, 1.00, 0.10, 0,  15, // Amplifies emerald / teal data graphs
+                                      0.05, 0.12, 1.25, 0,  30, // Illuminates cyber cyan & sky accents
+                                      0.00, 0.00, 0.00, 1,   0,
+                                    ])
+                                  : const ColorFilter.matrix(<double>[
+                                      0.98, 0.00, 0.00, 0,   0,
+                                      0.00, 0.98, 0.02, 0,   2,
+                                      0.02, 0.04, 1.05, 0,   8,
+                                      0.00, 0.00, 0.00, 1,   0,
+                                    ]),
+                              child: Lottie.asset(
+                                'assets/animations/dashboard.json',
+                                fit: BoxFit.contain,
+                                repeat: !GDecor.reduceMotion,
+                                errorBuilder: (context, error, stackTrace) => Icon(
+                                  Icons.dashboard_customize_rounded,
+                                  size: 56,
+                                  color: primaryThemeColor,
+                                ),
+                              ),
+                            ),
                           ),
                         ),
                       ],
                     ),
                   ),
-
-                  // Right Column on Desktop: Seamless Dashboard Animation with In-Engine Theming
-                  if (isDesktop)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 16, right: 8),
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          // Subtle contextual ambient aura behind animation
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  gradient: RadialGradient(
-                                    colors: [
-                                      (isDark
-                                              ? SoftPalette.sky400
-                                              : SoftPalette.amber300)
-                                          .withValues(alpha: isDark ? 0.18 : 0.10),
-                                      Colors.transparent,
-                                    ],
-                                    radius: 0.75,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: 290,
-                            height: 220,
-                            child: RepaintBoundary(
-                              child: ColorFiltered(
-                                colorFilter: isDark
-                                    ? const ColorFilter.matrix(<double>[
-                                        0.78, 0.00, 0.00, 0, -20, // Tones down harsh white base
-                                        0.00, 1.00, 0.10, 0,  15, // Amplifies emerald / teal data graphs
-                                        0.05, 0.12, 1.25, 0,  30, // Illuminates cyber cyan & sky accents
-                                        0.00, 0.00, 0.00, 1,   0,
-                                      ])
-                                    : const ColorFilter.matrix(<double>[
-                                        0.98, 0.00, 0.00, 0,   0,
-                                        0.00, 0.98, 0.02, 0,   2,
-                                        0.02, 0.04, 1.05, 0,   8,
-                                        0.00, 0.00, 0.00, 1,   0,
-                                      ]),
-                                child: Lottie.asset(
-                                  'assets/animations/dashboard.json',
-                                  fit: BoxFit.contain,
-                                  repeat: !GDecor.reduceMotion,
-                                  errorBuilder: (context, error, stackTrace) => Icon(
-                                    Icons.dashboard_customize_rounded,
-                                    size: 64,
-                                    color: isDark
-                                        ? SoftPalette.sky350
-                                        : SoftPalette.sky500,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     ),
   );
 }
 
 class _ExecutiveGlassPill extends StatefulWidget {
+  final RoleThemeData t;
   final String label;
   final IconData icon;
   final Color accentColor;
@@ -3389,6 +3557,7 @@ class _ExecutiveGlassPill extends StatefulWidget {
   final bool isCompact;
 
   const _ExecutiveGlassPill({
+    required this.t,
     required this.label,
     required this.icon,
     required this.accentColor,
@@ -3406,6 +3575,17 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
 
   @override
   Widget build(BuildContext context) {
+    final baseFill = widget.isDark
+        ? Color.alphaBlend(
+            widget.accentColor.withValues(alpha: 0.09),
+            widget.t.bgCardAlt,
+          )
+        : widget.t.bgCard;
+    final hoverFill = Color.alphaBlend(
+      widget.accentColor.withValues(alpha: widget.isDark ? 0.24 : 0.13),
+      widget.t.bgCard,
+    );
+
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
@@ -3417,33 +3597,25 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
           vertical: widget.isCompact ? 4.5 : 6.0,
         ),
         decoration: BoxDecoration(
-          color: widget.isDark
-              ? (_isHovered
-                  ? widget.accentColor.withValues(alpha: 0.22)
-                  : SoftPalette.slate800.withValues(alpha: 0.70))
-              : (_isHovered
-                  ? widget.accentColor.withValues(alpha: 0.14)
-                  : SoftPalette.gray50.withValues(alpha: 0.92)),
+          color: _isHovered ? hoverFill : baseFill,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: _isHovered
-                ? widget.accentColor.withValues(alpha: widget.isDark ? 0.65 : 0.55)
-                : (widget.isDark
-                    ? SoftPalette.gray50.withValues(alpha: 0.12)
-                    : widget.accentColor.withValues(alpha: 0.25)),
-            width: 0.8,
+                ? widget.accentColor.withValues(alpha: widget.isDark ? 0.65 : 0.50)
+                : widget.t.bgRule,
+            width: 0.9,
           ),
           boxShadow: _isHovered
               ? [
                   BoxShadow(
-                    color: widget.accentColor.withValues(alpha: widget.isDark ? 0.35 : 0.20),
+                    color: widget.accentColor.withValues(alpha: widget.isDark ? 0.30 : 0.18),
                     blurRadius: 8,
                     offset: const Offset(0, 3),
                   ),
                 ]
               : [
                   BoxShadow(
-                    color: widget.accentColor.withValues(alpha: widget.isDark ? 0.15 : 0.06),
+                    color: widget.accentColor.withValues(alpha: widget.isDark ? 0.14 : 0.05),
                     blurRadius: 5,
                     offset: const Offset(0, 1.5),
                   ),
@@ -3456,7 +3628,7 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
             Container(
               padding: EdgeInsets.all(widget.isCompact ? 3 : 4),
               decoration: BoxDecoration(
-                color: widget.accentColor.withValues(alpha: widget.isDark ? 0.20 : 0.12),
+                color: widget.accentColor.withValues(alpha: widget.isDark ? 0.22 : 0.13),
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Icon(widget.icon, size: widget.isCompact ? 11 : 13, color: widget.accentColor),
@@ -3465,9 +3637,7 @@ class _ExecutiveGlassPillState extends State<_ExecutiveGlassPill> {
             Text(
               widget.label,
               style: TextStyle(
-                color: widget.isDark
-                    ? (_isHovered ? SoftPalette.gray50 : SoftPalette.slate150)
-                    : (_isHovered ? SoftPalette.slate900 : SoftPalette.slate700),
+                color: _isHovered ? widget.t.textPrimary : widget.t.textPrimary,
                 fontSize: widget.isCompact ? 10.0 : 11.5,
                 fontWeight: FontWeight.w800,
                 letterSpacing: 0.2,
@@ -4470,7 +4640,7 @@ Widget _buildUserHeroAvatar(String photoUrl, String userName, RoleThemeData t, {
     height: size,
     decoration: BoxDecoration(
       shape: BoxShape.circle,
-      border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.95), width: 3.0),
+      border: Border.all(color: t.bgCard.withValues(alpha: 0.96), width: 3.0),
       boxShadow: [
         BoxShadow(
           color: SoftPalette.gray900.withValues(alpha: 0.25),
@@ -4486,12 +4656,12 @@ Widget _buildUserHeroAvatar(String photoUrl, String userName, RoleThemeData t, {
 Widget _buildUserAvatarFallback(String userName, RoleThemeData t, double size) {
   final initial = userName.trim().isNotEmpty ? userName.trim()[0].toUpperCase() : 'U';
   return Container(
-    color: t.accent.withValues(alpha: 0.8),
+    color: t.accent.withValues(alpha: 0.85),
     alignment: Alignment.center,
     child: Text(
       initial,
       style: TextStyle(
-        color: SoftPalette.gray50,
+        color: SoftPalette.pureWhiteSoft,
         fontWeight: FontWeight.w900,
         fontSize: size * 0.42,
       ),
@@ -4511,7 +4681,7 @@ class _SearchBar extends StatelessWidget {
   final RoleThemeData t;
   const _SearchBar({required this.state, required this.t});
 
-  bool get _dark => state._isDark;
+  bool get _dark => t.isDarkCanvas || state._isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -4529,14 +4699,14 @@ class _SearchBar extends StatelessWidget {
             : const AlwaysStoppedAnimation(1.0),
         child: Container(
           decoration: BoxDecoration(
-            color: _dark ? SoftPalette.slate900 : t.bgCard,
+            color: t.bgCard,
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
-                color: _dark ? SoftPalette.slate750 : t.bgRule,
+                color: t.bgRule,
                 width: 1.5),
             boxShadow: [
               BoxShadow(
-                  color: SoftPalette.gray900.withValues(alpha: 0.06),
+                  color: SoftPalette.gray900.withValues(alpha: _dark ? 0.22 : 0.06),
                   blurRadius: 16,
                   offset: const Offset(0, 4)),
             ],
@@ -4551,23 +4721,21 @@ class _SearchBar extends StatelessWidget {
               });
             },
             style: TextStyle(
-                color: _dark ? SoftPalette.slate150 : t.textPrimary,
+                color: t.textPrimary,
                 fontSize: 14,
                 fontWeight: FontWeight.w500),
             decoration: InputDecoration(
               hintText: 'Search modules…',
               hintStyle: TextStyle(
-                  color: _dark ? SoftPalette.slate400 : t.textTertiary,
+                  color: t.textTertiary,
                   fontSize: 14),
               prefixIcon: Icon(Icons.search_rounded,
-                  color: _dark ? SoftPalette.slate400 : t.textTertiary,
+                  color: t.textTertiary,
                   size: 20),
               suffixIcon: state._searchQuery.isNotEmpty
                   ? IconButton(
                       icon: Icon(Icons.close_rounded,
-                          color: _dark
-                              ? SoftPalette.slate400
-                              : t.textTertiary,
+                          color: t.textTertiary,
                           size: 18),
                       onPressed: () => state.clearSearch(),
                     )
@@ -4590,7 +4758,7 @@ class _CategoryChips extends StatelessWidget {
   final RoleThemeData t;
   const _CategoryChips({required this.state, required this.t});
 
-  bool get _dark => state._isDark;
+  bool get _dark => t.isDarkCanvas || state._isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -4612,25 +4780,18 @@ class _CategoryChips extends StatelessWidget {
                 selected: sel,
                 onSelected: (v) { if (v) state._changeCategory(cat); },
                 selectedColor:
-                    _dark ? t.accent.withValues(alpha: 0.2) : t.accent,
+                    _dark ? t.accent.withValues(alpha: 0.22) : t.accent,
                 labelStyle: TextStyle(
                     color: sel
-                        ? (_dark ? t.accent : SoftPalette.gray50)
-                        : (_dark
-                            ? SoftPalette.slate400
-                            : t.textSecondary),
+                        ? (_dark ? t.accent : SoftPalette.pureWhiteSoft)
+                        : t.textSecondary,
                     fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
                     fontSize: 12),
-                backgroundColor:
-                    _dark ? SoftPalette.slate900 : t.bgCard,
+                backgroundColor: t.bgCard,
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(20),
                     side: BorderSide(
-                        color: sel
-                            ? t.accent
-                            : (_dark
-                                ? SoftPalette.slate750
-                                : t.bgRule))),
+                        color: sel ? t.accent : t.bgRule)),
                 showCheckmark: false,
                 padding: const EdgeInsets.symmetric(
                     horizontal: 10, vertical: 5),
@@ -4652,7 +4813,7 @@ class _EmptySearch extends StatelessWidget {
   const _EmptySearch(
       {required this.state, required this.t, required this.hPad});
 
-  bool get _dark => state._isDark;
+  bool get _dark => t.isDarkCanvas || state._isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -4669,12 +4830,12 @@ class _EmptySearch extends StatelessWidget {
             constraints: const BoxConstraints(maxWidth: 480),
             padding: const EdgeInsets.all(28),
             decoration: BoxDecoration(
-              color: _dark ? SoftPalette.slate900 : SoftPalette.gray50,
+              color: t.bgCard,
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: _dark ? SoftPalette.slate750 : t.bgRule),
+              border: Border.all(color: t.bgRule),
               boxShadow: [
                 BoxShadow(
-                  color: SoftPalette.gray900.withValues(alpha: 0.03),
+                  color: SoftPalette.gray900.withValues(alpha: _dark ? 0.22 : 0.04),
                   blurRadius: 16,
                   offset: const Offset(0, 4),
                 ),
@@ -4686,10 +4847,14 @@ class _EmptySearch extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(18),
                   decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.slate100),
+                    color: t.bgCardAlt,
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(Icons.school_outlined, size: 36, color: context.adapt(SoftPalette.blue550)),
+                  child: Icon(
+                    Icons.school_outlined,
+                    size: 36,
+                    color: _dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+                  ),
                 ),
                 const SizedBox(height: 18),
                 Text(
@@ -4698,7 +4863,7 @@ class _EmptySearch extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w800,
-                    color: _dark ? SoftPalette.gray50 : SoftPalette.slate800,
+                    color: t.textPrimary,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -4707,7 +4872,7 @@ class _EmptySearch extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 13,
-                    color: _dark ? SoftPalette.slate400 : SoftPalette.slate550,
+                    color: t.textSecondary,
                   ),
                 ),
               ],
@@ -4733,25 +4898,24 @@ class _EmptySearch extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(22),
               decoration: BoxDecoration(
-                color: _dark ? SoftPalette.slate900 : t.accentMuted.withValues(alpha: 0.3),
+                color: _dark ? t.bgCardAlt : t.accentMuted.withValues(alpha: 0.45),
                 shape: BoxShape.circle,
-                border: Border.all(
-                    color: _dark ? SoftPalette.slate750 : t.bgRule),
+                border: Border.all(color: t.bgRule),
               ),
               child: Icon(Icons.search_off_rounded,
                   size: 32,
-                  color: _dark ? SoftPalette.slate400 : t.textTertiary),
+                  color: t.textTertiary),
             ),
             const SizedBox(height: 16),
             Text('No modules found',
                 style: TextStyle(
-                    color: _dark ? SoftPalette.slate150 : t.textPrimary,
+                    color: t.textPrimary,
                     fontSize: 17,
                     fontWeight: FontWeight.w800)),
             const SizedBox(height: 6),
             Text(state._searchQuery.isNotEmpty ? '"${state._searchQuery}" didn\'t match anything' : 'No modules available for this category',
                 style: TextStyle(
-                    color: _dark ? SoftPalette.slate400 : t.textTertiary,
+                    color: t.textTertiary,
                     fontSize: 13)),
             const SizedBox(height: 20),
             TextButton(
@@ -4809,7 +4973,7 @@ class _ModuleGrid extends StatelessWidget {
   }
 
   Widget _buildGrid(BuildContext context, int cols, double w) {
-    final dark = state._isDark;
+    final dark = t.isDarkCanvas || state._isDark;
     final isSearchActive = state._searchQuery.isNotEmpty;
 
     // Responsive Grid Delegate: 1 col on mobile, 2 on tablet, 3-4 on desktop
@@ -4867,7 +5031,7 @@ class _ModuleGrid extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.15),
+                    color: color.withValues(alpha: dark ? 0.20 : 0.12),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Icon(icon, size: 15, color: color),
@@ -4876,7 +5040,7 @@ class _ModuleGrid extends StatelessWidget {
                 Text(
                   title.toUpperCase(),
                   style: TextStyle(
-                    color: dark ? SoftPalette.slate150 : t.textPrimary,
+                    color: t.textPrimary,
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.0,
@@ -4886,7 +5050,7 @@ class _ModuleGrid extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.18),
+                    color: color.withValues(alpha: dark ? 0.22 : 0.14),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(
@@ -4931,17 +5095,17 @@ class _ModuleGrid extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (featured.isNotEmpty)
-          buildCategorySection('Core & Executive Operations', Icons.star_rounded, SoftPalette.amber300, featured),
+          buildCategorySection('Core & Executive Operations', Icons.star_rounded, dark ? SoftPalette.brightGold : SoftPalette.warmMarigold, featured),
         if (officeMods.isNotEmpty)
-          buildCategorySection('Office & Financial ERP', Icons.business_center_rounded, SoftPalette.indigo500, officeMods),
+          buildCategorySection('Office & Financial ERP', Icons.business_center_rounded, dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue, officeMods),
         if (medicalMods.isNotEmpty)
-          buildCategorySection('Medical & Dispensary Services', Icons.local_hospital_rounded, SoftPalette.teal500, medicalMods),
+          buildCategorySection('Medical & Dispensary Services', Icons.local_hospital_rounded, dark ? SoftPalette.brightCyan : SoftPalette.deepCyan, medicalMods),
         if (welfareMods.isNotEmpty)
-          buildCategorySection('Welfare & Relief Services', Icons.volunteer_activism_rounded, SoftPalette.orange350, welfareMods),
+          buildCategorySection('Welfare & Relief Services', Icons.volunteer_activism_rounded, dark ? SoftPalette.brightCoral : SoftPalette.roseCoral, welfareMods),
         if (eduMods.isNotEmpty)
-          buildCategorySection('Madrassa & School Education', Icons.school_rounded, SoftPalette.violet500, eduMods),
+          buildCategorySection('Madrassa & School Education', Icons.school_rounded, dark ? SoftPalette.softLavender : SoftPalette.royalViolet, eduMods),
         if (restMods.isNotEmpty)
-          buildCategorySection('System & Maintenance', Icons.settings_rounded, SoftPalette.slate550, restMods),
+          buildCategorySection('System & Maintenance', Icons.settings_rounded, t.textSecondary, restMods),
       ],
     );
   }
@@ -4993,38 +5157,41 @@ class _ModuleCardState extends State<_ModuleCard>
   @override
   Widget build(BuildContext context) {
     final dark = widget.dark;
+    final t = widget.t;
     final w = MediaQuery.of(context).size.width;
     final tiny = w < 480;
 
-    // Get color & label for category with individual rich palette & ambient glow themes
+    // High-clarity categorical accents matched across light, hybrid & dark themes
     final Color categoryColor;
     final Color ambientGlowColor;
     final String categoryLabel;
 
     switch (widget.module.category) {
       case ModuleCategory.office:
-        categoryColor = widget.module.id == 'finance' ? SoftPalette.violet500 : SoftPalette.indigo500; // Soft Purple / Indigo
-        ambientGlowColor = SoftPalette.indigo400;
+        categoryColor = widget.module.id == 'finance'
+            ? (dark ? SoftPalette.softLavender : SoftPalette.royalViolet)
+            : (dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue);
+        ambientGlowColor = categoryColor;
         categoryLabel = widget.module.id == 'finance' ? 'HR / FINANCE' : 'OFFICE';
         break;
       case ModuleCategory.dispensary:
-        categoryColor = SoftPalette.sky400; // Sky Blue / Teal
-        ambientGlowColor = SoftPalette.sky350;
+        categoryColor = dark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
+        ambientGlowColor = categoryColor;
         categoryLabel = 'MEDICAL';
         break;
       case ModuleCategory.dasterkhwaan:
-        categoryColor = SoftPalette.orange350; // Warm Orange
-        ambientGlowColor = SoftPalette.orange350;
+        categoryColor = dark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
+        ambientGlowColor = categoryColor;
         categoryLabel = 'WELFARE';
         break;
       case ModuleCategory.madrassa:
-        categoryColor = SoftPalette.red500; // Deep Rose / Berry
-        ambientGlowColor = SoftPalette.red400;
+        categoryColor = dark ? SoftPalette.brightCoral : SoftPalette.roseCoral;
+        ambientGlowColor = categoryColor;
         categoryLabel = 'MADRASSA';
         break;
       case ModuleCategory.school:
-        categoryColor = dark ? SoftPalette.sky350 : SoftPalette.sky700; // Deep Ocean Navy / Sky Blue
-        ambientGlowColor = SoftPalette.teal500; // Sage Teal
+        categoryColor = dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+        ambientGlowColor = categoryColor;
         categoryLabel = 'SCHOOL';
         break;
     }
@@ -5050,13 +5217,13 @@ class _ModuleCardState extends State<_ModuleCard>
               // Ambient outer radial glow shadow
               boxShadow: [
                 BoxShadow(
-                  color: ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.30 : 0.16) : (dark ? 0.12 : 0.06)),
+                  color: ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.30 : 0.16) : (dark ? 0.12 : 0.05)),
                   blurRadius: _hov ? 24 : 12,
                   spreadRadius: _hov ? 1 : 0,
                   offset: Offset(0, _hov ? 8 : 3),
                 ),
                 BoxShadow(
-                  color: SoftPalette.gray900.withValues(alpha: dark ? 0.35 : 0.05),
+                  color: SoftPalette.gray900.withValues(alpha: dark ? 0.35 : 0.04),
                   blurRadius: 8,
                   offset: const Offset(0, 2),
                 ),
@@ -5073,20 +5240,18 @@ class _ModuleCardState extends State<_ModuleCard>
                     end: Alignment.bottomRight,
                     colors: dark
                         ? [
-                            SoftPalette.slate800,
-                            SoftPalette.slate900,
+                            t.bgCard,
+                            Color.alphaBlend(categoryColor.withValues(alpha: 0.05), t.bgCardAlt),
                           ]
                         : [
-                            SoftPalette.gray50,
-                            SoftPalette.gray50,
+                            t.bgCard,
+                            Color.alphaBlend(categoryColor.withValues(alpha: 0.03), t.bgCard),
                           ],
                   ),
                   border: Border.all(
                     color: _hov
-                        ? categoryColor.withValues(alpha: dark ? 0.70 : 0.60)
-                        : (dark
-                            ? SoftPalette.slate700
-                            : SoftPalette.slate150),
+                        ? categoryColor.withValues(alpha: dark ? 0.72 : 0.62)
+                        : t.bgRule,
                     width: _hov ? 1.6 : 1.2,
                   ),
                 ),
@@ -5105,7 +5270,7 @@ class _ModuleCardState extends State<_ModuleCard>
                               shape: BoxShape.circle,
                               gradient: RadialGradient(
                                 colors: [
-                                  ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.35 : 0.25) : (dark ? 0.18 : 0.12)),
+                                  ambientGlowColor.withValues(alpha: _hov ? (dark ? 0.35 : 0.24) : (dark ? 0.18 : 0.11)),
                                   ambientGlowColor.withValues(alpha: 0.0),
                                 ],
                               ),
@@ -5165,7 +5330,7 @@ class _ModuleCardState extends State<_ModuleCard>
                                         ],
                                       ),
                                       border: Border.all(
-                                        color: SoftPalette.gray50.withValues(alpha: 0.35),
+                                        color: SoftPalette.pureWhiteSoft.withValues(alpha: 0.35),
                                         width: 1.0,
                                       ),
                                       boxShadow: [
@@ -5175,7 +5340,7 @@ class _ModuleCardState extends State<_ModuleCard>
                                           offset: const Offset(0, 4),
                                         ),
                                         BoxShadow(
-                                          color: SoftPalette.gray50.withValues(alpha: 0.25),
+                                          color: SoftPalette.pureWhiteSoft.withValues(alpha: 0.25),
                                           blurRadius: 1,
                                           offset: const Offset(-1, -1),
                                         ),
@@ -5183,7 +5348,7 @@ class _ModuleCardState extends State<_ModuleCard>
                                     ),
                                     child: Icon(
                                       widget.module.icon,
-                                      color: SoftPalette.gray50,
+                                      color: SoftPalette.pureWhiteSoft,
                                       size: tiny ? 19 : 22,
                                     ),
                                   ),
@@ -5224,7 +5389,7 @@ class _ModuleCardState extends State<_ModuleCard>
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
-                                          color: dark ? SoftPalette.gray50 : SoftPalette.slate900,
+                                          color: t.textPrimary,
                                           fontSize: tiny ? 14.0 : 15.5,
                                           fontWeight: FontWeight.w800,
                                           letterSpacing: -0.2,
@@ -5246,13 +5411,13 @@ class _ModuleCardState extends State<_ModuleCard>
                                     color: _hov
                                         ? categoryColor
                                         : (dark
-                                            ? SoftPalette.gray50.withValues(alpha: 0.08)
+                                            ? t.textPrimary.withValues(alpha: 0.08)
                                             : categoryColor.withValues(alpha: 0.10)),
                                     border: Border.all(
                                       color: _hov
                                           ? Colors.transparent
                                           : (dark
-                                              ? SoftPalette.gray50.withValues(alpha: 0.20)
+                                              ? t.textPrimary.withValues(alpha: 0.20)
                                               : categoryColor.withValues(alpha: 0.22)),
                                       width: 1.0,
                                     ),
@@ -5272,7 +5437,7 @@ class _ModuleCardState extends State<_ModuleCard>
                                       offset: Offset(_hov ? 0.1 : 0.0, 0.0),
                                       child: Icon(
                                         Icons.arrow_forward_rounded,
-                                        color: _hov ? SoftPalette.gray50 : categoryColor,
+                                        color: _hov ? SoftPalette.pureWhiteSoft : categoryColor,
                                         size: 14,
                                       ),
                                     ),
@@ -5289,9 +5454,7 @@ class _ModuleCardState extends State<_ModuleCard>
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                color: dark
-                                    ? (_hov ? SoftPalette.slate200 : SoftPalette.slate350)
-                                    : (_hov ? SoftPalette.slate600 : SoftPalette.slate550),
+                                color: _hov ? t.textPrimary : t.textSecondary,
                                 fontSize: tiny ? 11.0 : 12.0,
                                 fontWeight: FontWeight.w400,
                                 height: 1.35,
@@ -5308,5 +5471,619 @@ class _ModuleCardState extends State<_ModuleCard>
           ),
         ),
       );
+  }
+}
+
+// ── HQ Manager Command-Center Collapsible Rail & Slim Top Bar ─────────────────
+
+class _HqCollapsibleRail extends StatelessWidget {
+  final _GlobalModularDashboardState state;
+  final RoleThemeData t;
+  const _HqCollapsibleRail({required this.state, required this.t});
+
+  static const _icons = {
+    DashboardCategoryFilter.overall: Icons.space_dashboard_rounded,
+    DashboardCategoryFilter.office: Icons.business_center_rounded,
+    DashboardCategoryFilter.dispensary: Icons.local_hospital_rounded,
+    DashboardCategoryFilter.dasterkhwaan: Icons.volunteer_activism_rounded,
+    DashboardCategoryFilter.madrassa: Icons.auto_stories_rounded,
+    DashboardCategoryFilter.school: Icons.school_rounded,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final collapsed = state._hqRailCollapsed;
+    final dark = t.isDarkSidebar || t.isDarkCanvas || state._isDark;
+    final double width = collapsed ? 76.0 : 244.0;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      width: width,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [t.sidebarBg, t.sidebarBgSecondary],
+        ),
+        border: Border(
+          right: BorderSide(color: t.sidebarBorder, width: 1.1),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: t.accent.withValues(alpha: dark ? 0.10 : 0.05),
+            blurRadius: 20,
+            offset: const Offset(4, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // Brand + Collapse Toggle
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              collapsed ? 12 : 16,
+              18,
+              collapsed ? 12 : 12,
+              14,
+            ),
+            child: collapsed
+                ? Column(
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 36,
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          color: SoftPalette.gray50,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: t.accent.withValues(alpha: 0.25),
+                          ),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: Image.asset(
+                            'assets/logo/gmwf-1.webp',
+                            fit: BoxFit.contain,
+                            cacheHeight: 108,
+                            errorBuilder: (_, _, _) => Icon(
+                              Icons.business_rounded,
+                              color: t.accent,
+                              size: 18,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Tooltip(
+                        message: 'Expand rail',
+                        child: InkWell(
+                          onTap: state._toggleHqRail,
+                          borderRadius: BorderRadius.circular(10),
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: t.accent.withValues(alpha: dark ? 0.18 : 0.10),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: t.accent.withValues(alpha: 0.22),
+                              ),
+                            ),
+                            child: Icon(
+                              Icons.chevron_right_rounded,
+                              size: 18,
+                              color: t.accent,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                : Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 36,
+                          height: 36,
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            color: SoftPalette.gray50,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: t.accent.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(7),
+                            child: Image.asset(
+                              'assets/logo/gmwf-1.webp',
+                              fit: BoxFit.contain,
+                              cacheHeight: 108,
+                              errorBuilder: (_, _, _) => Icon(
+                                Icons.business_rounded,
+                                color: t.accent,
+                                size: 18,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'GMWF HQ',
+                                style: TextStyle(
+                                  color: t.sidebarTextActive,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13.5,
+                                  letterSpacing: 0.3,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                'Command Rail',
+                                style: TextStyle(
+                                  color: t.sidebarText,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                Tooltip(
+                  message: 'Collapse rail',
+                  child: InkWell(
+                    onTap: state._toggleHqRail,
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: t.accent.withValues(alpha: dark ? 0.18 : 0.10),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: t.accent.withValues(alpha: 0.22),
+                        ),
+                      ),
+                      child: Icon(
+                        Icons.chevron_left_rounded,
+                        size: 18,
+                        color: t.accent,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Divider(color: t.sidebarBorder, height: 1),
+          ),
+          // Category Navigation
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              children: [
+                if (!collapsed)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+                    child: Text(
+                      'WORKSPACES',
+                      style: TextStyle(
+                        color: t.sidebarText.withValues(alpha: 0.72),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                  ),
+                ...state._visibleCategories.map((cat) {
+                  final sel = state._hqUtilityView == null &&
+                      state._selectedCategory == cat;
+                  final icon = _icons[cat] ?? Icons.grid_view_rounded;
+                  final label = cat == DashboardCategoryFilter.overall
+                      ? 'Command Center'
+                      : cat.name[0].toUpperCase() + cat.name.substring(1);
+                  final catColor = cat == DashboardCategoryFilter.overall
+                      ? t.accent
+                      : _getCatColor(cat, dark: dark);
+
+                  final item = Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: collapsed ? 12 : 10,
+                      vertical: 3,
+                    ),
+                    child: InkWell(
+                      onTap: () => state._changeCategory(cat),
+                      borderRadius: BorderRadius.circular(12),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 160),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: collapsed ? 0 : 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: sel
+                              ? catColor.withValues(alpha: dark ? 0.22 : 0.13)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: sel
+                                ? catColor.withValues(alpha: 0.40)
+                                : Colors.transparent,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: collapsed
+                              ? MainAxisAlignment.center
+                              : MainAxisAlignment.start,
+                          children: [
+                            Icon(
+                              icon,
+                              size: 19,
+                              color: sel ? catColor : t.sidebarText,
+                            ),
+                            if (!collapsed) ...[
+                              const SizedBox(width: 11),
+                              Expanded(
+                                child: Text(
+                                  label,
+                                  style: TextStyle(
+                                    color: sel ? t.sidebarTextActive : t.sidebarText,
+                                    fontWeight: sel ? FontWeight.w700 : FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+
+                  return collapsed
+                      ? Tooltip(message: label, child: item)
+                      : item;
+                }),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Divider(color: t.sidebarBorder, height: 1),
+          ),
+          // Utility Footer
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: collapsed ? 12 : 10,
+              vertical: 12,
+            ),
+            child: Column(
+              children: [
+                _HqRailAction(
+                  icon: Icons.cloud_upload_rounded,
+                  label: 'Force Global Sync',
+                  color: dark ? SoftPalette.brightMint : SoftPalette.jadeEmerald,
+                  collapsed: collapsed,
+                  t: t,
+                  onTap: () => state._confirmAndTriggerForceGlobalSync(context),
+                ),
+                _HqRailAction(
+                  icon: Icons.notifications_outlined,
+                  label: 'Notifications',
+                  color: dark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+                  collapsed: collapsed,
+                  selected: state._hqUtilityView == _HqUtilityView.notifications,
+                  t: t,
+                  onTap: () => state._openHqUtility(_HqUtilityView.notifications),
+                ),
+                _HqRailAction(
+                  icon: Icons.settings_outlined,
+                  label: 'Settings',
+                  color: dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+                  collapsed: collapsed,
+                  selected: state._hqUtilityView == _HqUtilityView.settings,
+                  t: t,
+                  onTap: () => state._openHqUtility(_HqUtilityView.settings),
+                ),
+                _HqRailAction(
+                  icon: Icons.logout_rounded,
+                  label: 'Sign Out',
+                  color: dark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+                  collapsed: collapsed,
+                  t: t,
+                  onTap: state._logout,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HqRailAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool collapsed;
+  final bool selected;
+  final RoleThemeData t;
+  final VoidCallback onTap;
+
+  const _HqRailAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.collapsed,
+    this.selected = false,
+    required this.t,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final child = InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: EdgeInsets.symmetric(
+          horizontal: collapsed ? 0 : 10,
+          vertical: 8,
+        ),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.14) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? color.withValues(alpha: 0.35) : Colors.transparent,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment:
+              collapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
+          children: [
+            Icon(icon, size: 18, color: color),
+            if (!collapsed) ...[
+              const SizedBox(width: 11),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: selected ? t.sidebarTextActive : t.sidebarText,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+                    fontSize: 12.5,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    return collapsed ? Tooltip(message: label, child: child) : child;
+  }
+}
+
+class _HqSlimTopBar extends StatelessWidget {
+  final _GlobalModularDashboardState state;
+  final RoleThemeData t;
+  final bool isDesktop;
+  const _HqSlimTopBar({
+    required this.state,
+    required this.t,
+    required this.isDesktop,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final dateStr =
+        '${_weekdayFull(now.weekday)}, ${now.day} ${_monthFull(now.month)} ${now.year}';
+    final hPad = isDesktop ? 36.0 : 18.0;
+    final dark = t.isDarkCanvas || state._isDark;
+    final rawTod = _timeOfDayString(now.hour);
+    final todTitle = rawTod.isEmpty
+        ? 'Day'
+        : rawTod[0].toUpperCase() + rawTod.substring(1).toLowerCase();
+
+    return Container(
+      margin: EdgeInsets.fromLTRB(hPad, isDesktop ? 16 : 10, hPad, 0),
+      padding: EdgeInsets.symmetric(
+        horizontal: isDesktop ? 22 : 14,
+        vertical: isDesktop ? 14 : 12,
+      ),
+      decoration: BoxDecoration(
+        color: t.bgCard,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.alphaBlend(
+              t.accent.withValues(alpha: dark ? 0.16 : 0.07),
+              t.bgCard,
+            ),
+            t.bgCard,
+            Color.alphaBlend(
+              t.chartBar2.withValues(alpha: dark ? 0.08 : 0.03),
+              t.bgCard,
+            ),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: t.accent.withValues(alpha: dark ? 0.28 : 0.18),
+          width: 1.1,
+        ),
+        boxShadow: GShadow.s2(dark),
+      ),
+      child: Row(
+        children: [
+          _buildUserHeroAvatar(
+            state._userPhotoUrl,
+            state._userName,
+            t,
+            size: isDesktop ? 44 : 36,
+          ),
+          SizedBox(width: isDesktop ? 14 : 10),
+          // Left: Respectful Executive Salutation & Authority Scope
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'ASSALAM-O-ALAIKUM · GOOD $todTitle'.toUpperCase(),
+                      style: TextStyle(
+                        color: t.accent,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.9,
+                      ),
+                    ),
+                    if (isDesktop) ...[
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: t.accent.withValues(alpha: dark ? 0.20 : 0.10),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: t.accent.withValues(alpha: 0.28),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: dark
+                                    ? SoftPalette.brightMint
+                                    : SoftPalette.jadeEmerald,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              'HQ MANAGER · ALL BRANCHES',
+                              style: TextStyle(
+                                color: t.accent,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Respected ${state._userName}',
+                  style: TextStyle(
+                    color: t.textPrimary,
+                    fontSize: isDesktop ? 17 : 14.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.2,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (isDesktop)
+                  Text(
+                    'Executive Command Center  ·  $dateStr',
+                    style: TextStyle(
+                      color: t.textSecondary,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Right: Quick Actions
+          if (isDesktop) ...[
+            InkWell(
+              onTap: () {
+                if (state._selectedCategory == DashboardCategoryFilter.overall) {
+                  state._changeCategory(DashboardCategoryFilter.office);
+                }
+              },
+              borderRadius: BorderRadius.circular(11),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                decoration: BoxDecoration(
+                  color: t.bgCardAlt,
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(color: t.bgRule),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.apps_rounded, size: 15, color: t.accent),
+                    const SizedBox(width: 7),
+                    Text(
+                      'All Modules (${state._availableModules.length})',
+                      style: TextStyle(
+                        color: t.textPrimary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Tooltip(
+              message: 'Executive Settings',
+              child: InkWell(
+                onTap: () => state._openHqUtility(_HqUtilityView.settings),
+                borderRadius: BorderRadius.circular(11),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: t.bgCardAlt,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(color: t.bgRule),
+                  ),
+                  child: Icon(
+                    Icons.tune_rounded,
+                    size: 17,
+                    color: t.textSecondary,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }

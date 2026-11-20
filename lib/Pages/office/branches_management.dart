@@ -1,5 +1,7 @@
 // lib/pages/office/branches_management.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -72,6 +74,14 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
         role.contains('coordinator') ||
         role.contains('supervisor') ||
         role == 'head office';
+  }
+
+  /// Creating a branch: Chairman, CEO and Admin only (user, 2026-11-19: hidden from the HQ
+  /// Manager; managers, supervisors and coordinators never had a reason to see it either).
+  bool get _canRegisterBranch {
+    final activeData = LocalStorageService.getActiveUserData();
+    final role = (widget.currentUserRole ?? activeData['role'] ?? '').toString().toLowerCase().trim();
+    return role == 'chairman' || role == 'ceo' || role == 'admin' || role == 'global admin' || role == 'super admin';
   }
 
   // ── Admin Password Verification Modal ──────────────────────────────────────
@@ -1436,7 +1446,7 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
               child: CircularProgressIndicator(color: t.accent),
             )
           : ValueListenableBuilder<Box>(
-              valueListenable: Hive.box(LocalStorageService.branchesBox).listenable(),
+              valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.branchesBox)),
               builder: (context, box, _) {
           final Map<String, Map<String, dynamic>> branchMap = {};
 
@@ -1539,8 +1549,11 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // ── Header Bar ───────────────────────────────────────────────
+                  // Inside the executive shell the title is already in its
+                  // header; only Refresh / Register New Branch stay.
                   Row(
                     children: [
+                      if (!HomeModuleHost.isModuleRoot(context)) ...[
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
@@ -1551,8 +1564,9 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
                         child: Icon(Icons.account_balance_rounded, color: t.accent, size: 28),
                       ),
                       const SizedBox(width: 16),
+                      ],
                       Expanded(
-                        child: Column(
+                        child: HomeModuleHost.isModuleRoot(context) ? const SizedBox.shrink() : Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
@@ -1577,7 +1591,7 @@ class _BranchesManagementPageState extends State<BranchesManagementPage> {
                         onPressed: _refreshBranches,
                       ),
                       const SizedBox(width: 8),
-                      if (_isAdminOrExecutive) ...[
+                      if (_canRegisterBranch) ...[
                       ElevatedButton.icon(
                         icon: const Icon(Icons.add_business_rounded, size: 18),
                         label: const Text('Register New Branch', style: TextStyle(fontWeight: FontWeight.w800)),

@@ -1,5 +1,6 @@
 // lib/pages/office/audit_trail_tab.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -138,7 +139,7 @@ class _AuditTrailTabState extends State<AuditTrailTab> {
         children: [
           // Segmented Tab Switcher
           ValueListenableBuilder(
-            valueListenable: Hive.box(LocalStorageService.financeSettingsBox).listenable(),
+            valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.financeSettingsBox)),
             builder: (ctx, Box settingsBox, _) {
               final conflictsList = List<Map<String, dynamic>>.from(
                 (settingsBox.get('sync_conflicts') as List? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),
@@ -205,7 +206,7 @@ class _AuditTrailTabState extends State<AuditTrailTab> {
             ),
             Expanded(
               child: ValueListenableBuilder(
-                valueListenable: FinanceLocalStorage.auditLogsBox.listenable(),
+                valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.auditLogsBox),
                 builder: (ctx, Box box, _) {
                   final logs = FinanceLocalStorage.getAuditLogs(widget.branchId, searchQuery: _searchCtrl.text);
                   if (logs.isEmpty) {
@@ -353,7 +354,7 @@ class _AuditTrailTabState extends State<AuditTrailTab> {
           ] else ...[
             Expanded(
               child: ValueListenableBuilder(
-                valueListenable: Hive.box(LocalStorageService.financeSettingsBox).listenable(),
+                valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.financeSettingsBox)),
                 builder: (ctx, Box settingsBox, _) {
                   final conflicts = List<Map<String, dynamic>>.from(
                     (settingsBox.get('sync_conflicts') as List? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),

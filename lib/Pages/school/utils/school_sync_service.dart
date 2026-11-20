@@ -1,12 +1,16 @@
 // lib/pages/school/utils/school_sync_service.dart
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../../services/local_storage_service.dart';
 import '../../../services/sync_service.dart';
+import '../core/school_branch_id.dart';
+import '../core/school_merge.dart';
+import '../core/school_store.dart';
 import 'school_local_storage.dart';
 
 enum SchoolSyncState {
@@ -201,7 +205,11 @@ class SchoolSyncService {
       }
 
       // 2. Fetch and merge latest remote school records for branch(es)
-      for (final b in branchesToSync) {
+      final normalizedBranches = branchesToSync
+          .map(SchoolBranchId.normalize)
+          .where((b) => b != SchoolBranchId.all)
+          .toSet();
+      for (final b in normalizedBranches) {
         await fetchRemoteSchoolData(b);
       }
 
@@ -232,99 +240,48 @@ class SchoolSyncService {
     }
   }
 
-  /// Pull remote school collections from Firestore using delta sync & resolve conflicts
+  /// Pulls every School collection of [branchId] and merges it into Hive with
+  /// [SchoolMerge]: last write wins on `lastModified` for every collection,
+  /// pending local edits are never replaced by an older or equal cloud copy,
+  /// and attendance day documents merge per student.
+  ///
+  /// Still a full collection scan: a `lastModified > x` delta query would
+  /// silently skip records written by a PC whose clock runs behind.
   Future<void> fetchRemoteSchoolData(String branchId, {bool force = false}) async {
-    if (branchId == 'all' || branchId == 'global' || branchId.isEmpty) return;
+    final branch = SchoolBranchId.normalize(branchId);
+    if (branch == SchoolBranchId.all) return;
     await SchoolLocalStorage.ensureBoxesOpen();
     final firestore = FirebaseFirestore.instance;
-    final collections = [
-      'school_students',
-      'school_teachers',
-      'school_books',
-      'school_book_loans',
-      'school_attendance',
-      'school_teacher_attendance',
-      'school_grades',
-      'school_fees',
-      'school_homerooms',
-      'school_audit_logs',
-    ];
 
-    for (final col in collections) {
+    for (final col in SchoolCollection.all) {
       try {
-        final syncKey = '${col}_$branchId';
-        final lastSyncedTs = force ? null : LocalStorageService.getLastSyncedServerTimestamp(syncKey);
-        String? maxServerTs = lastSyncedTs;
-
         DocumentSnapshot? lastDoc;
-        bool hasMore = true;
-
+        var hasMore = true;
         while (hasMore) {
-          Query<Map<String, dynamic>> query = firestore
-              .collection('branches')
-              .doc(branchId)
-              .collection(col);
-
-          query = query.limit(500);
-          if (lastDoc != null) {
-            query = query.startAfterDocument(lastDoc);
-          }
-
+          Query<Map<String, dynamic>> query =
+              firestore.collection('branches').doc(branch).collection(col.name).limit(500);
+          if (lastDoc != null) query = query.startAfterDocument(lastDoc);
           final snap = await query.get();
 
           for (final doc in snap.docs) {
-            final remote = doc.data();
-            Map<String, dynamic>? local;
+            final remote = SchoolStore.sanitize(doc.data());
+            final local = SchoolStore.get(col, branch, doc.id);
+            final result = col.isDayLog
+                ? SchoolMerge.mergeDayLog(local, remote)
+                : SchoolMerge.mergeRecord(local, remote);
 
-            if (col == 'school_students') {
-              local = SchoolLocalStorage.getStudentCached(branchId, doc.id);
-            } else if (col == 'school_teachers') {
-              local = SchoolLocalStorage.getTeacherCached(branchId, doc.id);
-            } else if (col == 'school_books') {
-              local = SchoolLocalStorage.getBookCached(branchId, doc.id);
+            if (result.overwrotePendingLocal && col != SchoolCollection.auditLogs) {
+              await SchoolLocalStorage.logAudit(
+                branchId: branch,
+                action: 'SYNC_CONFLICT_WARNING',
+                user: 'System Conflict Resolver',
+                details: 'A newer cloud copy replaced unsynced local changes for ${col.name}/${doc.id} '
+                    '(cloud ${remote['lastModified']} vs local ${local?['lastModified']})',
+              );
             }
-
-            final docTs = remote['updatedAt']?.toString() ?? remote['lastModified']?.toString();
-            if (docTs != null) {
-              if (maxServerTs == null || docTs.compareTo(maxServerTs) > 0) {
-                maxServerTs = docTs;
-              }
+            if (local == null || jsonEncode(local) != jsonEncode(result.record)) {
+              await SchoolStore.putFromCloud(col, branch, doc.id, result.record);
             }
-
-            await _resolveAndSaveRecord(
-              branchId: branchId,
-              recordId: doc.id,
-              remoteData: remote,
-              localData: local,
-              saveLocal: (data) async {
-                if (col == 'school_students') {
-                  await SchoolLocalStorage.cacheStudent(branchId, doc.id, data);
-                } else if (col == 'school_teachers') {
-                  await SchoolLocalStorage.cacheTeacher(branchId, doc.id, data);
-                } else if (col == 'school_books') {
-                  await SchoolLocalStorage.cacheBook(branchId, doc.id, data);
-                } else if (col == 'school_book_loans') {
-                  await SchoolLocalStorage.cacheBookLoan(branchId, doc.id, data);
-                } else if (col == 'school_attendance') {
-                  await SchoolLocalStorage.cacheLog(branchId, doc.id, data);
-                } else if (col == 'school_teacher_attendance') {
-                  await SchoolLocalStorage.cacheTeacherAttendanceLog(branchId, doc.id, data);
-                } else if (col == 'school_grades') {
-                  final box = Hive.box(SchoolLocalStorage.gradesBox);
-                  await box.put('${branchId.toLowerCase()}__${doc.id}', data);
-                } else if (col == 'school_fees') {
-                  final box = Hive.box(SchoolLocalStorage.feesBox);
-                  await box.put('${branchId.toLowerCase()}__${doc.id}', data);
-                } else if (col == 'school_homerooms') {
-                  final box = Hive.box(SchoolLocalStorage.homeroomBox);
-                  await box.put('${branchId.toLowerCase()}__${doc.id}', data);
-                } else if (col == 'school_audit_logs') {
-                  final box = Hive.box(LocalStorageService.schoolAuditLogsBox);
-                  await box.put('${branchId.toLowerCase()}__${doc.id}', data);
-                }
-              },
-              recordType: col,
-            );
           }
 
           if (snap.docs.length < 500) {
@@ -333,59 +290,8 @@ class SchoolSyncService {
             lastDoc = snap.docs.last;
           }
         }
-
-        if (maxServerTs != null) {
-          await LocalStorageService.setLastSyncedServerTimestamp(syncKey, maxServerTs);
-        }
       } catch (e) {
-        debugPrint('[SchoolSyncService] Remote fetch error for $col: $e');
-      }
-    }
-  }
-
-  /// Conflict Resolution (Last-Write-Wins based on lastModified)
-  Future<void> _resolveAndSaveRecord({
-    required String branchId,
-    required String recordId,
-    required Map<String, dynamic> remoteData,
-    required Map<String, dynamic>? localData,
-    required Future<void> Function(Map<String, dynamic> data) saveLocal,
-    required String recordType,
-  }) async {
-    if (localData == null) {
-      // New record from cloud
-      remoteData['syncStatus'] = 'synced';
-      remoteData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await saveLocal(remoteData);
-      return;
-    }
-
-    final localModifiedStr = localData['lastModified']?.toString();
-    final remoteModifiedStr = remoteData['lastModified']?.toString();
-
-    final localModified = DateTime.tryParse(localModifiedStr ?? '') ?? DateTime(2000);
-    final remoteModified = DateTime.tryParse(remoteModifiedStr ?? '') ?? DateTime(2000);
-
-    if (remoteModified.isAfter(localModified)) {
-      // Remote write wins -> notify audit log if local had unsynced changes
-      if (localData['syncStatus'] == 'pending') {
-        await SchoolLocalStorage.logAudit(
-          branchId: branchId,
-          action: 'SYNC_CONFLICT_WARNING',
-          user: 'System Conflict Resolver',
-          details: 'Remote overwrite applied for $recordType ID $recordId (Remote: $remoteModifiedStr vs Local: $localModifiedStr)',
-        );
-      }
-
-      remoteData['syncStatus'] = 'synced';
-      remoteData['lastSyncedAt'] = DateTime.now().toIso8601String();
-      await saveLocal(remoteData);
-    } else {
-      // Local write is newer or equal
-      if (localData['syncStatus'] != 'synced') {
-        localData['syncStatus'] = 'synced';
-        localData['lastSyncedAt'] = DateTime.now().toIso8601String();
-        await saveLocal(localData);
+        debugPrint('[SchoolSyncService] Remote fetch error for ${col.name}: $e');
       }
     }
   }

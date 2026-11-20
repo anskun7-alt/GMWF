@@ -30,9 +30,9 @@ import '../../../utils/notification_deduper.dart';
 import 'package:gmwf/services/cloud_messaging_service.dart';
 import 'patient_register.dart';
 import 'token_screen.dart';
-import '../widgets/desk_summary_card.dart';
 import '../widgets/pharmacy_pane.dart';
 import '../widgets/connection_status_same.dart';
+import '../widgets/desk_theme.dart';
 import 'token_tally.dart';
 import 'package:gmwf/design/design_system.dart';
 import '../../../services/dispensary_preferences_service.dart';
@@ -119,7 +119,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   final Set<String> _pendingReversalSerials = <String>{};
   bool _isSubmittingReversal = false;
 
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
   static const int _tabToken = 0;
   // ignore: unused_field
   static const int _tabLog = 1;
@@ -1221,6 +1221,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildShiftSelector(bool isMobile) {
+    final c = context.comfort;
     final counts = _getSessionCounts();
     final shifts = [
       {'id': 'all', 'label': 'All Today', 'count': counts['all'] ?? 0},
@@ -1248,18 +1249,14 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               },
               borderRadius: BorderRadius.circular(20),
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
-                  color: isSelected
-                      ? SoftPalette.emerald550
-                      : (_isDark ? SoftPalette.slate700 : SoftPalette.gray100),
+                  color: isSelected ? c.brand : c.surfaceSunken,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isSelected
-                        ? SoftPalette.emerald550
-                        : (_isDark ? SoftPalette.slate600 : SoftPalette.gray150),
-                    width: 1.2,
+                    color: isSelected ? c.brand : c.border,
+                    width: 1,
                   ),
                 ),
                 child: Row(
@@ -1269,29 +1266,25 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                       label,
                       style: TextStyle(
                         fontSize: 11.5,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
-                        color: isSelected
-                            ? SoftPalette.gray50
-                            : (_isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87),
+                        fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                        color: isSelected ? c.onBrand : c.textSecondary,
                       ),
                     ),
                     const SizedBox(width: 5),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 1),
                       decoration: BoxDecoration(
                         color: isSelected
-                            ? SoftPalette.gray50.withValues(alpha: 0.25)
-                            : (_isDark ? SoftPalette.slate800 : SoftPalette.gray150),
+                            ? c.onBrand.withValues(alpha: 0.22)
+                            : c.surface,
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
                         '$count',
                         style: TextStyle(
                           fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: isSelected
-                              ? SoftPalette.gray50
-                              : (_isDark ? SoftPalette.sky350 : SoftPalette.teal550),
+                          fontWeight: FontWeight.w700,
+                          color: isSelected ? c.onBrand : c.textMuted,
                         ),
                       ),
                     ),
@@ -1354,6 +1347,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
   Widget _buildSummaryCards([bool isMobile = false, List<Map<String, dynamic>>? precomputedEntries]) {
     try {
+      final c = context.comfort;
       final todayEntries = precomputedEntries ?? _getFilteredTodayTokens();
 
       final tally = TokenTally.of(todayEntries, isKarachi: _isKarachi);
@@ -1367,26 +1361,27 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           BranchLabels.zakat(widget.branchId),
           zakat,
           'PKR $zakatAmount',
-          SoftPalette.emerald550, // Solid Emerald Green
-          Icons.volunteer_activism_rounded,
+          accentColor: c.brand,
+          bgTint: c.brandSoft,
+          icon: Icons.volunteer_activism_rounded,
           isMobile: isMobile,
         ),
         _compactSummaryCard(
           BranchLabels.nonZakat(widget.branchId),
           nonZakat,
           _isKarachi && nonZakat == 0 ? 'Disabled 🔒' : 'PKR $nonZakatAmount',
-          SoftPalette.emerald550,
-          Icons.person_outline_rounded,
+          accentColor: c.info,
+          bgTint: c.infoBg,
+          icon: Icons.person_outline_rounded,
           isMobile: isMobile,
-          isOutlined: true,
-          outlineColor: SoftPalette.emerald550, // Green Outline on White Card
         ),
         _compactSummaryCard(
           'GMWF',
           gmwf,
           'PKR 0',
-          SoftPalette.orange400, // Solid Amber
-          null,
+          accentColor: c.warning,
+          bgTint: c.warningBg,
+          icon: null,
           isImage: true,
           isMobile: isMobile,
         ),
@@ -1394,23 +1389,21 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           'Total',
           total,
           'PKR $totalAmount',
-          SoftPalette.orange400,
-          Icons.people_outline_rounded,
+          accentColor: c.textPrimary,
+          bgTint: c.surfaceSunken,
+          icon: Icons.people_outline_rounded,
+          isNeutral: true,
           isMobile: isMobile,
-          isOutlined: true,
-          outlineColor: SoftPalette.orange400, // Amber Outline on White Card
         ),
       ];
 
       return Row(
-        children: cards
-            .map((c) => Expanded(
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: isMobile ? 1.5 : 4),
-                    child: c,
-                  ),
-                ))
-            .toList(),
+        children: [
+          for (int i = 0; i < cards.length; i++) ...[
+            if (i > 0) SizedBox(width: isMobile ? 4 : 8),
+            Expanded(child: cards[i]),
+          ],
+        ],
       );
     } catch (e) {
       debugPrint('[ReceptionistScreen] _buildSummaryCards error: $e');
@@ -1441,51 +1434,158 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   Widget _compactSummaryCard(
     String title,
     int count,
-    String amount,
-    Color solidColor,
-    IconData? icon, {
+    String amount, {
+    required Color accentColor,
+    required Color bgTint,
+    IconData? icon,
     bool isImage = false,
     bool isMobile = false,
-    bool isOutlined = false,
-    Color? outlineColor,
+    bool isNeutral = false,
   }) {
-    // Shared with the Dispense Queue / Hybrid Pharmacy view (same look everywhere).
-    return DeskSummaryCard(
-      title: title,
-      count: count,
-      amount: amount,
-      solidColor: solidColor,
-      icon: icon,
-      isImage: isImage,
-      isMobile: isMobile,
-      isOutlined: isOutlined,
-      outlineColor: outlineColor,
-      isDark: _isDark,
+    final c = context.comfort;
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: isMobile ? 8 : 10,
+        vertical: isMobile ? 7 : 8,
+      ),
+      decoration: BoxDecoration(
+        color: bgTint,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isNeutral
+              ? c.borderStrong
+              : accentColor.withValues(alpha: _isDark ? 0.35 : 0.25),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: isMobile ? 10 : 11,
+                    fontWeight: FontWeight.w600,
+                    color: c.textSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (isImage)
+                ClipOval(
+                  child: Image.asset(
+                    'assets/logo/gmwf-1.webp',
+                    width: 14,
+                    height: 14,
+                    fit: BoxFit.cover,
+                  ),
+                )
+              else if (icon != null)
+                Icon(
+                  icon,
+                  size: 14,
+                  color: isNeutral ? c.textSecondary : accentColor,
+                ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Text(
+            '$count',
+            style: TextStyle(
+              fontSize: isMobile ? 16 : 18,
+              fontWeight: FontWeight.w800,
+              color: c.textPrimary,
+              height: 1.1,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            amount,
+            style: TextStyle(
+              fontSize: isMobile ? 9.5 : 10.5,
+              fontWeight: FontWeight.w600,
+              color: isNeutral ? c.textSecondary : accentColor,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildTokenLog([bool isMobile = false, List<Map<String, dynamic>>? precomputedEntries]) {
-    // Same fair order as the doctor/dispenser queues (offline-issued tokens by issue time).
-    final rawList = TokenOrder.sortFairly(
-        precomputedEntries ?? _getFilteredTodayTokens(),
+    int statusTier(Map<String, dynamic> e) {
+      final st = (e['status'] as String?)?.toLowerCase().trim() ?? 'waiting';
+      final hasPresc = (e['prescriptionId'] as String?)?.isNotEmpty == true || e['prescription'] is Map;
+      final isDisp = st == 'dispensed' ||
+          e['dispensedAt'] != null ||
+          (e['dispenseStatus'] as String?)?.toLowerCase().trim() == 'dispensed';
+      final isCanc = st == 'cancelled' || st == 'reversed';
+      final isWaitDisp = !isDisp &&
+          !isCanc &&
+          (hasPresc ||
+              st == 'completed' ||
+              st == 'prescribed' ||
+              st == 'waiting_to_dispense' ||
+              st == 'waiting_for_dispense');
+      if (isDisp || isCanc) return 2;
+      if (isWaitDisp) return 1;
+      return 0;
+    }
+
+    // Group: Waiting at top -> Waiting for Dispense (editable) in middle -> Dispensed at bottom,
+    // each ordered by token index / issue time.
+    final entries = precomputedEntries ?? _getFilteredTodayTokens();
+    final tier0 = TokenOrder.sortFairly(
+        entries.where((e) => statusTier(e) == 0).toList(),
         newestFirst: _sortNewestFirst);
+    final tier1 = TokenOrder.sortFairly(
+        entries.where((e) => statusTier(e) == 1).toList(),
+        newestFirst: _sortNewestFirst);
+    final tier2 = TokenOrder.sortFairly(
+        entries.where((e) => statusTier(e) == 2).toList(),
+        newestFirst: _sortNewestFirst);
+    final rawList = [...tier0, ...tier1, ...tier2];
 
     if (rawList.isEmpty) {
       return Center(
-        child: Text(
-          'No tokens issued today',
-          style: TextStyle(
-              fontSize: 14,
-              color: _isDark ? SoftPalette.slate350 : SoftPalette.gray350),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Image.asset(
+                  'assets/images/doctor_empty_queue.jpg',
+                  width: 112,
+                  height: 112,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'No tokens issued today',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: _isDark ? SoftPalette.slate350 : SoftPalette.slate600,
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
 
     return ListView.separated(
       itemCount: rawList.length,
-      separatorBuilder: (_, _) => Divider(
-          height: 1,
-          color: _isDark ? SoftPalette.slate700 : SoftPalette.gray100),
+      separatorBuilder: (_, _) => const SizedBox(height: 2),
       itemBuilder: (context, i) {
         final e = rawList[i];
         final serial = e['serial'] as String? ?? 'N/A';
@@ -1572,8 +1672,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             // Fallback: extract CNIC directly from patientId if patientId is a CNIC or `<cnic>_child_<name>`
             if (isSyntheticCnic) {
               final pidCandidate = pId.contains('_child_') ? pId.split('_child_').first : pId;
-              if (lss.LocalStorageService.isValidCnicValue(pidCandidate)) {
-                cnic = pidCandidate;
+              final formattedFromPid = lss.LocalStorageService.resolveFirstValidCnic([pidCandidate]);
+              if (formattedFromPid.isNotEmpty) {
+                cnic = formattedFromPid;
                 e['cnic'] = cnic;
                 e['patientCnic'] = cnic;
                 isSyntheticCnic = false;
@@ -1638,19 +1739,19 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         String displayType;
         if (_isKarachi) {
           if (effectiveQueueType == 'zakat') {
-            badgeColor = SoftPalette.green400;
+            badgeColor = context.comfort.brand;
             displayType = BranchLabels.karachiZakatLabel;
           } else if (effectiveQueueType == 'gmwf') {
             badgeColor = SoftPalette.orange350;
             displayType = 'GMWF';
           } else {
-            badgeColor = SoftPalette.green400;
+            badgeColor = context.comfort.brand;
             displayType = BranchLabels.karachiZakatLabel;
           }
         } else {
           switch (queueTypeRaw) {
             case 'zakat':
-              badgeColor = SoftPalette.green400;
+              badgeColor = context.comfort.brand;
               displayType = 'Zakat';
               break;
             case 'non-zakat':
@@ -1677,6 +1778,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         final isWaitingOnly = !isDispensed && !isWaitingToDispense && s != 'with_doctor' && s != 'with doctor' && s != 'in_consultation' && s != 'cancelled' && s != 'reversed' && s != 'deleted' && s != 'skipped';
         final canReverse = isWaitingOnly;
 
+        final c = context.comfort;
         String statusLabel;
         Color statusBg;
         Color statusText;
@@ -1684,13 +1786,13 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
         if (isDispensed) {
           statusLabel = 'Dispensed';
-          statusBg = _isDark ? SoftPalette.green700 : SoftPalette.green100m;
-          statusText = _isDark ? SoftPalette.emerald200 : SoftPalette.green550;
+          statusBg = c.successBg;
+          statusText = c.success;
           statusIcon = Icons.check_circle_outline_rounded;
         } else if (isWaitingToDispense) {
           statusLabel = 'Waiting for Dispense';
-          statusBg = _isDark ? SoftPalette.blue750 : SoftPalette.slate100;
-          statusText = _isDark ? SoftPalette.blue300 : SoftPalette.blue550;
+          statusBg = c.infoBg;
+          statusText = c.info;
           statusIcon = Icons.medication_outlined;
         } else if (s == 'with_doctor' || s == 'with doctor' || s == 'in_consultation') {
           statusLabel = 'With Doctor';
@@ -1699,23 +1801,23 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           statusIcon = Icons.medical_services_outlined;
         } else if (s == 'cancelled' || s == 'reversed') {
           statusLabel = 'Cancelled';
-          statusBg = _isDark ? SoftPalette.red800 : SoftPalette.pink100m;
-          statusText = _isDark ? SoftPalette.red300 : SoftPalette.red550;
+          statusBg = c.dangerBg;
+          statusText = c.danger;
           statusIcon = Icons.cancel_outlined;
         } else if (s == 'skipped') {
           statusLabel = 'Skipped';
-          statusBg = _isDark ? SoftPalette.slate700 : SoftPalette.gray100;
-          statusText = _isDark ? SoftPalette.slate350 : SoftPalette.gray550;
+          statusBg = c.surfaceSunken;
+          statusText = c.textSecondary;
           statusIcon = Icons.skip_next_rounded;
         } else {
           statusLabel = 'Waiting';
-          statusBg = _isDark ? SoftPalette.orange800 : SoftPalette.yellow50;
-          statusText = _isDark ? SoftPalette.yellow200 : SoftPalette.orange350;
+          statusBg = c.warningBg;
+          statusText = c.warning;
           statusIcon = Icons.hourglass_empty_rounded;
         }
 
-        final validCnic = cnic.isNotEmpty && !cnic.startsWith('unknown_') && cnic != '00000-0000000-0' && cnic != '-' ? cnic : '';
-        final validGuard = guardianCnic.isNotEmpty && !guardianCnic.startsWith('unknown_') && guardianCnic != '00000-0000000-0' && guardianCnic != '-' ? guardianCnic : '';
+        final validCnic = lss.LocalStorageService.isValidCnicValue(cnic) ? cnic : '';
+        final validGuard = lss.LocalStorageService.isValidCnicValue(guardianCnic) ? guardianCnic : '';
         final displayCnic = validCnic.isNotEmpty
             ? validCnic
             : validGuard.isNotEmpty
@@ -1750,16 +1852,12 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           padding: EdgeInsets.symmetric(
               horizontal: isMobile ? 8 : 12, vertical: 6),
           decoration: BoxDecoration(
-            color: _isDark
-                ? SoftPalette.slate800
-                : SoftPalette.gray50,
+            color: isDispensingRow
+                ? c.brandSoft.withValues(alpha: _isDark ? 0.22 : 0.45)
+                : c.surface,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-                color: isDispensingRow
-                    ? (_isDark ? SoftPalette.teal350 : SoftPalette.teal600)
-                    : (_isDark
-                        ? SoftPalette.slate700
-                        : SoftPalette.gray100),
+                color: isDispensingRow ? c.brand : c.border,
                 width: isDispensingRow ? 1.6 : 1),
           ),
           child: Row(
@@ -1767,16 +1865,17 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               // ── Token Number Pill ──────────────────────────────
               Container(
                 padding: const EdgeInsets.symmetric(
-                    horizontal: 8, vertical: 4),
+                    horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: badgeColor,
-                  borderRadius: BorderRadius.circular(8),
+                  color: c.brandSoft,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: c.brand.withValues(alpha: 0.35)),
                 ),
                 child: Text(
                   '#$seqNumber',
-                  style: const TextStyle(
-                    color: SoftPalette.gray50,
-                    fontWeight: FontWeight.bold,
+                  style: TextStyle(
+                    color: c.brand,
+                    fontWeight: FontWeight.w800,
                     fontSize: 13,
                   ),
                 ),
@@ -1795,11 +1894,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                           child: Text(
                             name,
                             style: TextStyle(
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w700,
                               fontSize: isMobile ? 13 : 14,
-                              color: _isDark
-                                  ? SoftPalette.gray50
-                                  : SoftPalette.gray900A87,
+                              color: c.textPrimary,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1866,18 +1963,20 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Text(
-                                    displayCnic,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: _isDark
-                                          ? SoftPalette.sky350
-                                          : SoftPalette.teal550,
-                                      decoration: (displayCnic.isNotEmpty && displayCnic != '-')
-                                          ? TextDecoration.underline
-                                          : TextDecoration.none,
-                                      decorationStyle: TextDecorationStyle.dotted,
+                                  Flexible(
+                                    child: Text(
+                                      displayCnic,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: _teal,
+                                        decoration: (displayCnic.isNotEmpty && displayCnic != '-')
+                                            ? TextDecoration.underline
+                                            : TextDecoration.none,
+                                        decorationStyle: TextDecorationStyle.dotted,
+                                      ),
                                     ),
                                   ),
                                   if (displayCnic.isNotEmpty && displayCnic != '-') ...[
@@ -1885,9 +1984,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                                     Icon(
                                       Icons.copy,
                                       size: 10,
-                                      color: _isDark
-                                          ? SoftPalette.sky350
-                                          : SoftPalette.teal550,
+                                      color: _teal,
                                     ),
                                   ],
                                 ],
@@ -1937,7 +2034,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                             style: TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.w600,
-                              color: SoftPalette.teal500,
+                              color: _teal,
                             ),
                           ),
                         ],
@@ -2026,8 +2123,65 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             ],
           ),
         );
-        if (onRowTap == null) return row;
-        return Tooltip(
+        final isFirstTier2 = statusTier(e) == 2 &&
+            (i == 0 || statusTier(rawList[i - 1]) != 2);
+        Widget wrapSection(Widget card) {
+          if (!isFirstTier2) return card;
+          final cHeader = context.comfort;
+          final hasDispensedInTier = tier2.any((x) {
+            final xs = (x['status'] as String?)?.toLowerCase().trim() ?? '';
+            return xs == 'dispensed' ||
+                x['dispensedAt'] != null ||
+                (x['dispenseStatus'] as String?)?.toLowerCase().trim() == 'dispensed';
+          });
+          final sectionLabel = hasDispensedInTier
+              ? 'DISPENSED (${tier2.length})'
+              : 'CANCELLED (${tier2.length})';
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 10, 4, 6),
+                child: Row(
+                  children: [
+                    Expanded(child: Container(height: 1, color: cHeader.border)),
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: cHeader.successBg,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: cHeader.success.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_circle_outline_rounded, size: 11, color: cHeader.success),
+                          const SizedBox(width: 4),
+                          Text(
+                            sectionLabel,
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.6,
+                              color: cHeader.success,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(child: Container(height: 1, color: cHeader.border)),
+                  ],
+                ),
+              ),
+              card,
+            ],
+          );
+        }
+
+        if (onRowTap == null) return wrapSection(row);
+        return wrapSection(Tooltip(
           message: isDispensingRow ? 'In the dispense form' : 'Dispense this patient',
           waitDuration: const Duration(milliseconds: 600),
           child: InkWell(
@@ -2035,7 +2189,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             borderRadius: BorderRadius.circular(10),
             child: row,
           ),
-        );
+        ));
       },
     );
   }
@@ -2050,8 +2204,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         future: lss.LocalStorageService.ensureBoxOpen('app_settings'),
         builder: (context, snapshot) {
           if (!snapshot.hasData || snapshot.data == null || !snapshot.data!.isOpen) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator(color: SoftPalette.emerald550)),
+            return Scaffold(
+              body: Center(child: CircularProgressIndicator(color: _teal)),
             );
           }
           final isDark = snapshot.data!.get('is_dark_mode', defaultValue: false) == true;
@@ -2061,7 +2215,9 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     }
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
+      valueListenable: Hive.box('app_settings').listenable(
+        keys: ['is_dark_mode', 'theme_choice', 'visual_theme'],
+      ),
       builder: (context, box, _) {
         final isDark = box.isOpen ? (box.get('is_dark_mode', defaultValue: false) == true) : false;
         return _buildScaffoldWithTheme(context, isDark, isMobile);
@@ -2070,10 +2226,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildScaffoldWithTheme(BuildContext context, bool isDark, bool isMobile) {
-    final body = Container(
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900 : SoftPalette.emerald100t,
-      ),
+    final bgColor = Theme.of(context).scaffoldBackgroundColor;
+    final body = DeskBackdrop(
       child: Column(
         children: [
           ClockSkewWarningBanner(branchId: widget.branchId),
@@ -2089,7 +2243,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
     if (widget.isEmbedded) return body;
 
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.emerald100t,
+      backgroundColor: bgColor,
       appBar: _buildAppBar(isMobile),
       body: body,
     );
@@ -2110,19 +2264,19 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             final b = listenable.value;
             try {
               if (!b.isOpen) {
-                return const Center(
+                return Center(
                   child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: CircularProgressIndicator(color: SoftPalette.emerald550),
+                    padding: const EdgeInsets.all(24),
+                    child: CircularProgressIndicator(color: _teal),
                   ),
                 );
               }
               return PerfTrace.measure('receptionist list/summary build (${b.length} entries)', () => builder(ctx, b, null), thresholdMs: 30);
             } catch (e) {
-              return const Center(
+              return Center(
                 child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(color: SoftPalette.emerald550),
+                  padding: const EdgeInsets.all(24),
+                  child: CircularProgressIndicator(color: _teal),
                 ),
               );
             }
@@ -2141,29 +2295,29 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               final b = listenable.value;
               try {
                 if (!b.isOpen) {
-                  return const Center(
+                  return Center(
                     child: Padding(
-                      padding: EdgeInsets.all(24),
-                      child: CircularProgressIndicator(color: SoftPalette.emerald550),
+                      padding: const EdgeInsets.all(24),
+                      child: CircularProgressIndicator(color: _teal),
                     ),
                   );
                 }
                 return builder(ctx, b, null);
               } catch (e) {
-                return const Center(
+                return Center(
                   child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: CircularProgressIndicator(color: SoftPalette.emerald550),
+                    padding: const EdgeInsets.all(24),
+                    child: CircularProgressIndicator(color: _teal),
                   ),
                 );
               }
             },
           );
         }
-        return const Center(
+        return Center(
           child: Padding(
-            padding: EdgeInsets.all(24),
-            child: CircularProgressIndicator(color: SoftPalette.emerald550),
+            padding: const EdgeInsets.all(24),
+            child: CircularProgressIndicator(color: _teal),
           ),
         );
       },
@@ -2186,10 +2340,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             // Tab 0: Token
             Padding(
               padding: const EdgeInsets.all(8),
-              child: Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16)),
+              child: DeskCard(
+                accentTop: true,
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: TokenScreen(
@@ -2227,7 +2379,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                   ),
                   // Refresh Button
                   IconButton(
-                    icon: const Icon(Icons.refresh, color: _teal, size: 20),
+                    icon: Icon(Icons.refresh, color: _teal, size: 20),
                     onPressed: _refreshTokenLog,
                     tooltip: 'Refresh token list',
                   ),
@@ -2260,10 +2412,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             // Tab 2: Register
             Padding(
               padding: const EdgeInsets.all(8),
-              child: Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16)),
+              child: DeskCard(
+                accentTop: true,
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: PatientRegisterPage(
@@ -2285,6 +2435,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   /// Register Patient or Issue Token (with vitals) — shared by the desktop body
   /// and the Hybrid Pharmacy layout.
   Widget _buildReceptionForm() {
+    final isCompactHybrid = widget.pharmacy != null;
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 120),
       child: _activeSection == 'register'
@@ -2293,6 +2444,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               branchId: widget.branchId,
               receptionistId: widget.receptionistId,
               initialCnic: _pendingCnic,
+              isCompactHybrid: isCompactHybrid,
               onPatientRegistered: _onPatientRegistered,
             )
           : TokenScreen(
@@ -2302,6 +2454,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               receptionistName: widget.receptionistName,
               initialCnic: _pendingCnic,
               targetPatientId: _pendingPatientId,
+              isCompactHybrid: isCompactHybrid,
               onPatientNotFound: _handlePatientNotFound,
             ),
     );
@@ -2516,20 +2669,38 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
         builder: (context, _, _) => _buildWithEntriesListenable((context, _, _) {
           final todayEntries = _getFilteredTodayTokens();
           return Padding(
-            padding: const EdgeInsets.fromLTRB(kPharmacyPad, 8, kPharmacyPad, 6),
+            padding: const EdgeInsets.fromLTRB(kPharmacyPad, 10, kPharmacyPad, 10),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _buildShiftSelector(false),
-                const SizedBox(height: 6),
-                Text(
-                  '${todayEntries.length} total · Auto-serving smallest token',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c.textSecondary),
-                ),
-                Divider(height: 12, color: c.border),
+                const SizedBox(height: 10),
                 Expanded(child: _buildTokenLog(false, todayEntries)),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: c.surfaceSunken,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: c.border),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_rounded, size: 15, color: c.textSecondary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Next token will be automatically shown after current patient.',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: c.textSecondary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           );
@@ -2539,67 +2710,68 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildDesktopBody() {
+    final c = context.comfort;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1650),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ── Left Column (flex: 3): Action Toggle + Main Form Card ───────
+              // ── Left Column (flex: 3): Unified Reception Desk Card ───────
               Expanded(
                 flex: 3,
-                child: Column(
-                  children: [
-                    _buildDesktopToggle(),
-                    const SizedBox(height: 16),
-                    Expanded(
-                      child: Card(
-                        elevation: 10,
-                        color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(28)),
-                        clipBehavior: Clip.antiAlias,
-                        child: Stack(
+                child: DeskCard(
+                  accentTop: true,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 12, 14, 12),
+                        child: Row(
                           children: [
-                            // ── Authentic Islamic Pattern Background (Vibrant Golden) ──
-                            // Performance: this used to be Opacity (a full-card offscreen layer) around a
-                            // tinted full-size image, repainted on every cursor blink and keystroke in the
-                            // form above it. Now the opacity is folded into the tint, the image is decoded
-                            // at a sensible size, and a RepaintBoundary lets Flutter keep it as a cached
-                            // layer that typing never touches.
-                            Positioned.fill(
-                              child: RepaintBoundary(
-                                child: IgnorePointer(
-                                  child: GDecorativeImage.asset(
-                                    'assets/images/islamic_pattern.webp',
-                                    fit: BoxFit.cover,
-                                    cacheWidth: 1400,
-                                    filterQuality: FilterQuality.low,
-                                    color: (_isDark ? SoftPalette.amber200 : SoftPalette.yellow300)
-                                        .withValues(alpha: _isDark ? 0.18 : 0.28),
-                                    colorBlendMode: BlendMode.srcIn,
-                                  ),
-                                ),
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: c.brandSoft,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(
+                                Icons.support_agent_rounded,
+                                size: 17,
+                                color: c.brand,
                               ),
                             ),
-
-                            // ── Form Content ──
-                            Padding(
-                              padding: const EdgeInsets.all(28),
-                              child: _buildReceptionForm(),
+                            const SizedBox(width: 10),
+                            Text(
+                              'Reception Desk',
+                              style: TextStyle(
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w700,
+                                color: c.textPrimary,
+                                letterSpacing: -0.2,
+                              ),
                             ),
+                            const Spacer(),
+                            _buildDesktopToggle(),
                           ],
                         ),
                       ),
-                    ),
-                  ],
+                      Divider(height: 1, thickness: 1, color: c.border),
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: _buildReceptionForm(),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(width: 20),
 
-              // ── Right Column (flex: 2): Summary Cards + Today's Tokens Card ──
+              // ── Right Column (flex: 2): Unified Today's Tokens Card ──────
               Expanded(
                 flex: 2,
                 child: ValueListenableBuilder<int>(
@@ -2608,108 +2780,105 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
                     (context, _, _) {
                       final todayEntries = _getFilteredTodayTokens();
                       final todayCount = todayEntries.length;
-                      return Column(
-                        children: [
-                          _buildSummaryCards(false, todayEntries),
-                          const SizedBox(height: 16),
-                          Expanded(
-                            child: Card(
-                                elevation: 8,
-                                color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(24)),
-                                clipBehavior: Clip.antiAlias,
-                                child: Stack(
-                                  children: [
-                                    // ── Vibrant Golden Islamic Watermark (Center Touching Right Edge + Rotated) ──
-                                    Positioned(
-                                      right: -135,
-                                      bottom: -50,
-                                      width: 320,
-                                      height: 320,
-                                      child: IgnorePointer(
-                                        child: Transform.rotate(
-                                          angle: -0.16, // ~9.2 degrees graceful tilt
-                                          child: Opacity(
-                                            opacity: _isDark ? 0.22 : 0.32,
-                                            child: GDecorativeImage.asset(
-                                              'assets/images/1.webp',
-                                              fit: BoxFit.contain,
-                                              color: _isDark ? SoftPalette.amber200 : SoftPalette.yellow300,
-                                              colorBlendMode: BlendMode.srcIn,
-                                            ),
-                                          ),
+                      return DeskCard(
+                        accentTop: true,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 10, 10),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.receipt_long_rounded, color: c.brand, size: 18),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    "Today's Tokens",
+                                    style: TextStyle(
+                                      fontSize: 15.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.textPrimary,
+                                      letterSpacing: -0.2,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: c.brandSoft,
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: c.brand.withValues(alpha: 0.25),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      '$todayCount total',
+                                      style: TextStyle(
+                                        color: c.brand,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Tooltip(
+                                    message: _sortNewestFirst ? 'Sort: Oldest First' : 'Sort: Newest First',
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(6),
+                                      onTap: () => setState(() => _sortNewestFirst = !_sortNewestFirst),
+                                      child: SizedBox(
+                                        width: 28,
+                                        height: 28,
+                                        child: Icon(
+                                          _sortNewestFirst
+                                              ? Icons.arrow_downward_rounded
+                                              : Icons.arrow_upward_rounded,
+                                          color: c.textSecondary,
+                                          size: 17,
                                         ),
                                       ),
                                     ),
-
-                                    // ── Today's Tokens Content ──
-                                    Padding(
-                                      padding: const EdgeInsets.all(20),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Row(children: [
-                                            Icon(Icons.list_alt_rounded,
-                                                color: _isDark ? SoftPalette.sky350 : _teal, size: 26),
-                                            const SizedBox(width: 10),
-                                            Text("Today's Tokens",
-                                                style: TextStyle(
-                                                    fontSize: 19,
-                                                    fontWeight:
-                                                        FontWeight.bold,
-                                                    color: _isDark ? SoftPalette.gray50 : _teal)),
-                                            const Spacer(),
-                                            IconButton(
-                                              icon: Icon(
-                                                  _sortNewestFirst
-                                                      ? Icons
-                                                          .arrow_downward_rounded
-                                                      : Icons
-                                                          .arrow_upward_rounded,
-                                                  color: _isDark ? SoftPalette.sky350 : _teal,
-                                                  size: 20),
-                                              onPressed: () => setState(() =>
-                                                  _sortNewestFirst =
-                                                      !_sortNewestFirst),
-                                              tooltip: _sortNewestFirst
-                                                  ? 'Sort: Oldest First'
-                                                  : 'Sort: Newest First',
-                                            ),
-                                            IconButton(
-                                              icon: Icon(Icons.refresh_rounded,
-                                                  color: _isDark ? SoftPalette.sky350 : _teal, size: 22),
-                                              onPressed: _refreshTokenLog,
-                                              tooltip: 'Refresh token list',
-                                            ),
-                                            WhatsAppShareButton(
-                                              onPressed: () => _shareCollectionToWhatsApp(todayEntries),
-                                            ),
-                                          ]),
-                                          const SizedBox(height: 10),
-                                          _buildShiftSelector(false),
-                                          const SizedBox(height: 6),
-                                          Row(
-                                            children: [
-                                              Text('$todayCount total',
-                                                  style: TextStyle(
-                                                      color: _isDark ? SoftPalette.slate350 : SoftPalette.gray550,
-                                                      fontSize: 13,
-                                                      fontWeight: FontWeight.w600)),
-                                            ],
-                                          ),
-                                          const Divider(height: 20),
-                                          Expanded(child: _buildTokenLog(false, todayEntries)),
-                                        ],
+                                  ),
+                                  const SizedBox(width: 2),
+                                  Tooltip(
+                                    message: 'Refresh token list',
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(6),
+                                      onTap: _refreshTokenLog,
+                                      child: SizedBox(
+                                        width: 28,
+                                        height: 28,
+                                        child: Icon(
+                                          Icons.refresh_rounded,
+                                          color: c.textSecondary,
+                                          size: 18,
+                                        ),
                                       ),
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                  WhatsAppShareButton(
+                                    onPressed: () => _shareCollectionToWhatsApp(todayEntries),
+                                  ),
+                                ],
                               ),
                             ),
-                        ],
+                            Divider(height: 1, thickness: 1, color: c.border),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
+                              child: _buildShiftSelector(false),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(14, 4, 14, 10),
+                              child: _buildSummaryCards(false, todayEntries),
+                            ),
+                            Divider(height: 1, thickness: 1, color: c.border),
+                            Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                child: _buildTokenLog(false, todayEntries),
+                              ),
+                            ),
+                          ],
+                        ),
                       );
                     },
                   ),
@@ -2797,8 +2966,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
             alignment: Alignment.center,
             decoration: BoxDecoration(
               gradient: isSelected
-                  ? const LinearGradient(
-                      colors: [SoftPalette.emerald400, SoftPalette.emerald550],
+                  ? LinearGradient(
+                      colors: [context.comfort.brand, context.comfort.brandStrong],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     )
@@ -2807,7 +2976,7 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
               boxShadow: isSelected
                   ? [
                       BoxShadow(
-                        color: SoftPalette.emerald400.withValues(alpha: _isDark ? 0.4 : 0.25),
+                        color: context.comfort.brand.withValues(alpha: _isDark ? 0.4 : 0.25),
                         blurRadius: 8,
                         offset: const Offset(0, 2),
                       )
@@ -2849,152 +3018,81 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
   }
 
   Widget _buildDesktopToggle() {
+    final c = context.comfort;
     final isToken = _activeSection == 'token';
     return Container(
-      width: double.infinity,
-      height: 54,
-      padding: const EdgeInsets.all(4),
+      padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(32),
-        border: Border.all(
-          color: _isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: _isDark ? 0.20 : 0.04),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          )
-        ],
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // ── Register Patient ──────────────────────────────────────────
-          Expanded(
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () => setState(() => _activeSection = 'register'),
-                borderRadius: BorderRadius.circular(28),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeInOut,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  decoration: BoxDecoration(
-                    gradient: !isToken
-                        ? const LinearGradient(
-                            colors: [SoftPalette.emerald400, SoftPalette.emerald550],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          )
-                        : null,
-                    borderRadius: BorderRadius.circular(28),
-                    boxShadow: !isToken
-                        ? [
-                            BoxShadow(
-                              color: SoftPalette.emerald400.withValues(alpha: _isDark ? 0.45 : 0.35),
-                              blurRadius: 14,
-                              spreadRadius: 1,
-                              offset: const Offset(0, 3),
-                            )
-                          ]
-                        : null,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.person_add_alt_1_rounded,
-                        size: 19,
-                        color: !isToken
-                            ? SoftPalette.gray50
-                            : (_isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Register Patient',
-                        style: TextStyle(
-                          fontWeight: !isToken ? FontWeight.bold : FontWeight.w600,
-                          fontSize: 14.5,
-                          color: !isToken
-                              ? SoftPalette.gray50
-                              : (_isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          _buildSegmentItem(
+            label: 'Register Patient',
+            icon: Icons.person_add_alt_1_rounded,
+            isSelected: !isToken,
+            onTap: () => setState(() => _activeSection = 'register'),
           ),
           const SizedBox(width: 4),
-          // ── Issue Token ───────────────────────────────────────────────
-          Expanded(
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () => setState(() {
-                  _activeSection = 'token';
-                  _pendingCnic = '';
-                  _pendingPatientId = null;
-                }),
-                borderRadius: BorderRadius.circular(28),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeInOut,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  decoration: BoxDecoration(
-                    gradient: isToken
-                        ? const LinearGradient(
-                            colors: [SoftPalette.emerald400, SoftPalette.emerald550],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          )
-                        : null,
-                    borderRadius: BorderRadius.circular(28),
-                    boxShadow: isToken
-                        ? [
-                            BoxShadow(
-                              color: SoftPalette.emerald400.withValues(alpha: _isDark ? 0.45 : 0.35),
-                              blurRadius: 14,
-                              spreadRadius: 1,
-                              offset: const Offset(0, 3),
-                            )
-                          ]
-                        : null,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.inventory_2_rounded,
-                        size: 19,
-                        color: isToken
-                            ? SoftPalette.gray50
-                            : (_isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Issue Token',
-                        style: TextStyle(
-                          fontWeight: isToken ? FontWeight.bold : FontWeight.w600,
-                          fontSize: 14.5,
-                          color: isToken
-                              ? SoftPalette.gray50
-                              : (_isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          _buildSegmentItem(
+            label: 'Issue Token',
+            icon: Icons.confirmation_number_outlined,
+            isSelected: isToken,
+            onTap: () => setState(() {
+              _activeSection = 'token';
+              _pendingCnic = '';
+              _pendingPatientId = null;
+            }),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSegmentItem({
+    required String label,
+    required IconData icon,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    final c = context.comfort;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: isSelected ? c.brand : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: isSelected ? c.onBrand : c.textSecondary,
+              ),
+              const SizedBox(width: 7),
+              Text(
+                label,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                  fontSize: 13,
+                  color: isSelected ? c.onBrand : c.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

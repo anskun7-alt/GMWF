@@ -222,7 +222,25 @@ class _DashboardTabState extends ConsumerState<DashboardTab> {
   }
 
   /// Apply all active client-side filters to the raw donation list.
+  // The filtered + sorted list is cached: every rebuild (scroll, hover, a
+  // parent tick) used to re-filter and re-sort every donation.
+  List<DonationRecord>? _filteredCache;
+  Object? _filteredFor;
+
   List<DonationRecord> _applyFilters(List<DonationRecord> raw) {
+    final key = Object.hashAll([
+      identityHashCode(raw), raw.length, identityHashCode(widget),
+      _searchCtrl.text, _startDate, _endDate, _statusFilter, _selectedGmwfSub, _selectedSubtype,
+      _paymentMethodFilter, _entryTypeFilter, _minAmount, _maxAmount, _sortMode,
+    ]);
+    if (_filteredCache != null && _filteredFor == key) return _filteredCache!;
+    _filteredFor = key;
+    return _filteredCache = _applyFiltersUncached(raw);
+  }
+
+  (double, double, double, int)? _lastStats;
+
+  List<DonationRecord> _applyFiltersUncached(List<DonationRecord> raw) {
     final q = _searchCtrl.text.toLowerCase();
     return raw.where((d) {
       // Branch scoping: when a specific branch is selected, strictly exclude other branches
@@ -415,7 +433,12 @@ class _DashboardTabState extends ConsumerState<DashboardTab> {
                     pending += amt;
                   }
                 }
-                widget.onStatsChanged?.call(total, received, pending, donations.length);
+                // Tell the parent only when the totals change (it rebuilds on each call).
+                final stats = (total, received, pending, donations.length);
+                if (stats != _lastStats) {
+                  _lastStats = stats;
+                  widget.onStatsChanged?.call(total, received, pending, donations.length);
+                }
               });
 
               if (donations.isEmpty) {

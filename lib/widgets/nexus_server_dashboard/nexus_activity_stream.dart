@@ -90,19 +90,12 @@ class NexusActivityStream extends StatelessWidget {
         color: NexusColors.cardBg,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: NexusColors.cardBorder, width: 1.0),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x06000000),
-            blurRadius: 10,
-            offset: Offset(0, 3),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
+            padding: const EdgeInsets.fromLTRB(18, 15, 18, 13),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -118,11 +111,32 @@ class NexusActivityStream extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Container(
-                      width: 6,
-                      height: 6,
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                       decoration: BoxDecoration(
-                        color: NexusColors.success,
-                        shape: BoxShape.circle,
+                        color: NexusColors.successMuted,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 5.5,
+                            height: 5.5,
+                            decoration: BoxDecoration(
+                              color: NexusColors.success,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Live',
+                            style: GoogleFonts.inter(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w600,
+                              color: NexusColors.success,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -156,7 +170,7 @@ class NexusActivityStream extends StatelessWidget {
 
           if (parsed.isEmpty)
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 36),
+              padding: const EdgeInsets.symmetric(vertical: 34),
               child: Center(
                 child: Text(
                   'No recent activity recorded yet',
@@ -171,12 +185,13 @@ class NexusActivityStream extends StatelessWidget {
             ListView.separated(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.symmetric(vertical: 6),
               itemCount: parsed.length,
               separatorBuilder: (context, i) => Divider(
-                color: NexusColors.cardBorder,
+                color: NexusColors.cardBorder.withValues(alpha: 0.7),
                 height: 1,
-                indent: 56,
+                indent: 18,
+                endIndent: 18,
               ),
               itemBuilder: (context, i) {
                 final log = parsed[i];
@@ -188,46 +203,45 @@ class NexusActivityStream extends StatelessWidget {
                 };
 
                 return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: badgeBg,
-                          borderRadius: BorderRadius.circular(5),
-                        ),
-                        child: Text(
-                          badgeLabel,
-                          style: GoogleFonts.inter(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.5,
-                            color: badgeColor,
+                      SizedBox(
+                        width: 58,
+                        child: Container(
+                          alignment: Alignment.center,
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: badgeBg,
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Text(
+                            badgeLabel,
+                            style: GoogleFonts.inter(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.4,
+                              color: badgeColor,
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(width: 14),
+                      const SizedBox(width: 12),
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              log.detail,
-                              style: GoogleFonts.inter(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                                color: NexusColors.textMain,
-                              ),
-                            ),
-                          ],
+                        child: Text(
+                          log.detail,
+                          style: GoogleFonts.inter(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w500,
+                            color: NexusColors.textMain,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Text(
                         log.timestamp,
-                        style: GoogleFonts.inter(
+                        style: GoogleFonts.firaCode(
                           fontSize: 11,
                           fontWeight: FontWeight.w400,
                           color: NexusColors.textSecondary,

@@ -12,7 +12,7 @@
 ;   • Professional finish page with launch option
 ; ══════════════════════════════════════════════════════════════
 
-#define MyAppVersion "1.6.4"
+#define MyAppVersion "1.6.5"
 
 [Setup]
 AppId={{B7E4D2A1-5C38-4F6E-9A10-2D8F6C3B9E47}

@@ -1158,8 +1158,16 @@ class MadrassaLocalStorage {
       try {
         final box = await LocalStorageService.ensureBoxOpen(studentsBox);
         final Map<String, dynamic> studentUpdates = {};
-        for (final doc in snap.docs) {
-          final data = expandMediaFromCloud(doc.data());
+        for (final change in snap.docChanges) {
+          final doc = change.doc;
+          final docData = doc.data();
+          if (change.type == DocumentChangeType.removed) {
+            final key = _studentKey(normBranch, doc.id);
+            await box.delete(key);
+            continue;
+          }
+          if (docData == null) continue;
+          final data = expandMediaFromCloud(docData);
           final rawDocBranch = (data['branchId'] ?? data['branch'] ?? '').toString().trim();
           final docBranch = rawDocBranch.isNotEmpty ? normalizeBranch(rawDocBranch) : normBranch;
           // A document naming another branch is cached under that branch only.

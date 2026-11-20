@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import '../../services/local_storage_service.dart';
+import '../../services/stock/stock_pool.dart';
+import '../../services/stock/stock_wipe_service.dart';
 import 'nexus_colors.dart';
 import 'nexus_devices_table.dart';
 import 'server_theme_selector.dart';
@@ -478,6 +482,7 @@ class NexusSettingsView extends StatefulWidget {
   final Widget biometricDeviceManager;
   final Widget pythonTerminal;
   final Widget dataVaultViewer;
+  final String branchId;
 
   const NexusSettingsView({
     super.key,
@@ -485,6 +490,7 @@ class NexusSettingsView extends StatefulWidget {
     required this.biometricDeviceManager,
     required this.pythonTerminal,
     required this.dataVaultViewer,
+    required this.branchId,
   });
 
   @override
@@ -498,11 +504,12 @@ class _NexusSettingsViewState extends State<NexusSettingsView> {
     'Biometric Devices',
     'Python Engine',
     'Local Data Vault',
+    'Inventory Wipe',
   ];
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
+    return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -593,20 +600,527 @@ class _NexusSettingsViewState extends State<NexusSettingsView> {
           ),
           const SizedBox(height: 18),
 
-          // Active Sub-Tab View
-          IndexedStack(
-            index: _activeSubTab,
-            children: [
-              widget.multiServerControl,
-              widget.biometricDeviceManager,
-              widget.pythonTerminal,
-              widget.dataVaultViewer,
-            ],
+          // Active Sub-Tab View (finite bounds so children with Expanded don't throw)
+          Expanded(
+            child: switch (_activeSubTab) {
+              0 => widget.multiServerControl,
+              1 => widget.biometricDeviceManager,
+              2 => widget.pythonTerminal,
+              3 => widget.dataVaultViewer,
+              4 => SingleChildScrollView(
+                  child: _NexusInventoryWipePanel(branchId: widget.branchId),
+                ),
+              _ => const SizedBox.shrink(),
+            },
           ),
-          const SizedBox(height: 24),
         ],
       ),
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inventory Wipe Panel (5th sub-tab in NexusSettingsView)
+// ─────────────────────────────────────────────────────────────────────────────
+class _NexusInventoryWipePanel extends StatefulWidget {
+  final String branchId;
+  const _NexusInventoryWipePanel({required this.branchId});
+
+  @override
+  State<_NexusInventoryWipePanel> createState() => _NexusInventoryWipePanelState();
+}
+
+class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
+  StockPool? _selectedPool;
+  List<StockPool> _pools = [];
+
+  final _pwCtrl = TextEditingController();
+  final _pwConfCtrl = TextEditingController();
+  bool _obscure1 = true;
+  bool _obscure2 = true;
+  bool _pwVerified = false;
+  String? _pwError;
+
+  bool _wiping = false;
+  final List<String> _log = [];
+  WipeResult? _result;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPools();
+  }
+
+  void _loadPools() {
+    final pools = StockPool.allFor(widget.branchId);
+    setState(() {
+      _pools = pools;
+      _selectedPool = pools.isNotEmpty ? pools.first : null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _pwCtrl.dispose();
+    _pwConfCtrl.dispose();
+    super.dispose();
+  }
+
+  bool _verifyPassword(String pw) {
+    if (pw.trim().isEmpty) return false;
+    // Check against master admin credentials
+    if (LocalStorageService.isMasterAdminCredentials('admin', pw.trim())) return true;
+    // Check against current user or local users
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final userData = Hive.box('app_settings').get('user_data');
+        if (userData is Map) {
+          final stored = (userData['passwordHash'] ?? '').toString();
+          final input = LocalStorageService.hashPassword(pw.trim());
+          if (stored.isNotEmpty && stored == input) return true;
+          final plain = (userData['password'] ?? '').toString();
+          if (plain.isNotEmpty && plain == pw.trim()) return true;
+        }
+      }
+      if (Hive.isBoxOpen('local_users')) {
+        final box = Hive.box('local_users');
+        for (final k in box.keys) {
+          final u = box.get(k);
+          if (u is! Map) continue;
+          final role = (u['role'] ?? u['userRole'] ?? '').toString().toLowerCase();
+          if (!role.contains('manager') && !role.contains('admin') && !role.contains('chairman')) continue;
+          final stored = (u['passwordHash'] ?? '').toString();
+          final input = LocalStorageService.hashPassword(pw.trim());
+          if (stored.isNotEmpty && stored == input) return true;
+          final plain = (u['password'] ?? '').toString();
+          if (plain.isNotEmpty && plain == pw.trim()) return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  Future<void> _doWipe() async {
+    final pool = _selectedPool;
+    if (pool == null || _wiping) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: NexusColors.cardBg,
+        title: Text(
+          '⚠️ Final Confirmation',
+          style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w700, color: NexusColors.textMain),
+        ),
+        content: Text(
+          'You are about to permanently wipe ALL inventory details for pool "${pool.key}".\n\n'
+          'This will:\n'
+          '• Delete all items & movements from local storage (Server)\n'
+          '• Delete all inventory documents in Firestore cloud (${pool.cloudBranch}/${pool.collection})\n'
+          '• Broadcast an instant wipe signal to all connected Doctor, Receptionist, Dispensary, and Hybrid desks\n\n'
+          'This action CANNOT be undone. Are you absolutely sure?',
+          style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel', style: GoogleFonts.inter(color: NexusColors.textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('WIPE NOW', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _wiping = true;
+      _log.clear();
+      _result = null;
+    });
+
+    final result = await StockWipeService.wipePool(pool, onProgress: (msg) {
+      if (mounted) setState(() => _log.add(msg));
+    });
+
+    if (mounted) {
+      setState(() {
+        _wiping = false;
+        _result = result;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cardDeco = BoxDecoration(
+      color: NexusColors.cardBg,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: NexusColors.cardBorder),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Danger Notice
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.red.shade900.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.red.shade700.withValues(alpha: 0.5)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red.shade400, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'PERMANENT INVENTORY WIPE',
+                      style: GoogleFonts.inter(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                        color: Colors.red.shade400,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Wipes all medicines and stock movements from local databases (Server & connected Doctor/Dispensary/Hybrid desks) '
+                      'and Firestore cloud. Password verification is required before initiating.',
+                      style: GoogleFonts.inter(fontSize: 11.5, color: NexusColors.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Step 1: Select Pool
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: cardDeco,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Step 1 — Select Branch / Camp Inventory Pool',
+                  style: GoogleFonts.inter(fontSize: 13.5, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
+              const SizedBox(height: 10),
+              if (_pools.isEmpty)
+                Text('No pools found for branch "${widget.branchId}".',
+                    style: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary))
+              else
+                DropdownButtonFormField<StockPool>(
+                  initialValue: _selectedPool,
+                  dropdownColor: NexusColors.cardBg,
+                  style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
+                  decoration: InputDecoration(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: NexusColors.cardBorder),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: NexusColors.cardBorder),
+                    ),
+                  ),
+                  items: _pools.map((p) => DropdownMenuItem(
+                    value: p,
+                    child: Text('${p.key}  (Cloud: ${p.cloudBranch}/${p.collection})',
+                        style: GoogleFonts.inter(fontSize: 12.5)),
+                  )).toList(),
+                  onChanged: _wiping ? null : (v) => setState(() => _selectedPool = v),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // Step 2: Password
+        if (!_pwVerified)
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: cardDeco,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Step 2 — Admin Password Verification',
+                    style: GoogleFonts.inter(fontSize: 13.5, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
+                const SizedBox(height: 4),
+                Text('Enter your admin, manager, or chairman password twice to unlock the wipe action.',
+                    style: GoogleFonts.inter(fontSize: 11.5, color: NexusColors.textSecondary)),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _pwCtrl,
+                  obscureText: _obscure1,
+                  style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    labelStyle: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.primary)),
+                    suffixIcon: IconButton(
+                      icon: Icon(_obscure1 ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18, color: NexusColors.textSecondary),
+                      onPressed: () => setState(() => _obscure1 = !_obscure1),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _pwConfCtrl,
+                  obscureText: _obscure2,
+                  style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
+                  decoration: InputDecoration(
+                    labelText: 'Confirm Password',
+                    labelStyle: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.primary)),
+                    suffixIcon: IconButton(
+                      icon: Icon(_obscure2 ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18, color: NexusColors.textSecondary),
+                      onPressed: () => setState(() => _obscure2 = !_obscure2),
+                    ),
+                  ),
+                ),
+                if (_pwError != null) ...[
+                  const SizedBox(height: 6),
+                  Text(_pwError!, style: GoogleFonts.inter(fontSize: 11.5, color: Colors.red.shade400)),
+                ],
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: NexusColors.primary,
+                      foregroundColor: NexusColors.onPrimary,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: const Icon(Icons.lock_open_rounded, size: 18),
+                    label: Text('Verify & Unlock Wipe', style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13)),
+                    onPressed: () {
+                      final pw = _pwCtrl.text.trim();
+                      final pw2 = _pwConfCtrl.text.trim();
+                      if (pw.isEmpty) {
+                        setState(() => _pwError = 'Please enter a password.');
+                        return;
+                      }
+                      if (pw != pw2) {
+                        setState(() => _pwError = 'Passwords do not match.');
+                        return;
+                      }
+                      if (!_verifyPassword(pw)) {
+                        setState(() => _pwError = 'Incorrect password. Only HQ Manager, Chairman, or Admin can proceed.');
+                        return;
+                      }
+                      setState(() { _pwVerified = true; _pwError = null; });
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+        // Step 2 (Unlocked): Wipe Button
+        if (_pwVerified) ...[
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: cardDeco,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Step 2 — Execute Wipe',
+                    style: GoogleFonts.inter(fontSize: 13.5, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.check_circle_rounded, color: Colors.green, size: 16),
+                    const SizedBox(width: 6),
+                    Text('Password verified. Selected pool: ${_selectedPool?.key ?? '—'}',
+                        style: GoogleFonts.inter(fontSize: 12, color: Colors.green)),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                if (_wiping)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const LinearProgressIndicator(
+                          minHeight: 4,
+                          backgroundColor: Colors.transparent,
+                          color: Colors.redAccent,
+                        ),
+                        const SizedBox(height: 6),
+                        Text('Performing safe multi-tier wipe (Local Hive, Outbox, Cloud, Desk Broadcast)…',
+                            style: GoogleFonts.inter(fontSize: 11, fontStyle: FontStyle.italic, color: NexusColors.textSecondary)),
+                      ],
+                    ),
+                  ),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.shade700,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.red.shade900.withValues(alpha: 0.8),
+                      disabledForegroundColor: Colors.white,
+                      elevation: _wiping ? 0 : 2,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: _wiping
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.2))
+                        : const Icon(Icons.delete_forever_rounded, size: 20),
+                    label: Text(
+                      _wiping ? 'Wiping in progress… Please wait' : '🗑  WIPE ALL INVENTORY DETAILS',
+                      style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 13.5, letterSpacing: 0.3),
+                    ),
+                    onPressed: (_wiping || _selectedPool == null) ? null : _doWipe,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+
+        // Logs and Results
+        if (_log.isNotEmpty || _result != null) ...[
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: NexusColors.cardBg,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: NexusColors.cardBorder),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Wipe Activity Console', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
+                    if (_wiping)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(color: Colors.amber.shade900.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(6)),
+                        child: Text('RUNNING', style: GoogleFonts.inter(fontSize: 10.5, fontWeight: FontWeight.w800, color: Colors.amber.shade400)),
+                      )
+                    else if (_result != null)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _result!.hasErrors ? Colors.orange.shade900.withValues(alpha: 0.2) : Colors.green.shade900.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(_result!.hasErrors ? 'COMPLETED WITH NOTES' : 'COMPLETED',
+                            style: GoogleFonts.inter(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                              color: _result!.hasErrors ? Colors.orange.shade400 : Colors.green.shade400,
+                            )),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: NexusColors.cardBorder.withValues(alpha: 0.6)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _log.map((l) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '▸  $l',
+                        style: GoogleFonts.firaCode(fontSize: 11.5, color: NexusColors.textMain.withValues(alpha: 0.85), height: 1.3),
+                      ),
+                    )).toList(),
+                  ),
+                ),
+                if (_result != null) ...[
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 12),
+                  _ResultRow('Local medicine items wiped', '${_result!.itemsWiped}'),
+                  _ResultRow('Local ledger movements cleared', '${_result!.movesWiped}'),
+                  _ResultRow('Cloud Firestore documents deleted', '${_result!.cloudDocsDeleted}'),
+                  if (_result!.hasErrors) ...[
+                    const SizedBox(height: 8),
+                    Text('Notes / Warnings (${_result!.errors.length}):',
+                        style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w700, color: Colors.orange.shade400)),
+                    ..._result!.errors.map((e) => Text('  • $e',
+                        style: GoogleFonts.inter(fontSize: 11, color: Colors.orange.shade300))),
+                  ],
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Icon(
+                        _result!.hasErrors ? Icons.info_outline_rounded : Icons.check_circle_rounded,
+                        color: _result!.hasErrors ? Colors.orange : Colors.green,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _result!.hasErrors
+                              ? 'Wipe finished. Check the notes above.'
+                              : 'All inventory details successfully wiped & broadcast delivered to all desks.',
+                          style: GoogleFonts.inter(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: _result!.hasErrors ? Colors.orange : Colors.green,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _ResultRow extends StatelessWidget {
+  final String label;
+  final String value;
+  const _ResultRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary))),
+          Text(value, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
+        ],
+      ),
+    );
+  }
+}
+
+
 

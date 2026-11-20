@@ -26,6 +26,7 @@ import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import '../../design/design_system.dart';
+import 'package:gmwf/widgets/patient_audit_history_dialog.dart';
 import 'dispensar/dispensar_screen.dart';
 import 'dispensar/dispense_queue.dart';
 import 'dispensar/patient_form.dart';
@@ -184,8 +185,46 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
     final entry = _dispensing;
     final serial = _dispensingSerial;
     return PharmacyPane(
-      icon: Icons.medication_outlined,
-      title: serial == null ? 'Dispense' : 'Dispense  ·  #$serial',
+      icon: Icons.person_rounded,
+      title: 'Active Patient',
+      actions: [
+        if (entry != null)
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: () {
+                final pId = (entry['patientId'] ?? entry['id'] ?? entry['cnic'] ?? '').toString();
+                final pName = (entry['patientName'] ?? entry['name'])?.toString();
+                PatientAuditHistoryDialog.show(
+                  context,
+                  patientId: pId,
+                  patientName: pName,
+                  branchId: widget.branchId,
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: c.brandSoft,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: c.brand.withValues(alpha: 0.35)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Patient Details',
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: c.brand),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(Icons.arrow_forward_rounded, size: 13, color: c.brand),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
       child: entry == null
           ? Center(
               child: Padding(
@@ -193,8 +232,20 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.medication_liquid_rounded, size: 52, color: c.textMuted),
-                    const SizedBox(height: 12),
+                    Container(
+                      width: 140,
+                      height: 110,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: c.border),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Image.asset(
+                        'assets/images/doctor_empty_medicines.jpg',
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
                     Text(
                       'No patients waiting to dispense',
                       textAlign: TextAlign.center,

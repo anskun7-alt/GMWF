@@ -34,6 +34,7 @@ class AppLocalizations {
     'change_password': {'en': 'Change Password', 'ur': 'پاس ورڈ تبدیل کریں'},
 
     // Personalization Fields
+    'visual_theme': {'en': 'Visual Theme', 'ur': 'ایپ تھیم'},
     'theme_color': {'en': 'Theme Color', 'ur': 'تھیم کا رنگ'},
     'language': {'en': 'App Language', 'ur': 'ایپ کی زبان'},
     'card_radius': {'en': 'Card Roundness', 'ur': 'کارڈ کی گولائی'},

@@ -4,10 +4,12 @@
 // Palette  : Deep forest green hero · mint accent · white surfaces
 // Typography: Google Fonts – DM Serif Display (headings) + DM Sans (body)
 //
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/utils/base64_image_cache.dart';
 import 'package:gmwf/design/components/decorative_image.dart';
 import 'package:flutter/services.dart';
@@ -1194,7 +1196,8 @@ class _DasterkhwaanOfficeBoyState extends State<DasterkhwaanOfficeBoy>
               backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.gray100,
               body: Column(
                 children: [
-                  _buildPersistentHeader(context),
+                  // The executive shell already shows title, sync and settings.
+                  if (!HomeModuleHost.isModuleRoot(context)) _buildPersistentHeader(context),
                   Expanded(
                     child: PageView(
                       controller: _pageController,
@@ -3342,14 +3345,15 @@ class _TokensScreenState extends State<_TokensScreen> {
             }
             final box = boxSnap.data!;
             return ValueListenableBuilder(
-              valueListenable: box.listenable(),
+              valueListenable: DebouncedBoxListenable.shared(box),
               builder: (ctx, Box box, _) {
                 final List<Map<String, dynamic>> tokenList = [];
                 final Set<int> seenTokenNumbers = {};
+                // Filter on the raw record first; copy only today's tokens (the box holds every day and branch).
                 for (final raw in box.values) {
-                  if (raw is Map) {
+                  if (raw is Map && raw['dateKey'] == widget.today && raw['branchId'] == widget.branchId) {
                     final t = Map<String, dynamic>.from(raw);
-                    if (t['dateKey'] == widget.today && t['branchId'] == widget.branchId) {
+                    {
                       final tokenNum = (t['number'] as num?)?.toInt() ?? 0;
                       if (tokenNum > 0 && !seenTokenNumbers.add(tokenNum)) continue;
                       String rawSession = (t['session'] as String? ?? 'lunch').toLowerCase();

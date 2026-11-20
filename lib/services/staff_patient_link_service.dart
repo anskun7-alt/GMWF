@@ -280,10 +280,16 @@ class StaffPatientLinkService {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.badge_rounded,
-            size: 11,
-            color: isDark ? SoftPalette.blue300 : SoftPalette.blue550,
+          Image.asset(
+            'assets/logo/gmwf-1.webp',
+            width: 13,
+            height: 13,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => Icon(
+              Icons.badge_rounded,
+              size: 11,
+              color: isDark ? SoftPalette.blue300 : SoftPalette.blue550,
+            ),
           ),
           const SizedBox(width: 4),
           Text(

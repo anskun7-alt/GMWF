@@ -1,20 +1,24 @@
 // lib/pages/dispensary/dispensar/inventory_update.dart
 
 import 'dart:async';
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:gmwf/design/design_system.dart' hide AppFeedback;
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/stock_actions.dart';
+import 'package:gmwf/services/stock/stock_ledger.dart';
+import 'package:gmwf/services/stock/stock_pool.dart';
+import 'package:gmwf/services/stock/stock_reader.dart';
 import 'package:gmwf/utils/string_similarity_helper.dart';
 import 'package:gmwf/pages/dispensary/dispensar/universal_proforma_sheet.dart';
+import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
 import 'package:gmwf/widgets/app_back_button.dart';
@@ -47,20 +51,11 @@ class InventoryUpdatePage extends StatefulWidget {
 class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     with TickerProviderStateMixin {
   // ── Palette ───────────────────────────────────────────────────────────────
-  static const _teal = SoftPalette.teal600;
-  static const _tealDark = SoftPalette.teal700;
-  static const _bg = SoftPalette.teal100t;
-  static const _white = SoftPalette.gray50;
-  static const _green50 = SoftPalette.green100m;
-  static const _green100 = SoftPalette.green200;
-   static const _green600 = SoftPalette.green550;
+  Color get _teal => context.comfort.brand;
+  static const _green600 = SoftPalette.green550;
   static const _red = SoftPalette.red500; // Vibrant red
-  static const _blue = SoftPalette.blue500;
-  static const _purple = SoftPalette.purple600;
   static const _textDark = SoftPalette.slate800;
   static const _textMid = SoftPalette.slate600;
-  static const _textLight = SoftPalette.slate500;
-  static const _border = SoftPalette.teal200;
   static const _shadow = SoftPalette.teal600A9;
 
   late TabController _tabCtrl;
@@ -166,6 +161,50 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
   bool get _hasMultiCamps => CampSessionService.hasCampsForBranch(_effectiveBranchId);
 
+  // ── Stock book ────────────────────────────────────────────────────────────
+  /// Pools this screen lists: the selected camp's pool, or every pool of the branch.
+  List<StockPool> _viewPools() {
+    final sel = _selectedCampFilter.trim();
+    if (sel.isEmpty || sel.toLowerCase() == 'all') return StockPool.allFor(_effectiveBranchId);
+    final p = StockPool.of(_effectiveBranchId, sel,
+        fallbackCamp: CampSessionService.getActiveCamp(_effectiveBranchId));
+    return p == null ? const [] : [p];
+  }
+
+  /// Every ledger batch of the listed pools; each keeps its own `pool` and `id`.
+  List<Map<String, dynamic>> _ledgerItems() {
+    final out = <Map<String, dynamic>>[];
+    for (final pool in _viewPools()) {
+      for (final rec in StockReader.batches(pool)) {
+        final m = Map<String, dynamic>.from(rec);
+        m['id'] = (m['medicineId'] ?? m['id']).toString();
+        m['pool'] = pool.key;
+        out.add(m);
+      }
+    }
+    return out;
+  }
+
+  /// Sends an audit entry to the cloud inventory_log (Medicine Ledger history). Stock
+  /// figures themselves travel as stock-book movements, never through this.
+  Future<void> _uploadInventoryLog(Map<String, dynamic> logData) async {
+    try {
+      await LocalStorageService.enqueueSync({
+        'type': 'save_inventory_log',
+        'branchId': _effectiveBranchId,
+        'data': logData,
+      });
+      SyncService().triggerUpload();
+    } catch (e) {
+      debugPrint('[InventoryUpdate] inventory log upload queue failed: $e');
+    }
+  }
+
+  /// Pool of a listed record (its own `pool`), else the pool of [camp] in this branch.
+  StockPool? _poolFor(Map med, [String? camp]) =>
+      StockActions.poolOf(med) ??
+      StockPool.of(_effectiveBranchId, camp, fallbackCamp: CampSessionService.getActiveCamp(_effectiveBranchId));
+
   // ── Register New Medicine state ───────────────────────────────────────────
   final _regFormKey = GlobalKey<FormState>();
   final _regNameCtrl = TextEditingController();
@@ -174,6 +213,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   final _regPriceCtrl = TextEditingController();
   final _regDoseCtrl = TextEditingController();
   final _regCodeCtrl = TextEditingController();
+  final _regPackBarcodeCtrl = TextEditingController();
   final _regReasonCtrl = TextEditingController();
   String _regType = 'Tablet';
   String? _regSelectedDose;
@@ -181,22 +221,53 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Map<String, dynamic>? _liveSpellingSuggestion;
 
   bool get _canRegisterMedicine {
+    if (widget.isDispenser || widget.isDoctor) return false;
+    if (widget.isAdmin) return true;
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final uData = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
         if (uData is Map) {
-          if (uData['canRegisterMedicine'] == true) return true;
-          final r = (uData['role'] ?? uData['userRole'] ?? '').toString().trim().toLowerCase();
-          if (r.contains('admin') || r.contains('supervisor') || r.contains('chairman') || r.contains('hqmanager') || r.contains('hq_manager') || r.contains('manager') || r.contains('president')) {
-            return true;
+          final raw = (uData['role'] ?? uData['userRole'] ?? '').toString();
+          final role = raw.trim().toLowerCase();
+          if (role.isEmpty) return false;
+
+          // Explicitly exclude dispensary staff roles
+          if (role == 'dispenser' ||
+              role.contains('dispens') ||
+              role == 'doctor' ||
+              role.contains('doctor') ||
+              role == 'receptionist' ||
+              role.contains('receptionist') ||
+              role == 'rec+dis' ||
+              role == 'doc+dis' ||
+              role == 'doc+rec' ||
+              role == 'doc+rec+dis') {
+            return false;
           }
+
+          // Allowed: HQ Manager, Branch Manager, Supervisor, and executive roles above them
+          return role == 'branch manager' ||
+              role == 'branch_manager' ||
+              role == 'bm' ||
+              role == 'supervisor' ||
+              role.contains('supervisor') ||
+              role.contains('branch manager') ||
+              role.contains('branch_manager') ||
+              role == 'hq manager' ||
+              role == 'hq_manager' ||
+              role == 'hqmanager' ||
+              role == 'headquarters manager' ||
+              role.contains('headquarters') ||
+              role.contains('hq') ||
+              role == 'chairman' ||
+              role == 'ceo' ||
+              role == 'president' ||
+              role == 'director' ||
+              role.contains('admin') ||
+              role == 'manager';
         }
       }
     } catch (_) {}
-
-    if (widget.isAdmin) {
-      return true;
-    }
     return false;
   }
 
@@ -279,7 +350,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     _currentBranchId = widget.branchId;
     _selectedCampFilter = _initialCampFilter();
 
-    _tabCtrl = TabController(length: 2, vsync: this);
+    _tabCtrl = TabController(length: _canRegisterMedicine ? 2 : 1, vsync: this);
     _fadeCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 300));
     _fadeAnim =
@@ -316,6 +387,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     _regPriceCtrl.dispose();
     _regDoseCtrl.dispose();
     _regCodeCtrl.dispose();
+    _regPackBarcodeCtrl.dispose();
     _regReasonCtrl.dispose();
     super.dispose();
   }
@@ -340,15 +412,15 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     if (profMatch != null) return true;
 
     // 2. Check local stock items in active camp
-    final localItems =
-        LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
+    final localItems = _ledgerItems();
     final queryInt = int.tryParse(normalized);
     final localMatch = localItems.any((item) {
       final itemCode = (item['code']?.toString().trim().toLowerCase() ?? item['barcode']?.toString().trim().toLowerCase() ?? '');
-      if (itemCode.isEmpty) return false;
+      final itemPack = (item['packBarcode']?.toString().trim().toLowerCase() ?? '');
+      if (itemCode.isEmpty && itemPack.isEmpty) return false;
       final itemDocId = item['_docId'] ?? item['id'] ?? item['docId'];
       if (excludeDocId != null && itemDocId == excludeDocId) return false;
-      if (itemCode == normalized) return true;
+      if (itemCode == normalized || (itemPack.isNotEmpty && itemPack == normalized)) return true;
       if (queryInt != null) {
         final itemInt = int.tryParse(itemCode);
         if (itemInt != null && itemInt == queryInt) return true;
@@ -366,7 +438,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final profMatch = MasterProformaService.findExactBarcodeMatch(code);
     if (profMatch != null) return profMatch;
 
-    final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
+    final localItems = _ledgerItems();
     final queryInt = int.tryParse(cleanCode);
     for (final item in localItems) {
       final itemCode = (item['code']?.toString().trim().toLowerCase() ?? item['barcode']?.toString().trim().toLowerCase() ?? '');
@@ -391,7 +463,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final profMatch = MasterProformaService.findExactNameDoseTypeMatch(name, type, dose);
     if (profMatch != null) return profMatch;
 
-    final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: true);
+    final localItems = _ledgerItems();
     for (final item in localItems) {
       final itemDocId = item['_docId'] ?? item['id'] ?? item['docId'];
       if (excludeDocId != null && itemDocId == excludeDocId) continue;
@@ -421,9 +493,26 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       if (widget.isAdmin || widget.isDoctor) {
         final docId = (originalMed['_docId'] ?? originalMed['id'] ?? originalMed['medicineId'])?.toString();
         if (docId != null && docId.isNotEmpty) {
-          final updatedItem = Map<String, dynamic>.from(originalMed)..addAll(updatedFields);
-          updatedItem['updatedAt'] = DateTime.now().toIso8601String();
-          LocalStorageService.saveLocalInventoryItem(updatedItem);
+          // Stock book: details via saveDetails (never quantity); a changed quantity is
+          // recorded as a counted difference on this one batch. StockActions sends both to
+          // the LAN server and the cloud.
+          final pool = _poolFor(originalMed, (originalMed['campId'] ?? originalMed['dispensaryId'])?.toString());
+          if (pool == null) {
+            _snack('Please select a specific camp above before editing.', err: true);
+            return;
+          }
+          final details = Map<String, dynamic>.from(updatedFields)
+            ..removeWhere((k, _) => const {'quantity', 'stock', '_quantityDelta', 'pool', 'id', 'medicineId', '_docId', '_docIds'}.contains(k));
+          await StockActions.saveDetails(pool, docId, details);
+          if (updatedFields.containsKey('quantity')) {
+            final newQ = updatedFields['quantity'];
+            final oldQ = originalMed['quantity'];
+            final n = newQ is num ? newQ.toDouble() : double.tryParse(newQ?.toString() ?? '');
+            final o = oldQ is num ? oldQ.toDouble() : double.tryParse(oldQ?.toString() ?? '');
+            if (n != null && n != o) {
+              await StockActions.setCounted(pool, docId, n, reason: 'edit medicine');
+            }
+          }
 
           final logData = {
             'action': 'edit_medicine_directly',
@@ -437,23 +526,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             'createdAt': DateTime.now().toIso8601String(),
           };
           LocalStorageService.saveLocalInventoryLog(logData);
-
-          RealtimeManager().sendMessage({
-            'event_type': RealtimeEvents.saveStockItem,
-            'branchId': widget.branchId,
-            'data': updatedItem,
-            'logData': logData,
-          });
-
-          // Upload through the sync queue only (a second direct SDK write cost quota for nothing).
-          await LocalStorageService.enqueueSync({
-            'type': 'register_medicine',
-            'branchId': widget.branchId,
-            'medicineId': docId,
-            'data': updatedItem,
-            'logData': logData,
-          });
-          SyncService().triggerUpload();
+          await _uploadInventoryLog(logData);
 
           _snack('Medicine updated successfully!');
           _loadAllMedicines();
@@ -549,22 +622,26 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   // ── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final isDark = _isDark;
+    final c = context.comfort;
     if (widget.isEmbedded) {
       return Container(
-        color: isDark ? SoftPalette.slate900 : _bg,
-        child: widget.showMode == 1 ? _addStockTab() : _registerTab(),
+        color: c.background,
+        child: widget.showMode == 1
+            ? _addStockTab()
+            : (_canRegisterMedicine ? _registerTab() : _addStockTab()),
       );
     }
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : _bg,
+      backgroundColor: c.background,
       appBar: _buildAppBar(),
       body: FadeTransition(
         opacity: _fadeAnim,
-        child: TabBarView(
-          controller: _tabCtrl,
-          children: [_addStockTab(), _registerTab()],
-        ),
+        child: _canRegisterMedicine
+            ? TabBarView(
+                controller: _tabCtrl,
+                children: [_addStockTab(), _registerTab()],
+              )
+            : _addStockTab(),
       ),
     );
   }
@@ -672,30 +749,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Future<void> _loadAllMedicines() async {
     setState(() => _isSearching = true);
     try {
-      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: false);
+      // Stock book: the ledger batches of the selected pool(s). Each record is one real
+      // batch, so no camp guessing or de-duplication is needed.
+      final localItems = _ledgerItems();
       final Map<String, Map<String, dynamic>> consolidated = {};
-      final Set<String> processedDocIds = {};
 
       void processItem(Map<String, dynamic> d) {
-        final rawDocId = (d['_docId'] ?? d['id'] ?? d['docId'])?.toString().trim();
-        final docId = (rawDocId != null && rawDocId.startsWith('stock:')) ? rawDocId.substring(6) : rawDocId;
-        if (docId != null && docId.isNotEmpty) {
-          if (processedDocIds.contains(docId)) return;
-          processedDocIds.add(docId);
-        }
-
-        final itemCamp = (d['dispensaryId'] ?? d['campId'] ?? '').toString().toLowerCase().trim();
-
-        if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
-          final matches = CampSessionService.matchesCamp(
-            selectedCamp: _selectedCampFilter,
-            dispensaryId: d['dispensaryId']?.toString(),
-            campId: d['campId']?.toString(),
-            dispensaryTag: d['dispensaryTag']?.toString(),
-            serial: (d['barcode'] ?? d['code'] ?? docId)?.toString(),
-          );
-          if (!matches) return;
-        }
+        final docId = (d['medicineId'] ?? d['id'])?.toString().trim();
+        final itemCamp = (d['pool'] ?? '').toString();
 
         // Filter by Type category if selected
         final itemType = (d['type'] ?? '').toString();
@@ -770,26 +831,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       final Map<String, Map<String, dynamic>> seen = {};
       final q = query.toLowerCase().trim();
 
-      final Set<String> processedDocIds = {};
-      void processDoc(Map<String, dynamic> d, String rawDocId) {
-        final docId = (rawDocId.startsWith('stock:')) ? rawDocId.substring(6) : rawDocId;
-        if (docId.isNotEmpty) {
-          if (processedDocIds.contains(docId)) return;
-          processedDocIds.add(docId);
-        }
-
-        final itemCamp = (d['dispensaryId'] ?? d['campId'] ?? '').toString().toLowerCase().trim();
-
-        if (_hasMultiCamps && _selectedCampFilter.isNotEmpty && _selectedCampFilter != 'all') {
-          final matches = CampSessionService.matchesCamp(
-            selectedCamp: _selectedCampFilter,
-            dispensaryId: d['dispensaryId']?.toString(),
-            campId: d['campId']?.toString(),
-            dispensaryTag: d['dispensaryTag']?.toString(),
-            serial: (d['barcode'] ?? d['code'] ?? docId)?.toString(),
-          );
-          if (!matches) return;
-        }
+      void processDoc(Map<String, dynamic> d, String docId) {
+        final itemCamp = (d['pool'] ?? '').toString();
 
         final itemType = (d['type'] ?? '').toString();
         if (_selectedTypeFilter != 'All' && itemType.toLowerCase() != _selectedTypeFilter.toLowerCase()) {
@@ -805,17 +848,18 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         }
       }
 
-      // Check local Hive stock first (works offline immediately)
-      final localItems = LocalStorageService.getAllLocalStockItems(branchId: _effectiveBranchId, filterByCamp: false);
+      // Stock book batches of the selected pool(s) (works offline immediately)
+      final localItems = _ledgerItems();
       for (final item in localItems) {
         final name = (item['name'] ?? '').toString().toLowerCase();
         final barcode = (item['barcode'] ?? item['code'] ?? '').toString().toLowerCase();
+        final packBarcode = (item['packBarcode'] ?? '').toString().toLowerCase();
         final formula = (item['formula'] ?? '').toString().toLowerCase();
         final qNum = int.tryParse(q);
         final bNum = int.tryParse(barcode);
         final numMatch = qNum != null && bNum != null && qNum == bNum;
-        if (name.contains(q) || barcode.contains(q) || formula.contains(q) || numMatch) {
-          final docId = (item['_docId'] ?? item['id'] ?? item['docId'])?.toString() ?? '';
+        if (name.contains(q) || barcode.contains(q) || packBarcode.contains(q) || formula.contains(q) || numMatch) {
+          final docId = (item['medicineId'] ?? item['id'])?.toString() ?? '';
           processDoc(item, docId);
         }
       }
@@ -873,8 +917,14 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       final medId = _selectedDocId!;
       final campLabel = CampSessionService.getCampLabel(targetCamp);
 
-      // STEP 1: Update local Hive instantly — local UI reflects immediately
-      await LocalStorageService.updateLocalStockQuantity(medId, qty.toDouble());
+      // Stock book: ONE restock movement on the batch's own pool. It is applied here at
+      // once and StockActions sends it to the LAN server and the cloud.
+      final pool = _poolFor(_selectedMed!, targetCamp);
+      if (pool == null) {
+        _snack('Please select a specific camp above before adding stock.', err: true);
+        return;
+      }
+      await StockActions.restock(pool, medId, qty.toDouble(), ref: 'add stock');
 
       final logData = {
         'action': 'add_stock',
@@ -891,42 +941,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'createdAt': DateTime.now().toIso8601String(),
       };
       await LocalStorageService.saveLocalInventoryLog(logData);
-
-      // STEP 2: LAN broadcast — all LAN devices (doctor, server) see it instantly
-      final updatedMed = LocalStorageService.getLocalInventoryItem(medId);
-      if (updatedMed != null) {
-        RealtimeManager().sendMessage({
-          'event_type': RealtimeEvents.saveStockItem,
-          'data': {
-            ...updatedMed,
-            '_quantityDelta':   qty,
-            'branchId':         _effectiveBranchId,
-            'campId':           targetCamp,
-            'dispensaryId':     targetCamp,
-            'campName':         campLabel,
-            'performedBy':      userInfo['uid'],
-            'performedByName':  userInfo['username'],
-          },
-          'logData': logData,
-        });
-      }
-
-      // STEP 3: Upload through the sync queue only. A direct SDK increment as well counted the
-      // restock twice in the cloud.
-      await LocalStorageService.enqueueSync({
-        'type': 'add_inventory_stock',
-        'branchId': _effectiveBranchId,
-        'dispensaryId': targetCamp,
-        'campId': targetCamp,
-        'campName': campLabel,
-        'medicineId': medId,
-        'medicineName': _selectedMed!['name'],
-        'quantity': qty,
-        'performedBy': userInfo['uid'],
-        'performedByName': userInfo['username'],
-        'logData': logData,
-      });
-      SyncService().triggerUpload();
+      await _uploadInventoryLog(logData);
 
       _snack('+$qty added to ${_selectedMed!['name']} at $campLabel (${_currentBranchId.toUpperCase()})!');
       _clearSelection();
@@ -1016,15 +1031,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final items = MasterProformaService.getAllItems();
     candidates.addAll(items);
 
-    if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-      final stockBox = Hive.box(LocalStorageService.stockBox);
-      for (final key in stockBox.keys) {
-        final val = stockBox.get(key);
-        if (val is Map) {
-          candidates.add(Map<String, dynamic>.from(val));
-        }
-      }
-    }
+    candidates.addAll(StockLedger.items());
 
     final matches = StringSimilarityHelper.findSimilarMedicines(name, candidates, threshold: 0.65);
     if (matches.isNotEmpty) {
@@ -1144,7 +1151,20 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       return;
     }
 
-    String code = _regCodeCtrl.text.trim();
+    final rawProformaBarcode = _regCodeCtrl.text.trim();
+    final proformaBarcode = rawProformaBarcode.isEmpty
+        ? MasterProformaService.getNextRollNumber()
+        : MasterProformaService.normalizeProformaBarcode(rawProformaBarcode);
+    if (proformaBarcode == null) {
+      _snack('Proforma Barcode must be a 3-digit number from 001 to 999', err: true);
+      return;
+    }
+    if (MasterProformaService.findExactBarcodeMatch(proformaBarcode) != null) {
+      _snack('Proforma Barcode $proformaBarcode is already assigned to another medicine', err: true);
+      return;
+    }
+    final packBarcode = _regPackBarcodeCtrl.text.trim();
+
     final dose = _hasDoseDropdown
         ? (_regSelectedDose ?? '')
         : (_usesFreeTextDose ? _regDoseCtrl.text.trim() : '');
@@ -1155,10 +1175,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final finalName = _regNameCtrl.text.trim();
     final cleanFormula = MasterProformaService.cleanBrandToFormula(finalName);
 
-    if (code.isEmpty) {
-      final initials = cleanFormula.split(RegExp(r'\s+')).take(3).map((w) => w.isNotEmpty ? w[0].toUpperCase() : '').join();
-      code = 'MED-$initials-${DateTime.now().millisecondsSinceEpoch % 10000}';
-    }
+    final initials = cleanFormula.split(RegExp(r'\s+')).take(3).map((w) => w.isNotEmpty ? w[0].toUpperCase() : '').join();
+    final code = 'MED-$initials-${DateTime.now().millisecondsSinceEpoch % 10000}';
 
     setState(() => _isSubmittingReg = true);
     try {
@@ -1166,6 +1184,10 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
       final proformaItem = {
         'code': code,
+        'itemCode': code,
+        'barcode': proformaBarcode,
+        'rollNo': proformaBarcode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
         'name': cleanFormula,
         'formula': cleanFormula,
         'type': _regType,
@@ -1182,6 +1204,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'id': 'audit_${DateTime.now().millisecondsSinceEpoch}',
         'action': 'register_proforma_medicine',
         'medicineCode': code,
+        'barcode': proformaBarcode,
+        'rollNo': proformaBarcode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
         'medicineName': cleanFormula,
         'medicineType': _regType,
         'medicineDose': dose,
@@ -1219,6 +1244,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     _regPriceCtrl.clear();
     _regDoseCtrl.clear();
     _regCodeCtrl.clear();
+    _regPackBarcodeCtrl.clear();
     _regReasonCtrl.clear();
     setState(() {
       _regType = 'Tablet';
@@ -1258,32 +1284,33 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       };
 
   InputDecoration _inputDec(String label, {IconData? icon, String? hint}) {
-    final isDark = _isDark;
+    final c = context.comfort;
     return InputDecoration(
       labelText: label,
       labelStyle: TextStyle(
-        color: isDark ? SoftPalette.slate350 : _teal,
+        color: c.textSecondary,
         fontSize: 13,
+        fontWeight: FontWeight.w500,
       ),
       hintText: hint,
       hintStyle: TextStyle(
-        color: isDark ? SoftPalette.slate550 : _textLight,
-        fontSize: 13,
+        color: c.textMuted,
+        fontSize: 12.5,
       ),
-      prefixIcon: icon != null ? Icon(icon, color: isDark ? SoftPalette.sky350 : _teal, size: 18) : null,
+      prefixIcon: icon != null ? Icon(icon, color: c.brand, size: 18) : null,
       filled: true,
-      fillColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+      fillColor: c.surfaceSunken,
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _border),
+        borderSide: BorderSide(color: c.border),
       ),
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _border),
+        borderSide: BorderSide(color: c.border),
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(color: isDark ? SoftPalette.sky350 : _teal, width: 1.8),
+        borderSide: BorderSide(color: c.brand, width: 1.6),
       ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     );
@@ -1317,235 +1344,212 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           ),
           const SizedBox(width: 8),
         ],
-        bottom: TabBar(
-          controller: _tabCtrl,
-          indicatorColor: SoftPalette.gray50,
-          indicatorWeight: 3,
-          labelColor: SoftPalette.gray50,
-          unselectedLabelColor: SoftPalette.gray50A60,
-          labelStyle: const TextStyle(
-              fontWeight: FontWeight.bold, fontSize: 13),
-          tabs: const [
-            Tab(
-                icon: Icon(Icons.add_box_rounded, size: 18),
-                text: 'Add Stock'),
-            Tab(
-                icon: Icon(Icons.medication_liquid_rounded, size: 18),
-                text: 'Register New'),
-          ],
-        ),
+        bottom: _canRegisterMedicine
+            ? TabBar(
+                controller: _tabCtrl,
+                indicatorColor: SoftPalette.gray50,
+                indicatorWeight: 3,
+                labelColor: SoftPalette.gray50,
+                unselectedLabelColor: SoftPalette.gray50A60,
+                labelStyle: const TextStyle(
+                    fontWeight: FontWeight.bold, fontSize: 13),
+                tabs: const [
+                  Tab(
+                      icon: Icon(Icons.add_box_rounded, size: 18),
+                      text: 'Add Stock'),
+                  Tab(
+                      icon: Icon(Icons.medication_liquid_rounded, size: 18),
+                      text: 'Register New'),
+                ],
+              )
+            : null,
       );
 
   // ══════════════════════════════════════════════════════════════════════════
   // TAB 1 — Add Stock & Inventory Manager Redesign
   // ══════════════════════════════════════════════════════════════════════════
-  Widget _buildContextBanner() {
-    final isDark = _isDark;
-    final totalCount = _searchResults.length;
-    final lowStockCount = _searchResults.where((m) => _isLowStock(_safeInt(m['quantity']), m['type']?.toString() ?? '')).length;
-
+  Widget _buildKpiMetricCard({
+    required IconData icon,
+    required Color accentColor,
+    required Color bgTint,
+    String? value,
+    Widget? valueWidget,
+    required String label,
+  }) {
+    final c = context.comfort;
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.teal100,
-          width: 1,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: isDark ? SoftPalette.gray900A26 : _shadow,
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          )
+        color: bgTint,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: accentColor.withValues(alpha: _isDark ? 0.22 : 0.14),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: accentColor, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (valueWidget != null)
+                  valueWidget
+                else
+                  Text(
+                    value ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: c.textPrimary,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      height: 1.1,
+                    ),
+                  ),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: accentColor,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: isDark ? SoftPalette.teal550.withValues(alpha: 0.3) : SoftPalette.slate100,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(Icons.inventory_2_rounded, size: 20, color: isDark ? SoftPalette.sky350 : _teal),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Stock & Inventory Manager',
-                      style: TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? SoftPalette.gray50 : _tealDark,
-                      ),
-                    ),
-                    Text(
-                      'Total: $totalCount items${lowStockCount > 0 ? ' • $lowStockCount low stock' : ''} • Search & adjust stock',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: isDark ? SoftPalette.gray50A60 : _textLight,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              // Branch Selection (or Badge)
-              if (_isMultiBranchUser && _availableBranches.length > 1) ...[
-                Container(
-                  height: 34,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.slate900 : SoftPalette.slate100,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: isDark ? SoftPalette.slate600 : SoftPalette.slate200),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: _availableBranches.contains(_currentBranchId.toLowerCase().trim())
-                          ? _currentBranchId.toLowerCase().trim()
-                          : _availableBranches.first,
-                      isDense: true,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? SoftPalette.sky350 : _tealDark,
-                      ),
-                      icon: Icon(Icons.arrow_drop_down_rounded, color: isDark ? SoftPalette.sky350 : _teal),
-                      items: _availableBranches.map((b) {
-                        return DropdownMenuItem(
-                          value: b,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.business_rounded, size: 14, color: _teal),
-                              const SizedBox(width: 5),
-                              Text(b.toUpperCase()),
-                            ],
-                          ),
-                        );
-                      }).toList(),
-                      onChanged: (newBranch) {
-                        if (newBranch != null) _onBranchChanged(newBranch);
-                      },
-                    ),
-                  ),
-                ),
-              ] else ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.teal550.withValues(alpha: 0.2) : SoftPalette.teal50,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: isDark ? SoftPalette.teal350.withValues(alpha: 0.4) : SoftPalette.teal150),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.business_rounded, size: 13, color: _teal),
-                      const SizedBox(width: 5),
-                      Text(
-                        _currentBranchId.toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: _teal,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 10),
-          const Divider(height: 1),
-          const SizedBox(height: 10),
+    );
+  }
 
-          // Facility Camp Selector Row
-          Row(
-            children: [
-              Text(
-                'Target Camp:',
+  Widget _buildContextBanner() {
+    final c = context.comfort;
+    final isCompact = GBreakpoint.isCompact(context);
+    final totalCount = _searchResults.length;
+    final totalUnits = _searchResults.fold<int>(0, (s, m) => s + _safeInt(m['quantity']));
+    final lowStockCount = _searchResults
+        .where((m) => _isLowStock(_safeInt(m['quantity']), m['type']?.toString() ?? ''))
+        .length;
+    final numberFormat = NumberFormat('#,###');
+
+    final card1 = _buildKpiMetricCard(
+      icon: Icons.medication_outlined,
+      accentColor: c.brand,
+      bgTint: c.brandSoft,
+      value: '$totalCount',
+      label: 'Medicines',
+    );
+    final card2 = _buildKpiMetricCard(
+      icon: Icons.inventory_2_outlined,
+      accentColor: c.info,
+      bgTint: c.infoBg,
+      value: numberFormat.format(totalUnits),
+      label: 'Total Units',
+    );
+    final card3 = _buildKpiMetricCard(
+      icon: Icons.warning_amber_rounded,
+      accentColor: c.danger,
+      bgTint: c.dangerBg,
+      value: '$lowStockCount',
+      label: 'Low Stock',
+    );
+
+    final activeBranchValue = _availableBranches.contains(_currentBranchId.toLowerCase().trim())
+        ? _currentBranchId.toLowerCase().trim()
+        : _availableBranches.first;
+    final branchSubLabel = _hasMultiCamps && _selectedCampFilter != 'all'
+        ? CampSessionService.getCampLabel(_selectedCampFilter, _effectiveBranchId)
+        : 'Active Branch';
+
+    final card4 = _buildKpiMetricCard(
+      icon: Icons.business_rounded,
+      accentColor: c.success,
+      bgTint: c.successBg,
+      value: (_isMultiBranchUser && _availableBranches.length > 1)
+          ? null
+          : _currentBranchId.toUpperCase(),
+      valueWidget: (_isMultiBranchUser && _availableBranches.length > 1)
+          ? DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: activeBranchValue,
+                isDense: true,
+                dropdownColor: c.surface,
+                icon: Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: c.success),
                 style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  color: isDark ? SoftPalette.gray50A70 : _textMid,
+                  color: c.textPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
                 ),
-              ),
-              const SizedBox(width: 10),
-              if (_hasMultiCamps) ...[
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        ...CampSessionService.getCampsForBranch(_effectiveBranchId).map((c) {
-                          final cId = (c['id'] ?? '').toString();
-                          final cName = (c['name'] ?? CampSessionService.getCampLabel(cId, _effectiveBranchId)).toString();
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: _campPillButton(
-                              label: cName,
-                              campId: cId,
-                              icon: Icons.location_on_rounded,
+                items: _availableBranches
+                    .map((b) => DropdownMenuItem<String>(
+                          value: b,
+                          child: Text(
+                            b.toUpperCase(),
+                            style: TextStyle(
+                              color: c.textPrimary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
                             ),
-                          );
-                        }),
-                        _campPillButton(
-                          label: 'All Camps',
-                          campId: 'all',
-                          icon: Icons.holiday_village_rounded,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ] else ...[
-                Text(
-                  'Main Facility',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.sky350 : _teal,
-                  ),
-                ),
-              ],
-            ],
-          ),
+                          ),
+                        ))
+                    .toList(),
+                onChanged: (newBranch) {
+                  if (newBranch != null) _onBranchChanged(newBranch);
+                },
+              ),
+            )
+          : null,
+      label: branchSubLabel,
+    );
 
-          // Ambiguity Warning if "All Camps" is selected
-          if (_selectedCampFilter == 'all' && _hasMultiCamps) ...[
+    if (isCompact) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(child: card1),
+                const SizedBox(width: 8),
+                Expanded(child: card2),
+              ],
+            ),
             const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: isDark ? SoftPalette.orange800.withValues(alpha: 0.6) : SoftPalette.yellow50,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: isDark ? SoftPalette.orange400.withValues(alpha: 0.5) : SoftPalette.yellow200),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.info_outline_rounded, size: 15, color: isDark ? SoftPalette.yellow200 : SoftPalette.orange350),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Viewing consolidated inventory from all camps. When adding stock, choose the specific destination camp in the pop-up.',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.yellow150 : SoftPalette.orange350),
-                    ),
-                  ),
-                ],
-              ),
+            Row(
+              children: [
+                Expanded(child: card3),
+                const SizedBox(width: 8),
+                Expanded(child: card4),
+              ],
             ),
           ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        children: [
+          Expanded(child: card1),
+          const SizedBox(width: 8),
+          Expanded(child: card2),
+          const SizedBox(width: 8),
+          Expanded(child: card3),
+          const SizedBox(width: 8),
+          Expanded(child: card4),
         ],
       ),
     );
@@ -1556,9 +1560,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     required String campId,
     required IconData icon,
   }) {
+    final c = context.comfort;
     final isSelected = (_selectedCampFilter == campId) ||
         (campId == 'haji_camp' && _selectedCampFilter == 'haji');
-    final isDark = _isDark;
 
     return InkWell(
       onTap: () {
@@ -1574,29 +1578,11 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       },
       borderRadius: BorderRadius.circular(20),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: isSelected
-              ? (campId == 'all'
-                  ? (isDark ? SoftPalette.slate700 : SoftPalette.slate600)
-                  : (campId == 'saddar' ? SoftPalette.teal600 : SoftPalette.sky500))
-              : (isDark ? SoftPalette.slate800 : SoftPalette.slate100),
+          color: isSelected ? c.brand : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: isSelected
-                ? Colors.transparent
-                : (isDark ? SoftPalette.slate600 : SoftPalette.slate200),
-          ),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: (campId == 'saddar' ? SoftPalette.teal600 : SoftPalette.sky500).withValues(alpha: 0.3),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  )
-                ]
-              : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1604,15 +1590,15 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             Icon(
               icon,
               size: 13,
-              color: isSelected ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : _textMid),
+              color: isSelected ? c.onBrand : c.textSecondary,
             ),
             const SizedBox(width: 5),
             Text(
               label,
               style: TextStyle(
                 fontSize: 11.5,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                color: isSelected ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : _textDark),
+                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                color: isSelected ? c.onBrand : c.textSecondary,
               ),
             ),
           ],
@@ -1624,172 +1610,304 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   // ══════════════════════════════════════════════════════════════════════════
   // TAB 1 — Add Stock & Inventory Manager Redesign
   // ══════════════════════════════════════════════════════════════════════════
-  Widget _addStockTab() => Column(
-        children: [
-          // ── Context Banner (Branch & Camp Switcher + Stats) ───────────────
-          _buildContextBanner(),
+  Widget _addStockTab() {
+    final c = context.comfort;
+    final isCompact = GBreakpoint.isCompact(context);
+    final types = const [
+      'All',
+      'Tablet',
+      'Syrup',
+      'Capsule',
+      'Injection',
+      'Infusion',
+      'Syringe',
+      'Others',
+    ];
 
-          // ── Search & Filter Controls ──────────────────────────────────────
-          Container(
-            color: _isDark ? SoftPalette.slate800 : _white,
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: _searchCtrl,
-                  cursorColor: _teal,
-                  style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 14),
-                  onChanged: _searchMedicine,
-                  decoration: InputDecoration(
-                    prefixIcon: _isSearching
-                        ? Container(
-                            margin: const EdgeInsets.all(12),
-                            width: 18,
-                            height: 18,
-                            child: const CircularProgressIndicator(strokeWidth: 2, color: _teal))
-                        : const Icon(Icons.search_rounded, color: _teal, size: 20),
-                    hintText: 'Search by formula, brand name, or dose...',
-                    hintStyle: TextStyle(color: context.adapt(_textLight), fontSize: 13),
-                    suffixIcon: _searchCtrl.text.isNotEmpty
-                        ? IconButton(
-                            icon: Icon(Icons.close_rounded, color: context.adapt(_textLight), size: 18),
-                            onPressed: () {
-                              _searchCtrl.clear();
-                              _loadAllMedicines();
-                            },
-                          )
-                        : null,
-                    filled: true,
-                    fillColor: _isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: _isDark ? SoftPalette.slate700 : _border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: _isDark ? SoftPalette.slate700 : _border),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: SoftPalette.sky350, width: 1.5),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    final searchField = Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.borderStrong),
+      ),
+      child: TextField(
+        controller: _searchCtrl,
+        cursorColor: c.brand,
+        style: TextStyle(color: c.textPrimary, fontSize: 13),
+        onChanged: _searchMedicine,
+        decoration: InputDecoration(
+          prefixIcon: _isSearching
+              ? Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
+                  ),
+                )
+              : Icon(Icons.search_rounded, color: c.brand, size: 18),
+          hintText: 'Search by formula, brand name, dose, or barcode...',
+          hintStyle: TextStyle(color: c.textMuted, fontSize: 12),
+          suffixIcon: _searchCtrl.text.isNotEmpty
+              ? IconButton(
+                  icon: Icon(Icons.close_rounded, color: c.textSecondary, size: 16),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Clear search',
+                  onPressed: () {
+                    _searchCtrl.clear();
+                    _loadAllMedicines();
+                  },
+                )
+              : null,
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+      ),
+    );
+
+    final typePillsRow = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (int i = 0; i < types.length; i++) ...[
+          if (i > 0) const SizedBox(width: 6),
+          Builder(builder: (_) {
+            final t = types[i];
+            final isSel = _selectedTypeFilter == t;
+            return InkWell(
+              onTap: () {
+                setState(() => _selectedTypeFilter = t);
+                _loadAllMedicines();
+              },
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isSel ? c.brand : c.surfaceSunken,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: isSel ? c.brand : c.border),
+                ),
+                child: Text(
+                  t,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSel ? FontWeight.w700 : FontWeight.w600,
+                    color: isSel ? c.onBrand : c.textSecondary,
                   ),
                 ),
+              ),
+            );
+          }),
+        ],
+      ],
+    );
+
+    return Column(
+      children: [
+        // ── KPI Cards Row ─────────────────────────────────────────────────
+        _buildContextBanner(),
+
+        // ── Unified Search & Filter Card ──────────────────────────────────
+        Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompact ? 10 : 12,
+            vertical: isCompact ? 8 : 10,
+          ),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: c.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (isCompact) ...[
+                searchField,
                 const SizedBox(height: 8),
-                // Type Filter Chips Row
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
+                  child: typePillsRow,
+                ),
+              ] else
+                Row(
+                  children: [
+                    Expanded(flex: 2, child: searchField),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 3,
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: typePillsRow,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+              if (_hasMultiCamps) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                      'Target Camp:',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: c.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Container(
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            color: c.surfaceSunken,
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(color: c.border),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _campPillButton(
+                                label: 'All Camps',
+                                campId: 'all',
+                                icon: Icons.holiday_village_rounded,
+                              ),
+                              for (final camp in CampSessionService.getCampsForBranch(_effectiveBranchId)) ...[
+                                const SizedBox(width: 2),
+                                _campPillButton(
+                                  label: (camp['name'] ??
+                                          CampSessionService.getCampLabel(
+                                            (camp['id'] ?? '').toString(),
+                                            _effectiveBranchId,
+                                          ))
+                                      .toString(),
+                                  campId: (camp['id'] ?? '').toString(),
+                                  icon: Icons.location_on_rounded,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+
+              if (_selectedCampFilter == 'all' && _hasMultiCamps) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: c.warningBg,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: c.warning.withValues(alpha: 0.35)),
+                  ),
                   child: Row(
                     children: [
-                      'All',
-                      'Tablet',
-                      'Syrup',
-                      'Capsule',
-                      'Injection',
-                      'Infusion',
-                      'Syringe',
-                      'Others'
-                    ].map((t) {
-                      final isSel = _selectedTypeFilter == t;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: FilterChip(
-                          label: Text(t),
-                          selected: isSel,
-                          onSelected: (selected) {
-                            setState(() => _selectedTypeFilter = t);
-                            _loadAllMedicines();
-                          },
-                          backgroundColor: _isDark ? SoftPalette.slate900 : SoftPalette.slate100,
-                          selectedColor: _teal,
-                          checkmarkColor: SoftPalette.gray50,
-                          labelStyle: TextStyle(
+                      Icon(Icons.info_outline_rounded, size: 15, color: c.warning),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Viewing consolidated stock from all camps. Choose a destination camp when adding stock.',
+                          style: TextStyle(
                             fontSize: 11,
-                            fontWeight: isSel ? FontWeight.bold : FontWeight.w500,
-                            color: isSel ? SoftPalette.gray50 : (_isDark ? SoftPalette.gray50A70 : _textMid),
+                            fontWeight: FontWeight.w600,
+                            color: c.warning,
                           ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide(
-                              color: isSel ? _teal : (_isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                            ),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         ),
-                      );
-                    }).toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+
+        // ── Section header ─────────────────────────────────────────────────
+        if (_hasSearched && _searchResults.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            child: Row(
+              children: [
+                Text(
+                  _searchCtrl.text.isEmpty
+                      ? 'Available Medicines (${_searchResults.length})'
+                      : 'Search Results (${_searchResults.length})',
+                  style: TextStyle(
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12.5,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  _hasMultiCamps
+                      ? (_selectedCampFilter == 'all'
+                          ? 'Camp: All Camps (Combined)'
+                          : 'Camp: ${CampSessionService.getCampLabel(_effectiveTargetCamp, _effectiveBranchId)}')
+                      : 'Main Facility • Tap any row to add stock',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: c.textMuted,
                   ),
                 ),
               ],
             ),
           ),
 
-          // ── Section header ─────────────────────────────────────────────────
-          if (_hasSearched && _searchResults.isNotEmpty)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              color: _isDark ? SoftPalette.slate900 : SoftPalette.teal50t,
-              child: Row(
-                children: [
-                  Text(
-                    _searchCtrl.text.isEmpty
-                        ? 'Available Medicines (${_searchResults.length})'
-                        : 'Search Results (${_searchResults.length})',
-                    style: const TextStyle(color: _teal, fontWeight: FontWeight.bold, fontSize: 13),
-                  ),
-                  const Spacer(),
-                  Text(
-                    _selectedCampFilter == 'all'
-                        ? 'Camp: All Camps (Combined)'
-                        : 'Camp: ${CampSessionService.getCampLabel(_effectiveTargetCamp)}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: _isDark ? SoftPalette.sky350 : _tealDark,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-          // ── Persistent medicine list ───────────────────────────────────────
-          Expanded(
-            child: _isSearching && !_hasSearched
-                ? const Center(child: CircularProgressIndicator(color: _teal))
-                : _searchResults.isEmpty && _hasSearched
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.search_off_rounded, size: 64, color: context.adapt(SoftPalette.gray150)),
-                            const SizedBox(height: 12),
-                            Text('No medicines found in this camp/filter',
-                                style: TextStyle(color: context.adapt(_textLight), fontSize: 15)),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
-                        itemCount: _searchResults.length,
-                        itemBuilder: (ctx, i) {
-                          final med = _searchResults[i];
-                          return _searchResultRow(med);
-                        },
+        // ── Persistent medicine list ───────────────────────────────────────
+        Expanded(
+          child: _isSearching && !_hasSearched
+              ? Center(child: CircularProgressIndicator(color: c.brand))
+              : _searchResults.isEmpty && _hasSearched
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.search_off_rounded, size: 56, color: c.textMuted),
+                          const SizedBox(height: 12),
+                          Text(
+                            'No medicines found in this camp/filter',
+                            style: TextStyle(
+                              color: c.textSecondary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                       ),
-          ),
-        ],
-      );
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(12, 2, 12, 20),
+                      itemCount: _searchResults.length,
+                      itemBuilder: (ctx, i) => _searchResultRow(_searchResults[i]),
+                    ),
+        ),
+      ],
+    );
+  }
 
   Widget _searchResultRow(Map<String, dynamic> med) {
+    final c = context.comfort;
     final isDark = _isDark;
     final qty = _safeInt(med['quantity']);
     final type = med['type']?.toString() ?? 'Tablet';
     final name = (med['name'] ?? med['formula'] ?? '').toString();
     final dose = (med['dose'] ?? '').toString();
+    final barcode = (med['barcode'] ?? med['rollNo'] ?? '').toString().trim();
     final lowStock = _isLowStock(qty, type);
     final expSoon = _isExpiringSoon(med['expiryDate']?.toString());
+    final expiry = (med['expiryDate'] ?? '').toString().trim();
 
     final rawCamp = (med['campId'] ?? med['dispensaryId'] ?? '').toString().toLowerCase();
     String campTag = '';
@@ -1808,168 +1926,258 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       campTag = 'General Stock';
     }
 
+    final rawTypeColor = _typeColor(type);
+    final typeColor = isDark ? Color.lerp(rawTypeColor, SoftPalette.gray50, 0.35)! : rawTypeColor;
+
+    final Color qtyBg = qty == 0 ? c.dangerBg : (lowStock ? c.warningBg : c.successBg);
+    final Color qtyFg = qty == 0 ? c.danger : (lowStock ? c.warning : c.success);
+
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
+      margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-          width: 1.0,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: isDark ? SoftPalette.gray900A12 : SoftPalette.gray900.withValues(alpha: 0.02),
-            blurRadius: 3,
-            offset: const Offset(0, 1),
-          )
-        ],
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
         child: InkWell(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(12),
           onTap: () => _showAddStockDialog(med),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             child: Row(
               children: [
-                // Category Type Pill
+                // Soft-tinted Type + Icon Badge
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
-                    color: _typeColor(type).withValues(alpha: isDark ? 0.25 : 0.12),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: _typeColor(type).withValues(alpha: 0.4)),
+                    color: typeColor.withValues(alpha: isDark ? 0.2 : 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: typeColor.withValues(alpha: 0.28)),
                   ),
-                  child: Text(
-                    type.length > 4 ? type.substring(0, 4) : type,
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
-                      color: isDark ? SoftPalette.sky350 : _typeColor(type),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-
-                // Name, Dose, and Camp Info
-                Expanded(
                   child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              name,
-                              style: TextStyle(
-                                color: isDark ? SoftPalette.gray50 : _textDark,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13.5,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            if (dose.isNotEmpty || (_hasMultiCamps && campTag.isNotEmpty) || lowStock || expSoon)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2),
-                                child: Row(
-                                  children: [
-                                    if (dose.isNotEmpty)
-                                      Text(
-                                        dose,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w500,
-                                          color: isDark ? SoftPalette.slate350 : _textMid,
-                                        ),
-                                      ),
-                                    if (dose.isNotEmpty && _hasMultiCamps && campTag.isNotEmpty)
-                                      Text(' • ', style: TextStyle(fontSize: 10, color: isDark ? SoftPalette.gray50A38 : SoftPalette.gray350)),
-                                    if (_hasMultiCamps && campTag.isNotEmpty)
-                                      Text(
-                                        campTag,
-                                        style: TextStyle(
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.w600,
-                                          color: isDark ? SoftPalette.sky350 : SoftPalette.sky500,
-                                        ),
-                                      ),
-                                    if (lowStock) ...[
-                                      const SizedBox(width: 6),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: SoftPalette.amber200.withValues(alpha: 0.2),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: const Text('LOW', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: SoftPalette.amber200)),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                          ],
+                      Icon(_typeIcon(type), size: 13, color: typeColor),
+                      const SizedBox(width: 6),
+                      Text(
+                        type,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: typeColor,
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
 
-                // Stock Count Pill
+                // Medicine Name, Barcode & Metadata Pills
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              name,
+                              style: TextStyle(
+                                color: c.textPrimary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (barcode.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: c.brandSoft,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                '#$barcode',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: c.brandStrong,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      if (dose.isNotEmpty || (_hasMultiCamps && campTag.isNotEmpty) || lowStock || expSoon || expiry.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              if (dose.isNotEmpty)
+                                Text(
+                                  dose,
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w500,
+                                    color: c.textSecondary,
+                                  ),
+                                ),
+                              if (expiry.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: expSoon ? c.dangerBg : c.surfaceSunken,
+                                    borderRadius: BorderRadius.circular(5),
+                                    border: Border.all(
+                                      color: (expSoon ? c.danger : c.border).withValues(alpha: 0.35),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.calendar_today_rounded,
+                                        size: 9.5,
+                                        color: expSoon ? c.danger : c.textSecondary,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Exp: ${_formatExpiryDisplay(expiry)}',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          color: expSoon ? c.danger : c.textSecondary,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              if (_hasMultiCamps && campTag.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: c.infoBg,
+                                    borderRadius: BorderRadius.circular(5),
+                                    border: Border.all(color: c.info.withValues(alpha: 0.25)),
+                                  ),
+                                  child: Text(
+                                    campTag,
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: c.info,
+                                    ),
+                                  ),
+                                ),
+                              if (lowStock)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: c.warningBg,
+                                    borderRadius: BorderRadius.circular(5),
+                                    border: Border.all(color: c.warning.withValues(alpha: 0.35)),
+                                  ),
+                                  child: Text(
+                                    'LOW STOCK',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.warning,
+                                    ),
+                                  ),
+                                ),
+                              if (expSoon)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: c.dangerBg,
+                                    borderRadius: BorderRadius.circular(5),
+                                    border: Border.all(color: c.danger.withValues(alpha: 0.35)),
+                                  ),
+                                  child: Text(
+                                    'NEAR EXPIRY',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.danger,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+
+                // Stock Quantity Badge
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
-                    color: qty == 0
-                        ? (isDark ? SoftPalette.red700.withValues(alpha: 0.3) : SoftPalette.red150m)
-                        : (lowStock
-                            ? (isDark ? SoftPalette.orange700.withValues(alpha: 0.3) : SoftPalette.yellow100)
-                            : (isDark ? SoftPalette.emerald700.withValues(alpha: 0.3) : SoftPalette.emerald100)),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(
-                      color: qty == 0
-                          ? SoftPalette.red400
-                          : (lowStock ? SoftPalette.amber300 : SoftPalette.green350),
-                    ),
+                    color: qtyBg,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: qtyFg.withValues(alpha: 0.35)),
                   ),
                   child: Text(
-                    '$qty',
+                    '$qty in stock',
                     style: TextStyle(
-                      color: qty == 0
-                          ? SoftPalette.red500
-                          : (lowStock ? SoftPalette.orange350 : SoftPalette.green550),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
+                      color: qtyFg,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11.5,
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
 
-                // Action Buttons: [+ Add Stock] & [Edit]
-                ElevatedButton.icon(
-                  onPressed: () => _showAddStockDialog(med),
-                  icon: const Icon(Icons.add_rounded, size: 14, color: SoftPalette.gray50),
-                  label: const Text('Add Stock', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: SoftPalette.gray50)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _teal,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    minimumSize: const Size(0, 30),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                    elevation: 0,
+                // [+ Add Stock] Button
+                SizedBox(
+                  height: 34,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _showAddStockDialog(med),
+                    icon: const Icon(Icons.add_rounded, size: 15),
+                    label: const Text(
+                      'Add Stock',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: c.brand,
+                      foregroundColor: c.onBrand,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      elevation: 0,
+                    ),
                   ),
                 ),
-                const SizedBox(width: 5),
-                IconButton(
-                  icon: const Icon(Icons.edit_rounded, size: 16),
-                  color: isDark ? SoftPalette.purple350 : _purple,
-                  tooltip: 'Edit / Request Changes',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                  onPressed: () => _showEditRequestSheet(med),
+                const SizedBox(width: 6),
+
+                // Outlined [Edit] Button
+                Tooltip(
+                  message: 'Edit / Request Changes',
+                  child: InkWell(
+                    onTap: () => _showEditRequestSheet(med),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: c.surfaceSunken,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: c.border),
+                      ),
+                      child: Icon(Icons.edit_outlined, size: 16, color: c.textSecondary),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -1979,9 +2187,141 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
+  // ── Expiry Date Helpers ───────────────────────────────────────────────────
+  String _formatExpiryDisplay(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return '—';
+    final str = raw.trim();
+    final dt = MasterProformaService.parseExpiryDate(str);
+    if (dt.year >= 3000) return str;
+    final clean = str.replaceAll('/', '-');
+    final parts = clean.split('-');
+    if (parts.length == 3) {
+      return DateFormat('dd-MM-yyyy').format(dt);
+    }
+    return DateFormat('MM-yyyy').format(dt);
+  }
+
+  int _expiryDaysRemaining(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return 99999;
+    final dt = MasterProformaService.parseExpiryDate(raw);
+    if (dt.year >= 3000) return 99999;
+    final today = DateTime.now();
+    return dt.difference(DateTime(today.year, today.month, today.day)).inDays;
+  }
+
+  Widget _badgeChip(String label, Color fg, Color bg) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: fg.withValues(alpha: 0.3)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.w800, color: fg),
+      ),
+    );
+  }
+
+  Widget _quickDateChip(String label, VoidCallback onTap, GComfortColors c) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: c.border),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: c.brandStrong,
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> _getExistingBatchesForMed(Map<String, dynamic> med, String targetCamp) {
+    final pool = _poolFor(med, targetCamp);
+    if (pool == null) return const [];
+
+    final medName = (med['name'] ?? med['formula'] ?? '').toString().trim();
+    final medFormula = (med['formula'] ?? med['name'] ?? '').toString().trim();
+    final medType = (med['type'] ?? '').toString().trim().toLowerCase();
+    final medDose = (med['dose'] ?? '').toString().trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    final medCode = (med['code'] ?? med['itemCode'] ?? '').toString().trim().toLowerCase();
+    final medGroupKey = StockReader.groupKey(med);
+
+    final rawBatches = StockReader.batches(pool);
+    final matching = <Map<String, dynamic>>[];
+
+    for (final b in rawBatches) {
+      if (b['deleted'] == true) continue;
+
+      // GroupKey match
+      if (StockReader.groupKey(b) == medGroupKey) {
+        matching.add(b);
+        continue;
+      }
+
+      // Exact code match
+      final bCode = (b['code'] ?? b['itemCode'] ?? '').toString().trim().toLowerCase();
+      if (medCode.isNotEmpty && bCode.isNotEmpty && bCode == medCode) {
+        matching.add(b);
+        continue;
+      }
+
+      // Name/formula + type + dose match
+      final bName = (b['name'] ?? b['formula'] ?? '').toString().trim().toLowerCase();
+      final bFormula = (b['formula'] ?? b['name'] ?? '').toString().trim().toLowerCase();
+      final bType = (b['type'] ?? '').toString().trim().toLowerCase();
+      final bDose = (b['dose'] ?? '').toString().trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
+
+      final nameMatches = bName == medName.toLowerCase() ||
+          bName == medFormula.toLowerCase() ||
+          bFormula == medName.toLowerCase() ||
+          bFormula == medFormula.toLowerCase();
+
+      final typeMatches = medType.isEmpty || bType == medType;
+      final doseMatches = medDose.isEmpty || bDose == medDose;
+
+      if (nameMatches && typeMatches && doseMatches) {
+        matching.add(b);
+      }
+    }
+
+    if (matching.isEmpty && (med['_docId'] != null || med['id'] != null)) {
+      matching.add(med);
+    }
+
+    // Consolidate any records sharing the same normalized expiry
+    final Map<String, Map<String, dynamic>> consolidated = {};
+    for (final b in matching) {
+      final exp = (b['expiryDate'] ?? b['expiry'] ?? '').toString().trim();
+      final normKey = exp.isEmpty ? 'no_exp' : exp.toLowerCase();
+      if (!consolidated.containsKey(normKey)) {
+        consolidated[normKey] = Map<String, dynamic>.from(b);
+      } else {
+        final existing = consolidated[normKey]!;
+        final q1 = StockReader.qty(existing);
+        final q2 = StockReader.qty(b);
+        existing['quantity'] = q1 + q2;
+      }
+    }
+
+    final result = consolidated.values.toList();
+    StockReader.sortFefo(result);
+    return result;
+  }
+
   // ── Add Stock Pop-up Dialog ────────────────────────────────────────────────
   void _showAddStockDialog(Map<String, dynamic> med) {
-    final isDark = _isDark;
     final medName = (med['name'] ?? med['formula'] ?? 'Medicine').toString();
     final medType = med['type']?.toString() ?? 'Tablet';
     final medDose = med['dose']?.toString() ?? '';
@@ -2017,21 +2357,55 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final qtyCtrl = TextEditingController(text: '10');
     bool isSubmitting = false;
 
+    // Load initial batches for targetCamp
+    List<Map<String, dynamic>> existingBatches = _getExistingBatchesForMed(med, targetCamp);
+    bool isNewBatchMode = existingBatches.isEmpty;
+
+    // Pre-select matching batch if possible
+    final clickedDocId = (med['_docId'] ?? med['id'] ?? med['medicineId'])?.toString();
+    final clickedExpiry = (med['expiryDate'] ?? '').toString().trim();
+    Map<String, dynamic>? selectedExistingBatch;
+    if (existingBatches.isNotEmpty) {
+      selectedExistingBatch = existingBatches.firstWhere(
+        (b) {
+          final bId = (b['medicineId'] ?? b['id'] ?? b['_docId'])?.toString();
+          if (clickedDocId != null && clickedDocId.isNotEmpty && bId == clickedDocId) return true;
+          final bExp = (b['expiryDate'] ?? '').toString().trim();
+          if (clickedExpiry.isNotEmpty && bExp == clickedExpiry) return true;
+          return false;
+        },
+        orElse: () => existingBatches.first,
+      );
+    }
+
+    // Default new expiry date: 1 year from now
+    DateTime newExpiryDate = DateTime.now().add(const Duration(days: 365));
+    final newExpiryCtrl = TextEditingController(text: DateFormat('dd-MM-yyyy').format(newExpiryDate));
+
     showDialog(
       context: context,
       barrierDismissible: true,
       builder: (dialogCtx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
+          final c = ctx.comfort;
           final campLabel = targetCamp.isNotEmpty && targetCamp != 'all' && targetCamp != 'main'
               ? CampSessionService.getCampLabel(targetCamp, _effectiveBranchId)
               : (isKarachi ? 'Saddar Dispensary' : 'Inventory');
+
+          final int batchStock = selectedExistingBatch != null
+              ? _safeInt(selectedExistingBatch!['quantity'])
+              : (isNewBatchMode ? 0 : curQty);
+
           return Dialog(
-            backgroundColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            backgroundColor: c.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: c.border),
+            ),
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxWidth: 480,
-                maxHeight: MediaQuery.of(ctx).size.height * 0.90,
+                maxWidth: 520,
+                maxHeight: MediaQuery.of(ctx).size.height * 0.92,
               ),
               child: Padding(
                 padding: const EdgeInsets.all(22),
@@ -2041,323 +2415,1012 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                    // Header
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.teal550.withValues(alpha: 0.3) : SoftPalette.slate100,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Icon(Icons.add_box_rounded, color: isDark ? SoftPalette.sky350 : _teal, size: 22),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Add Stock to Inventory',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  color: isDark ? SoftPalette.gray50 : _textDark,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Routes to Local Server & connected Doctors immediately',
-                                style: TextStyle(
-                                  fontSize: 11.5,
-                                  color: isDark ? SoftPalette.slate350 : _textMid,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          icon: Icon(Icons.close_rounded, color: isDark ? SoftPalette.gray50A60 : _textLight, size: 20),
-                          onPressed: () => Navigator.of(dialogCtx).pop(),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Med Info Card
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                      ),
-                      child: Row(
+                      // Header
+                      Row(
                         children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: c.brandSoft,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(Icons.add_box_rounded, color: c.brand, size: 22),
+                          ),
+                          const SizedBox(width: 12),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  medName,
+                                  'Add Stock to Inventory',
                                   style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14.5,
-                                    color: isDark ? SoftPalette.gray50 : _textDark,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                    color: c.textPrimary,
                                   ),
                                 ),
-                                const SizedBox(height: 4),
-                                Row(
-                                  children: [
-                                    _miniChip(medType, isDark ? SoftPalette.sky350 : _teal),
-                                    if (medDose.isNotEmpty) ...[
-                                      const SizedBox(width: 6),
-                                      _miniChip(medDose, isDark ? SoftPalette.slate350 : _textMid),
-                                    ],
-                                  ],
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Select an existing expiry date or create a new batch',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: c.textSecondary,
+                                  ),
                                 ),
                               ],
                             ),
                           ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: isDark ? SoftPalette.emerald700.withValues(alpha: 0.3) : SoftPalette.emerald100,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: SoftPalette.green350),
+                          IconButton(
+                            icon: Icon(Icons.close_rounded, color: c.textMuted, size: 20),
+                            onPressed: () => Navigator.of(dialogCtx).pop(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Med Info Card
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: c.surfaceSunken,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: c.border),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    medName,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 14.5,
+                                      color: c.textPrimary,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 5),
+                                  Row(
+                                    children: [
+                                      _miniChip(medType, c.brand),
+                                      if (medDose.isNotEmpty) ...[
+                                        const SizedBox(width: 6),
+                                        _miniChip(medDose, c.textSecondary),
+                                      ],
+                                      if ((med['barcode'] ?? med['rollNo'] ?? '').toString().isNotEmpty) ...[
+                                        const SizedBox(width: 6),
+                                        _miniChip('#${med['barcode'] ?? med['rollNo']}', c.brandStrong),
+                                      ],
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
-                            child: Column(
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.dangerBg : c.successBg,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: ((isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success).withValues(alpha: 0.35),
+                                ),
+                              ),
+                              child: Column(
+                                children: [
+                                  Text(
+                                    isNewBatchMode ? 'New Batch' : 'Batch Stock',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
+                                    ),
+                                  ),
+                                  Text(
+                                    isNewBatchMode ? '0' : '$batchStock',
+                                    style: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w800,
+                                      color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Target Facility Camp Selector
+                      if (_hasMultiCamps) ...[
+                        Text(
+                          'Target Facility Camp:',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: c.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Builder(
+                          builder: (_) {
+                            final branchCamps = CampSessionService.getCampsForBranch(_effectiveBranchId);
+                            final campsToShow = branchCamps.isNotEmpty
+                                ? branchCamps
+                                : (isKarachi
+                                    ? [
+                                        {'id': 'saddar', 'name': 'Saddar Camp'},
+                                        {'id': 'haji_camp', 'name': 'Haji Camp'},
+                                      ]
+                                    : <Map<String, dynamic>>[]);
+                            if (campsToShow.isEmpty) return const SizedBox.shrink();
+                            return Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: campsToShow.map((camp) {
+                                final cId = (camp['id'] ?? '').toString();
+                                final cName = (camp['name'] ??
+                                        CampSessionService.getCampLabel(cId, _effectiveBranchId))
+                                    .toString();
+                                final isSelected = targetCamp == cId ||
+                                    (isKarachi &&
+                                        cId == 'saddar' &&
+                                        (targetCamp.isEmpty || targetCamp == 'saddar'));
+                                return InkWell(
+                                  onTap: () {
+                                    setDialogState(() {
+                                      targetCamp = cId;
+                                      existingBatches = _getExistingBatchesForMed(med, targetCamp);
+                                      if (existingBatches.isEmpty) {
+                                        isNewBatchMode = true;
+                                        selectedExistingBatch = null;
+                                      } else {
+                                        selectedExistingBatch = existingBatches.first;
+                                      }
+                                    });
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: isSelected ? c.brand : c.surfaceSunken,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isSelected ? c.brand : c.border,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      cName,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: isSelected ? c.onBrand : c.textPrimary,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 14),
+                      ],
+
+                      // ── Expiry Date (Batch) Mode Selector ───────────────────
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.event_note_rounded, size: 16, color: c.brand),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Expiry Date (Batch):',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: c.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (existingBatches.isNotEmpty)
+                            Text(
+                              '${existingBatches.length} old batch${existingBatches.length > 1 ? 'es' : ''} available',
+                              style: TextStyle(fontSize: 11, color: c.textMuted, fontWeight: FontWeight.w500),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Segmented Mode Switch: [Select Old Expiry]  [+ Add New Expiry]
+                      Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          color: c.surfaceSunken,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: c.border),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: InkWell(
+                                onTap: existingBatches.isEmpty
+                                    ? null
+                                    : () {
+                                        setDialogState(() {
+                                          isNewBatchMode = false;
+                                          selectedExistingBatch ??= existingBatches.first;
+                                        });
+                                      },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: !isNewBatchMode ? c.surface : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: !isNewBatchMode
+                                        ? [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.05),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 1),
+                                            ),
+                                          ]
+                                        : null,
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(
+                                        Icons.history_rounded,
+                                        size: 15,
+                                        color: !isNewBatchMode ? c.brand : (existingBatches.isEmpty ? c.textMuted : c.textSecondary),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        'Select Old Expiry',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: !isNewBatchMode ? FontWeight.w700 : FontWeight.w500,
+                                          color: !isNewBatchMode ? c.brand : (existingBatches.isEmpty ? c.textMuted : c.textSecondary),
+                                        ),
+                                      ),
+                                      if (existingBatches.isNotEmpty) ...[
+                                        const SizedBox(width: 5),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: !isNewBatchMode ? c.brandSoft : c.border,
+                                            borderRadius: BorderRadius.circular(10),
+                                          ),
+                                          child: Text(
+                                            '${existingBatches.length}',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w700,
+                                              color: !isNewBatchMode ? c.brandStrong : c.textSecondary,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: InkWell(
+                                onTap: () {
+                                  setDialogState(() {
+                                    isNewBatchMode = true;
+                                  });
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: isNewBatchMode ? c.surface : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: isNewBatchMode
+                                        ? [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.05),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 1),
+                                            ),
+                                          ]
+                                        : null,
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(
+                                        Icons.add_circle_outline_rounded,
+                                        size: 15,
+                                        color: isNewBatchMode ? c.brand : c.textSecondary,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '+ Add New Expiry',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: isNewBatchMode ? FontWeight.w700 : FontWeight.w500,
+                                          color: isNewBatchMode ? c.brand : c.textSecondary,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Existing Batches List
+                      if (!isNewBatchMode) ...[
+                        if (existingBatches.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: c.warningBg,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: c.warning.withValues(alpha: 0.3)),
+                            ),
+                            child: Row(
                               children: [
-                                Text('Current Stock', style: TextStyle(fontSize: 10, color: isDark ? SoftPalette.emerald200 : SoftPalette.green550)),
-                                Text('$curQty', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50 : SoftPalette.green600)),
+                                Icon(Icons.info_outline_rounded, color: c.warning, size: 18),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'No old batches found in $campLabel. Please choose "Add New Expiry" to set an expiry date.',
+                                    style: TextStyle(fontSize: 11.5, color: c.warning, fontWeight: FontWeight.w600),
+                                  ),
+                                ),
                               ],
+                            ),
+                          )
+                        else
+                          Container(
+                            constraints: const BoxConstraints(maxHeight: 180),
+                            decoration: BoxDecoration(
+                              color: c.surfaceSunken,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: c.border),
+                            ),
+                            child: ListView.separated(
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.all(6),
+                              itemCount: existingBatches.length,
+                              separatorBuilder: (_, index) => const SizedBox(height: 4),
+                              itemBuilder: (ctx, idx) {
+                                final batch = existingBatches[idx];
+                                final bExp = (batch['expiryDate'] ?? '').toString();
+                                final bStock = _safeInt(batch['quantity']);
+                                final isSelected = selectedExistingBatch != null &&
+                                    (selectedExistingBatch!['medicineId'] ?? selectedExistingBatch!['id'] ?? selectedExistingBatch!['_docId']) ==
+                                        (batch['medicineId'] ?? batch['id'] ?? batch['_docId']);
+                                final daysRemaining = _expiryDaysRemaining(bExp);
+                                final isExpired = daysRemaining < 0;
+                                final isNearExpiry = !isExpired && daysRemaining <= 60;
+
+                                return InkWell(
+                                  onTap: () {
+                                    setDialogState(() {
+                                      selectedExistingBatch = batch;
+                                    });
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: isSelected ? c.brandSoft : c.surface,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isSelected ? c.brand : c.border,
+                                        width: isSelected ? 1.5 : 1,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
+                                          size: 17,
+                                          color: isSelected ? c.brand : c.textMuted,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Text(
+                                                    'Exp: ${_formatExpiryDisplay(bExp)}',
+                                                    style: TextStyle(
+                                                      fontSize: 12.5,
+                                                      fontWeight: FontWeight.w700,
+                                                      color: isSelected ? c.brandStrong : c.textPrimary,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  if (isExpired)
+                                                    _badgeChip('EXPIRED', c.danger, c.dangerBg)
+                                                  else if (isNearExpiry)
+                                                    _badgeChip('EXPIRING SOON', c.warning, c.warningBg),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                'Current stock in this batch: $bStock units',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: isSelected ? c.brandStrong.withValues(alpha: 0.8) : c.textMuted,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                          decoration: BoxDecoration(
+                                            color: bStock == 0 ? c.dangerBg : c.successBg,
+                                            borderRadius: BorderRadius.circular(6),
+                                          ),
+                                          child: Text(
+                                            '$bStock in stock',
+                                            style: TextStyle(
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.w700,
+                                              color: bStock == 0 ? c.danger : c.success,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                      ],
+
+                      // New Batch Expiry Picker
+                      if (isNewBatchMode) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: c.surfaceSunken,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: c.border),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.calendar_today_rounded, size: 16, color: c.brand),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Set Expiry Date for New Batch:',
+                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.textPrimary),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              // Date Picker Row
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: InkWell(
+                                      onTap: () async {
+                                        final picked = await showDatePicker(
+                                          context: ctx,
+                                          initialDate: newExpiryDate,
+                                          firstDate: DateTime.now(),
+                                          lastDate: DateTime.now().add(const Duration(days: 365 * 15)),
+                                          builder: (context, child) {
+                                            return Theme(
+                                              data: Theme.of(context).copyWith(
+                                                colorScheme: ColorScheme.light(
+                                                  primary: c.brand,
+                                                  onPrimary: c.onBrand,
+                                                  surface: c.surface,
+                                                  onSurface: c.textPrimary,
+                                                ),
+                                              ),
+                                              child: child!,
+                                            );
+                                          },
+                                        );
+                                        if (picked != null) {
+                                          setDialogState(() {
+                                            newExpiryDate = picked;
+                                            newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(picked);
+                                          });
+                                        }
+                                      },
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                        decoration: BoxDecoration(
+                                          color: c.surface,
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: c.borderStrong),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Icon(Icons.event_available_rounded, size: 18, color: c.brand),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              DateFormat('dd-MM-yyyy').format(newExpiryDate),
+                                              style: TextStyle(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w700,
+                                                color: c.textPrimary,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              '(${DateFormat('MMM yyyy').format(newExpiryDate)})',
+                                              style: TextStyle(
+                                                fontSize: 11.5,
+                                                color: c.textMuted,
+                                              ),
+                                            ),
+                                            const Spacer(),
+                                            Icon(Icons.calendar_month_rounded, size: 17, color: c.brand),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              // Quick Expiry Shortcut Chips
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: [
+                                  _quickDateChip('+1 Year', () {
+                                    final d = DateTime(DateTime.now().year + 1, DateTime.now().month, DateTime.now().day);
+                                    setDialogState(() {
+                                      newExpiryDate = d;
+                                      newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
+                                    });
+                                  }, c),
+                                  _quickDateChip('+2 Years', () {
+                                    final d = DateTime(DateTime.now().year + 2, DateTime.now().month, DateTime.now().day);
+                                    setDialogState(() {
+                                      newExpiryDate = d;
+                                      newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
+                                    });
+                                  }, c),
+                                  _quickDateChip('+3 Years', () {
+                                    final d = DateTime(DateTime.now().year + 3, DateTime.now().month, DateTime.now().day);
+                                    setDialogState(() {
+                                      newExpiryDate = d;
+                                      newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
+                                    });
+                                  }, c),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 14),
+
+                      // Quantity Input with Steppers & Quick Increment Chips
+                      Text(
+                        'Quantity to Add:',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: c.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          _qtyBtn(Icons.remove_rounded, () {
+                            final v = int.tryParse(qtyCtrl.text) ?? 1;
+                            if (v > 1) setDialogState(() => qtyCtrl.text = '${v - 1}');
+                          }),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: TextField(
+                              controller: qtyCtrl,
+                              textAlign: TextAlign.center,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                              cursorColor: c.brand,
+                              onChanged: (_) => setDialogState(() {}),
+                              style: TextStyle(
+                                color: c.brand,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 20,
+                              ),
+                              decoration: InputDecoration(
+                                filled: true,
+                                fillColor: c.surfaceSunken,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: BorderSide(color: c.border),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: BorderSide(color: c.border),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: BorderSide(color: c.brand, width: 1.8),
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          _qtyBtn(Icons.add_rounded, () {
+                            final v = int.tryParse(qtyCtrl.text) ?? 0;
+                            setDialogState(() => qtyCtrl.text = '${v + 1}');
+                          }),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Quick Increment Chips
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [10, 50, 100, 500].map((increment) {
+                          return Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 3),
+                              child: InkWell(
+                                onTap: () {
+                                  final v = int.tryParse(qtyCtrl.text) ?? 0;
+                                  setDialogState(() => qtyCtrl.text = '${v + increment}');
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 7),
+                                  decoration: BoxDecoration(
+                                    color: c.surfaceSunken,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: c.border),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    '+$increment',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.brandStrong,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 14),
+
+                      // Resulting Stock Impact Preview Box
+                      Builder(builder: (_) {
+                        final addQty = int.tryParse(qtyCtrl.text) ?? 0;
+                        final int beforeQty = isNewBatchMode ? 0 : batchStock;
+                        final int afterQty = beforeQty + addQty;
+                        final String targetExpDesc = isNewBatchMode
+                            ? 'New Batch: ${DateFormat('dd-MM-yyyy').format(newExpiryDate)}'
+                            : (selectedExistingBatch != null
+                                ? 'Existing Batch: ${_formatExpiryDisplay(selectedExistingBatch!['expiryDate'])}'
+                                : 'No batch selected');
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                          decoration: BoxDecoration(
+                            color: c.brandSoft.withValues(alpha: 0.5),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.inventory_rounded, size: 16, color: c.brand),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Stock Impact: $beforeQty + $addQty = $afterQty units',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: c.brandStrong,
+                                      ),
+                                    ),
+                                    Text(
+                                      targetExpDesc,
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        color: c.textSecondary,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }),
+                      const SizedBox(height: 18),
+
+                      // Submit & Cancel Buttons
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: isSubmitting ? null : () => Navigator.of(dialogCtx).pop(),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: c.textSecondary,
+                                side: BorderSide(color: c.borderStrong),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                              child: Text(
+                                'Cancel',
+                                style: TextStyle(color: c.textSecondary, fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            flex: 2,
+                            child: ElevatedButton.icon(
+                              onPressed: isSubmitting
+                                  ? null
+                                  : () async {
+                                      final qty = int.tryParse(qtyCtrl.text.trim()) ?? 0;
+                                      if (qty < 1) {
+                                        _snack('Enter a valid quantity (min 1)', err: true);
+                                        return;
+                                      }
+                                      if (!isNewBatchMode && selectedExistingBatch == null) {
+                                        _snack('Please select an existing expiry batch', err: true);
+                                        return;
+                                      }
+                                      final expToSubmit = isNewBatchMode
+                                          ? DateFormat('dd-MM-yyyy').format(newExpiryDate)
+                                          : (selectedExistingBatch!['expiryDate'] ?? '').toString();
+
+                                      setDialogState(() => isSubmitting = true);
+                                      Navigator.of(dialogCtx).pop();
+                                      await _submitAddStockForMed(
+                                        med: med,
+                                        qty: qty,
+                                        targetCamp: targetCamp,
+                                        isNewBatch: isNewBatchMode,
+                                        expiryDateStr: expToSubmit,
+                                        selectedExistingBatch: selectedExistingBatch,
+                                      );
+                                    },
+                              icon: isSubmitting
+                                  ? SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: c.onBrand),
+                                    )
+                                  : const Icon(Icons.add_task_rounded, size: 18),
+                              label: Text(
+                                _hasMultiCamps && campLabel.isNotEmpty && campLabel != 'Inventory'
+                                    ? 'Add Stock to $campLabel'
+                                    : 'Add Stock to Inventory',
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: c.brand,
+                                foregroundColor: c.onBrand,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                elevation: 0,
+                              ),
                             ),
                           ),
                         ],
                       ),
-                    ),
-                    const SizedBox(height: 14),
-
-                    // Target Facility Camp Selector
-                    if (_hasMultiCamps) ...[
-                      Text('Target Facility Camp:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50A70 : _textMid)),
-                      const SizedBox(height: 6),
-                      Builder(
-                        builder: (_) {
-                          final branchCamps = CampSessionService.getCampsForBranch(_effectiveBranchId);
-                          final campsToShow = branchCamps.isNotEmpty
-                              ? branchCamps
-                              : (isKarachi
-                                  ? [
-                                      {'id': 'saddar', 'name': 'Saddar Camp'},
-                                      {'id': 'haji_camp', 'name': 'Haji Camp'},
-                                    ]
-                                  : <Map<String, dynamic>>[]);
-                          if (campsToShow.isEmpty) return const SizedBox.shrink();
-                          return Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: campsToShow.map((c) {
-                              final cId = (c['id'] ?? '').toString();
-                              final cName = (c['name'] ?? CampSessionService.getCampLabel(cId, _effectiveBranchId)).toString();
-                              final isSelected = targetCamp == cId || (isKarachi && cId == 'saddar' && (targetCamp.isEmpty || targetCamp == 'saddar'));
-                              final btnColor = cId.contains('haji') ? SoftPalette.sky500 : _teal;
-                              return InkWell(
-                                onTap: () => setDialogState(() => targetCamp = cId),
-                                borderRadius: BorderRadius.circular(8),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? btnColor : (isDark ? SoftPalette.slate900 : SoftPalette.slate100),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: isSelected ? btnColor : (isDark ? SoftPalette.slate700 : SoftPalette.slate200)),
-                                  ),
-                                  child: Text(
-                                    cName,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: isSelected ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : _textDark),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 14),
                     ],
-
-                    // Quantity Input with Steppers & Quick Increment Chips
-                    Text('Quantity to Add:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50A70 : _textMid)),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        _qtyBtn(Icons.remove_rounded, () {
-                          final v = int.tryParse(qtyCtrl.text) ?? 1;
-                          if (v > 1) setDialogState(() => qtyCtrl.text = '${v - 1}');
-                        }),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: TextField(
-                            controller: qtyCtrl,
-                            textAlign: TextAlign.center,
-                            keyboardType: TextInputType.number,
-                            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                            cursorColor: _teal,
-                            style: TextStyle(
-                              color: isDark ? SoftPalette.gray50 : _teal,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 20,
-                            ),
-                            decoration: InputDecoration(
-                              filled: true,
-                              fillColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                                borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _border),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                                borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _border),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                                borderSide: const BorderSide(color: SoftPalette.sky350, width: 1.8),
-                              ),
-                              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        _qtyBtn(Icons.add_rounded, () {
-                          final v = int.tryParse(qtyCtrl.text) ?? 0;
-                          setDialogState(() => qtyCtrl.text = '${v + 1}');
-                        }),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-
-                    // Quick Increment Chips
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [10, 50, 100, 500].map((increment) {
-                        return Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 3),
-                            child: InkWell(
-                              onTap: () {
-                                final v = int.tryParse(qtyCtrl.text) ?? 0;
-                                setDialogState(() => qtyCtrl.text = '${v + increment}');
-                              },
-                              borderRadius: BorderRadius.circular(6),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: isDark ? SoftPalette.slate700 : SoftPalette.slate100,
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(color: isDark ? SoftPalette.slate600 : SoftPalette.slate150),
-                                ),
-                                alignment: Alignment.center,
-                                child: Text(
-                                  '+$increment',
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    fontWeight: FontWeight.bold,
-                                    color: isDark ? SoftPalette.sky350 : _tealDark,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // Submit & Cancel Buttons
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: isSubmitting ? null : () => Navigator.of(dialogCtx).pop(),
-                            style: OutlinedButton.styleFrom(
-                              side: BorderSide(color: isDark ? SoftPalette.slate600 : SoftPalette.gray300),
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                            ),
-                            child: Text('Cancel', style: TextStyle(color: isDark ? SoftPalette.gray50A70 : _textMid, fontWeight: FontWeight.bold)),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          flex: 2,
-                          child: ElevatedButton.icon(
-                            onPressed: isSubmitting
-                                ? null
-                                : () async {
-                                    final qty = int.tryParse(qtyCtrl.text.trim()) ?? 0;
-                                    if (qty < 1) {
-                                      _snack('Enter a valid quantity (min 1)', err: true);
-                                      return;
-                                    }
-                                    setDialogState(() => isSubmitting = true);
-                                    Navigator.of(dialogCtx).pop();
-                                    await _submitAddStockForMed(med, qty, targetCamp);
-                                  },
-                            icon: isSubmitting
-                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50))
-                                : const Icon(Icons.add_task_rounded, color: SoftPalette.gray50, size: 18),
-                            label: Text(
-                              _hasMultiCamps && campLabel.isNotEmpty && campLabel != 'Inventory'
-                                  ? 'Add Stock to $campLabel'
-                                  : 'Add Stock to Inventory',
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: SoftPalette.gray50),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: SoftPalette.emerald400,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                              elevation: 2,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
-          ),
-        );
+          );
         },
       ),
     );
   }
 
   // ── Submit Add Stock for specific medicine ──────────────────────────────────
-  Future<void> _submitAddStockForMed(Map<String, dynamic> med, int qty, String targetCamp) async {
-    final medId = (med['_docId'] ?? med['id'] ?? med['medicineId'])?.toString() ?? '';
-    if (medId.isEmpty) {
-      _snack('Invalid medicine ID', err: true);
-      return;
-    }
-
+  Future<void> _submitAddStockForMed({
+    required Map<String, dynamic> med,
+    required int qty,
+    required String targetCamp,
+    required bool isNewBatch,
+    required String expiryDateStr,
+    Map<String, dynamic>? selectedExistingBatch,
+  }) async {
     final campLabel = CampSessionService.getCampLabel(targetCamp);
     final medName = (med['name'] ?? med['formula'] ?? 'Medicine').toString();
+    final medFormula = (med['formula'] ?? med['name'] ?? medName).toString();
+    final medType = (med['type'] ?? 'Tablet').toString();
+    final medDose = (med['dose'] ?? '').toString();
 
     try {
       final userInfo = await _getUserInfo();
 
-      // STEP 1: Update local Hive storage immediately so UI reflects without delay
-      await LocalStorageService.updateLocalStockQuantity(medId, qty.toDouble());
+      final pool = _poolFor(med, targetCamp);
+      if (pool == null) {
+        _snack('Please select a specific camp above before adding stock.', err: true);
+        return;
+      }
+
+      // ── Option A: Restock to Existing Batch ────────────────────────────────
+      if (!isNewBatch && selectedExistingBatch != null) {
+        final medId = (selectedExistingBatch['medicineId'] ?? selectedExistingBatch['id'] ?? selectedExistingBatch['_docId'])?.toString() ?? '';
+        if (medId.isEmpty) {
+          _snack('Invalid batch ID', err: true);
+          return;
+        }
+        await StockActions.restock(pool, medId, qty.toDouble(), ref: 'add stock');
+
+        final logData = {
+          'action': 'add_stock',
+          'medicineName': medName,
+          'medicineFormula': medFormula,
+          'medicineType': medType,
+          'medicineDose': medDose,
+          'medicineId': medId,
+          'quantityAdded': qty,
+          'expiryDate': selectedExistingBatch['expiryDate'] ?? expiryDateStr,
+          'isNewBatch': false,
+          'branchId': _effectiveBranchId,
+          'dispensaryId': targetCamp,
+          'campId': targetCamp,
+          'campName': campLabel,
+          'performedBy': userInfo['uid'],
+          'performedByName': userInfo['username'],
+          'timestamp': DateTime.now().toIso8601String(),
+          'createdAt': DateTime.now().toIso8601String(),
+          'details': 'Restocked +$qty units to $medName (Exp: ${selectedExistingBatch['expiryDate'] ?? expiryDateStr}) at $campLabel',
+        };
+        await LocalStorageService.saveLocalInventoryLog(logData);
+        await _uploadInventoryLog(logData);
+
+        _snack('+$qty added to $medName (Exp: ${_formatExpiryDisplay(selectedExistingBatch['expiryDate'] ?? expiryDateStr)}) at $campLabel!');
+        _loadAllMedicines();
+        return;
+      }
+
+      // ── Option B: New Expiry Date ──────────────────────────────────────────
+      // Check if an existing batch with the exact same expiry date already exists in this camp
+      final existingBatches = _getExistingBatchesForMed(med, targetCamp);
+      final targetParsed = MasterProformaService.parseExpiryDate(expiryDateStr);
+      Map<String, dynamic>? matchExisting;
+      for (final b in existingBatches) {
+        final bExp = (b['expiryDate'] ?? '').toString().trim();
+        if (bExp.isNotEmpty && bExp == expiryDateStr.trim()) {
+          matchExisting = b;
+          break;
+        }
+        final bParsed = MasterProformaService.parseExpiryDate(bExp);
+        if (bParsed.year < 3000 && targetParsed.year < 3000) {
+          if (bParsed.year == targetParsed.year && bParsed.month == targetParsed.month) {
+            matchExisting = b;
+            break;
+          }
+        }
+      }
+
+      if (matchExisting != null) {
+        final medId = (matchExisting['medicineId'] ?? matchExisting['id'] ?? matchExisting['_docId'])?.toString() ?? '';
+        await StockActions.restock(pool, medId, qty.toDouble(), ref: 'add stock');
+
+        final logData = {
+          'action': 'add_stock',
+          'medicineName': medName,
+          'medicineFormula': medFormula,
+          'medicineType': medType,
+          'medicineDose': medDose,
+          'medicineId': medId,
+          'quantityAdded': qty,
+          'expiryDate': matchExisting['expiryDate'] ?? expiryDateStr,
+          'isNewBatch': false,
+          'branchId': _effectiveBranchId,
+          'dispensaryId': targetCamp,
+          'campId': targetCamp,
+          'campName': campLabel,
+          'performedBy': userInfo['uid'],
+          'performedByName': userInfo['username'],
+          'timestamp': DateTime.now().toIso8601String(),
+          'createdAt': DateTime.now().toIso8601String(),
+          'details': 'Restocked +$qty units of $medName into existing batch (Exp: ${matchExisting['expiryDate']}) at $campLabel',
+        };
+        await LocalStorageService.saveLocalInventoryLog(logData);
+        await _uploadInventoryLog(logData);
+
+        _snack('+$qty added to existing batch of $medName (Exp: ${_formatExpiryDisplay(matchExisting['expiryDate'])}) at $campLabel!');
+        _loadAllMedicines();
+        return;
+      }
+
+      // Create brand new batch in the pool
+      final newDocId = RequestUtils.generateDocId(
+        medName,
+        medType,
+        medDose,
+        expiryDateStr,
+        campId: targetCamp,
+      );
+
+      final barcode = (med['barcode'] ?? med['rollNo'] ?? '').toString();
+      final itemCode = (med['itemCode'] ?? med['code'] ?? '').toString();
+      final packBarcode = (med['packBarcode'] ?? '').toString();
+      final price = med['price'] is num
+          ? (med['price'] as num).toDouble()
+          : (double.tryParse(med['price']?.toString() ?? '') ?? 0.0);
+
+      final stockData = {
+        'docId': newDocId,
+        'id': newDocId,
+        'medicineId': newDocId,
+        if (itemCode.isNotEmpty) 'code': itemCode,
+        if (itemCode.isNotEmpty) 'itemCode': itemCode,
+        if (barcode.isNotEmpty) 'barcode': barcode,
+        if (barcode.isNotEmpty) 'rollNo': barcode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
+        'name': medName,
+        'formula': medFormula,
+        'type': medType,
+        'dose': medDose,
+        'price': price,
+        'expiryDate': expiryDateStr,
+        'isCustomized': med['isCustomized'] == true,
+        'branchId': _effectiveBranchId,
+        'dispensaryId': targetCamp,
+        'campId': targetCamp,
+        'addedBy': userInfo['username'] ?? '',
+        'performedByName': userInfo['username'] ?? '',
+        'performedByUid': userInfo['uid'] ?? '',
+        'createdAt': DateTime.now().toIso8601String(),
+        'lastUpdated': DateTime.now().toIso8601String(),
+      };
+
+      await StockActions.addBatch(
+        pool,
+        newDocId,
+        stockData,
+        initialQty: qty.toDouble(),
+        ref: 'add stock (new expiry)',
+        opKey: 'add_stock_${DateTime.now().microsecondsSinceEpoch}',
+      );
 
       final logData = {
         'action': 'add_stock',
         'medicineName': medName,
-        'medicineId': medId,
+        'medicineFormula': medFormula,
+        'medicineType': medType,
+        'medicineDose': medDose,
+        'medicineId': newDocId,
+        'docId': newDocId,
         'quantityAdded': qty,
+        'expiryDate': expiryDateStr,
+        'isNewBatch': true,
         'branchId': _effectiveBranchId,
         'dispensaryId': targetCamp,
         'campId': targetCamp,
@@ -2366,45 +3429,12 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'performedByName': userInfo['username'],
         'timestamp': DateTime.now().toIso8601String(),
         'createdAt': DateTime.now().toIso8601String(),
+        'details': 'Created new batch & added +$qty units of $medName (New Exp: $expiryDateStr) at $campLabel',
       };
       await LocalStorageService.saveLocalInventoryLog(logData);
+      await _uploadInventoryLog(logData);
 
-      // STEP 2: LAN Server First routing — sends RealtimeEvents.saveStockItem to local Server
-      // The server updates its local state and broadcasts instantly to connected Doctors!
-      final updatedMed = LocalStorageService.getLocalInventoryItem(medId) ?? med;
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.saveStockItem,
-        'data': {
-          ...updatedMed,
-          '_quantityDelta':  qty,
-          'branchId':        _effectiveBranchId,
-          'campId':          targetCamp,
-          'dispensaryId':    targetCamp,
-          'campName':        campLabel,
-          'performedBy':     userInfo['uid'],
-          'performedByName': userInfo['username'],
-        },
-        'logData': logData,
-      });
-
-      // STEP 3: Upload through the sync queue only. A direct SDK increment as well counted the
-      // restock twice in the cloud.
-      await LocalStorageService.enqueueSync({
-        'type': 'add_inventory_stock',
-        'branchId': _effectiveBranchId,
-        'dispensaryId': targetCamp,
-        'campId': targetCamp,
-        'campName': campLabel,
-        'medicineId': medId,
-        'medicineName': medName,
-        'quantity': qty,
-        'performedBy': userInfo['uid'],
-        'performedByName': userInfo['username'],
-        'logData': logData,
-      });
-      SyncService().triggerUpload();
-
-      _snack('+$qty added to $medName at $campLabel (${_currentBranchId.toUpperCase()})!');
+      _snack('+$qty added to $medName with new expiry (${_formatExpiryDisplay(expiryDateStr)}) at $campLabel!');
       _loadAllMedicines();
     } catch (e) {
       _snack('Error updating stock: $e', err: true);
@@ -2432,25 +3462,31 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
-  Widget _qtyBtn(IconData icon, VoidCallback fn) => InkWell(
-        onTap: fn,
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            color: _isDark ? SoftPalette.slate800 : _teal.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: _isDark ? SoftPalette.slate700 : _teal.withValues(alpha: 0.25)),
-          ),
-          child: Icon(icon, color: _isDark ? SoftPalette.sky350 : _teal, size: 22),
+  Widget _qtyBtn(IconData icon, VoidCallback fn) {
+    final c = context.comfort;
+    return InkWell(
+      onTap: fn,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: c.brandSoft,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: c.brand.withValues(alpha: 0.3)),
         ),
-      );
+        child: Icon(icon, color: c.brand, size: 22),
+      ),
+    );
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   // TAB 2 — Register New Medicine
   // ══════════════════════════════════════════════════════════════════════════
   Widget _registerTab() {
+    final c = context.comfort;
+    final isCompact = GBreakpoint.isCompact(context);
+
     if (!_canRegisterMedicine) {
       return Center(
         child: Padding(
@@ -2458,273 +3494,347 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.lock_outline_rounded, size: 64, color: SoftPalette.amber300),
+              Icon(Icons.lock_outline_rounded, size: 64, color: c.warning),
               const SizedBox(height: 16),
               Text(
                 'Access Restricted',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _isDark ? SoftPalette.gray50 : _tealDark),
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: c.textPrimary),
               ),
               const SizedBox(height: 8),
               Text(
                 'Registering permanent medicines into the Master Proforma is restricted to Chairman, HQ Managers, and Admins.\nDispensary staff and doctors can restock and add branch inventory from the Universal Proforma Sheet.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: _isDark ? SoftPalette.slate350 : _textMid),
+                style: TextStyle(fontSize: 14, color: c.textSecondary),
               ),
             ],
           ),
         ),
       );
     }
+
+    final proformaBarcodeField = TextFormField(
+      controller: _regCodeCtrl,
+      keyboardType: TextInputType.number,
+      inputFormatters: [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(3),
+      ],
+      style: TextStyle(color: c.textPrimary, fontSize: 14.5),
+      cursorColor: c.brand,
+      decoration: _inputDec(
+        'Proforma Barcode (001–999)',
+        icon: Icons.qr_code_rounded,
+        hint: 'e.g. ${MasterProformaService.getNextRollNumber()} (auto if blank)',
+      ),
+      validator: (v) {
+        final raw = v?.trim() ?? '';
+        if (raw.isEmpty) return null; // Auto-assigned if left empty
+        if (!MasterProformaService.isValidProformaBarcode(raw)) {
+          return 'Must be a 3-digit number from 001 to 999';
+        }
+        return null;
+      },
+    );
+
+    final packBarcodeField = TextFormField(
+      controller: _regPackBarcodeCtrl,
+      style: TextStyle(color: c.textPrimary, fontSize: 14.5),
+      cursorColor: c.brand,
+      decoration: _inputDec(
+        'Pack Barcode (Optional)',
+        icon: Icons.qr_code_scanner_rounded,
+        hint: 'External barcode (e.g. 8964000123456)',
+      ),
+    );
+
+    final typeDropdown = DropdownButtonFormField<String>(
+      initialValue: _regType,
+      dropdownColor: c.surface,
+      style: TextStyle(color: c.textPrimary, fontSize: 14),
+      decoration: _inputDec('Type', icon: FontAwesomeIcons.capsules),
+      items: _allTypes
+          .map((t) => DropdownMenuItem(
+                value: t,
+                child: Row(
+                  children: [
+                    Icon(_typeIcon(t), size: 13, color: c.brand),
+                    const SizedBox(width: 8),
+                    Text(t, style: TextStyle(color: c.textPrimary)),
+                  ],
+                ),
+              ))
+          .toList(),
+      onChanged: (v) {
+        if (v != null) {
+          setState(() {
+            _regType = v;
+            _regSelectedDose = null;
+            _regDoseCtrl.clear();
+          });
+        }
+      },
+    );
+
+    final Widget? doseField = _hasDoseDropdown
+        ? DropdownButtonFormField<String>(
+            initialValue: _regSelectedDose,
+            dropdownColor: c.surface,
+            style: TextStyle(color: c.textPrimary, fontSize: 14),
+            decoration: _inputDec('Dose', icon: Icons.science_rounded),
+            hint: Text('Select dose', style: TextStyle(color: c.textMuted)),
+            items: (_doseOptions[_regType] ?? [])
+                .map((d) => DropdownMenuItem(
+                      value: d,
+                      child: Text(d, style: TextStyle(color: c.textPrimary)),
+                    ))
+                .toList(),
+            onChanged: (v) => setState(() => _regSelectedDose = v),
+            validator: (v) =>
+                (_regType == 'Tablet') ? null : (v == null ? 'Select a dose' : null),
+          )
+        : (_usesFreeTextDose
+            ? TextFormField(
+                controller: _regDoseCtrl,
+                style: TextStyle(color: c.textPrimary, fontSize: 14.5),
+                cursorColor: c.brand,
+                decoration: _inputDec(
+                  _regType == 'Nebulization'
+                      ? 'Dose per session'
+                      : 'Dose / Variant (e.g. 500mg)',
+                  icon: Icons.science_rounded,
+                ),
+              )
+            : null);
+
     return SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
-        child: Column(children: [
-          _card(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: _card(
             child: Form(
               key: _regFormKey,
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                _sectionLabel('Register Medicine to Master Proforma'),
-                const SizedBox(height: 18),
-
-                // Name (Formula)
-                TextFormField(
-                  controller: _regNameCtrl,
-                  style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 15),
-                  cursorColor: _isDark ? SoftPalette.sky350 : _teal,
-                  decoration: _inputDec('Formula',
-                      icon: Icons.medication_rounded,
-                      hint: 'e.g. Amoxicillin, Panadol Extra'),
-                  validator: (v) => v?.trim().isEmpty ?? true
-                      ? 'Formula is required'
-                      : null,
-                ),
-                if (_liveSpellingSuggestion != null) ...[
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: _isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: _isDark ? SoftPalette.sky350 : SoftPalette.sky300),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _sectionLabel('Register Medicine to Master Proforma'),
+                  const SizedBox(height: 4),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 14),
+                    child: Text(
+                      'Creates a permanent generic catalog item available to all branches and camps.',
+                      style: TextStyle(fontSize: 12, color: c.textSecondary),
                     ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.lightbulb_outline, size: 18, color: SoftPalette.blue500),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text.rich(
-                            TextSpan(
-                              style: TextStyle(fontSize: 12, color: _isDark ? SoftPalette.gray50A70 : _textDark),
-                              children: [
-                                const TextSpan(text: 'Did you mean '),
-                                TextSpan(
-                                  text: '${_liveSpellingSuggestion!['name']}',
-                                  style: const TextStyle(fontWeight: FontWeight.bold, color: _blue),
+                  ),
+                  const SizedBox(height: 18),
+
+                  // Name (Formula)
+                  TextFormField(
+                    controller: _regNameCtrl,
+                    style: TextStyle(color: c.textPrimary, fontSize: 15),
+                    cursorColor: c.brand,
+                    decoration: _inputDec(
+                      'Formula',
+                      icon: Icons.medication_rounded,
+                      hint: 'e.g. Amoxicillin, Panadol Extra',
+                    ),
+                    validator: (v) =>
+                        v?.trim().isEmpty ?? true ? 'Formula is required' : null,
+                  ),
+                  if (_liveSpellingSuggestion != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: c.infoBg,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: c.info.withValues(alpha: 0.35)),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.lightbulb_outline_rounded, size: 18, color: c.info),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text.rich(
+                              TextSpan(
+                                style: TextStyle(fontSize: 12, color: c.textPrimary),
+                                children: [
+                                  const TextSpan(text: 'Did you mean '),
+                                  TextSpan(
+                                    text: '${_liveSpellingSuggestion!['name']}',
+                                    style: TextStyle(fontWeight: FontWeight.w700, color: c.info),
+                                  ),
+                                  if (_liveSpellingSuggestion!['formula'] != null)
+                                    TextSpan(text: ' (${_liveSpellingSuggestion!['formula']})'),
+                                  const TextSpan(text: '?'),
+                                ],
+                              ),
+                            ),
+                          ),
+                          InkWell(
+                            onTap: () {
+                              setState(() {
+                                _regNameCtrl.text = _liveSpellingSuggestion!['name'] ?? '';
+                                _liveSpellingSuggestion = null;
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(6),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: c.info,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                'Apply Fix',
+                                style: TextStyle(
+                                  color: c.onBrand,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
                                 ),
-                                if (_liveSpellingSuggestion!['formula'] != null)
-                                  TextSpan(text: ' (${_liveSpellingSuggestion!['formula']})'),
-                                const TextSpan(text: '?'),
-                              ],
+                              ),
                             ),
                           ),
-                        ),
-                        InkWell(
-                          onTap: () {
-                            setState(() {
-                              _regNameCtrl.text = _liveSpellingSuggestion!['name'] ?? '';
-                              _liveSpellingSuggestion = null;
-                            });
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: _blue,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const Text('Apply Fix', style: TextStyle(color: SoftPalette.gray50, fontSize: 11, fontWeight: FontWeight.bold)),
-                          ),
-                        ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+
+                  // Proforma Barcode (001–999) + Pack Barcode
+                  if (isCompact) ...[
+                    proformaBarcodeField,
+                    const SizedBox(height: 14),
+                    packBarcodeField,
+                  ] else
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: proformaBarcodeField),
+                        const SizedBox(width: 14),
+                        Expanded(child: packBarcodeField),
                       ],
                     ),
-                  ),
-                ],
-                const SizedBox(height: 14),
-
-                // Barcode — required and must be unique across the branch
-                TextFormField(
-                  controller: _regCodeCtrl,
-                  style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 15),
-                  cursorColor: _isDark ? SoftPalette.sky350 : _teal,
-                  decoration: _inputDec('Barcode',
-                      icon: Icons.qr_code_rounded,
-                      hint: 'e.g. 8964000123456'),
-                  validator: (v) => v?.trim().isEmpty ?? true
-                      ? 'Barcode is required'
-                      : null,
-                ),
-                const SizedBox(height: 14),
-
-                // Type Dropdown
-                DropdownButtonFormField<String>(
-                  initialValue: _regType,
-                  dropdownColor: _isDark ? SoftPalette.slate800 : _white,
-                  style: TextStyle(
-                      color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 14),
-                  decoration: _inputDec('Type',
-                      icon: FontAwesomeIcons.capsules),
-                  items: _allTypes
-                      .map((t) => DropdownMenuItem(
-                          value: t,
-                          child: Row(children: [
-                            Icon(_typeIcon(t),
-                                size: 13, color: _teal),
-                            const SizedBox(width: 8),
-                            Text(t, style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark)),
-                          ])))
-                      .toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      setState(() {
-                        _regType = v;
-                        _regSelectedDose = null;
-                        _regDoseCtrl.clear();
-                      });
-                    }
-                  },
-                ),
-                const SizedBox(height: 14),
-
-                // Dose dropdown
-                if (_hasDoseDropdown) ...[
-                  DropdownButtonFormField<String>(
-                    initialValue: _regSelectedDose,
-                    dropdownColor: _isDark ? SoftPalette.slate800 : _white,
-                    style: TextStyle(
-                        color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 14),
-                    decoration: _inputDec('Dose',
-                        icon: Icons.science_rounded),
-                    hint: Text('Select dose',
-                        style: TextStyle(color: _isDark ? SoftPalette.slate550 : _textLight)),
-                    items: (_doseOptions[_regType] ?? [])
-                        .map((d) => DropdownMenuItem(
-                            value: d, child: Text(d, style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark))))
-                        .toList(),
-                    onChanged: (v) =>
-                        setState(() => _regSelectedDose = v),
-                    validator: (v) => (_regType == 'Tablet')
-                          ? null
-                          : (v == null ? 'Select a dose' : null),
-                  ),
                   const SizedBox(height: 14),
-                ],
 
-                // Dose free text
-                if (_usesFreeTextDose) ...[
+                  // Type Dropdown & Dose side-by-side on desktop
+                  if (doseField != null && !isCompact)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: typeDropdown),
+                        const SizedBox(width: 14),
+                        Expanded(child: doseField),
+                      ],
+                    )
+                  else ...[
+                    typeDropdown,
+                    if (doseField != null) ...[
+                      const SizedBox(height: 14),
+                      doseField,
+                    ],
+                  ],
+                  const SizedBox(height: 14),
+
+                  // Reason for Registration (MANDATORY AUDIT)
                   TextFormField(
-                    controller: _regDoseCtrl,
-                    style: TextStyle(
-                        color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 15),
-                    cursorColor: _isDark ? SoftPalette.sky350 : _teal,
+                    controller: _regReasonCtrl,
+                    maxLines: 2,
+                    style: TextStyle(color: c.textPrimary, fontSize: 14),
+                    cursorColor: c.brand,
                     decoration: _inputDec(
-                      _regType == 'Nebulization'
-                          ? 'Dose per session'
-                          : 'Dose / Variant (e.g. 500mg)',
-                      icon: Icons.science_rounded,
+                      'Reason for Registration (Mandatory Audit) *',
+                      icon: Icons.history_edu_rounded,
+                      hint: 'e.g. Approved generic formula per Chairman / HQ decision',
                     ),
+                    validator: (v) => v?.trim().isEmpty ?? true
+                        ? 'Reason is required for Master Proforma audit logging'
+                        : null,
                   ),
-                  const SizedBox(height: 14),
-                ],
+                  const SizedBox(height: 22),
 
-                // Reason for Registration (MANDATORY AUDIT)
-                TextFormField(
-                  controller: _regReasonCtrl,
-                  maxLines: 2,
-                  style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 14),
-                  cursorColor: _isDark ? SoftPalette.sky350 : _teal,
-                  decoration: _inputDec(
-                    'Reason for Registration (Mandatory Audit) *',
-                    icon: Icons.history_edu_rounded,
-                    hint: 'e.g. Approved generic formula per Chairman / HQ decision',
-                  ),
-                  validator: (v) => v?.trim().isEmpty ?? true
-                      ? 'Reason is required for Master Proforma audit logging'
-                      : null,
-                ),
-                const SizedBox(height: 22),
-
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed:
-                        _isSubmittingReg ? null : _submitRegister,
-                    icon: _isSubmittingReg
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _isSubmittingReg ? null : _submitRegister,
+                      icon: _isSubmittingReg
+                          ? SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: SoftPalette.gray50))
-                        : const Icon(
-                            Icons.save_rounded,
-                            color: SoftPalette.gray50),
-                    label: Text(
+                                color: c.onBrand,
+                              ),
+                            )
+                          : const Icon(Icons.save_rounded),
+                      label: Text(
                         _isSubmittingReg
                             ? 'Registering...'
                             : 'Save Permanently to Master Proforma',
                         style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold,
-                            color: SoftPalette.gray50)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _teal,
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 15),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10)),
-                      elevation: 2,
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: c.brand,
+                        foregroundColor: c.onBrand,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        elevation: 0,
+                      ),
                     ),
                   ),
-                ),
-              ]),
+                ],
+              ),
             ),
           ),
-        ]),
-      );
+        ),
+      ),
+    );
   }
 
   // ── Shared widgets ─────────────────────────────────────────────────────────
-  Widget _card({required Widget child}) => Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: _isDark ? SoftPalette.slate800 : _white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: _isDark ? SoftPalette.slate700 : _green100),
-          boxShadow: [
-            BoxShadow(
-                color: _isDark ? SoftPalette.gray900A26 : _shadow,
-                blurRadius: 12,
-                offset: const Offset(0, 4))
-          ],
-        ),
-        child: child,
-      );
+  Widget _card({required Widget child}) {
+    final c = context.comfort;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: c.border),
+      ),
+      child: child,
+    );
+  }
 
-  Widget _sectionLabel(String text) => Row(children: [
+  Widget _sectionLabel(String text) {
+    final c = context.comfort;
+    return Row(
+      children: [
         Container(
-            width: 4,
-            height: 18,
-            decoration: BoxDecoration(
-                color: _teal,
-                borderRadius: BorderRadius.circular(2))),
+          width: 4,
+          height: 18,
+          decoration: BoxDecoration(
+            color: c.brand,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
         const SizedBox(width: 10),
-        Text(text,
-            style: const TextStyle(
-                color: _teal,
-                fontSize: 15,
-                fontWeight: FontWeight.bold)),
-      ]);
+        Text(
+          text,
+          style: TextStyle(
+            color: c.textPrimary,
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _miniChip(String label, Color color) => Container(
         padding:
@@ -2781,14 +3891,7 @@ class _EditRequestSheet extends StatefulWidget {
 }
 
 class _EditRequestSheetState extends State<_EditRequestSheet> {
-  static const _teal = SoftPalette.teal600;
-  static const _tealDark = SoftPalette.teal700;
-  static const _green50 = SoftPalette.green100m;
   static const _red = SoftPalette.red550;
-  static const _purple = SoftPalette.purple600;
-  static const _border = SoftPalette.teal200;
-  static const _textDark = SoftPalette.slate800;
-  static const _textLight = SoftPalette.slate500;
 
   late TextEditingController _nameCtrl;
   late TextEditingController _doseCtrl;
@@ -2797,6 +3900,8 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
   late TextEditingController _expiryCtrl;
   late TextEditingController _reasonCtrl;
   late TextEditingController _codeCtrl;
+  late TextEditingController _barcodeCtrl;
+  late TextEditingController _packBarcodeCtrl;
   late String _selectedType;
   String? _selectedDoseDropdown;
 
@@ -2837,7 +3942,11 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
         TextEditingController(text: med['expiryDate']?.toString() ?? '');
     _reasonCtrl = TextEditingController();
     _codeCtrl =
-        TextEditingController(text: med['code']?.toString() ?? '');
+        TextEditingController(text: (med['code'] ?? med['itemCode'] ?? '').toString());
+    _barcodeCtrl =
+        TextEditingController(text: (med['barcode'] ?? med['rollNo'] ?? '').toString());
+    _packBarcodeCtrl =
+        TextEditingController(text: med['packBarcode']?.toString() ?? '');
     _selectedType = widget.allTypes.contains(med['type'])
         ? med['type'].toString()
         : widget.allTypes.first;
@@ -2858,6 +3967,8 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
     _expiryCtrl.dispose();
     _reasonCtrl.dispose();
     _codeCtrl.dispose();
+    _barcodeCtrl.dispose();
+    _packBarcodeCtrl.dispose();
     super.dispose();
   }
 
@@ -2895,6 +4006,10 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
             ? _doseCtrl.text.trim()
             : '';
 
+    final rawBar = _barcodeCtrl.text.trim();
+    final newBarcode = MasterProformaService.normalizeProformaBarcode(rawBar) ?? rawBar;
+    final newPackBarcode = _packBarcodeCtrl.text.trim();
+
     final updatedFormula = MasterProformaService.cleanBrandToFormula(_nameCtrl.text.trim());
     final finalName = updatedFormula.isNotEmpty ? updatedFormula : _nameCtrl.text.trim();
     final updatedFields = {
@@ -2903,7 +4018,10 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
       'type': _selectedType,
       'dose': dose,
       'code': newCode,
-      'barcode': newCode,
+      'itemCode': newCode,
+      if (newBarcode.isNotEmpty) 'barcode': newBarcode,
+      if (newBarcode.isNotEmpty) 'rollNo': newBarcode,
+      if (newPackBarcode.isNotEmpty) 'packBarcode': newPackBarcode,
       'quantity': int.tryParse(_qtyCtrl.text.trim()) ?? 0,
       'price': _priceCtrl.text.trim(),
       'expiryDate': _expiryCtrl.text.trim(),
@@ -2921,15 +4039,16 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final hasDd = _hasDd(_selectedType);
     final hasFree = _hasFree(_selectedType);
 
     return Container(
       decoration: BoxDecoration(
-        color: context.adapt(SoftPalette.gray50),
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(24)),
+        color: c.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        border: Border(top: BorderSide(color: c.border)),
       ),
       padding: EdgeInsets.fromLTRB(20, 0, 20, bottom + 24),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -2939,8 +4058,9 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
             width: 40,
             height: 4,
             decoration: BoxDecoration(
-                color: context.adapt(SoftPalette.gray150),
-                borderRadius: BorderRadius.circular(2)),
+              color: c.borderStrong,
+              borderRadius: BorderRadius.circular(2),
+            ),
           ),
         ),
 
@@ -2949,11 +4069,10 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: context.adapt(_purple).withValues(alpha: 0.1),
+              color: c.brandSoft,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(Icons.edit_rounded,
-                color: context.adapt(_purple), size: 18),
+            child: Icon(Icons.edit_rounded, color: c.brand, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -2963,17 +4082,16 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
               Text('Request Edit',
                   style: TextStyle(
                       fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      color: context.adapt(_tealDark))),
+                      fontWeight: FontWeight.w700,
+                      color: c.textPrimary)),
               Text(
                   'Changes will be sent for supervisor approval',
                   style:
-                      TextStyle(fontSize: 11, color: context.adapt(_textLight))),
+                      TextStyle(fontSize: 11.5, color: c.textSecondary)),
             ]),
           ),
           IconButton(
-            icon: Icon(Icons.close_rounded,
-                color: context.adapt(_textLight)),
+            icon: Icon(Icons.close_rounded, color: c.textMuted),
             onPressed: () => Navigator.pop(context),
           ),
         ]),
@@ -2983,14 +4101,12 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
         Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
-            color: context.adapt(SoftPalette.purple150m),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-                color: context.adapt(_purple).withValues(alpha: 0.2)),
+            color: c.brandSoft,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.brand.withValues(alpha: 0.25)),
           ),
           child: Row(children: [
-            Icon(Icons.info_outline_rounded,
-                size: 14, color: context.adapt(_purple)),
+            Icon(Icons.info_outline_rounded, size: 15, color: c.brandStrong),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -2998,7 +4114,7 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                 '(${widget.medicine['type'] ?? ''})',
                 style: TextStyle(
                     fontSize: 12,
-                    color: context.adapt(_purple),
+                    color: c.brandStrong,
                     fontWeight: FontWeight.w600),
               ),
             ),
@@ -3006,7 +4122,7 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
         ),
 
         const SizedBox(height: 14),
-        const Divider(height: 1),
+        Divider(height: 1, color: c.border),
         const SizedBox(height: 14),
 
         Flexible(
@@ -3026,18 +4142,37 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                 ),
                 const SizedBox(height: 12),
 
-                // Barcode — required and must be unique across the branch
+                // Item Code & Proforma Barcode (001–999)
                 Builder(builder: (context) {
                   return _field(
                     controller: _codeCtrl,
-                    label: 'Barcode',
-                    icon: Icons.qr_code_rounded,
+                    label: 'Item Code',
+                    icon: Icons.tag_rounded,
                     enabled: true,
                     validator: (v) => (v == null || v.trim().isEmpty)
-                        ? 'Barcode is required'
+                        ? 'Item Code is required'
                         : null,
                   );
                 }),
+                const SizedBox(height: 12),
+                _field(
+                  controller: _barcodeCtrl,
+                  label: 'Proforma Barcode (001–999)',
+                  icon: Icons.qr_code_rounded,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(3),
+                  ],
+                  enabled: true,
+                ),
+                const SizedBox(height: 12),
+                _field(
+                  controller: _packBarcodeCtrl,
+                  label: 'Pack Barcode (Optional)',
+                  icon: Icons.qr_code_scanner_rounded,
+                  enabled: true,
+                ),
                 const SizedBox(height: 12),
 
                 // Type dropdown
@@ -3049,27 +4184,26 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: context.adapt(_textLight))),
+                          color: c.textSecondary)),
                   const SizedBox(height: 6),
                   Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14),
                     decoration: BoxDecoration(
-                      color: context.adapt(_green50),
+                      color: c.surfaceSunken,
                       borderRadius: BorderRadius.circular(10),
-                      border:
-                          Border.all(color: context.adapt(_border)),
+                      border: Border.all(color: c.border),
                     ),
                     child: DropdownButton<String>(
                       value: _selectedType,
                       isExpanded: true,
                       underline: const SizedBox(),
-                      dropdownColor: context.adapt(SoftPalette.gray50),
+                      dropdownColor: c.surface,
                       style: TextStyle(
-                          color: context.adapt(_textDark), fontSize: 14),
-                      icon: const Icon(
+                          color: c.textPrimary, fontSize: 14),
+                      icon: Icon(
                           Icons.expand_more_rounded,
-                          color: _teal),
+                          color: c.brand),
                       items: widget.allTypes
                           .map((t) => DropdownMenuItem(
                               value: t, child: Text(t)))
@@ -3095,17 +4229,15 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                         style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
-                            color: context.adapt(_textLight))),
+                            color: c.textSecondary)),
                     const SizedBox(height: 6),
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 14),
                       decoration: BoxDecoration(
-                        color: context.adapt(_green50),
-                        borderRadius:
-                            BorderRadius.circular(10),
-                        border:
-                            Border.all(color: context.adapt(_border)),
+                        color: c.surfaceSunken,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: c.border),
                       ),
                       child: DropdownButton<String>(
                         value: _selectedDoseDropdown,
@@ -3113,13 +4245,13 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                         underline: const SizedBox(),
                         hint: Text('Select dose',
                             style: TextStyle(
-                                color: context.adapt(_textLight))),
-                        dropdownColor: context.adapt(SoftPalette.gray50),
+                                color: c.textMuted)),
+                        dropdownColor: c.surface,
                         style: TextStyle(
-                            color: context.adapt(_textDark), fontSize: 14),
-                        icon: const Icon(
+                            color: c.textPrimary, fontSize: 14),
+                        icon: Icon(
                             Icons.expand_more_rounded,
-                            color: _teal),
+                            color: c.brand),
                         items: (widget.doseOptions[
                                         _selectedType] ??
                                     [])
@@ -3186,32 +4318,28 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
                   child: ElevatedButton.icon(
                     onPressed: _submitting ? null : _submit,
                     icon: _submitting
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 18,
                             height: 18,
                             child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: SoftPalette.gray50))
-                        : const Icon(
-                            Icons.send_rounded,
-                            color: SoftPalette.gray50,
-                            size: 18),
+                                color: c.onBrand))
+                        : const Icon(Icons.send_rounded, size: 18),
                     label: Text(
                         _submitting
                             ? 'Submitting…'
                             : 'Submit for Approval',
                         style: const TextStyle(
-                            color: SoftPalette.gray50,
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w700,
                             fontSize: 15)),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _purple,
-                      disabledBackgroundColor:
-                          _purple.withValues(alpha: 0.5),
+                      backgroundColor: c.brand,
+                      foregroundColor: c.onBrand,
+                      disabledBackgroundColor: c.brand.withValues(alpha: 0.45),
                       shape: RoundedRectangleBorder(
                           borderRadius:
                               BorderRadius.circular(12)),
-                      elevation: 3,
+                      elevation: 0,
                     ),
                   ),
                 ),
@@ -3228,57 +4356,61 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
     required String label,
     required IconData icon,
     TextInputType keyboardType = TextInputType.text,
+    List<TextInputFormatter>? inputFormatters,
     String? Function(String?)? validator,
     int maxLines = 1,
     bool enabled = true,
     String? helperText,
-  }) =>
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label,
-            style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: context.adapt(_textLight))),
-        const SizedBox(height: 6),
-        TextFormField(
-          controller: controller,
-          keyboardType: keyboardType,
-          validator: validator,
-          maxLines: maxLines,
-          enabled: enabled,
-          readOnly: !enabled,
-          cursorColor: _teal,
-          style: TextStyle(color: enabled ? context.adapt(_textDark) : context.adapt(SoftPalette.gray550), fontSize: 14),
-          decoration: InputDecoration(
-            prefixIcon: Icon(icon, size: 17, color: enabled ? _teal : context.adapt(SoftPalette.gray350)),
-            suffixIcon: !enabled ? Icon(Icons.lock_rounded, size: 16, color: context.adapt(SoftPalette.gray350)) : null,
-            helperText: helperText,
-            helperStyle: TextStyle(color: SoftPalette.orange350, fontSize: 11, fontWeight: FontWeight.bold),
-            filled: true,
-            fillColor: enabled ? context.adapt(_green50) : context.adapt(SoftPalette.gray100),
-            border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide.none),
-            enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: context.adapt(_border))),
-            focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: _teal, width: 1.5)),
-            disabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: context.adapt(SoftPalette.gray150))),
-            errorBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: _red)),
-            focusedErrorBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: _red, width: 1.5)),
-            contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14, vertical: 13),
-          ),
+  }) {
+    final c = context.comfort;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label,
+          style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: c.textSecondary)),
+      const SizedBox(height: 6),
+      TextFormField(
+        controller: controller,
+        keyboardType: keyboardType,
+        inputFormatters: inputFormatters,
+        validator: validator,
+        maxLines: maxLines,
+        enabled: enabled,
+        readOnly: !enabled,
+        cursorColor: c.brand,
+        style: TextStyle(color: enabled ? c.textPrimary : c.textMuted, fontSize: 14),
+        decoration: InputDecoration(
+          prefixIcon: Icon(icon, size: 17, color: enabled ? c.brand : c.textMuted),
+          suffixIcon: !enabled ? Icon(Icons.lock_rounded, size: 16, color: c.textMuted) : null,
+          helperText: helperText,
+          helperStyle: TextStyle(color: c.warning, fontSize: 11, fontWeight: FontWeight.w700),
+          filled: true,
+          fillColor: enabled ? c.surfaceSunken : c.background,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide.none),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.brand, width: 1.6)),
+          disabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border)),
+          errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.danger)),
+          focusedErrorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.danger, width: 1.5)),
+          contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14, vertical: 13),
         ),
-      ]);
+      ),
+    ]);
+  }
 }
 
 // ── Expiry Date Formatter ──────────────────────────────────────────────────────

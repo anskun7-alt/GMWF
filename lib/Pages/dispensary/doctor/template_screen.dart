@@ -4,9 +4,10 @@ import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:hive_flutter/hive_flutter.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/stock_pool.dart';
+import 'package:gmwf/services/stock/stock_reader.dart';
 
 /// Doctor Prescription Templates & Disease Presets Manager.
 class TemplateScreen extends StatefulWidget {
@@ -24,8 +25,8 @@ class TemplateScreen extends StatefulWidget {
 }
 
 class _TemplateScreenState extends State<TemplateScreen> {
-  static const Color _teal = SoftPalette.teal600;
-  static const Color _tealLight = SoftPalette.teal100m;
+  Color get _teal => context.comfort.brand;
+  Color get _tealLight => context.comfort.brandSoft;
 
   // Form State
   final TextEditingController _complaintCtrl = TextEditingController();
@@ -209,35 +210,27 @@ class _TemplateScreenState extends State<TemplateScreen> {
     setState(() => _isLoadingInventory = true);
     final List<Map<String, dynamic>> items = [];
 
+    // This PC's stock pool from the stock book (all batches of a medicine added together,
+    // other patients' reservations taken off). No made-up stock: an empty pool stays empty.
     try {
-      final stockBox = await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
-      final localStock = stockBox.values.whereType<Map>();
-        for (final s in localStock) {
-          final item = Map<String, dynamic>.from(s);
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.stockBox);
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.prescriptionsBox);
+      await LocalStorageService.ensureBoxOpen(LocalStorageService.entriesBox);
+      final pool = StockPool.current(widget.branchId);
+      if (pool != null) {
+        for (final g in StockReader.groups(pool)) {
+          if (g.batches.isEmpty) continue;
+          final item = Map<String, dynamic>.from(g.primary);
           final isCustom = item['isCustomized'] == true || item['userEdited'] == true;
           if (!isCustom) {
             final rawName = (item['name'] ?? '').toString();
             item['name'] = MasterProformaService.cleanBrandToFormula(rawName);
           }
-          item['quantity'] = item['quantity'] ?? item['stock'] ?? 0;
+          item['quantity'] = g.available.floor();
           items.add(item);
         }
+      }
     } catch (_) {}
-
-    if (items.isEmpty || items.length < 5) {
-      items.addAll([
-        {'id': 'inv_1', 'name': 'Paracetamol 500mg', 'type': 'Tablet', 'quantity': 140, 'formula': 'Acetaminophen'},
-        {'id': 'inv_2', 'name': 'Chlorpheniramine 4mg (Piriton)', 'type': 'Tablet', 'quantity': 85, 'formula': 'Chlorpheniramine Maleate'},
-        {'id': 'inv_3', 'name': 'Syp. Mucaine / Antacid', 'type': 'Syrup', 'quantity': 32, 'formula': 'Oxetacaine + Aluminium Hydroxide'},
-        {'id': 'inv_4', 'name': 'Cap. Ciprofloxacin 500mg', 'type': 'Capsule', 'quantity': 64, 'formula': 'Ciprofloxacin HCl'},
-        {'id': 'inv_5', 'name': 'Tab. Flagyl 400mg', 'type': 'Tablet', 'quantity': 6, 'formula': 'Metronidazole'},
-        {'id': 'inv_6', 'name': 'Syp. ORS Powder / Electrolyte', 'type': 'Syrup', 'quantity': 45, 'formula': 'Oral Rehydration Salts'},
-        {'id': 'inv_7', 'name': 'Tab. Augmentin 625mg', 'type': 'Tablet', 'quantity': 50, 'formula': 'Co-Amoxiclav'},
-        {'id': 'inv_8', 'name': 'Tab. Brufen 400mg', 'type': 'Tablet', 'quantity': 90, 'formula': 'Ibuprofen'},
-        {'id': 'inv_9', 'name': 'Tab. Amlodipine 5mg', 'type': 'Tablet', 'quantity': 110, 'formula': 'Amlodipine Besylate'},
-        {'id': 'inv_10', 'name': 'Tab. Disprin / Lowplat 75mg', 'type': 'Tablet', 'quantity': 80, 'formula': 'Aspirin 75mg'},
-      ]);
-    }
 
     if (mounted) {
       setState(() {
@@ -249,15 +242,18 @@ class _TemplateScreenState extends State<TemplateScreen> {
 
   int _getStockForMedicine(String medName) {
     final clean = medName.toLowerCase().trim();
+    if (clean.isEmpty) return 0;
     final item = _inventory.firstWhere(
       (m) {
         final name = (m['name'] ?? '').toString().toLowerCase().trim();
         final form = (m['formula'] ?? '').toString().toLowerCase().trim();
+        if (name.isEmpty) return false;
         return name.contains(clean) || clean.contains(name) || (form.isNotEmpty && clean.contains(form));
       },
       orElse: () => {},
     );
-    if (item.isEmpty) return 99;
+    // Not in this pool's stock: none available (never an invented figure).
+    if (item.isEmpty) return 0;
     final q = item['quantity'] ?? item['stock'] ?? 0;
     return q is num ? q.toInt() : int.tryParse(q.toString()) ?? 0;
   }
@@ -541,14 +537,15 @@ class _TemplateScreenState extends State<TemplateScreen> {
               )
             else
               ..._prescriptions.map((m) {
-                final stock = _getStockForMedicine(m['name']);
+                final stock = _getStockForMedicine((m['name'] ?? '').toString());
+                final isOutOfStock = stock <= 0;
                 return Container(
                   margin: const EdgeInsets.only(bottom: 8),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.gray50),
+                    color: context.adapt(isOutOfStock ? SoftPalette.gray100 : SoftPalette.gray50),
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: context.adapt(SoftPalette.gray150)),
+                    border: Border.all(color: context.adapt(isOutOfStock ? SoftPalette.red300 : SoftPalette.gray150)),
                   ),
                   child: Row(
                     children: [
@@ -565,7 +562,38 @@ class _TemplateScreenState extends State<TemplateScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(m['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5)),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    (m['name'] ?? '').toString(),
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13.5,
+                                      color: isOutOfStock ? context.adapt(SoftPalette.gray550) : null,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                // Stock of this dispensary: out-of-stock lines are flagged,
+                                // they are never given an invented quantity.
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                  decoration: BoxDecoration(
+                                    color: context.adapt(isOutOfStock ? SoftPalette.pink100m : SoftPalette.green100m),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    isOutOfStock ? 'Out of stock' : 'Stock: $stock',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.bold,
+                                      color: context.adapt(isOutOfStock ? SoftPalette.red550 : SoftPalette.green550),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                             const SizedBox(height: 2),
                             Text(
                               'Dose: ${m['dose']} • Freq: ${m['frequency']} • Duration: ${m['duration']} • ${m['instructions']}',

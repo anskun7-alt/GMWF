@@ -1,15 +1,16 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
+import 'package:gmwf_ui/gmwf_ui.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../theme/app_theme.dart';
 import '../theme/role_theme_provider.dart';
-import '../design/design_system.dart';
+import '../design/tokens/soft_palette.dart';
 import '../utils/localization_helper.dart';
 import '../services/local_storage_service.dart';
 import '../utils/formatters.dart';
@@ -22,19 +23,24 @@ import '../services/user_language_service.dart';
 import '../widgets/update_dialog_widget.dart';
 import '../realtime/realtime_events.dart';
 import '../realtime/realtime_manager.dart';
-import 'settings/biometric_device_manager_page.dart';
-import 'settings/python_terminal_screen.dart';
 import 'school/views/school_about_view.dart';
 import 'support_page.dart';
 import '../services/quota_service.dart';
 import '../services/hidden_force_uploader.dart';
 import '../widgets/queue_doctor_dialog.dart';
+import 'settings/biometric_device_manager_page.dart';
+import 'settings/python_terminal_screen.dart';
 
 
 class SettingsPage extends StatefulWidget {
   final Map<String, dynamic> userData;
+  final bool embedded;
 
-  const SettingsPage({super.key, required this.userData});
+  const SettingsPage({
+    super.key,
+    required this.userData,
+    this.embedded = false,
+  });
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -43,6 +49,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   late Box _settingsBox;
   late TextEditingController _terminalIdController;
+  int _mobileTab = 0; // 0: All, 1: Appearance, 2: Account, 3: Sync & Tools
 
   @override
   void initState() {
@@ -230,71 +237,6 @@ class _SettingsPageState extends State<SettingsPage> {
     return Divider(color: t.bgRule, height: 24);
   }
 
-  Future<void> _launchNetworkPressureTest() async {
-    try {
-      if (!Platform.isWindows) {
-        AppToast.showSnackBar(context, 
-          const SnackBar(content: Text('Network pressure testing is supported on Windows.')),
-        );
-        return;
-      }
-
-      const exeName = 'gmwf_pressure_test.exe';
-      final currentExeDir = File(Platform.resolvedExecutable).parent.path;
-      final candidatePaths = [
-        p.join(currentExeDir, exeName),
-        p.join(Directory.current.path, exeName),
-        p.join(Directory.current.path, 'build', 'windows', 'x64', 'runner', 'Release', exeName),
-        p.join('E:', 'GMWF', 'gmwf', exeName),
-      ];
-
-      File? targetExe;
-      for (final cp in candidatePaths) {
-        final f = File(cp);
-        if (f.existsSync()) {
-          targetExe = f;
-          break;
-        }
-      }
-
-      if (targetExe != null) {
-        Process.run('cmd.exe', [
-          '/c',
-          'start',
-          'GMWF LAN Network Pressure & Real Device Chaos Audit',
-          'cmd.exe',
-          '/k',
-          targetExe.path,
-        ]);
-        if (mounted) {
-          AppToast.showSnackBar(context, 
-            const SnackBar(
-              content: Text('🚀 Network Pressure Audit launched! Live terminal opened; report will save to Desktop & Notepad.'),
-              backgroundColor: SoftPalette.emerald600,
-              duration: Duration(seconds: 4),
-            ),
-          );
-        }
-      } else {
-        if (mounted) {
-          AppToast.showSnackBar(context, 
-            const SnackBar(
-              content: Text('⚠️ gmwf_pressure_test.exe not found. Run Pressure_Test_Network.bat or compile it.'),
-              backgroundColor: SoftPalette.amber300,
-              duration: Duration(seconds: 4),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Error launching audit: $e'), backgroundColor: SoftPalette.red400),
-        );
-      }
-    }
-  }
-
   Widget _buildColorPill(RoleThemeData t, String label, String? hexColor, Color previewColor) {
     final activeHex = _settingsBox.get('custom_accent_color') as String?;
     final isSelected = hexColor == null ? (activeHex == null || activeHex.isEmpty) : (activeHex?.toUpperCase() == hexColor.toUpperCase());
@@ -344,7 +286,8 @@ class _SettingsPageState extends State<SettingsPage> {
     const presetHexes = {
       '#4A7FB5', '#B8860B', '#0047AB', '#2C4A8F', '#3A5178',
       '#00A86B', '#2E7D5B', '#0E6E63', '#0E7C90', '#4B0082',
-      '#008080', '#5E5490', '#C2185B', '#D97706', '#DC2626'
+      '#008080', '#5E5490', '#C2185B', '#D97706', '#DC2626',
+      '#7650CC', '#3D60DD', '#0F8A6B',
     };
     final isCustomSelected = activeHex != null && activeHex.isNotEmpty && !presetHexes.contains(activeHex);
 
@@ -538,6 +481,146 @@ class _SettingsPageState extends State<SettingsPage> {
           }).toList(),
         ),
       ],
+    );
+  }
+
+  static const Map<GThemeChoice, String> _themeBlurbs = {
+    GThemeChoice.gmwf: 'Emerald and gold on warm ivory. The default.',
+    GThemeChoice.nexus: 'Graphite and cobalt blue, from the Server Control Center.',
+    GThemeChoice.twilight: 'Plum and violet on soft lilac.',
+  };
+
+  /// The three themes (GMWF / Nexus / Twilight) and the dark-mode switch. One
+  /// saved setting decides colours on every screen, School and the title bar.
+  Widget _buildThemeChoiceSelector(RoleThemeData t, String? userPrefKey) {
+    final active = UserThemeService.getThemeChoice(userPrefKey);
+    final dark = UserThemeService.isDarkMode(userPrefKey);
+    final brightness = dark ? Brightness.dark : Brightness.light;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'One theme for every screen. Dark mode is a separate switch below.',
+          style: TextStyle(color: t.textSecondary, fontSize: 12),
+        ),
+        const SizedBox(height: 12),
+        LayoutBuilder(builder: (context, constraints) {
+          final cols = constraints.maxWidth >= 640 ? 3 : 1;
+          const spacing = 10.0;
+          final cardWidth = (constraints.maxWidth - (cols - 1) * spacing) / cols;
+          return Wrap(
+            spacing: spacing,
+            runSpacing: spacing,
+            children: [
+              for (final choice in GThemeChoice.values)
+                SizedBox(
+                  width: cardWidth,
+                  child: _themeChoiceCard(t, choice, GTheme.colors(brightness, family: choice.family), choice == active, () async {
+                    await UserThemeService.setThemeChoice(choice, explicitUserKey: userPrefKey);
+                    if (mounted) setState(() {});
+                  }),
+                ),
+            ],
+          );
+        }),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: t.bgCardAlt,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: t.bgRule),
+          ),
+          child: Row(children: [
+            Icon(dark ? Icons.dark_mode_rounded : Icons.light_mode_rounded, size: 18, color: t.textSecondary),
+            const SizedBox(width: 10),
+            Expanded(child: Text('Dark mode', style: _getStyle(t, size: 13, weight: FontWeight.w600))),
+            Switch(
+              value: dark,
+              onChanged: (v) async {
+                await UserThemeService.setDarkMode(v, explicitUserKey: userPrefKey);
+                if (mounted) setState(() {});
+              },
+            ),
+          ]),
+        ),
+      ],
+    );
+  }
+
+  Widget _themeChoiceCard(RoleThemeData t, GThemeChoice choice, GComfortColors c, bool selected, VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: selected ? Color.alphaBlend(c.brand.withValues(alpha: t.isDarkCanvas ? 0.16 : 0.08), t.bgCard) : t.bgCardAlt,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: selected ? c.brand : t.bgRule, width: selected ? 1.8 : 1),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            // Mini preview: sidebar, canvas, a card and a brand button.
+            Container(
+              height: 58,
+              decoration: BoxDecoration(
+                color: c.background,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: c.border),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Row(children: [
+                Container(width: 28, color: c.sidebarBg),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: c.surface,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: c.border),
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      child: Row(children: [
+                        Expanded(
+                          child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Container(height: 5, width: 46, color: c.textPrimary.withValues(alpha: 0.7)),
+                            const SizedBox(height: 4),
+                            Container(height: 4, width: 30, color: c.textMuted.withValues(alpha: 0.6)),
+                          ]),
+                        ),
+                        Container(
+                          width: 26,
+                          height: 12,
+                          decoration: BoxDecoration(color: c.brand, borderRadius: BorderRadius.circular(4)),
+                        ),
+                        const SizedBox(width: 4),
+                        Container(width: 8, height: 8, decoration: BoxDecoration(color: c.accent, shape: BoxShape.circle)),
+                      ]),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: Text(choice.label, style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.w800))),
+              if (selected) Icon(Icons.check_circle_rounded, color: c.brand, size: 18),
+            ]),
+            const SizedBox(height: 2),
+            Text(
+              _themeBlurbs[choice] ?? '',
+              style: TextStyle(color: t.textSecondary, fontSize: 11, height: 1.25),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ]),
+        ),
+      ),
     );
   }
 
@@ -963,6 +1046,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final roleStr = (widget.userData['role'] as String? ?? 'admin').toLowerCase().trim();
     final isChairmanOrHq = ['chairman', 'hq manager', 'hq_manager', 'hq', 'headquarters manager', 'admin', 'global admin', 'super admin', 'ceo'].contains(roleStr);
     final roleTheme = RoleThemeData.fromString(roleStr);
+    final userPrefKey = (widget.userData['uid'] ?? widget.userData['username'])?.toString();
 
     return RoleThemeScope(
       role: roleTheme,
@@ -971,12 +1055,17 @@ class _SettingsPageState extends State<SettingsPage> {
           'custom_accent_color',
           'card_radius',
           'is_dark_mode',
+          'visual_theme',
+          'theme_choice',
+          UserThemeService.getStorageKey(userPrefKey),
+          UserThemeService.getVisualThemeKey(userPrefKey),
+          UserThemeService.getThemeChoiceKey(userPrefKey),
           'language',
           'font_scale',
           'dialog_blur_enabled',
         ]),
         builder: (context, Box box, child) {
-          final t = RoleThemeScope.dataOf(context);
+          final t = RoleThemeScope.dataOf(context, null, userPrefKey);
           final isDesktop = GBreakpoint.isDesktop(context);
           final userName = resolveUserDisplayName(widget.userData);
           final email = widget.userData['email'] ?? 'No email set';
@@ -993,183 +1082,156 @@ class _SettingsPageState extends State<SettingsPage> {
 
           final activeRadius = box.get('card_radius', defaultValue: 16.0) as double;
           final activeFontScale = box.get('font_scale', defaultValue: 1.0) as double;
-          final userPrefKey = (widget.userData['uid'] ?? widget.userData['username'])?.toString();
           final isDarkMode = UserThemeService.isDarkMode(userPrefKey);
           final activeLanguage = UserLanguageService.getLanguage(userPrefKey);
           final isDialogBlur = box.get('dialog_blur_enabled', defaultValue: false) as bool;
 
+          final c = context.comfort;
           return Directionality(
             textDirection: activeLanguage == 'ur' ? TextDirection.rtl : TextDirection.ltr,
             child: Scaffold(
-              backgroundColor: t.bg,
-              appBar: AppBar(
-                backgroundColor: t.bgCard,
-                elevation: 0,
-                surfaceTintColor: Colors.transparent,
-                automaticallyImplyLeading: roleStr != 'supervisor' && Navigator.canPop(context),
-                leading: (roleStr == 'supervisor' || !Navigator.canPop(context))
-                    ? null
-                    : IconButton(
-                        icon: Icon(
-                          Icons.arrow_back_rounded, 
-                          color: t.textSecondary, 
-                          size: 22
+              backgroundColor: widget.embedded ? c.background : t.bg,
+              appBar: widget.embedded
+                  ? null
+                  : AppBar(
+                      backgroundColor: t.bgCard,
+                      elevation: 0,
+                      surfaceTintColor: Colors.transparent,
+                      automaticallyImplyLeading: roleStr != 'supervisor' && Navigator.canPop(context),
+                      leading: (roleStr == 'supervisor' || !Navigator.canPop(context))
+                          ? null
+                          : IconButton(
+                              icon: Icon(
+                                Icons.arrow_back_rounded,
+                                color: t.textSecondary,
+                                size: 22,
+                              ),
+                              onPressed: () => Navigator.maybePop(context),
+                            ),
+                      title: Text(
+                        context.tr('settings'),
+                        style: TextStyle(
+                          color: t.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.5,
                         ),
-                        onPressed: () => Navigator.maybePop(context),
                       ),
-                title: Text(
-                  context.tr('settings'),
-                  style: TextStyle(
-                    color: t.textPrimary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                bottom: PreferredSize(
-                  preferredSize: const Size.fromHeight(1),
-                  child: Divider(color: t.bgRule, height: 1),
-                ),
-              ),
-              body: Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: isDesktop ? 680 : double.infinity),
-                  child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(),
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                      bottom: PreferredSize(
+                        preferredSize: const Size.fromHeight(1),
+                        child: Divider(color: t.bgRule, height: 1),
+                      ),
+                    ),
+              body: Builder(
+                builder: (context) {
+                  // Wrap each section into clean modular blocks so Desktop & Mobile
+                  // can render distinct, purpose-built layouts.
+                  final profileSection = GSection(
+                    title: context.tr('account_profile'),
+                    subtitle: '$role · $branch',
+                    icon: GIcons.users,
+                    iconColor: c.brand,
+                    action: IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: Icon(GIcons.edit, color: c.brand, size: 18),
+                      onPressed: () => _showEditProfileDialog(context, t, widget.userData, userName, email),
+                      tooltip: 'Edit Profile',
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // PROFILE SECTION
-                        _sectionLabel(t, 'account_profile'),
-                        RoleCard(
-                          showGlow: true,
-                          child: Column(
-                            children: [
-                              Row(
+                        Row(
+                          children: [
+                            GestureDetector(
+                              onTap: () => _pickProfilePicture(context),
+                              child: Stack(
                                 children: [
-                                  GestureDetector(
-                                    onTap: () => _pickProfilePicture(context),
-                                    child: Stack(
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.all(3.5),
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            gradient: LinearGradient(
-                                              colors: [t.accent, t.accent.withValues(alpha: 0.35)],
-                                              begin: Alignment.topLeft,
-                                              end: Alignment.bottomRight,
-                                            ),
-                                            boxShadow: [
-                                              BoxShadow(
-                                                color: t.accent.withValues(alpha: 0.35),
-                                                blurRadius: 16,
-                                                offset: const Offset(0, 4),
-                                              ),
-                                            ],
-                                          ),
-                                          child: CircleAvatar(
-                                            radius: isDesktop ? 50 : 42,
-                                            backgroundColor: isDarkMode ? SoftPalette.slate900 : SoftPalette.gray50,
-                                            backgroundImage: profileProvider,
-                                            child: profileProvider == null
-                                                ? Text(
-                                                    initials,
-                                                    style: TextStyle(
-                                                      color: t.accent,
-                                                      fontWeight: FontWeight.w900,
-                                                      fontSize: isDesktop ? 28 : 22,
-                                                    ),
-                                                  )
-                                                : null,
-                                          ),
-                                        ),
-                                        Positioned(
-                                          bottom: 0,
-                                          right: 0,
-                                          child: Container(
-                                            padding: const EdgeInsets.all(6),
-                                            decoration: BoxDecoration(
-                                              color: t.accent,
-                                              shape: BoxShape.circle,
-                                              border: Border.all(
-                                                color: isDarkMode ? SoftPalette.slate900 : SoftPalette.gray50,
-                                                width: 2.0,
-                                              ),
-                                              boxShadow: [
-                                                BoxShadow(
-                                                  color: t.accent.withValues(alpha: 0.4),
-                                                  blurRadius: 6,
-                                                ),
-                                              ],
-                                            ),
-                                            child: const Icon(
-                                              Icons.camera_alt_rounded,
-                                              color: SoftPalette.gray50,
-                                              size: 13,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                                  CircleAvatar(
+                                    radius: isDesktop ? 32 : 34,
+                                    backgroundColor: c.brandSoft,
+                                    backgroundImage: profileProvider,
+                                    child: profileProvider == null
+                                        ? Text(
+                                            initials,
+                                            style: GText.h3(c.brand),
+                                          )
+                                        : null,
                                   ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                userName,
-                                                style: TextStyle(
-                                                  color: t.textPrimary,
-                                                  fontWeight: FontWeight.w900,
-                                                  fontSize: isDesktop ? 20 : 17.5,
-                                                  letterSpacing: -0.3,
-                                                  height: 1.2,
-                                                ),
-                                                softWrap: true,
-                                                maxLines: 2,
-                                              ),
-                                            ),
-                                            IconButton(
-                                              padding: EdgeInsets.zero,
-                                              constraints: const BoxConstraints(),
-                                              icon: Icon(Icons.edit_note_rounded, color: t.accent, size: 24),
-                                              onPressed: () => _showEditProfileDialog(context, t, widget.userData, userName, email),
-                                              tooltip: 'Edit Profile',
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          email,
-                                          style: TextStyle(color: t.textTertiary, fontSize: 13),
-                                          softWrap: true,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ],
+                                  Positioned(
+                                    bottom: 0,
+                                    right: 0,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(5),
+                                      decoration: BoxDecoration(
+                                        color: c.brand,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(color: c.surface, width: 2),
+                                      ),
+                                      child: const Icon(
+                                        Icons.camera_alt_rounded,
+                                        color: Colors.white,
+                                        size: 11,
+                                      ),
                                     ),
                                   ),
                                 ],
                               ),
-                              _divider(t),
-                              _profileItem(t, Icons.badge_outlined, 'role', role),
-                              _divider(t),
-                              _profileItem(t, Icons.location_on_outlined, 'branch', branch),
-                              _divider(t),
-                              ListTile(
-                                onTap: () async {
-                                  AppToast.showSnackBar(context, 
+                            ),
+                            const SizedBox(width: Gsp.sp3),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    userName,
+                                    style: GText.h3(c.textPrimary),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    email,
+                                    style: GText.caption(c.textSecondary),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: Gsp.sp2),
+                                  Wrap(
+                                    spacing: Gsp.sp2,
+                                    runSpacing: Gsp.sp1,
+                                    children: [
+                                      AppChip(label: role, state: AppChipState.info, icon: Icons.badge_outlined),
+                                      AppChip(label: branch, state: AppChipState.neutral, icon: GIcons.branch),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Gsp.sp3),
+                        Divider(height: 1, color: c.border),
+                        const SizedBox(height: Gsp.sp2),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () => _showChangePasswordDialog(context, t),
+                                icon: const Icon(Icons.lock_outline_rounded, size: 16),
+                                label: Text(context.tr('change_password'), overflow: TextOverflow.ellipsis),
+                              ),
+                            ),
+                            const SizedBox(width: Gsp.sp2),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () async {
+                                  AppToast.showSnackBar(
+                                    context,
                                     SnackBar(
                                       content: const Text('Checking for application updates...'),
                                       duration: const Duration(seconds: 2),
-                                      backgroundColor: t.accent,
+                                      backgroundColor: c.brand,
                                     ),
                                   );
                                   final info = await AutoUpdateService.checkForUpdates();
@@ -1177,506 +1239,368 @@ class _SettingsPageState extends State<SettingsPage> {
                                     if (info != null && info.hasUpdate) {
                                       UpdateDialogWidget.showUpdateDialogIfNeeded(context, manualCheck: true);
                                     } else {
-                                      AppToast.showSnackBar(context, 
+                                      AppToast.showSnackBar(
+                                        context,
                                         SnackBar(
                                           content: Text('Your GMWF Platform is up to date (v${AutoUpdateService.currentVersion})!'),
-                                          backgroundColor: SoftPalette.green400,
+                                          backgroundColor: c.success,
                                         ),
                                       );
                                     }
                                   }
                                 },
-                                leading: Container(
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: t.accent.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(Icons.system_update_rounded, color: t.accent, size: 20),
-                                ),
-                                title: Text(
-                                  'App Version v${AutoUpdateService.currentVersion}',
-                                  style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
-                                ),
-                                subtitle: Text(
-                                  'Tap to check for updates',
-                                  style: TextStyle(color: t.textTertiary, fontSize: 12),
-                                ),
-                                trailing: Icon(Icons.chevron_right_rounded, color: t.textTertiary, size: 20),
+                                icon: const Icon(Icons.system_update_rounded, size: 16),
+                                label: Text('v${AutoUpdateService.currentVersion}', overflow: TextOverflow.ellipsis),
                               ),
-                              _divider(t),
-                              ListTile(
-                                onTap: () => _showChangePasswordDialog(context, t),
-                                leading: Container(
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: t.accent.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: t.accent.withOpacity(0.2)),
-                                  ),
-                                  child: Icon(Icons.lock_outline_rounded, color: t.accent, size: 22),
-                                ),
-                                title: Text(
-                                  context.tr('change_password'),
-                                  style: _getStyle(t, size: 14, weight: FontWeight.w800),
-                                ),
-                                trailing: Icon(
-                                  Icons.chevron_right_rounded, 
-                                  color: t.textTertiary
-                                ),
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                              if (widget.userData['nameHistory'] != null && (widget.userData['nameHistory'] as List).isNotEmpty) ...[
-                                _divider(t),
-                                Theme(
-                                  data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-                                  child: ExpansionTile(
-                                    tilePadding: EdgeInsets.zero,
-                                    iconColor: t.accent,
-                                    collapsedIconColor: t.textTertiary,
-                                    title: Row(
-                                      children: [
-                                        Icon(Icons.history_toggle_off_rounded, color: t.accent, size: 20),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          'Profile Name History',
-                                          style: _getStyle(t, size: 13, weight: FontWeight.bold),
-                                        ),
-                                      ],
-                                    ),
-                                    childrenPadding: EdgeInsets.zero,
-                                    children: (widget.userData['nameHistory'] as List).map((entry) {
-                                      final item = Map<String, dynamic>.from(entry as Map);
-                                      final oldName = item['oldName'] ?? '';
-                                      final newName = item['newName'] ?? '';
-                                      final changedBy = item['changedBy'] ?? '';
-                                      final how = item['how'] ?? '';
-                                      final whenStr = item['changedAt'] ?? '';
-                                      final reason = item['reason'] ?? '';
-                                      
-                                      String timeFormatted = whenStr;
-                                      try {
-                                        final dt = DateTime.parse(whenStr);
-                                        timeFormatted = DateFormat('MMM dd, yyyy - hh:mm a').format(dt.toLocal());
-                                      } catch (_) {}
-
-                                      return Padding(
-                                        padding: const EdgeInsets.symmetric(vertical: 6),
-                                        child: Container(
-                                          padding: const EdgeInsets.all(12),
-                                          decoration: BoxDecoration(
-                                            color: t.bgCardAlt,
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: Border.all(color: t.bgRule),
-                                          ),
-                                          child: Row(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Icon(Icons.person_outline_rounded, color: t.accent, size: 18),
-                                              const SizedBox(width: 12),
-                                              Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    Row(
-                                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                                      children: [
-                                                        Expanded(
-                                                          child: Text(
-                                                            "$oldName ➔ $newName",
-                                                            style: TextStyle(color: t.textPrimary, fontSize: 13, fontWeight: FontWeight.bold),
-                                                            overflow: TextOverflow.ellipsis,
-                                                          ),
-                                                        ),
-                                                        Text(
-                                                          timeFormatted,
-                                                          style: TextStyle(color: t.textTertiary, fontSize: 11),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                    const SizedBox(height: 6),
-                                                    Text(
-                                                      'Edited by: $changedBy via $how',
-                                                      style: TextStyle(color: t.textSecondary, fontSize: 11.5),
-                                                    ),
-                                                    if (reason.isNotEmpty) ...[
-                                                      const SizedBox(height: 4),
-                                                      Text(
-                                                        'Reason: $reason',
-                                                        style: TextStyle(color: t.textTertiary, fontSize: 11.5, fontStyle: FontStyle.italic),
-                                                      ),
-                                                    ],
-                                                  ],
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      );
-                                    }).toList().reversed.toList(),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
-
-                        // HARDWARE & BIOMETRICS SECTION (Strictly for Chairman / HQ Manager)
-                        if (isChairmanOrHq) ...[
-                          _sectionLabel(t, 'HARDWARE & BIOMETRICS'),
-                          RoleCard(
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: t.accent.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Icon(Icons.fingerprint_rounded, color: t.accent, size: 24),
-                              ),
-                              title: Text(
-                                'ZKTeco Biometric Devices & Attendance',
-                                style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
-                              ),
-                              subtitle: Text(
-                                'View connected Wi-Fi/Ethernet readers, building assignments, live logs, and employee PINs.',
-                                style: TextStyle(color: t.textSecondary, fontSize: 12),
-                              ),
-                              trailing: Icon(Icons.arrow_forward_ios_rounded, color: t.textTertiary, size: 14),
-                              onTap: () {
-                                final branchId = widget.userData['branchId'] as String? ?? 'main';
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => BiometricDeviceManagerPage(branchId: branchId),
-                                  ),
-                                );
-                              },
+                        const SizedBox(height: Gsp.sp2),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: c.danger,
+                              side: BorderSide(color: c.danger.withValues(alpha: 0.35)),
                             ),
-                          ),
-                          const SizedBox(height: 10),
-
-                          RoleCard(
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                              leading: Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: SoftPalette.sky350.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: const Icon(Icons.terminal_rounded, color: SoftPalette.sky500, size: 22),
-                              ),
-                              title: Text(
-                                'Python Biometric & Hardware Terminal',
-                                style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
-                              ),
-                              subtitle: Text(
-                                'Live interactive terminal to run ZKTeco daemons, diagnostic pings, and punch deduplication scripts.',
-                                style: TextStyle(color: t.textSecondary, fontSize: 12),
-                              ),
-                              trailing: Icon(Icons.arrow_forward_ios_rounded, color: t.textTertiary, size: 14),
-                              onTap: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => const PythonTerminalScreen(),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-
-                          RoleCard(
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                              leading: Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: SoftPalette.emerald350.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: const Icon(Icons.speed_rounded, color: SoftPalette.emerald500, size: 22),
-                              ),
-                              title: Text(
-                                'LAN Network Pressure & Real-Device Chaos Audit',
-                                style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
-                              ),
-                              subtitle: Text(
-                                'Tests peak traffic floods, Doctor vs Receptionist collisions, wire disconnects & instant data catch-up.',
-                                style: TextStyle(color: t.textSecondary, fontSize: 12),
-                              ),
-                              trailing: Icon(Icons.arrow_forward_ios_rounded, color: t.textTertiary, size: 14),
-                              onTap: _launchNetworkPressureTest,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                        ],
-                        // SCHOOL PROFILE & ABOUT (Only for School-specific users)
-                        if (roleStr.contains('school') ||
-                            roleStr.contains('teacher') ||
-                            roleStr.contains('principal') ||
-                            roleStr.contains('headmaster') ||
-                            roleStr.contains('headmistress') ||
-                            roleStr.contains('educator')) ...[
-                          _sectionLabel(t, 'School & Institution Details'),
-                          RoleCard(
-                            showGlow: true,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Container(
-                                    width: 48,
-                                    height: 48,
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: SoftPalette.gray50,
-                                      borderRadius: BorderRadius.circular(12),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: SoftPalette.gray900.withValues(alpha: 0.06),
-                                          blurRadius: 8,
-                                        ),
-                                      ],
-                                    ),
-                                    child: Image.asset('assets/logo/twt.webp', fit: BoxFit.contain),
-                                  ),
-                                  title: Text(
-                                    'Taleem-wa-Tarbiyat School System',
-                                    style: TextStyle(
-                                      color: t.textPrimary,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 14.5,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    'A Project of Gulzar Madina Welfare Foundation (GMWF)',
-                                    style: TextStyle(
-                                      color: t.textSecondary,
-                                      fontSize: 11.5,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: ElevatedButton.icon(
-                                    icon: const Icon(Icons.info_outline_rounded, size: 18),
-                                    label: const Text(
-                                      'About Taleem-wa-Tarbiyat School',
-                                      style: TextStyle(fontWeight: FontWeight.bold),
-                                    ),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: t.accent,
-                                      foregroundColor: SoftPalette.gray50,
-                                      padding: const EdgeInsets.symmetric(vertical: 14),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                    ),
-                                    onPressed: () {
-                                      final bId = widget.userData['branchId']?.toString() ?? 'all';
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) => Scaffold(
-                                            appBar: AppBar(
-                                              title: const Text('About Taleem-wa-Tarbiyat School', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                                              leading: const BackButton(),
-                                            ),
-                                            body: SchoolAboutView(branchId: bId),
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                        ] else ...[
-                          // HELP & SUPPORT (For non-school users like Office Boy, Kitchen, Receptionist, etc.)
-                          _sectionLabel(t, 'Support & Help'),
-                          RoleCard(
-                            showGlow: true,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Container(
-                                    width: 48,
-                                    height: 48,
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(
-                                      color: t.accent.withValues(alpha: 0.12),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: t.accent.withValues(alpha: 0.25)),
-                                    ),
-                                    child: Icon(Icons.support_agent_rounded, color: t.accent, size: 26),
-                                  ),
-                                  title: Text(
-                                    'Support & Help Center',
-                                    style: TextStyle(
-                                      color: t.textPrimary,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 14.5,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    'Need assistance, FAQs, or want to report an issue? Contact our technical helpdesk.',
-                                    style: TextStyle(
-                                      color: t.textSecondary,
-                                      fontSize: 11.5,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: ElevatedButton.icon(
-                                    icon: const Icon(Icons.help_outline_rounded, size: 18),
-                                    label: const Text(
-                                      'Open Support & Help Center',
-                                      style: TextStyle(fontWeight: FontWeight.bold),
-                                    ),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: t.accent,
-                                      foregroundColor: SoftPalette.gray50,
-                                      padding: const EdgeInsets.symmetric(vertical: 14),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                    ),
-                                    onPressed: () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) => const SupportPage(),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // CLOUD SYNC & OFFLINE STORAGE
-                        _sectionLabel(t, 'Cloud Sync & Offline Storage'),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: QuotaService.isQuotaExhaustedNotifier,
-                          builder: (context, _, _) => ValueListenableBuilder(
-                            valueListenable: Hive.box(LocalStorageService.syncBox).listenable(),
-                            builder: (context, box, _) {
-                              final pending = box.length;
-                              final isPaused = QuotaService.isPausedForDailyReset;
-                              final pausedUntil = QuotaService.dailyResetPauseUntil;
-                              final isClean = pending == 0;
-
-                              return RoleCard(
-                                showGlow: !isClean,
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    ListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      leading: Container(
-                                        width: 48,
-                                        height: 48,
-                                        padding: const EdgeInsets.all(8),
-                                        decoration: BoxDecoration(
-                                          color: isPaused
-                                              ? SoftPalette.red400.withValues(alpha: 0.12)
-                                              : (isClean ? SoftPalette.emerald500.withValues(alpha: 0.12) : SoftPalette.amber400.withValues(alpha: 0.12)),
-                                          borderRadius: BorderRadius.circular(12),
-                                          border: Border.all(
-                                            color: isPaused
-                                                ? SoftPalette.red400.withValues(alpha: 0.3)
-                                                : (isClean ? SoftPalette.emerald500.withValues(alpha: 0.3) : SoftPalette.amber400.withValues(alpha: 0.3)),
-                                          ),
-                                        ),
-                                        child: Icon(
-                                          isPaused
-                                              ? Icons.cloud_off_rounded
-                                              : (isClean ? Icons.cloud_done_rounded : Icons.cloud_sync_rounded),
-                                          color: isPaused
-                                              ? SoftPalette.red400
-                                              : (isClean ? SoftPalette.emerald500 : SoftPalette.amber500),
-                                          size: 26,
-                                        ),
-                                      ),
-                                      title: Text(
-                                        isPaused
-                                            ? 'Daily Cloud Quota Limit Reached'
-                                            : (isClean ? 'All Data Synchronized' : '$pending Offline Records Waiting'),
-                                        style: TextStyle(
-                                          color: t.textPrimary,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14.5,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        isPaused
-                                            ? 'Uploads pause until reset (${DateFormat('h:mm a').format(pausedUntil!.toLocal())}). All records are 100% safe offline.'
-                                            : (isClean
-                                                ? 'Local offline queue is clean. All records are backed up to Cloud Firestore.'
-                                                : 'Unsynced records stored safely on this device. Tap below to force an immediate cloud upload.'),
-                                        style: TextStyle(
-                                          color: t.textSecondary,
-                                          fontSize: 11.5,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 14),
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: ElevatedButton.icon(
-                                            icon: const Icon(Icons.rocket_launch_rounded, size: 16),
-                                            label: const Text('Force Upload Now', style: TextStyle(fontWeight: FontWeight.bold)),
-                                            style: ElevatedButton.styleFrom(
-                                              backgroundColor: t.accent,
-                                              foregroundColor: SoftPalette.gray50,
-                                              padding: const EdgeInsets.symmetric(vertical: 13),
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            ),
-                                            onPressed: () async {
-                                              await HiddenForceUploader.instance.runSilentForceUpload();
-                                            },
-                                          ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        OutlinedButton.icon(
-                                          icon: const Icon(Icons.medical_services_outlined, size: 16),
-                                          label: const Text('Queue Doctor', style: TextStyle(fontWeight: FontWeight.bold)),
-                                          style: OutlinedButton.styleFrom(
-                                            foregroundColor: t.textPrimary,
-                                            side: BorderSide(color: t.bgRule),
-                                            padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 14),
-                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                          ),
-                                          onPressed: () => QueueDoctorDialog.show(context),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
+                            onPressed: () async {
+                              final confirmed = await showLogoutDialog(
+                                context,
+                                subtitle: 'Are you sure you want to sign out of your account?',
                               );
+                              if (confirmed != true || !context.mounted) return;
+                              await AuthService().signOut();
+                              if (context.mounted) {
+                                Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+                              }
                             },
+                            icon: const Icon(GIcons.logout, size: 16),
+                            label: Text(context.tr('logout')),
                           ),
                         ),
-                        const SizedBox(height: 16),
+                        if (widget.userData['nameHistory'] != null && (widget.userData['nameHistory'] as List).isNotEmpty) ...[
+                          const SizedBox(height: Gsp.sp2),
+                          Theme(
+                            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                            child: ExpansionTile(
+                              tilePadding: EdgeInsets.zero,
+                              dense: true,
+                              iconColor: c.brand,
+                              collapsedIconColor: c.textMuted,
+                              title: Text('Profile Name History', style: GText.label(c.textPrimary)),
+                              childrenPadding: EdgeInsets.zero,
+                              children: (widget.userData['nameHistory'] as List).map((entry) {
+                                final item = Map<String, dynamic>.from(entry as Map);
+                                final oldName = item['oldName'] ?? '';
+                                final newName = item['newName'] ?? '';
+                                final changedBy = item['changedBy'] ?? '';
+                                final how = item['how'] ?? '';
+                                final whenStr = item['changedAt'] ?? '';
+                                String timeFormatted = whenStr;
+                                try {
+                                  final dt = DateTime.parse(whenStr);
+                                  timeFormatted = DateFormat('MMM dd, yyyy').format(dt.toLocal());
+                                } catch (_) {}
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: Gsp.sp2),
+                                  padding: const EdgeInsets.all(Gsp.sp2),
+                                  decoration: BoxDecoration(
+                                    color: c.surfaceSunken,
+                                    borderRadius: Gr.input,
+                                    border: Border.all(color: c.border),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              '$oldName ➔ $newName',
+                                              style: GText.body2Bold(c.textPrimary),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          Text(timeFormatted, style: GText.caption(c.textMuted)),
+                                        ],
+                                      ),
+                                      Text('By $changedBy via $how', style: GText.caption(c.textSecondary)),
+                                    ],
+                                  ),
+                                );
+                              }).toList().reversed.toList(),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
 
-                        // PERSONALIZATION SECTION
-                        _sectionLabel(t, 'personalization'),
-                        RoleCard(
+                  final isSchoolRole = roleStr.contains('school') ||
+                      roleStr.contains('teacher') ||
+                      roleStr.contains('principal') ||
+                      roleStr.contains('headmaster') ||
+                      roleStr.contains('headmistress') ||
+                      roleStr.contains('educator');
+
+                  // SCHOOL PROFILE & ABOUT / SUPPORT
+                  final supportOrSchoolSection = isSchoolRole
+                      ? GSection(
+                          title: 'School & Institution',
+                          subtitle: 'Taleem-wa-Tarbiyat School System',
+                          icon: GIcons.student,
+                          iconColor: c.brand,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              Text(
+                                'A Project of Gulzar Madina Welfare Foundation (GMWF)',
+                                style: GText.body2(c.textSecondary),
+                              ),
+                              const SizedBox(height: Gsp.sp3),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  icon: const Icon(Icons.info_outline_rounded, size: 16),
+                                  label: const Text('About Taleem-wa-Tarbiyat School'),
+                                  onPressed: () {
+                                    final bId = widget.userData['branchId']?.toString() ?? 'all';
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => Scaffold(
+                                          appBar: AppBar(
+                                            title: const Text('About Taleem-wa-Tarbiyat School', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                            leading: const BackButton(),
+                                          ),
+                                          body: SchoolAboutView(branchId: bId),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : GSection(
+                          title: 'Support & Help Center',
+                          subtitle: 'FAQs, diagnostics & technical helpdesk',
+                          icon: Icons.support_agent_rounded,
+                          iconColor: c.info,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Need assistance or want to report an issue? Open the helpdesk.',
+                                style: GText.body2(c.textSecondary),
+                              ),
+                              const SizedBox(height: Gsp.sp3),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  icon: const Icon(Icons.help_outline_rounded, size: 16),
+                                  label: const Text('Open Support & Help Center'),
+                                  onPressed: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => const SupportPage(),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+
+                  // CLOUD SYNC & OFFLINE STORAGE
+                  final syncSection = ValueListenableBuilder<bool>(
+                    valueListenable: QuotaService.isQuotaExhaustedNotifier,
+                    builder: (context, _, _) => ValueListenableBuilder(
+                      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.syncBox)),
+                      builder: (context, box, _) {
+                        final pending = box.length;
+                        final isPaused = QuotaService.isPausedForDailyReset;
+                        final pausedUntil = QuotaService.dailyResetPauseUntil;
+                        final isClean = pending == 0;
+                        final statusColor = isPaused ? c.danger : (isClean ? c.success : c.warning);
+
+                        return GSection(
+                          title: 'Cloud Sync & Storage',
+                          subtitle: isPaused
+                              ? 'Daily quota paused until ${DateFormat('h:mm a').format(pausedUntil!.toLocal())}'
+                              : (isClean ? 'All records synchronized' : '$pending offline records waiting'),
+                          icon: isPaused
+                              ? Icons.cloud_off_rounded
+                              : (isClean ? Icons.cloud_done_rounded : Icons.cloud_sync_rounded),
+                          iconColor: statusColor,
+                          action: AppChip(
+                            label: isPaused ? 'Paused' : (isClean ? 'Synced' : '$pending queued'),
+                            state: isPaused ? AppChipState.danger : (isClean ? AppChipState.active : AppChipState.warning),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isPaused
+                                    ? 'Uploads pause until daily reset. All local records remain 100% safe offline.'
+                                    : (isClean
+                                        ? 'Local offline queue is clean and backed up to Cloud Firestore.'
+                                        : 'Unsynced records are stored safely on this device. Force an upload or inspect the queue.'),
+                                style: GText.body2(c.textSecondary),
+                              ),
+                              const SizedBox(height: Gsp.sp3),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: FilledButton.icon(
+                                      icon: const Icon(Icons.rocket_launch_rounded, size: 16),
+                                      label: const Text('Force Upload'),
+                                      onPressed: () async {
+                                        await HiddenForceUploader.instance.runSilentForceUpload();
+                                      },
+                                    ),
+                                  ),
+                                  const SizedBox(width: Gsp.sp2),
+                                  OutlinedButton.icon(
+                                    icon: const Icon(Icons.medical_services_outlined, size: 16),
+                                    label: const Text('Queue Doctor'),
+                                    onPressed: () => QueueDoctorDialog.show(context),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  );
+
+                  int boxCount(String name) => Hive.isBoxOpen(name) ? Hive.box(name).length : 0;
+                  final cacheTiles = [
+                    ('Patients', boxCount(LocalStorageService.patientsBox), GIcons.patient, c.chart1),
+                    ('Donations', boxCount(LocalStorageService.donationsBox), GIcons.donation, c.chart2),
+                    ('Employees', boxCount(LocalStorageService.employeesBox), GIcons.attendance, c.info),
+                    ('School', boxCount(LocalStorageService.schoolStudentsBox), GIcons.student, c.brand),
+                    ('Madrassa', boxCount(LocalStorageService.madrassaStudentsBox), GIcons.madrassa, c.success),
+                    ('Sync Queue', boxCount(LocalStorageService.syncBox), GIcons.sync, c.warning),
+                  ];
+
+                  final storageSection = GSection(
+                    title: 'Local Cache & Storage',
+                    subtitle: 'Offline Hive records on this device',
+                    icon: GIcons.inventory,
+                    iconColor: c.chart3,
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        const cols = 3;
+                        final w = (constraints.maxWidth - Gsp.sp2 * (cols - 1)) / cols;
+                        return Wrap(
+                          spacing: Gsp.sp2,
+                          runSpacing: Gsp.sp2,
+                          children: [
+                            for (final (label, count, icon, color) in cacheTiles)
+                              Container(
+                                width: w,
+                                padding: const EdgeInsets.symmetric(horizontal: Gsp.sp2 + 2, vertical: Gsp.sp2),
+                                decoration: BoxDecoration(
+                                  color: c.surfaceSunken,
+                                  borderRadius: Gr.input,
+                                  border: Border.all(color: c.border),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(icon, size: 13, color: color),
+                                        const SizedBox(width: 4),
+                                        Expanded(
+                                          child: Text(
+                                            label,
+                                            style: GText.caption(c.textMuted),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      GFormat.count(count),
+                                      style: GText.body1Bold(c.textPrimary).copyWith(
+                                        fontFeatures: const [FontFeature.tabularFigures()],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  );
+
+                  final devicesSection = GSection(
+                    title: 'Devices & Diagnostics',
+                    subtitle: 'Biometric terminals & system tools',
+                    icon: Icons.fingerprint_rounded,
+                    iconColor: c.accent,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.fingerprint_rounded, size: 16),
+                          label: const Text('Biometric Devices'),
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => BiometricDeviceManagerPage(
+                                  branchId: (widget.userData['branchId'] ?? 'main').toString(),
+                                  currentUserRole: roleStr,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        if (isChairmanOrHq) ...[
+                          const SizedBox(height: Gsp.sp2),
+                          OutlinedButton.icon(
+                            icon: const Icon(Icons.terminal_rounded, size: 16),
+                            label: const Text('Python Terminal'),
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(builder: (_) => const PythonTerminalScreen()),
+                              );
+                            },
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+
+                  // APPEARANCE: VISUAL THEME (Card 1) + LANGUAGE & INTERFACE (Card 2)
+                  final visualThemeSection = GSection(
+                    title: context.tr('visual_theme'),
+                    subtitle: '${UserThemeService.getThemeChoice(userPrefKey).label} · ${UserThemeService.isDarkMode(userPrefKey) ? 'Dark' : 'Light'}',
+                    icon: GIcons.palette,
+                    iconColor: c.accent,
+                    child: _buildThemeChoiceSelector(t, userPrefKey),
+                  );
+
+                  final personalizationSection = GSection(
+                    title: 'Language & Interface',
+                    subtitle: '${activeLanguage == 'ur' ? 'Urdu' : 'English'} · ${activeRadius.toInt()}px · ${(activeFontScale * 100).round()}%',
+                    icon: GIcons.settings,
+                    iconColor: c.brand,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                               // 0. Language Selector (Available for all roles)
                               _buildSegmentedSelector<String>(
                                 t,
@@ -1694,112 +1618,67 @@ class _SettingsPageState extends State<SettingsPage> {
                               ),
                               _divider(t),
 
-                              // Advanced Theme Colors & Scaling (Only for Chairman & HQ Manager)
+                              // Advanced Card Radius & Font Scaling (Only for Chairman & HQ Manager)
+                              // Theme Color picker disabled: app uses unified visual themes.
                               if (isChairmanOrHq) ...[
-                                // 1. Accent Color presets
-                                Row(
-                                  children: [
-                                    Icon(Icons.color_lens_outlined, color: t.accent),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      context.tr('theme_color'),
-                                      style: _getStyle(t, size: 14, weight: FontWeight.bold),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 12),
-                                SingleChildScrollView(
-                                  scrollDirection: Axis.horizontal,
-                                  child: Row(
+                                // ignore: dead_code
+                                if (false) ...[
+                                  Row(
                                     children: [
-                                      _buildColorPill(t, 'Role Default', null, t.accentGradient.colors.first),
-                                      _buildColorPill(t, 'CEO Steel Blue', '#4A7FB5', SoftPalette.blue500),
-                                      _buildColorPill(t, 'Gold Authority', '#B8860B', SoftPalette.amber400),
-                                      _buildColorPill(t, 'Electric Blue', '#0047AB', SoftPalette.blue600),
-                                      _buildColorPill(t, 'Sapphire Indigo', '#2C4A8F', SoftPalette.blue600),
-                                      _buildColorPill(t, 'Midnight Slate', '#3A5178', SoftPalette.blue600),
-                                      _buildColorPill(t, 'Emerald Mint', '#00A86B', SoftPalette.emerald400),
-                                      _buildColorPill(t, 'Forest Sage', '#2E7D5B', SoftPalette.emerald550),
-                                      _buildColorPill(t, 'Executive Teal', '#0E6E63', SoftPalette.teal600),
-                                      _buildColorPill(t, 'Clinical Cyan', '#0E7C90', SoftPalette.cyan550),
-                                      _buildColorPill(t, 'Royal Indigo', '#4B0082', SoftPalette.violet750),
-                                      _buildColorPill(t, 'Clinical Teal', '#008080', SoftPalette.teal550),
-                                      _buildColorPill(t, 'Slate Plum', '#5E5490', SoftPalette.violet600),
-                                      _buildColorPill(t, 'Warm Rose', '#C2185B', SoftPalette.pink550),
-                                      _buildColorPill(t, 'Sunset Amber', '#D97706', SoftPalette.orange400),
-                                      _buildColorPill(t, 'Crimson Red', '#DC2626', SoftPalette.red500),
-                                      _buildCustomHexColorPill(t),
+                                      Icon(Icons.color_lens_outlined, color: t.accent),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        context.tr('theme_color'),
+                                        style: _getStyle(t, size: 14, weight: FontWeight.bold),
+                                      ),
                                     ],
                                   ),
-                                ),
-                                _divider(t),
+                                  const SizedBox(height: 12),
+                                  SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    child: Row(
+                                      children: [
+                                        _buildColorPill(t, 'Preset Default', null, t.accentGradient.colors.first),
+                                        _buildColorPill(t, 'Jade Emerald', '#0F8A6B', SoftPalette.jadeEmerald),
+                                        _buildColorPill(t, 'Royal Violet', '#7650CC', SoftPalette.royalViolet),
+                                        _buildColorPill(t, 'Cobalt Blue', '#3D60DD', SoftPalette.cobaltBlue),
+                                        _buildColorPill(t, 'CEO Steel Blue', '#4A7FB5', SoftPalette.blue500),
+                                        _buildColorPill(t, 'Gold Authority', '#B8860B', SoftPalette.amber400),
+                                        _buildColorPill(t, 'Electric Blue', '#0047AB', SoftPalette.blue600),
+                                        _buildColorPill(t, 'Sapphire Indigo', '#2C4A8F', SoftPalette.blue600),
+                                        _buildColorPill(t, 'Midnight Slate', '#3A5178', SoftPalette.blue600),
+                                        _buildColorPill(t, 'Emerald Mint', '#00A86B', SoftPalette.emerald400),
+                                        _buildColorPill(t, 'Forest Sage', '#2E7D5B', SoftPalette.emerald550),
+                                        _buildColorPill(t, 'Executive Teal', '#0E6E63', SoftPalette.teal600),
+                                        _buildColorPill(t, 'Clinical Cyan', '#0E7C90', SoftPalette.cyan550),
+                                        _buildColorPill(t, 'Royal Indigo', '#4B0082', SoftPalette.violet750),
+                                        _buildColorPill(t, 'Clinical Teal', '#008080', SoftPalette.teal550),
+                                        _buildColorPill(t, 'Slate Plum', '#5E5490', SoftPalette.violet600),
+                                        _buildColorPill(t, 'Warm Rose', '#C2185B', SoftPalette.pink550),
+                                        _buildColorPill(t, 'Sunset Amber', '#D97706', SoftPalette.orange400),
+                                        _buildColorPill(t, 'Crimson Red', '#DC2626', SoftPalette.red500),
+                                        _buildCustomHexColorPill(t),
+                                      ],
+                                    ),
+                                  ),
+                                  _divider(t),
+                                ],
 
                                 // 2. Card corner radius choices
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    _buildSegmentedSelector<double>(
-                                      t, 
-                                      'card_radius', 
-                                      activeRadius, 
-                                      {
-                                        8.0: 'sharp',
-                                        16.0: 'medium',
-                                        24.0: 'round',
-                                      }, 
-                                      (radius) async {
-                                        await box.put('card_radius', radius);
-                                        UserThemeService.notifyThemeChanged();
-                                        setState(() {});
-                                      }
-                                    ),
-                                    const SizedBox(height: 12),
-                                    AnimatedContainer(
-                                      duration: const Duration(milliseconds: 250),
-                                      padding: const EdgeInsets.all(16),
-                                      decoration: BoxDecoration(
-                                        color: t.accent.withValues(alpha: 0.08),
-                                        borderRadius: BorderRadius.circular(activeRadius),
-                                        border: Border.all(color: t.accent.withValues(alpha: 0.3), width: 1.5),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color: t.accent,
-                                              borderRadius: BorderRadius.circular((activeRadius / 2).clamp(4.0, 12.0)),
-                                            ),
-                                            child: const Icon(Icons.rounded_corner_rounded, color: SoftPalette.gray50, size: 20),
-                                          ),
-                                          const SizedBox(width: 14),
-                                          Expanded(
-                                            child: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
-                                              children: [
-                                                Text(
-                                                  'Card Radius Preview (${activeRadius.toInt()}px)',
-                                                  style: TextStyle(
-                                                    color: t.textPrimary,
-                                                    fontWeight: FontWeight.bold,
-                                                    fontSize: 13.5,
-                                                  ),
-                                                ),
-                                                const SizedBox(height: 2),
-                                                Text(
-                                                  'Cards, dialogs, and UI cards adjust live across the app.',
-                                                  style: TextStyle(
-                                                    color: t.textSecondary,
-                                                    fontSize: 11.5,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
+                                _buildSegmentedSelector<double>(
+                                  t,
+                                  'card_radius',
+                                  activeRadius,
+                                  {
+                                    8.0: 'sharp',
+                                    16.0: 'medium',
+                                    24.0: 'round',
+                                  },
+                                  (radius) async {
+                                    await box.put('card_radius', radius);
+                                    UserThemeService.notifyThemeChanged();
+                                    setState(() {});
+                                  },
                                 ),
                                 _divider(t),
 
@@ -1823,40 +1702,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 _divider(t),
                               ],
 
-                              // 4. Dark Mode / Light Mode Toggle
-                              SwitchListTile(
-                                value: isDarkMode,
-                                activeThumbColor: t.accent,
-                                onChanged: (val) async {
-                                  await UserThemeService.setDarkMode(val, explicitUserKey: userPrefKey);
-                                  UserThemeService.notifyThemeChanged();
-                                  setState(() {});
-                                },
-                                secondary: Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(
-                                    color: t.accent.withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Icon(
-                                    isDarkMode ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
-                                    color: t.accent,
-                                    size: 20,
-                                  ),
-                                ),
-                                title: Text(
-                                  'Dark Mode',
-                                  style: TextStyle(color: t.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
-                                ),
-                                subtitle: Text(
-                                  isDarkMode ? 'Dark charcoal theme active' : 'Light surface theme active',
-                                  style: TextStyle(color: t.textSecondary, fontSize: 12),
-                                ),
-                                contentPadding: EdgeInsets.zero,
-                              ),
-                              _divider(t),
-
-                              // 5. Frosted Glass Dialog Blur
+                              // 4. Frosted Glass Dialog Blur
                               SwitchListTile(
                                 value: isDialogBlur,
                                 activeThumbColor: t.accent,
@@ -1888,26 +1734,277 @@ class _SettingsPageState extends State<SettingsPage> {
                                 ),
                                 contentPadding: EdgeInsets.zero,
                               ),
-                              _divider(t),
+                      ],
+                    ),
+                  );
 
-                              // 6. Logout Button
-                              _LogoutTile(t: t),
+                  final kpiStrip = ValueListenableBuilder(
+                    valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.syncBox)),
+                    builder: (context, syncBox, _) {
+                      final pending = syncBox.length;
+                      final isClean = pending == 0;
+                      final isPaused = QuotaService.isPausedForDailyReset;
+                      final tiles = [
+                        GKpiTile(
+                          label: 'Account Role',
+                          value: role,
+                          icon: Icons.badge_outlined,
+                          color: c.brand,
+                          caption: branch,
+                        ),
+                        GKpiTile(
+                          label: 'Cloud Sync',
+                          value: isPaused ? 'Paused' : (isClean ? 'Synced' : '$pending queued'),
+                          icon: isPaused ? Icons.cloud_off_rounded : (isClean ? Icons.cloud_done_rounded : Icons.cloud_sync_rounded),
+                          color: isPaused ? c.danger : (isClean ? c.success : c.warning),
+                          caption: isClean ? 'Queue clean' : 'Offline records pending',
+                          onTap: () => QueueDoctorDialog.show(context),
+                        ),
+                        GKpiTile(
+                          label: 'Appearance',
+                          value: isDarkMode ? 'Dark' : 'Light',
+                          icon: isDarkMode ? GIcons.darkMode : GIcons.lightMode,
+                          color: c.accent,
+                          caption: '${activeLanguage == 'ur' ? 'Urdu' : 'English'} · ${activeRadius.toInt()}px radius',
+                          onTap: () => UserThemeService.toggleDarkMode(),
+                        ),
+                        GKpiTile(
+                          label: 'App Version',
+                          value: 'v${AutoUpdateService.currentVersion}',
+                          icon: Icons.system_update_rounded,
+                          color: c.info,
+                          caption: 'Scale ${(activeFontScale * 100).round()}% · Tap to check',
+                          onTap: () async {
+                            final info = await AutoUpdateService.checkForUpdates();
+                            if (context.mounted) {
+                              if (info != null && info.hasUpdate) {
+                                UpdateDialogWidget.showUpdateDialogIfNeeded(context, manualCheck: true);
+                              } else {
+                                AppToast.showSnackBar(
+                                  context,
+                                  SnackBar(
+                                    content: Text('Your GMWF Platform is up to date (v${AutoUpdateService.currentVersion})!'),
+                                    backgroundColor: c.success,
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                        ),
+                      ];
+                      if (isDesktop) {
+                        return Row(
+                          children: [
+                            for (var i = 0; i < tiles.length; i++) ...[
+                              if (i > 0) const SizedBox(width: Gsp.sp3),
+                              Expanded(child: tiles[i]),
+                            ],
+                          ],
+                        );
+                      }
+                      return GridView.count(
+                        crossAxisCount: 2,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        mainAxisSpacing: Gsp.sp2,
+                        crossAxisSpacing: Gsp.sp2,
+                        childAspectRatio: 2.1,
+                        children: tiles,
+                      );
+                    },
+                  );
+
+                  final footerWidget = Column(
+                    children: [
+                      const SizedBox(height: 28),
+                      Center(
+                        child: Text(
+                          "GMWF System Hub v${AutoUpdateService.currentVersion}\nDesign & Theming by Antigravity Studio",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: t.textTertiary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                    ],
+                  );
+
+                  if (isDesktop) {
+                    return Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 1440),
+                        child: SingleChildScrollView(
+                          physics: const BouncingScrollPhysics(),
+                          padding: const EdgeInsets.symmetric(horizontal: Gsp.sp5, vertical: Gsp.sp4),
+                          child: Column(
+                            children: [
+                              kpiStrip,
+                              const SizedBox(height: Gsp.sp3),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    flex: 4,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        profileSection,
+                                        const SizedBox(height: Gsp.sp3),
+                                        supportOrSchoolSection,
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: Gsp.sp4),
+                                  Expanded(
+                                    flex: 4,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        syncSection,
+                                        const SizedBox(height: Gsp.sp3),
+                                        storageSection,
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: Gsp.sp4),
+                                  Expanded(
+                                    flex: 5,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        personalizationSection,
+                                        const SizedBox(height: Gsp.sp3),
+                                        devicesSection,
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: Gsp.sp3),
+                              visualThemeSection,
+                              footerWidget,
                             ],
                           ),
                         ),
-                        const SizedBox(height: 36),
-                        Center(
-                          child: Text(
-                            "GMWF System Hub v${AutoUpdateService.currentVersion}\nDesign & Theming by Antigravity Studio",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: t.textTertiary, fontSize: 11, fontWeight: FontWeight.w500, height: 1.5),
+                      ),
+                    );
+                  }
+
+                  // Mobile-first layout: compact category filter bar + single-column cards
+                  final showAppearance = _mobileTab == 0 || _mobileTab == 1;
+                  final showAccount = _mobileTab == 0 || _mobileTab == 2;
+                  final showSystem = _mobileTab == 0 || _mobileTab == 3;
+
+                  return Column(
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+                        decoration: BoxDecoration(
+                          color: t.bgCard,
+                          border: Border(
+                            bottom: BorderSide(color: t.bgRule, width: 1),
                           ),
                         ),
-                        const SizedBox(height: 24),
-                      ],
-                    ),
-                  ),
-                ),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              for (final tab in const [
+                                (0, 'All', Icons.grid_view_rounded),
+                                (1, 'Appearance', Icons.palette_outlined),
+                                (2, 'Account', Icons.person_outline_rounded),
+                                (3, 'Sync & Tools', Icons.sync_rounded),
+                              ])
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: InkWell(
+                                    onTap: () => setState(() => _mobileTab = tab.$1),
+                                    borderRadius: BorderRadius.circular(20),
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 180),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 7),
+                                      decoration: BoxDecoration(
+                                        color: _mobileTab == tab.$1
+                                            ? t.accent
+                                            : t.bgCardAlt,
+                                        borderRadius: BorderRadius.circular(20),
+                                        border: Border.all(
+                                          color: _mobileTab == tab.$1
+                                              ? t.accent
+                                              : t.bgRule,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            tab.$3,
+                                            size: 14,
+                                            color: _mobileTab == tab.$1
+                                                ? SoftPalette.gray50
+                                                : t.textSecondary,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            tab.$2,
+                                            style: TextStyle(
+                                              color: _mobileTab == tab.$1
+                                                  ? SoftPalette.gray50
+                                                  : t.textPrimary,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          physics: const BouncingScrollPhysics(),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (showAppearance) ...[
+                                personalizationSection,
+                                const SizedBox(height: Gsp.sp3),
+                                visualThemeSection,
+                                const SizedBox(height: Gsp.sp3),
+                              ],
+                              if (showAccount) ...[
+                                profileSection,
+                                const SizedBox(height: Gsp.sp3),
+                                supportOrSchoolSection,
+                                const SizedBox(height: Gsp.sp3),
+                              ],
+                              if (showSystem) ...[
+                                syncSection,
+                                const SizedBox(height: Gsp.sp3),
+                                storageSection,
+                                const SizedBox(height: Gsp.sp3),
+                                devicesSection,
+                              ],
+                              footerWidget,
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           );

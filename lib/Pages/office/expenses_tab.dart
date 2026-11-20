@@ -1,5 +1,6 @@
 // lib/pages/office/expenses_tab.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/design_system.dart';
 import 'package:flutter/services.dart';
@@ -630,7 +631,7 @@ class _ExpensesTabState extends State<ExpensesTab> {
           // ── Reactive Expenses List & Breakdowns ──────────────────────────────────
           Expanded(
             child: ValueListenableBuilder(
-              valueListenable: Hive.box(LocalStorageService.expensesBox).listenable(),
+              valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.expensesBox)),
               builder: (context, Box box, _) {
                 final activeBranch = _getEffectiveBranchId();
                 final dayExpenses = FinanceExpensesStorage.getExpensesForDate(activeBranch, dateKey);

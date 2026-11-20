@@ -33,6 +33,7 @@ class TokenScreen extends StatefulWidget {
   final Function(String cnic)? onPatientNotFound;
   final String? initialCnic;
   final String? targetPatientId;
+  final bool isCompactHybrid;
 
   const TokenScreen({
     super.key,
@@ -43,6 +44,7 @@ class TokenScreen extends StatefulWidget {
     this.onPatientNotFound,
     this.initialCnic,
     this.targetPatientId,
+    this.isCompactHybrid = false,
   });
 
   @override
@@ -116,8 +118,6 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     }
   }
 
-  static const Color _teal  = SoftPalette.teal600;
-
   bool get _isKarachi => BranchLabels.isKarachiBranch(widget.branchId);
 
   @override
@@ -130,6 +130,14 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     _capturedDispensaryId = PerfTrace.measure('TokenScreen.initState: _computeInitialDispensaryId', _computeInitialDispensaryId);
     CampSessionService.activeCampNotifier.addListener(_onActiveCampChanged);
     PerfTrace.measureAsync('TokenScreen.initState: _estimateNextSerial', _estimateNextSerial);
+
+    // Background CNIC standardization & deduplication check for active branch
+    Future.microtask(() {
+      LocalStorageService.standardizeAndDeduplicateAllPatients(
+        branchId: widget.branchId,
+        processRemote: false,
+      );
+    });
 
     if (widget.targetPatientId != null && widget.targetPatientId!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -780,6 +788,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         }
       }
 
+      localResults = _deduplicateAndHealPatientList(localResults);
       if (mounted) {
         setState(() => _patientsList = localResults);
       }
@@ -899,37 +908,185 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   }
 
   // ── Search ─────────────────────────────────────────────────────────────────
-  /// Rebuilds a wiped patient record (blank name/CNIC/phone) from the tokens already issued to
-  /// them, which still carry those details, and saves it back so it stays fixed.
+  String _getPatientDisplayName(Map<String, dynamic> p) {
+    final raw = (p['name'] ?? p['patientName'] ?? p['fullName'] ?? p['guardianName'])?.toString().trim() ?? '';
+    if (raw.isNotEmpty && raw != '0' && raw.toLowerCase() != 'null') {
+      return raw;
+    }
+    final pid = (p['patientId'] ?? p['id'] ?? '').toString();
+    if (pid.contains('_child_')) {
+      final child = pid.split('_child_').last.trim();
+      if (child.isNotEmpty) return child;
+    }
+    final cnicInfo = _getDisplayCnicInfo(p);
+    if (cnicInfo.cnic.isNotEmpty && cnicInfo.cnic != '-') {
+      return 'Patient (${cnicInfo.cnic})';
+    }
+    return 'Patient';
+  }
+
+  String _getPatientDisplayPhone(Map<String, dynamic> p) {
+    final ph = (p['phone'] ?? p['contactPhone'] ?? p['patientPhone'] ?? p['phoneNumber'] ?? p['mobile'] ?? p['guardianPhone'] ?? '')
+        .toString().trim();
+    return (ph.isNotEmpty && ph != '0' && ph.toLowerCase() != 'null') ? ph : '-';
+  }
+
+  /// Merges duplicate patient records (e.g. dashed and un-dashed stubs for same CNIC)
+  /// and applies field healing across all records in the list.
+  List<Map<String, dynamic>> _deduplicateAndHealPatientList(List<Map<String, dynamic>> list) {
+    if (list.isEmpty) return [];
+    final grouped = <String, Map<String, dynamic>>{};
+    for (final raw in list) {
+      final healed = _healPatient(raw);
+      final cleanCnic = (healed['cnic'] ?? healed['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
+      final cleanGuard = (healed['guardianCnic'] ?? healed['guardian_cnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
+      final pid = (healed['patientId'] ?? healed['id'] ?? '').toString().trim();
+
+      String effectiveKey;
+      if (pid.contains('_child_')) {
+        final parts = pid.split('_child_');
+        final g = parts[0].replaceAll(RegExp(r'\D'), '');
+        final child = parts.sublist(1).join('_child_').toLowerCase().trim();
+        final gDash = g.length == 13 ? '${g.substring(0, 5)}-${g.substring(5, 12)}-${g.substring(12, 13)}' : g;
+        effectiveKey = '${gDash}_child_$child';
+      } else if (cleanCnic.length == 13) {
+        effectiveKey = '${cleanCnic.substring(0, 5)}-${cleanCnic.substring(5, 12)}-${cleanCnic.substring(12, 13)}';
+      } else if (cleanGuard.length == 13) {
+        effectiveKey = '${cleanGuard.substring(0, 5)}-${cleanGuard.substring(5, 12)}-${cleanGuard.substring(12, 13)}';
+      } else {
+        effectiveKey = pid;
+      }
+
+      if (!grouped.containsKey(effectiveKey)) {
+        grouped[effectiveKey] = healed;
+      } else {
+        final merged = LocalStorageService.mergePatientMaps(grouped[effectiveKey]!, healed);
+        grouped[effectiveKey] = merged;
+        // Actively clean up duplicate keys from patientsBox so they don't linger
+        if (Hive.isBoxOpen(LocalStorageService.patientsBox)) {
+          final box = Hive.box(LocalStorageService.patientsBox);
+          final rawId = (raw['patientId'] ?? raw['id'])?.toString();
+          if (rawId != null && rawId.isNotEmpty && rawId != effectiveKey) {
+            unawaited(box.delete(rawId));
+          }
+        }
+      }
+    }
+    return grouped.values.toList();
+  }
+
+  /// Rebuilds a wiped patient record (blank name/CNIC/phone) from tokens and prescriptions,
+  /// and saves it back so it stays permanently restored in Hive.
   Map<String, dynamic> _healPatient(Map<String, dynamic> p) {
     bool blank(dynamic v) {
       final s = (v ?? '').toString().trim();
-      return s.isEmpty || s == '0' || s.toLowerCase() == 'null';
+      return s.isEmpty || s == '0' || s.toLowerCase() == 'null' || s == '-';
     }
-    if (!blank(p['name']) && !blank(p['patientName'])) return p;
-    try {
-      if (!Hive.isBoxOpen(LocalStorageService.entriesBox)) return p;
-      final pid = (p['patientId'] ?? p['id'] ?? '').toString().trim();
-      if (pid.isEmpty) return p;
-      final healed = Map<String, dynamic>.from(p);
-      for (final raw in Hive.box(LocalStorageService.entriesBox).values) {
-        if (raw is! Map) continue;
-        if ((raw['patientId'] ?? '').toString().trim() != pid) continue;
-        final n = raw['patientName'] ?? raw['name'];
-        if (blank(n)) continue;
-        healed['name'] = n.toString().trim();
-        healed['patientName'] = n.toString().trim();
-        for (final k in ['phone', 'cnic', 'guardianCnic', 'gender', 'age', 'dob', 'address']) {
-          if (blank(healed[k]) && !blank(raw[k])) healed[k] = raw[k];
+
+    final healed = Map<String, dynamic>.from(p);
+    final pid = (healed['patientId'] ?? healed['id'] ?? '').toString().trim();
+    final normPid = pid.replaceAll('-', '').toLowerCase();
+
+    // 1. Resolve CNIC from all possible fields or patientId
+    String pCnic = (healed['cnic'] ?? healed['patientCnic'] ?? '').toString().trim();
+    String pGuard = (healed['guardianCnic'] ?? healed['guardian_cnic'] ?? '').toString().trim();
+    if (blank(pCnic) && blank(pGuard) && pid.isNotEmpty) {
+      if (pid.contains('_child_')) {
+        pGuard = pid.split('_child_').first;
+        healed['guardianCnic'] = pGuard;
+      } else {
+        final clean = pid.replaceAll(RegExp(r'\D'), '');
+        if (clean.length == 13) {
+          pCnic = clean;
+          healed['cnic'] = _formatCnic(clean);
         }
-        if (blank(healed['cnic']) && !blank(raw['patientCnic'])) healed['cnic'] = raw['patientCnic'];
-        unawaited(LocalStorageService.saveLocalPatient(healed, isFromSync: true));
-        return healed;
       }
-    } catch (e) {
-      debugPrint('[TokenScreen] heal patient failed: $e');
     }
-    return p;
+    final normCnic = pCnic.replaceAll('-', '').trim();
+    final normGuard = pGuard.replaceAll('-', '').trim();
+    final searchDigits = cnicController.text.replaceAll(RegExp(r'\D'), '');
+
+    // 2. Resolve name from patientId if child key
+    if (blank(healed['name']) && blank(healed['patientName']) && pid.contains('_child_')) {
+      final childPart = pid.split('_child_').last.trim();
+      if (childPart.isNotEmpty) {
+        healed['name'] = childPart;
+        healed['patientName'] = childPart;
+      }
+    }
+
+    // 3. Heal from entriesBox (tokens issued to patient)
+    final needsHealing = blank(healed['name']) || blank(healed['phone']) || (blank(healed['cnic']) && blank(healed['guardianCnic']));
+    if (needsHealing && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+      try {
+        final eBox = Hive.box(LocalStorageService.entriesBox);
+        for (final raw in eBox.values) {
+          if (raw is! Map) continue;
+          final entryPid = (raw['patientId'] ?? raw['id'] ?? '').toString().trim();
+          final entryNormPid = entryPid.replaceAll('-', '').toLowerCase();
+          final entryCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll('-', '').trim();
+          final entryGuard = (raw['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
+
+          final idMatches = normPid.isNotEmpty && (normPid == entryNormPid || entryPid == pid);
+          final cnicMatches = (normCnic.isNotEmpty && (entryCnic == normCnic || entryGuard == normCnic)) ||
+                              (normGuard.isNotEmpty && (entryCnic == normGuard || entryGuard == normGuard)) ||
+                              (searchDigits.length == 13 && (entryCnic == searchDigits || entryGuard == searchDigits));
+
+          if (!idMatches && !cnicMatches) continue;
+
+          final n = raw['patientName'] ?? raw['name'] ?? raw['fullName'];
+          if (!blank(n)) {
+            healed['name'] ??= n.toString().trim();
+            healed['patientName'] ??= n.toString().trim();
+          }
+          final ph = raw['phone'] ?? raw['contactPhone'] ?? raw['patientPhone'] ?? raw['phoneNumber'];
+          if (blank(healed['phone']) && !blank(ph)) {
+            healed['phone'] = ph.toString().trim();
+          }
+          if (blank(healed['cnic']) && !blank(entryCnic)) {
+            healed['cnic'] = entryCnic.length == 13 ? _formatCnic(entryCnic) : entryCnic;
+          }
+          if (blank(healed['guardianCnic']) && !blank(entryGuard)) {
+            healed['guardianCnic'] = entryGuard.length == 13 ? _formatCnic(entryGuard) : entryGuard;
+          }
+          for (final k in ['gender', 'age', 'dob', 'address', 'bloodGroup', 'status']) {
+            if (blank(healed[k]) && !blank(raw[k])) healed[k] = raw[k];
+          }
+
+          if (!blank(healed['name']) && !blank(healed['phone'])) break;
+        }
+      } catch (e) {
+        debugPrint('[TokenScreen] heal from entriesBox failed: $e');
+      }
+    }
+
+    // 4. Also check prescriptionsBox if still missing name
+    if (blank(healed['name']) && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
+      try {
+        final rxBox = Hive.box(LocalStorageService.prescriptionsBox);
+        for (final raw in rxBox.values) {
+          if (raw is! Map) continue;
+          final rxPid = (raw['patientId'] ?? '').toString().trim();
+          final rxCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll('-', '').trim();
+          final idMatches = normPid.isNotEmpty && rxPid.replaceAll('-', '').toLowerCase() == normPid;
+          final cnicMatches = searchDigits.length == 13 && rxCnic == searchDigits;
+          if (idMatches || cnicMatches) {
+            final n = raw['patientName'] ?? raw['name'];
+            if (!blank(n)) {
+              healed['name'] = n.toString().trim();
+              healed['patientName'] = n.toString().trim();
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 5. Persist healed patient so future lookups have full details
+    if (!blank(healed['name'])) {
+      unawaited(LocalStorageService.saveLocalPatient(healed, isFromSync: true));
+    }
+    return healed;
   }
 
   Future<void> _searchPatient() async {
@@ -982,7 +1139,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
             digitsOnly, branchId: widget.branchId);
       }
 
-      if (localResults.isEmpty) {
+      final bool hasValidLocalMatch = localResults.any((p) {
+        final n = (p['name'] ?? p['patientName'] ?? p['fullName'] ?? '').toString().trim();
+        return n.isNotEmpty && n != '0' && n.toLowerCase() != 'null';
+      });
+
+      if (localResults.isEmpty || !hasValidLocalMatch) {
         // Fast targeted lookup with Karachi family / sub-branch cross-search
         try {
           final branchCandidates = <String>{
@@ -1045,13 +1207,16 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
               localResults = LocalStorageService.searchPatientsByCnicOrGuardian(
                   input, branchId: widget.branchId);
             }
+            if (localResults.isEmpty) {
+              localResults = found;
+            }
           }
         } catch (e) {
           debugPrint('[TokenScreen] Direct branch patient query failed: $e');
         }
       }
-        localResults = localResults.map(_healPatient).toList();
-        if (mounted) {
+        localResults = _deduplicateAndHealPatientList(localResults);
+      if (mounted) {
         setState(() => _patientsList = localResults);
       }
       if (localResults.isNotEmpty) {
@@ -1119,6 +1284,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   /// Downloads restrictions from Firestore first so internet-only terminals
   /// always have the latest data before the block check.
   Future<void> _selectPatient(Map<String, dynamic> patient) async {
+    final effectivePatient = _healPatient(patient);
     // FIX 5b: capture the camp once here, when this patient's workflow
     // starts. A camp switch from another tab in the hybrid screen after
     // this point won't retroactively change which camp this in-progress
@@ -1131,16 +1297,16 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       debugPrint('[TokenScreen] downloadMedicineRestrictions failed: $e');
     });
 
-    final hasBoth = _hasBothTokensToday(patient);
-    final cannotIssueMore = _isVitalsTokenAllowed ? hasBoth : _hasRegularTokenToday(patient);
+    final hasBoth = _hasBothTokensToday(effectivePatient);
+    final cannotIssueMore = _isVitalsTokenAllowed ? hasBoth : _hasRegularTokenToday(effectivePatient);
     if (mounted) {
       setState(() {
-        _patientData   = patient;
+        _patientData   = effectivePatient;
         _hasTokenToday = cannotIssueMore;
         _errorMessage  = null;
         _isExceptionPending = false;
       });
-      _checkMedicineRestriction(patient);
+      _checkMedicineRestriction(effectivePatient);
       if (!cannotIssueMore) {
         _showVitalsDialog();
       }
@@ -1730,9 +1896,10 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        colors: isDark
-                            ? [SoftPalette.teal550, SoftPalette.teal500]
-                            : [SoftPalette.green550, SoftPalette.teal550],
+                        colors: [
+                          context.comfort.brand,
+                          context.comfort.brandStrong,
+                        ],
                       ),
                       borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
                     ),
@@ -2144,12 +2311,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         decoration: InputDecoration(
           labelText: label,
           labelStyle: TextStyle(
-            color: isDark ? SoftPalette.teal200 : SoftPalette.green500,
+            color: context.comfort.brand,
             fontWeight: FontWeight.w500,
             fontSize: 12,
           ),
           isDense: true,
-          prefixIcon: Icon(icon, color: isDark ? SoftPalette.teal200 : SoftPalette.green400, size: 20),
+          prefixIcon: Icon(icon, color: context.comfort.brand, size: 20),
           filled: true,
           fillColor: isDark
               ? (readOnly ? SoftPalette.slate900.withValues(alpha: 0.6) : SoftPalette.slate900)
@@ -2162,7 +2329,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
               borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.gray150)),
           focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(10),
-              borderSide: BorderSide(color: isDark ? SoftPalette.teal300 : SoftPalette.green400, width: 2)),
+              borderSide: BorderSide(color: context.comfort.brand, width: 2)),
           contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
         ),
       ),
@@ -2183,61 +2350,113 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final isMobile       = GBreakpoint.isMobile(context);
-    final containerWidth = isMobile ? double.infinity : 480.0;
+    final containerWidth = isMobile ? double.infinity : 560.0;
     final isDark = _isDark;
+    final c = context.comfort;
 
     return Container(
       color: Colors.transparent,
       child: Center(
         child: SingleChildScrollView(
           padding: EdgeInsets.symmetric(
-              horizontal: isMobile ? 12 : 20,
-              vertical:   isMobile ? 16 : 24),
+              horizontal: isMobile ? 8 : 12,
+              vertical:   8),
           child: Container(
             width: containerWidth,
-            padding: EdgeInsets.all(isMobile ? 18 : 30),
-            decoration: BoxDecoration(
-              color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                  color: isDark ? SoftPalette.slate700 : SoftPalette.green300,
-                  width: 1.5),
-              boxShadow: [
-                BoxShadow(
-                    color: isDark ? SoftPalette.gray900A26 : SoftPalette.green400.withValues(alpha: 0.07),
-                    blurRadius: 20,
-                    offset: const Offset(0, 6)),
-              ],
-            ),
+            padding: EdgeInsets.symmetric(horizontal: isMobile ? 4 : 8, vertical: 8),
             child: Stack(children: [
               Column(mainAxisSize: MainAxisSize.min, children: [
-                // Next serial badge
+                // Status Pill + Hero Serial + Flanking-Line Logo Header
                 Container(
-                  padding: EdgeInsets.symmetric(
-                      horizontal: isMobile ? 16 : 24,
-                      vertical:   isMobile ? 8  : 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
                   decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.teal550.withValues(alpha: 0.2) : _teal.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(color: isDark ? SoftPalette.teal550 : _teal.withValues(alpha: 0.3)),
+                    color: c.brandSoft,
+                    borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    'Next Token: ${_nextSerial ?? 'Loading...'}',
+                    'Next Token • Ready',
                     style: TextStyle(
-                        color: isDark ? SoftPalette.sky350 : _teal, fontWeight: FontWeight.bold,
-                        fontSize: isMobile ? 16 : 20, letterSpacing: 0.4),
+                      color: c.brand,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12.5,
+                    ),
                   ),
                 ),
-                SizedBox(height: isMobile ? 14 : 20),
-                Image.asset('assets/logo/gmwf-1.webp',
-                    height: isMobile ? 64 : 90),
-                SizedBox(height: isMobile ? 10 : 16),
-                Text('Issue Token',
-                    style: TextStyle(
-                        fontSize:   isMobile ? 18 : 22,
-                        fontWeight: FontWeight.bold,
-                        color:      isDark ? SoftPalette.gray50 : SoftPalette.green600)),
-                SizedBox(height: isMobile ? 18 : 28),
+                const SizedBox(height: 8),
+                Text(
+                  _nextSerial ?? 'Loading...',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: isMobile ? 22 : 26,
+                    fontWeight: FontWeight.w900,
+                    color: c.textPrimary,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        height: 1.5,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              c.brand.withValues(alpha: 0.04),
+                              c.brand.withValues(alpha: isDark ? 0.65 : 0.45),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Transform.rotate(
+                      angle: 0.785398,
+                      child: Container(
+                        width: 5.5,
+                        height: 5.5,
+                        color: c.brand.withValues(alpha: isDark ? 0.75 : 0.55),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      child: Image.asset(
+                        'assets/logo/gmwf-1.webp',
+                        height: isMobile ? 76 : (widget.isCompactHybrid ? 108 : 140),
+                      ),
+                    ),
+                    Transform.rotate(
+                      angle: 0.785398,
+                      child: Container(
+                        width: 5.5,
+                        height: 5.5,
+                        color: c.brand.withValues(alpha: isDark ? 0.75 : 0.55),
+                      ),
+                    ),
+                    Expanded(
+                      child: Container(
+                        height: 1.5,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              c.brand.withValues(alpha: isDark ? 0.65 : 0.45),
+                              c.brand.withValues(alpha: 0.04),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Issue Token',
+                  style: TextStyle(
+                    fontSize: isMobile ? 16 : 18,
+                    fontWeight: FontWeight.w800,
+                    color: c.textPrimary,
+                  ),
+                ),
+                SizedBox(height: isMobile ? 12 : 16),
 
                 // CNIC field
                 TextField(
@@ -2245,7 +2464,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                   focusNode:    _cnicFocusNode,
                   maxLength:    15,
                   keyboardType: TextInputType.number,
-                  cursorColor:  isDark ? SoftPalette.sky350 : SoftPalette.green600,
+                  cursorColor:  c.brand,
                   onChanged: (v) {
                     final d = v.replaceAll(RegExp(r'[^0-9]'), '');
                     if (d.startsWith('03')) {
@@ -2299,26 +2518,65 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     }
                   },
                   onSubmitted: (_) => triggerSearch(),
-                  style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.green600),
+                  style: TextStyle(color: c.textPrimary),
                   decoration: InputDecoration(
-                    labelText:   'Guardian CNIC or Phone',
+                    hintText:    'Guardian CNIC or Phone',
+                    hintStyle:   TextStyle(color: c.textMuted, fontSize: 13.5),
                     counterText: '',
-                    labelStyle:  TextStyle(color: isDark ? SoftPalette.slate350 : SoftPalette.green400),
-                    prefixIcon:  Icon(Icons.badge, color: isDark ? SoftPalette.sky350 : SoftPalette.green400),
-                    suffixIcon:  IconButton(
-                        icon: Icon(Icons.search, color: isDark ? SoftPalette.sky350 : SoftPalette.green400),
-                        onPressed: triggerSearch),
-                    filled: true, fillColor: isDark ? SoftPalette.slate700 : SoftPalette.green100m,
+                    prefixIcon:  Icon(Icons.search_rounded, color: c.textSecondary, size: 20),
+                    suffixIcon:  cnicController.text.isNotEmpty
+                        ? IconButton(
+                            icon: Icon(Icons.arrow_forward_rounded, color: c.brand, size: 20),
+                            tooltip: 'Search',
+                            onPressed: triggerSearch,
+                          )
+                        : null,
+                    filled: true,
+                    fillColor: c.surface,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                     enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: BorderSide(color: isDark ? SoftPalette.slate600 : SoftPalette.green400)),
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide(color: c.borderStrong)),
                     focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide:
-                            BorderSide(color: isDark ? SoftPalette.sky350 : SoftPalette.green400, width: 2)),
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide(color: c.brand, width: 1.8)),
                   ),
                 ),
                 const SizedBox(height: 12),
+
+                if (_patientData == null && _patientsList.isEmpty)
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        if (cnicController.text.trim().isNotEmpty) {
+                          triggerSearch();
+                        } else if (widget.onPatientNotFound != null) {
+                          widget.onPatientNotFound!('');
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: c.brand,
+                        foregroundColor: c.onBrand,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.medical_services_outlined, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'Register Patient / Issue Token',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                          ),
+                          SizedBox(width: 8),
+                          Icon(Icons.arrow_forward_rounded, size: 17),
+                        ],
+                      ),
+                    ),
+                  ),
 
                 if (_errorMessage != null)
                   Container(
@@ -2347,8 +2605,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                             alignment: Alignment.centerRight,
                             child: ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: _teal,
-                                foregroundColor: SoftPalette.gray50,
+                                backgroundColor: c.brand,
+                                foregroundColor: c.onBrand,
+                                elevation: 0,
                                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                               ),
@@ -2382,36 +2641,37 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     Color cardBg;
                     Color cardBorder;
                     if (hasBoth) {
-                      cardBg = isDark ? SoftPalette.red800 : SoftPalette.red100t;
-                      cardBorder = isDark ? SoftPalette.red700 : SoftPalette.red200;
+                      cardBg = c.dangerBg;
+                      cardBorder = c.danger.withValues(alpha: 0.35);
                     } else if (isRestricted && regularToken == null) {
-                      cardBg = isDark ? SoftPalette.orange750m : SoftPalette.yellow50m;
-                      cardBorder = isDark ? SoftPalette.orange700 : SoftPalette.yellow150;
+                      cardBg = c.warningBg;
+                      cardBorder = c.warning.withValues(alpha: 0.35);
                     } else {
-                      cardBg = isDark ? SoftPalette.slate800 : SoftPalette.green100m;
-                      cardBorder = isDark ? SoftPalette.slate700 : SoftPalette.green300;
+                      cardBg = c.surfaceSunken;
+                      cardBorder = c.border;
                     }
 
                     return Card(
+                      elevation: 0,
                       color: cardBg,
                       margin: const EdgeInsets.symmetric(vertical: 4),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
-                          side: BorderSide(color: cardBorder, width: hasBoth || isRestricted ? 1.5 : 1)),
+                          side: BorderSide(color: cardBorder, width: hasBoth || isRestricted ? 1.4 : 1)),
                       child: ListTile(
                         dense: isMobile,
                         contentPadding: EdgeInsets.symmetric(
-                            horizontal: isMobile ? 10 : 16,
-                            vertical:   isMobile ? 4  : 8),
+                            horizontal: isMobile ? 10 : 14,
+                            vertical:   isMobile ? 4  : 6),
                         title: Row(
                           children: [
                             Expanded(
                               child: Text(
-                                p['name'] as String? ?? '',
+                                _getPatientDisplayName(p),
                                 style: TextStyle(
-                                    color: isDark ? SoftPalette.gray50 : (hasBoth ? SoftPalette.red550 : SoftPalette.green600),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: isMobile ? 15 : 16),
+                                    color: hasBoth ? c.danger : c.textPrimary,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: isMobile ? 15 : 15.5),
                               ),
                             ),
                             if (hasBoth)
@@ -2479,15 +2739,16 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
-                                  color: SoftPalette.green400,
+                                  color: c.successBg,
                                   borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: c.success.withValues(alpha: 0.3)),
                                 ),
-                                child: const Text(
-                                  '🟢 Available',
+                                child: Text(
+                                  'Available',
                                   style: TextStyle(
-                                      color: SoftPalette.gray50,
+                                      color: c.success,
                                       fontSize: 11,
-                                      fontWeight: FontWeight.bold),
+                                      fontWeight: FontWeight.w700),
                                 ),
                               ),
                           ],
@@ -2498,11 +2759,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text('${cnicInfo.label}: ${cnicInfo.cnic}',
-                                  style: TextStyle(
-                                      color: isDark ? SoftPalette.slate350 : SoftPalette.green550, fontSize: 12)),
-                              Text('Phone: ${p['phone'] ?? '-'}',
-                                  style: TextStyle(
-                                      color: isDark ? SoftPalette.slate350 : SoftPalette.green550, fontSize: 12)),
+                                  style: TextStyle(color: c.textSecondary, fontSize: 12)),
+                              Text('Phone: ${_getPatientDisplayPhone(p)}',
+                                  style: TextStyle(color: c.textSecondary, fontSize: 12)),
                               if (vitalsToken != null && _isVitalsTokenAllowed)
                                 Padding(
                                   padding: const EdgeInsets.only(top: 2),
@@ -2573,16 +2832,17 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                         trailing: ElevatedButton(
                           style: ElevatedButton.styleFrom(
                               backgroundColor: hasBoth
-                                  ? SoftPalette.red500
-                                  : (isRestricted && regularToken == null ? SoftPalette.orange350 : SoftPalette.green400),
-                              foregroundColor: SoftPalette.gray50,
+                                  ? c.danger
+                                  : (isRestricted && regularToken == null ? c.warning : c.brand),
+                              foregroundColor: c.onBrand,
+                              elevation: 0,
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 10),
-                              minimumSize: const Size(80, 38),
+                              minimumSize: const Size(80, 36),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
                           onPressed: () async => await _selectPatient(p),
                           child: Text(hasBoth ? 'View' : 'Select',
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
                         ),
                       ),
                     );
@@ -2595,18 +2855,18 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
                         onPressed: () => setState(() => _patientData = null),
-                        icon: Icon(Icons.close_rounded, size: 16, color: _isDark ? SoftPalette.sky350 : SoftPalette.green400),
+                        icon: Icon(Icons.close_rounded, size: 16, color: c.textSecondary),
                         label: Text('Deselect Patient',
                             style: TextStyle(
-                                color: _isDark ? SoftPalette.sky350 : SoftPalette.green400,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13)),
+                                color: c.textSecondary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12.5)),
                         style: TextButton.styleFrom(
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          backgroundColor: _isDark ? SoftPalette.slate800 : SoftPalette.green100m,
+                          backgroundColor: c.surfaceSunken,
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(8),
-                              side: BorderSide(color: _isDark ? SoftPalette.slate700 : SoftPalette.green300)),
+                              side: BorderSide(color: c.border)),
                         ),
                       ),
                     ),
@@ -2622,26 +2882,43 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     return Container(
                       padding: EdgeInsets.all(isMobile ? 12 : 16),
                       decoration: BoxDecoration(
-                        color: _isDark ? SoftPalette.slate800 : SoftPalette.green100m,
+                        color: c.surfaceSunken,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _isDark ? SoftPalette.slate700 : SoftPalette.green300),
+                        border: Border.all(color: c.borderStrong),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
-                              Expanded(child: Text(
-                                _patientData!['name'] as String? ?? '',
-                                style: TextStyle(
-                                    fontSize:   isMobile ? 17 : 20,
-                                    color:      _isDark ? SoftPalette.gray50 : SoftPalette.green400,
-                                    fontWeight: FontWeight.bold),
-                              )),
+                              Expanded(
+                                child: Wrap(
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  spacing: 8,
+                                  runSpacing: 6,
+                                  children: [
+                                    Text(
+                                      _getPatientDisplayName(_patientData!),
+                                      style: TextStyle(
+                                          fontSize:   isMobile ? 16.5 : 18,
+                                          color:      c.textPrimary,
+                                          fontWeight: FontWeight.w800),
+                                    ),
+                                    _buildCategoryBadge(),
+                                    Builder(builder: (context) {
+                                      final staffInfo = StaffPatientLinkService.getStaffInfoFromPatientMap(_patientData);
+                                      if (staffInfo != null) {
+                                        return StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: _isDark);
+                                      }
+                                      return const SizedBox.shrink();
+                                    }),
+                                  ],
+                                ),
+                              ),
                               IconButton(
-                                icon: const Icon(Icons.history_rounded,
-                                    color: SoftPalette.teal500, size: 24),
+                                icon: Icon(Icons.history_rounded,
+                                    color: c.brand, size: 22),
                                 tooltip: 'Audit History',
                                 padding: EdgeInsets.zero,
                                 constraints: const BoxConstraints(),
@@ -2650,15 +2927,15 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   PatientAuditHistoryDialog.show(
                                     context,
                                     patientId: pId,
-                                    patientName: _patientData!['name']?.toString(),
+                                    patientName: _getPatientDisplayName(_patientData!),
                                     branchId: widget.branchId,
                                   );
                                 },
                               ),
                               const SizedBox(width: 12),
                               IconButton(
-                                icon: const Icon(Icons.edit,
-                                    color: SoftPalette.amber300, size: 24),
+                                icon: Icon(Icons.edit_rounded,
+                                    color: c.warning, size: 22),
                                 tooltip: 'Edit Details',
                                 padding: EdgeInsets.zero,
                                 constraints: const BoxConstraints(),
@@ -2666,32 +2943,20 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          Wrap(spacing: 8, runSpacing: 4, children: [
-                            Builder(builder: (context) {
-                              final staffInfo = StaffPatientLinkService.getStaffInfoFromPatientMap(_patientData);
-                              if (staffInfo != null) {
-                                return StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: _isDark);
-                              }
-                              return const SizedBox.shrink();
-                            }),
-                            _infoBadge(Icons.badge, () {
-                              final i = _getDisplayCnicInfo(_patientData!);
-                              return '${i.label}: ${i.cnic}';
-                            }()),
-                            _infoBadge(Icons.phone,
-                                'Phone: ${_patientData!['phone'] ?? '-'}'),
-                            _infoBadge(
-                                Icons.category,
-                                () {
-                                  final q = _resolveQueueType(_patientData!['status'] as String?);
-                                  if (_isKarachi) {
-                                    if (q.toLowerCase() == 'zakat' || q.toLowerCase() == 'non-zakat') return BranchLabels.karachiZakatLabel;
-                                    if (q.toLowerCase() == 'gmwf') return 'GMWF';
-                                  }
-                                  return q;
-                                }()),
-                          ]),
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              _infoBadge(Icons.badge_outlined, () {
+                                final i = _getDisplayCnicInfo(_patientData!);
+                                return '${i.label}: ${i.cnic}';
+                              }()),
+                              _infoBadge(Icons.phone_outlined,
+                                  'Phone: ${_getPatientDisplayPhone(_patientData!)}'),
+                            ],
+                          ),
                           if ((hasBothToday && _isVitalsTokenAllowed) || ((hasRegularToday || hasVitalsToday) && !_isVitalsTokenAllowed)) ...[
                             const SizedBox(height: 10),
                             Container(
@@ -2826,43 +3091,21 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                           const SizedBox(height: 12),
                           () {
                             final cannotIssueToken = _isVitalsTokenAllowed ? hasBothToday : (hasRegularToday || hasVitalsToday);
-                            return Container(
+                            return SizedBox(
                               width: double.infinity,
-                              height: isMobile ? 48 : 52,
-                              decoration: BoxDecoration(
-                                gradient: cannotIssueToken
-                                    ? null
-                                    : const LinearGradient(
-                                        colors: [SoftPalette.emerald400, SoftPalette.emerald550],
-                                        begin: Alignment.topLeft,
-                                        end: Alignment.bottomRight,
-                                      ),
-                                color: cannotIssueToken
-                                    ? (_isDark ? SoftPalette.slate700 : SoftPalette.gray300)
-                                    : null,
-                                borderRadius: BorderRadius.circular(14),
-                                boxShadow: cannotIssueToken
-                                    ? null
-                                    : [
-                                        BoxShadow(
-                                          color: SoftPalette.emerald400.withValues(alpha: 0.3),
-                                          blurRadius: 10,
-                                          offset: const Offset(0, 3),
-                                        ),
-                                      ],
-                              ),
+                              height: 46,
                               child: ElevatedButton.icon(
                                 onPressed: cannotIssueToken ? null : _showVitalsDialog,
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.transparent,
-                                  foregroundColor: SoftPalette.gray50,
-                                  shadowColor: Colors.transparent,
-                                  padding: EdgeInsets.symmetric(
-                                      vertical: isMobile ? 10 : 12),
+                                  backgroundColor: c.brand,
+                                  disabledBackgroundColor: c.surface,
+                                  foregroundColor: c.onBrand,
+                                  disabledForegroundColor: c.textMuted,
+                                  elevation: 0,
                                   shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(14)),
+                                      borderRadius: BorderRadius.circular(10)),
                                 ),
-                                icon: const Icon(Icons.inventory_2_rounded, size: 20),
+                                icon: const Icon(Icons.inventory_2_rounded, size: 19),
                                 label: Text(
                                   cannotIssueToken
                                       ? ((regularTodayToken?['status'] == 'skipped' || vitalsTodayToken?['status'] == 'skipped')
@@ -2874,9 +3117,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                               ? (_isVitalsTokenAllowed ? 'Issue Vitals Only Token' : 'Token Already Issued Today')
                                               : 'Enter Vitals & Issue Token')),
                                   style: TextStyle(
-                                      fontSize: isMobile ? 14 : 15.5,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 0.3),
+                                      fontSize: isMobile ? 13.5 : 14.5,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.2),
                                 ),
                               ),
                             );
@@ -2889,9 +3132,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
                 SizedBox(height: isMobile ? 16 : 24),
                 if (_isLoading)
-                  const Center(
+                  Center(
                       child: CircularProgressIndicator(
-                          color: SoftPalette.green400)),
+                          color: c.brand)),
               ]),
             ]),
           ),
@@ -2900,25 +3143,148 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _infoBadge(IconData icon, String text) => Row(
+  Widget _infoBadge(
+    IconData icon,
+    String text, {
+    String? imageAsset,
+    Color? backgroundColor,
+    Color? borderColor,
+    Color? textColor,
+    Color? iconColor,
+  }) {
+    final c = context.comfort;
+    final bg = backgroundColor ?? c.surface;
+    final bd = borderColor ?? c.borderStrong;
+    final tc = textColor ?? c.textPrimary;
+    final ic = iconColor ?? c.brand;
+
+    return Container(
+      height: 30,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: bd, width: 1),
+      ),
+      child: Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Icon(icon, size: 13, color: _isDark ? SoftPalette.sky350 : SoftPalette.green500),
-          const SizedBox(width: 4),
-          Text(text,
-              style: TextStyle(color: _isDark ? SoftPalette.slate200 : SoftPalette.green550, fontSize: 12)),
+          if (imageAsset != null)
+            Image.asset(
+              imageAsset,
+              width: 14,
+              height: 14,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => Icon(icon, size: 14, color: ic),
+            )
+          else
+            Icon(icon, size: 14, color: ic),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: TextStyle(
+              color: tc,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.1,
+            ),
+          ),
         ],
-      );
+      ),
+    );
+  }
+
+  Widget _buildCategoryBadge() {
+    final q = _resolveQueueType(_patientData!['status'] as String?);
+    final isGmwf = q.toLowerCase() == 'gmwf';
+    final rawLabel = _isKarachi
+        ? (isGmwf ? 'GMWF' : BranchLabels.karachiZakatLabel)
+        : (isGmwf ? 'GMWF' : q);
+
+    String displayLabel;
+    final lLower = rawLabel.trim().toLowerCase();
+    if (lLower == 'non-zakat' || lLower == 'non_zakat') {
+      displayLabel = 'Non-Zakat';
+    } else if (lLower == 'zakat') {
+      displayLabel = 'Zakat';
+    } else if (lLower == 'gmwf') {
+      displayLabel = 'GMWF';
+    } else if (rawLabel.trim().isEmpty) {
+      displayLabel = 'General';
+    } else {
+      displayLabel = rawLabel.trim().split(RegExp(r'[\s_-]+')).map((w) {
+        if (w.isEmpty) return '';
+        return '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}';
+      }).join(' ');
+    }
+
+    Color bg;
+    Color border;
+    Color textCol;
+    IconData iconData;
+
+    if (isGmwf) {
+      bg = _isDark ? SoftPalette.yellow800.withValues(alpha: 0.25) : SoftPalette.yellow50;
+      border = _isDark ? SoftPalette.yellow500.withValues(alpha: 0.5) : SoftPalette.yellow600.withValues(alpha: 0.6);
+      textCol = _isDark ? SoftPalette.yellow300 : SoftPalette.yellow900;
+      iconData = Icons.stars_rounded;
+    } else if (lLower == 'zakat') {
+      bg = _isDark ? SoftPalette.emerald900.withValues(alpha: 0.25) : SoftPalette.emerald50;
+      border = _isDark ? SoftPalette.emerald600.withValues(alpha: 0.5) : SoftPalette.emerald400.withValues(alpha: 0.7);
+      textCol = _isDark ? SoftPalette.emerald300 : SoftPalette.emerald700;
+      iconData = Icons.volunteer_activism_rounded;
+    } else {
+      bg = _isDark ? SoftPalette.blue900.withValues(alpha: 0.2) : SoftPalette.blue50;
+      border = _isDark ? SoftPalette.blue400.withValues(alpha: 0.4) : SoftPalette.blue300.withValues(alpha: 0.6);
+      textCol = _isDark ? SoftPalette.blue200 : SoftPalette.blue700;
+      iconData = Icons.shield_outlined;
+    }
+
+    return _infoBadge(
+      iconData,
+      displayLabel,
+      imageAsset: isGmwf ? 'assets/logo/gmwf-1.webp' : null,
+      backgroundColor: bg,
+      borderColor: border,
+      textColor: textCol,
+      iconColor: textCol,
+    );
+  }
 
   ({String cnic, String label}) _getDisplayCnicInfo(
       Map<String, dynamic> patient) {
-    final ownCnic      = patient['cnic']?.toString().trim();
-    final guardianCnic = patient['guardianCnic']?.toString().trim();
-    if (ownCnic != null && ownCnic.isNotEmpty) {
-      return (cnic: ownCnic, label: 'CNIC');
+    final ownCnic = (patient['cnic'] ?? patient['patientCnic'] ?? patient['cNic'])?.toString().trim();
+    final guardianCnic = (patient['guardianCnic'] ?? patient['guardian_cnic'])?.toString().trim();
+    if (ownCnic != null && ownCnic.isNotEmpty && ownCnic != '-' && !ownCnic.startsWith('unknown_')) {
+      final clean = ownCnic.replaceAll(RegExp(r'\D'), '');
+      final formatted = clean.length == 13 ? _formatCnic(clean) : ownCnic;
+      return (cnic: formatted, label: 'CNIC');
     }
-    if (guardianCnic != null && guardianCnic.isNotEmpty) {
-      return (cnic: guardianCnic, label: 'Guardian CNIC');
+    if (guardianCnic != null && guardianCnic.isNotEmpty && guardianCnic != '-' && !guardianCnic.startsWith('unknown_')) {
+      final clean = guardianCnic.replaceAll(RegExp(r'\D'), '');
+      final formatted = clean.length == 13 ? _formatCnic(clean) : guardianCnic;
+      return (cnic: formatted, label: 'Guardian CNIC');
+    }
+    final pid = (patient['patientId'] ?? patient['id'] ?? '').toString().trim();
+    if (pid.isNotEmpty) {
+      if (pid.contains('_child_')) {
+        final g = pid.split('_child_').first.replaceAll(RegExp(r'\D'), '');
+        final formatted = g.length == 13 ? _formatCnic(g) : pid.split('_child_').first;
+        return (cnic: formatted, label: 'Guardian CNIC');
+      }
+      final clean = pid.replaceAll(RegExp(r'\D'), '');
+      if (clean.length == 13) {
+        return (cnic: _formatCnic(clean), label: 'CNIC');
+      }
+    }
+    final searched = cnicController.text.trim();
+    final searchDigits = searched.replaceAll(RegExp(r'\D'), '');
+    if (searchDigits.length == 13) {
+      return (
+        cnic: _formatCnic(searchDigits),
+        label: patient['isAdult'] == false ? 'Guardian CNIC' : 'CNIC',
+      );
     }
     return (cnic: '-', label: 'CNIC');
   }
@@ -3014,7 +3380,7 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
   bool isIssuingInDialog = false;
   String? _vitalsError; // shown inside the dialog (a SnackBar would appear behind it)
 
-  static const Color _teal = SoftPalette.teal600;
+  Color get _teal => context.comfort.brand;
 
   @override
   void initState() {
@@ -3067,19 +3433,20 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
   }
 
   InputDecoration _vitalsDecoration(String label, IconData? icon, bool isDark, {String? hint}) {
+    final c = context.comfort;
     return InputDecoration(
       labelText: label,
       hintText: hint,
       prefixIcon: icon != null
-          ? Icon(icon, color: isDark ? SoftPalette.emerald300 : _teal, size: 20)
+          ? Icon(icon, color: _teal, size: 20)
           : null,
-      labelStyle: TextStyle(color: isDark ? SoftPalette.emerald150 : SoftPalette.gray550, fontSize: 13),
-      hintStyle: TextStyle(color: isDark ? SoftPalette.slate550 : SoftPalette.gray300, fontSize: 12),
+      labelStyle: TextStyle(color: c.textSecondary, fontSize: 13),
+      hintStyle: TextStyle(color: c.textMuted, fontSize: 12),
       filled: true,
-      fillColor: isDark ? SoftPalette.teal900 : SoftPalette.gray50,
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: isDark ? SoftPalette.emerald750 : SoftPalette.gray150)),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: isDark ? SoftPalette.emerald750 : SoftPalette.gray150)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _teal, width: 2)),
+      fillColor: c.surfaceSunken,
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: c.border)),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: c.border)),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: _teal, width: 1.8)),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       isDense: true,
     );
@@ -3104,8 +3471,8 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
 
     if (temp.isNotEmpty) {
       final tempVal = double.tryParse(temp);
-      if (tempVal == null || tempVal < 80.0 || tempVal > 110.0) {
-        setState(() => _vitalsError = 'Temperature must be between 80.0 and 110.0 °F.');
+      if (tempVal == null || tempVal < 30.0 || tempVal > 110.0) {
+        setState(() => _vitalsError = 'Please enter a valid Temperature (°C).');
         return;
       }
     }
@@ -3137,14 +3504,15 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final dialogBg = isDark ? SoftPalette.teal900 : SoftPalette.gray50;
-    final titleBg = isDark ? SoftPalette.emerald800 : SoftPalette.green100m;
-    final titleTextColor = isDark ? SoftPalette.emerald300 : SoftPalette.green500;
-    final sectionBg = isDark ? SoftPalette.teal900 : SoftPalette.gray50;
-    final sectionBorder = isDark ? SoftPalette.emerald750 : SoftPalette.gray150;
-    final textColor = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
-    final labelColor = isDark ? SoftPalette.emerald150 : SoftPalette.gray550;
-    final dialogBorder = isDark ? SoftPalette.emerald350 : SoftPalette.green300;
+    final c = context.comfort;
+    final dialogBg = c.surface;
+    final titleBg = c.brandSoft;
+    final titleTextColor = c.brand;
+    final sectionBg = c.surfaceSunken;
+    final sectionBorder = c.border;
+    final textColor = c.textPrimary;
+    final labelColor = c.textSecondary;
+    final dialogBorder = c.border;
 
     // Placeholder values like '0' or 'null' (bad records) are not names.
     String cleanPatientName(dynamic v) {
@@ -3283,10 +3651,10 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
                 onChanged: (_) => _formatTemperatureAutoDot(tempCtrl),
                 style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600),
                 decoration: _vitalsDecoration(
-                    'Temperature (°F)',
+                    'Temperature (°C)',
                     Icons.thermostat,
                     isDark,
-                    hint: 'e.g. 98.6'),
+                    hint: 'e.g. 37.0'),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -3330,18 +3698,15 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
               Row(
                 children: [1, 2, 3].map((d) {
                   final isSelected = suggestedDays == d;
-                  final itemBg = isSelected
-                      ? _teal
-                      : (isDark ? SoftPalette.teal900 : SoftPalette.green100m);
-                  final itemBorder = isSelected
-                      ? _teal
-                      : (isDark ? SoftPalette.emerald750 : SoftPalette.green300);
+                  final itemBg = isSelected ? _teal : sectionBg;
+                  final itemBorder = isSelected ? _teal : sectionBorder;
 
                   return Expanded(
                     child: Padding(
                       padding: EdgeInsets.only(right: d < 3 ? 8 : 0),
                       child: InkWell(
                         onTap: () => setState(() => suggestedDays = d),
+                        borderRadius: BorderRadius.circular(10),
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           decoration: BoxDecoration(
@@ -3356,9 +3721,7 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
                             child: Text(
                               '$d Day${d > 1 ? 's' : ''}',
                               style: TextStyle(
-                                color: isSelected
-                                    ? SoftPalette.gray50
-                                    : (isDark ? SoftPalette.emerald300 : _teal),
+                                color: isSelected ? c.onBrand : textColor,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13,
                               ),
@@ -3457,12 +3820,12 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: widget.hasRegularToday ? SoftPalette.gray350 : SoftPalette.green400,
-                  foregroundColor: SoftPalette.gray50,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  backgroundColor: widget.hasRegularToday ? c.surfaceSunken : _teal,
+                  foregroundColor: widget.hasRegularToday ? c.textMuted : c.onBrand,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8)),
-                  elevation: widget.hasRegularToday ? 0 : 2,
+                  elevation: 0,
                 ),
               ),
             ],

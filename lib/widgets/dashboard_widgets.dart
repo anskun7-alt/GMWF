@@ -3170,106 +3170,132 @@ class GlobalFilterBar extends StatelessWidget {
 
         final rangeText = formatRangeLabel(filter);
 
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () {
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => DashboardFilterDialog(
-                      controller: controller,
-                      branches: branches,
-                    ),
-                  );
-                },
-                borderRadius: BorderRadius.circular(12),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: isFiltered ? t.accent.withValues(alpha: 0.12) : t.bgCard,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isFiltered ? t.accent : t.bgRule,
-                      width: isFiltered ? 1.4 : 1.0,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: SoftPalette.gray900.withValues(alpha: 0.04),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.tune_rounded,
-                        size: 15,
-                        color: isFiltered ? t.accent : t.textSecondary,
-                      ),
-                      const SizedBox(width: 7),
-                      Text(
-                        'Filters',
-                        style: TextStyle(
-                          color: isFiltered ? t.accent : t.textPrimary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(width: 7),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final maxChipAreaWidth = constraints.hasBoundedWidth
+                ? max(120.0, constraints.maxWidth - (isFiltered ? 38.0 : 0.0))
+                : double.infinity;
+
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxChipAreaWidth),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () {
+                        showDialog(
+                          context: context,
+                          builder: (ctx) => DashboardFilterDialog(
+                            controller: controller,
+                            branches: branches,
+                          ),
+                        );
+                      },
+                      borderRadius: BorderRadius.circular(Gr.r2),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6.5),
                         decoration: BoxDecoration(
                           color: isFiltered
-                              ? t.accent.withValues(alpha: 0.18)
-                              : (t.isDarkCanvas ? SoftPalette.gray50A10 : SoftPalette.slate100),
-                          borderRadius: BorderRadius.circular(6),
+                              ? t.accent.withValues(alpha: t.isDarkCanvas ? 0.16 : 0.10)
+                              : (t.isDarkCanvas ? t.bgCard : SoftPalette.gray50),
+                          borderRadius: BorderRadius.circular(Gr.r2),
+                          border: Border.all(
+                            color: isFiltered
+                                ? t.accent
+                                : (t.isDarkCanvas ? t.bgRule : SoftPalette.slate150),
+                            width: isFiltered ? 1.3 : 1.0,
+                          ),
+                          boxShadow: GShadow.s1(t.isDarkCanvas),
                         ),
-                        child: Text(
-                          '$rangeText · $activeBranchName${filter.patientType != null ? ' · ${filter.patientType!.toUpperCase()}' : ''}${filter.multiDayMedicineOnly ? ' · 2+ Days' : ''}',
-                          style: TextStyle(
-                            color: isFiltered ? t.accent : t.textSecondary,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.tune_rounded,
+                              size: 14,
+                              color: isFiltered ? t.accent : t.textSecondary,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Filters',
+                              style: TextStyle(
+                                color: isFiltered ? t.accent : t.textPrimary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 7),
+                            Flexible(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isFiltered
+                                      ? t.accent.withValues(alpha: 0.16)
+                                      : (t.isDarkCanvas ? SoftPalette.slate900 : SoftPalette.slate100),
+                                  borderRadius: BorderRadius.circular(Gr.r1 + 2),
+                                  border: Border.all(
+                                    color: isFiltered
+                                        ? t.accent.withValues(alpha: 0.25)
+                                        : (t.isDarkCanvas ? t.bgRule : SoftPalette.slate150),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: Text(
+                                  '$rangeText · $activeBranchName${filter.patientType != null ? ' · ${filter.patientType!.toUpperCase()}' : ''}${filter.multiDayMedicineOnly ? ' · 2+ Days' : ''}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  softWrap: false,
+                                  style: TextStyle(
+                                    color: isFiltered ? t.accent : t.textSecondary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.keyboard_arrow_down_rounded,
+                              size: 16,
+                              color: isFiltered ? t.accent : t.textSecondary,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                if (isFiltered) ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Reset Filters',
+                    child: InkWell(
+                      onTap: controller.resetFilters,
+                      borderRadius: BorderRadius.circular(Gr.r2),
+                      child: Container(
+                        padding: const EdgeInsets.all(6.5),
+                        decoration: BoxDecoration(
+                          color: GColor.dangerOf(t.isDarkCanvas).withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(Gr.r2),
+                          border: Border.all(
+                            color: GColor.dangerOf(t.isDarkCanvas).withValues(alpha: 0.30),
                           ),
                         ),
+                        child: Icon(
+                          Icons.restart_alt_rounded,
+                          size: 15,
+                          color: GColor.dangerOf(t.isDarkCanvas),
+                        ),
                       ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        size: 16,
-                        color: isFiltered ? t.accent : t.textSecondary,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            if (isFiltered) ...[
-              const SizedBox(width: 6),
-              Tooltip(
-                message: 'Reset Filters',
-                child: InkWell(
-                  onTap: controller.resetFilters,
-                  borderRadius: BorderRadius.circular(8),
-                  child: Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: SoftPalette.red400.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: SoftPalette.red400.withValues(alpha: 0.3)),
                     ),
-                    child: const Icon(Icons.restart_alt_rounded, size: 15, color: SoftPalette.red400),
                   ),
-                ),
-              ),
-            ],
-          ],
+                ],
+              ],
+            );
+          },
         );
       },
     );

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GComfortColorsContext;
 import 'package:gmwf/design/components/decorative_image.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lottie/lottie.dart';
@@ -133,22 +134,21 @@ class _GmwfLoadingViewState extends State<GmwfLoadingView>
         ? 120.0
         : (size.shortestSide * 0.18).clamp(72.0, 110.0);
 
+    final c = context.comfort;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    // ── Design tokens (matching LoginPage) ───────────────────────────────────
-    final bgColor   = isDark ? SoftPalette.teal900 : SoftPalette.green100t;
-    final cardBg    = isDark ? SoftPalette.teal900.withValues(alpha: 0.95) : SoftPalette.gray50;
-    final cardBorder= isDark ? SoftPalette.emerald350.withValues(alpha: 0.25) : SoftPalette.emerald100;
-    final cardShadow= isDark ? SoftPalette.gray900.withValues(alpha: 0.45) : SoftPalette.emerald550.withValues(alpha: 0.08);
-    final badgeColor= isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final badgeDivider= isDark ? SoftPalette.emerald550 : SoftPalette.emerald150;
-    final titleMain = isDark ? SoftPalette.gray50 : SoftPalette.emerald700;
-    final titleAccent= isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final subtitleColor= isDark ? SoftPalette.gray50.withValues(alpha: 0.5) : SoftPalette.slate600;
-    final shimmerColor= isDark ? SoftPalette.emerald300 : SoftPalette.emerald500;
-    final shimmerTrack= isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.emerald500.withValues(alpha: 0.12);
-    final glowColor = isDark ? SoftPalette.emerald350 : SoftPalette.emerald500;
-    final panelBg   = isDark ? SoftPalette.teal900 : SoftPalette.emerald700;
+    final bgColor = c.background;
+    final cardBg = c.surface;
+    final cardBorder = c.border;
+    final cardShadow = c.brand.withValues(alpha: isDark ? 0.25 : 0.08);
+    final badgeColor = c.brand;
+    final badgeDivider = c.border;
+    final titleMain = c.textPrimary;
+    final titleAccent = c.brand;
+    final subtitleColor = c.textSecondary;
+    final shimmerColor = c.brand;
+    final shimmerTrack = c.brandSoft;
+    final glowColor = c.brand;
+    final panelBg = c.sidebarBg;
 
     final displayMessage = widget.message ?? _defaultMessages[_messageIndex];
 

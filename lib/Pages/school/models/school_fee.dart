@@ -52,6 +52,13 @@ class SchoolFeeRecord {
 
   double get remainingBalance => (totalAmount - paidAmount).clamp(0.0, double.infinity);
 
+  /// paid ≥ total (whole rupees) → paid; anything paid → partial; else unpaid.
+  static String statusFor(double total, double paid) {
+    if (paid.round() >= total.round() && (total > 0 || paid > 0)) return 'paid';
+    if (paid > 0) return 'partial';
+    return total <= 0 ? 'paid' : 'unpaid';
+  }
+
   factory SchoolFeeRecord.fromMap(String id, Map<String, dynamic> map) {
     final tuition = (map['tuitionFee'] as num?)?.toDouble() ?? 0.0;
     final admission = (map['admissionFee'] as num?)?.toDouble() ?? 0.0;
@@ -142,6 +149,15 @@ class SchoolFeeRecord {
     String? remarks,
     String? branchId,
   }) {
+    // Total and status are derived, not copied: copying the old total meant a
+    // discount never reduced it, and the stored status stayed "unpaid" after payment.
+    final t = tuitionFee ?? this.tuitionFee;
+    final a = admissionFee ?? this.admissionFee;
+    final e = examFee ?? this.examFee;
+    final o = otherCharges ?? this.otherCharges;
+    final d = discount ?? this.discount;
+    final total = totalAmount ?? ((t + a + e + o) - d).clamp(0.0, double.infinity);
+    final paid = paidAmount ?? this.paidAmount;
     return SchoolFeeRecord(
       id: id,
       studentId: studentId,
@@ -150,14 +166,14 @@ class SchoolFeeRecord {
       grade: grade ?? this.grade,
       section: section ?? this.section,
       monthYear: monthYear ?? this.monthYear,
-      tuitionFee: tuitionFee ?? this.tuitionFee,
-      admissionFee: admissionFee ?? this.admissionFee,
-      examFee: examFee ?? this.examFee,
-      otherCharges: otherCharges ?? this.otherCharges,
-      discount: discount ?? this.discount,
-      totalAmount: totalAmount ?? this.totalAmount,
-      paidAmount: paidAmount ?? this.paidAmount,
-      status: status ?? this.status,
+      tuitionFee: t,
+      admissionFee: a,
+      examFee: e,
+      otherCharges: o,
+      discount: d,
+      totalAmount: total,
+      paidAmount: paid,
+      status: status ?? statusFor(total, paid),
       paymentDate: paymentDate ?? this.paymentDate,
       paymentMethod: paymentMethod ?? this.paymentMethod,
       receiptNo: receiptNo ?? this.receiptNo,

@@ -38,18 +38,11 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: NexusColors.cardBg,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: NexusColors.cardBorder, width: 1.0),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x06000000),
-            blurRadius: 10,
-            offset: Offset(0, 3),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -64,7 +57,7 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
                   Text(
                     'Server Performance',
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w700,
                       color: NexusColors.textMain,
                     ),
@@ -73,7 +66,7 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
                   Text(
                     'Live telemetry for CPU and memory utilization',
                     style: GoogleFonts.inter(
-                      fontSize: 12,
+                      fontSize: 11.5,
                       fontWeight: FontWeight.w400,
                       color: NexusColors.textSecondary,
                     ),
@@ -100,15 +93,7 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
                         decoration: BoxDecoration(
                           color: isSel ? NexusColors.cardBg : Colors.transparent,
                           borderRadius: BorderRadius.circular(6),
-                          boxShadow: isSel
-                              ? const [
-                                  BoxShadow(
-                                    color: Color(0x08000000),
-                                    blurRadius: 4,
-                                    offset: Offset(0, 1),
-                                  )
-                                ]
-                              : null,
+                          border: isSel ? Border.all(color: NexusColors.cardBorder) : null,
                         ),
                         child: Text(
                           r,
@@ -125,21 +110,21 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
 
           // Legend Row
           Row(
             children: [
-              _buildLegendItem('CPU Utilization', NexusColors.cpuAccent, '${(widget.currentCpu * 100).toStringAsFixed(0)}%'),
-              const SizedBox(width: 20),
-              _buildLegendItem('Memory Usage', NexusColors.ramAccent, '${(widget.currentRam * 100).toStringAsFixed(0)}%'),
+              _buildLegendItem('CPU', NexusColors.cpuAccent, '${(widget.currentCpu * 100).toStringAsFixed(0)}%'),
+              const SizedBox(width: 10),
+              _buildLegendItem('Memory', NexusColors.ramAccent, '${(widget.currentRam * 100).toStringAsFixed(0)}%'),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
 
           // Chart Canvas
           SizedBox(
-            height: 220,
+            height: 210,
             child: CustomPaint(
               painter: _NexusLineChartPainter(
                 history: widget.telemetryHistory,
@@ -154,36 +139,45 @@ class _NexusPerformanceChartState extends State<NexusPerformanceChart> {
   }
 
   Widget _buildLegendItem(String label, Color color, String currentValue) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+            ),
           ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          label,
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            color: NexusColors.textSecondary,
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: GoogleFonts.inter(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w500,
+              color: NexusColors.textSecondary,
+            ),
           ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          currentValue,
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: NexusColors.textMain,
+          const SizedBox(width: 5),
+          Text(
+            currentValue,
+            style: GoogleFonts.inter(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              color: NexusColors.textMain,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

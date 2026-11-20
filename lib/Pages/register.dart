@@ -1,6 +1,7 @@
 // lib/pages/register.dart
 
 import 'dart:async';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
@@ -1256,8 +1257,9 @@ class _RegisterState extends State<Register>
                     ),
                   ],
                 ),
-                const SizedBox(height: 2),
-                const Text(
+                // The executive shell already shows the page title.
+                if (!HomeModuleHost.isModuleRoot(context)) const SizedBox(height: 2),
+                if (!HomeModuleHost.isModuleRoot(context)) const Text(
                   'Register Staff User',
                   style: TextStyle(color: SoftPalette.gray50, fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: 0.2),
                   overflow: TextOverflow.ellipsis,

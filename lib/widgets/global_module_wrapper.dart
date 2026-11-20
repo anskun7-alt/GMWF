@@ -277,7 +277,25 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
     }
   }
 
+  // ── Cache TTL guards: Avoid spamming Firestore on every screen navigation ──
+  static DateTime? _lastBranchInfoRefresh;
+  static DateTime? _lastAllBranchesRefresh;
+  static const Duration _branchRefreshTtl = Duration(hours: 6);
+
+  /// Allows explicit cache invalidation when an admin edits branch metadata
+  // ignore: unused_element
+  static void invalidateBranchCache() {
+    _lastBranchInfoRefresh = null;
+    _lastAllBranchesRefresh = null;
+  }
+
   Future<void> _refreshBranchInfoBackground(String myBranchId) async {
+    if (_lastBranchInfoRefresh != null &&
+        DateTime.now().difference(_lastBranchInfoRefresh!) < _branchRefreshTtl) {
+      return;
+    }
+    _lastBranchInfoRefresh = DateTime.now();
+
     try {
       final doc = await FirebaseFirestore.instance
           .collection('branches')
@@ -299,6 +317,12 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
   }
 
   Future<void> _refreshAllBranchesBackground() async {
+    if (_lastAllBranchesRefresh != null &&
+        DateTime.now().difference(_lastAllBranchesRefresh!) < _branchRefreshTtl) {
+      return;
+    }
+    _lastAllBranchesRefresh = DateTime.now();
+
     try {
       final snap = await FirebaseFirestore.instance.collection('branches').get();
       final localBranchesBox = Hive.box(LocalStorageService.branchesBox);
@@ -443,9 +467,14 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
       );
     }
 
+    // Set to true to re-enable the legacy green wrapper AppBar if needed.
+    const bool showWrapperAppBar = false;
+
     return Scaffold(
       backgroundColor: _isGlobal ? SoftPalette.slate900 : t.bg,
-      appBar: _buildAppBar(t, isMobile),
+      // Disabled for the new HomeShell layout; _buildAppBar is kept intact for reuse.
+      // ignore: dead_code
+      appBar: showWrapperAppBar ? _buildAppBar(t, isMobile) : null,
       body: _needsBranch
           ? _BranchPickerBody(
               state: this,

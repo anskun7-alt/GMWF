@@ -1,5 +1,6 @@
 // lib/models/module_registry.dart
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../services/permission_service.dart';
 import '../services/local_storage_service.dart';
@@ -9,7 +10,7 @@ import '../pages/dispensary/doctor/doctor_screen.dart';
 import '../pages/dispensary/dispensar/dispensar_screen.dart';
 import '../pages/dispensary/dispensar/inventory.dart';
 import '../pages/dispensary/dispensar/universal_proforma_sheet.dart';
-import '../pages/dispensary/dispensar/medicine_ledger.dart';
+import '../pages/dispensary/dispensar/stock_check_report.dart';
 import '../pages/donations/donations_screen.dart';
 import '../pages/donations/donations_shared.dart';
 import '../pages/branches.dart';
@@ -473,15 +474,17 @@ class ModuleRegistry {
     ),
     AppModule(
       id: 'inventory_ledger',
-      title: 'Medicine Ledger',
-      description: 'Track complete history of medicine stock and dispensing',
+      // Id kept as 'inventory_ledger' so saved permissions and shortcuts still work.
+      title: 'Report',
+      description: 'Medicine ledger, stock checks, counts needed and set-aside records',
       icon: Icons.receipt_long_rounded,
       requiredPermission: AppPermission.manageInventory,
       isBranchDependent: true,
       supportsGlobalWrapper: true,
-      builder: (context, data) => MedicineLedgerPage(
+      builder: (context, data) => StockReportPage(
         branchId: data['branchId'] ?? 'unknown',
         isEmbedded: true,
+        canAdjust: true,
       ),
       category: ModuleCategory.dispensary,
     ),
@@ -600,7 +603,7 @@ class ModuleRegistry {
       id: 'dasterkhwaan_food_log',
       title: 'Food Log',
       description: 'Track daily food prepared by cook or received from outside hotels',
-      icon: Icons.restaurant_menu_rounded,
+      icon: LucideIcons.wheat,
       requiredPermission: AppPermission.manageKitchen,
       isBranchDependent: true,
       supportsGlobalWrapper: true,
@@ -655,7 +658,7 @@ class ModuleRegistry {
     // ── SCHOOL MODULES ──
     AppModule(
       id: 'school_module',
-      title: 'Taleem-wa-Tarbiyat School',
+      title: 'School',
       description: 'Taleem-wa-Tarbiyat School System dashboard overview, admissions, and analytics (GMWF)',
       icon: Icons.school_rounded,
       requiredPermission: AppPermission.manageSchool,
@@ -869,7 +872,7 @@ class ModuleRegistry {
         'inventory': 'Inventory',
         'pending_requests': 'Requests',
         'finance': 'Finance',
-        'inventory_ledger': 'Medicine Ledger',
+        'inventory_ledger': 'Report',
         'office_boy': 'Issue Food Tokens',
         'kitchen': 'Kitchen',
         'dasterkhwaan_inventory': 'Dasterkhwaan Stock',

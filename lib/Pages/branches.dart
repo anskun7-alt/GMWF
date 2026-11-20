@@ -1,9 +1,12 @@
 // lib/pages/branches.dart
 
 import 'dart:ui' as ui;
+import 'package:gmwf/design/tokens/colors.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GComfortColorsContext;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/shadows.dart';
 import 'package:flutter/material.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -195,6 +198,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   int _currentPage = 1;
   int _rowsPerPage = 10;
   String _chartRange = '7d'; // '7d', '14d', '30d', 'month'
+  bool _showBarChart = false;
   String _selectedCampFilter = 'all'; // 'all', 'haji', 'saddar'
   // Hover changes repaint only the chart; a setState rebuilt the whole page
   // (patient search scan, peak record lookup) on every mouse move.
@@ -374,7 +378,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   void _showDateRangePicker(BuildContext context, RoleThemeData t) async {
-    final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = t.isDarkCanvas;
     final currentRange = ref.read(branchDateRangeProvider);
     final initialDateRange = DateTimeRange(
       start: currentRange.start ?? DateTime.now(),
@@ -484,11 +488,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Expanded(
                         child: DropdownButtonFormField<String>(
                           value: _sortField,
+                          dropdownColor: t.bgCard,
+                          style: TextStyle(fontSize: 13, color: t.textPrimary),
                           decoration: InputDecoration(
                             isDense: true,
                             filled: true,
-                            fillColor: t.bg,
+                            fillColor: t.bgCardAlt,
                             border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
+                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: t.bgRule)),
                           ),
                           items: const [
                             DropdownMenuItem(value: 'token', child: Text('Token number')),
@@ -551,6 +558,18 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         child: FilterChip(
                           label: const Text("Multi-Day Course"),
                           selected: mDay,
+                          backgroundColor: t.bgCardAlt,
+                          selectedColor: Color.alphaBlend(
+                            t.accent.withValues(alpha: t.isDarkCanvas ? 0.22 : 0.14),
+                            t.bgCard,
+                          ),
+                          checkmarkColor: t.accent,
+                          side: BorderSide(color: mDay ? t.accent : t.bgRule),
+                          labelStyle: TextStyle(
+                            color: mDay ? t.accent : t.textPrimary,
+                            fontSize: 12,
+                            fontWeight: mDay ? FontWeight.w700 : FontWeight.w500,
+                          ),
                           onSelected: (val) {
                             ref.read(branchMultiDayFilterProvider.notifier).state = val;
                             setModalState(() {});
@@ -563,6 +582,18 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         child: FilterChip(
                           label: const Text("Frequent Visits (2+)"),
                           selected: mVisit,
+                          backgroundColor: t.bgCardAlt,
+                          selectedColor: Color.alphaBlend(
+                            t.accent.withValues(alpha: t.isDarkCanvas ? 0.22 : 0.14),
+                            t.bgCard,
+                          ),
+                          checkmarkColor: t.accent,
+                          side: BorderSide(color: mVisit ? t.accent : t.bgRule),
+                          labelStyle: TextStyle(
+                            color: mVisit ? t.accent : t.textPrimary,
+                            fontSize: 12,
+                            fontWeight: mVisit ? FontWeight.w700 : FontWeight.w500,
+                          ),
                           onSelected: (val) {
                             ref.read(branchMultiVisitFilterProvider.notifier).state = val;
                             setModalState(() {});
@@ -579,7 +610,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       onPressed: () => Navigator.pop(ctx),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: t.accent,
-                        foregroundColor: SoftPalette.gray50,
+                        foregroundColor: GColor.onAccent(t.accent),
                         padding: const EdgeInsets.symmetric(vertical: 14),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
@@ -596,17 +627,21 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildModalChip(String label, bool isSelected, VoidCallback onTap, RoleThemeData t) {
+    final isDark = t.isDarkCanvas;
     return ChoiceChip(
       label: Text(label),
       selected: isSelected,
       onSelected: (_) => onTap(),
-      selectedColor: t.accent.withValues(alpha: 0.2),
+      selectedColor: Color.alphaBlend(
+        t.accent.withValues(alpha: isDark ? 0.22 : 0.14),
+        t.bgCard,
+      ),
       labelStyle: TextStyle(
         color: isSelected ? t.accent : t.textSecondary,
         fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
         fontSize: 12,
       ),
-      backgroundColor: t.bg,
+      backgroundColor: t.bgCardAlt,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
         side: BorderSide(color: isSelected ? t.accent : t.bgRule),
@@ -640,7 +675,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     Icon(Icons.store_rounded, size: 48, color: t.bgRule),
                     const SizedBox(height: 16),
                     Text("No branches found", style: TextStyle(color: t.textTertiary, fontSize: 16)),
-                    if (widget.showRegisterButton) ...[
+                    // Creating a branch: Chairman, CEO and Admin only (not the HQ Manager).
+                    if (widget.showRegisterButton &&
+                        const {'chairman', 'ceo', 'admin', 'global admin', 'super admin'}.contains(
+                            (LocalStorageService.getActiveUserData()['role'] ?? '').toString().toLowerCase().trim())) ...[
                       const SizedBox(height: 16),
                       ElevatedButton.icon(
                         onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => BranchesRegister())),
@@ -772,6 +810,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           if (branches.length > 1 && canSwitchBranches) ...[
                             const SizedBox(width: 8),
                             PopupMenuButton<String>(
+                              color: t.bgCard,
                               icon: Icon(Icons.keyboard_arrow_down_rounded, color: t.textSecondary),
                               tooltip: 'Switch Branch',
                               onSelected: (bId) {
@@ -827,13 +866,17 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildDatePresetChip(String label, bool isSelected, VoidCallback onTap, RoleThemeData t) {
+    final isDark = t.isDarkCanvas;
+    final fillColor = isSelected
+        ? Color.alphaBlend(t.accent.withValues(alpha: isDark ? 0.22 : 0.12), t.bgCard)
+        : t.bgCard;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
-          color: isSelected ? t.accent.withValues(alpha: 0.15) : t.bgCard,
+          color: fillColor,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isSelected ? t.accent : t.bgRule,
@@ -928,7 +971,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               ),
             ),
             style: OutlinedButton.styleFrom(
-              backgroundColor: isCustom ? t.accent.withValues(alpha: 0.12) : t.bgCard,
+              backgroundColor: isCustom
+                  ? Color.alphaBlend(
+                      t.accent.withValues(alpha: t.isDarkCanvas ? 0.20 : 0.12),
+                      t.bgCard,
+                    )
+                  : t.bgCard,
               side: BorderSide(color: isCustom ? t.accent : t.bgRule),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -1021,15 +1069,22 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
 
         return LayoutBuilder(
           builder: (context, constraints) {
-            final isWide = constraints.maxWidth > 1350;
-            final isMedium = constraints.maxWidth > 750;
+            final c = context.comfort;
+            final isWide = constraints.maxWidth >= 980;
+            final isMedium = constraints.maxWidth >= 620;
             final cardWidth = isWide
-                ? (constraints.maxWidth - 64) / 5
-                : (isMedium ? (constraints.maxWidth - 16) / 2 : constraints.maxWidth);
+                ? (constraints.maxWidth - 48) / 5
+                : (isMedium ? (constraints.maxWidth - 12) / 2 : constraints.maxWidth);
+
+            final tokensColor = c.chart1;
+            final revenueColor = c.chart2;
+            final prescColor = c.chart3;
+            final dispColor = c.info;
+            final peakColor = c.chart4;
 
             return Wrap(
-              spacing: 16,
-              runSpacing: 16,
+              spacing: 12,
+              runSpacing: 12,
               children: [
                 SizedBox(
                   width: cardWidth,
@@ -1038,7 +1093,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     mainCount: NumberFormat('#,###').format(totalTokens),
                     trendText: "Today",
                     isPositiveTrend: true,
-                    badgeColor: SoftPalette.indigo500,
+                    badgeColor: tokensColor,
                     badgeIcon: Icons.people_alt_rounded,
                     subItems: [
                       {'label': BranchLabels.isKarachiBranch(branchId) ? BranchLabels.karachiZakatLabel : 'Zakat (Rs 20)', 'val': NumberFormat('#,###').format(zakatTokens)},
@@ -1051,28 +1106,11 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 SizedBox(
                   width: cardWidth,
                   child: _buildKpiCard(
-                    title: "Total Token Collection",
-                    mainCount: "PKR $fmtTotal",
-                    trendText: "Revenue",
-                    isPositiveTrend: true,
-                    badgeColor: SoftPalette.teal500,
-                    badgeIcon: Icons.account_balance_wallet_rounded,
-                    subItems: [
-                      {'label': BranchLabels.text('Zakat Rec.', branchId), 'val': 'Rs $fmtZakat'},
-                      {'label': BranchLabels.text('Non-Zakat Rec.', branchId), 'val': 'Rs $fmtNonZakat'},
-                      {'label': 'Free Tokens', 'val': 'Rs 0'},
-                    ],
-                    t: t,
-                  ),
-                ),
-                SizedBox(
-                  width: cardWidth,
-                  child: _buildKpiCard(
                     title: "Total Prescriptions",
                     mainCount: NumberFormat('#,###').format(prescribed),
                     trendText: "+8% vs yest",
                     isPositiveTrend: true,
-                    badgeColor: SoftPalette.emerald350,
+                    badgeColor: prescColor,
                     badgeIcon: Icons.assignment_rounded,
                     subItems: [
                       {'label': 'Waiting', 'val': NumberFormat('#,###').format(waitingDoctor)},
@@ -1088,7 +1126,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     mainCount: NumberFormat('#,###').format(dispensed),
                     trendText: "+5% vs yest",
                     isPositiveTrend: true,
-                    badgeColor: SoftPalette.amber300,
+                    badgeColor: dispColor,
                     badgeIcon: Icons.medication_liquid_rounded,
                     subItems: [
                       {'label': 'Pending', 'val': NumberFormat('#,###').format(pendingDisp)},
@@ -1104,11 +1142,28 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     mainCount: NumberFormat('#,###').format(peakCount),
                     trendText: records.isNewRecordToday ? "🔥 Record Broken Today!" : peakDate,
                     isPositiveTrend: true,
-                    badgeColor: SoftPalette.orange400,
+                    badgeColor: peakColor,
                     badgeIcon: Icons.emoji_events_rounded,
                     subItems: [
                       {'label': 'Record Date', 'val': peakDate},
                       {'label': 'Today Dealt', 'val': NumberFormat('#,###').format(totalTokens)},
+                    ],
+                    t: t,
+                  ),
+                ),
+                SizedBox(
+                  width: cardWidth,
+                  child: _buildKpiCard(
+                    title: "Total Token Collection",
+                    mainCount: "PKR $fmtTotal",
+                    trendText: "Revenue",
+                    isPositiveTrend: true,
+                    badgeColor: revenueColor,
+                    badgeIcon: Icons.account_balance_wallet_rounded,
+                    subItems: [
+                      {'label': BranchLabels.text('Zakat Rec.', branchId), 'val': 'Rs $fmtZakat'},
+                      {'label': BranchLabels.text('Non-Zakat Rec.', branchId), 'val': 'Rs $fmtNonZakat'},
+                      {'label': 'Free Tokens', 'val': 'Rs 0'},
                     ],
                     t: t,
                   ),
@@ -1129,139 +1184,183 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     required List<Map<String, String>> subItems,
     required RoleThemeData t,
   }) {
-    final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = t.isDarkCanvas;
+    final trendColor = isPositiveTrend
+        ? (isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald)
+        : (isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral);
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
-      decoration: BoxDecoration(
-        color: t.bgCard,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: t.bgRule.withValues(alpha: 0.8), width: 1),
-        boxShadow: GShadow.s2(isDark),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: badgeColor.withValues(alpha: 0.25), width: 1),
-                ),
-                child: Icon(badgeIcon, color: badgeColor, size: 20),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color.alphaBlend(
+                badgeColor.withValues(alpha: isDark ? 0.08 : 0.04),
+                t.bgCard,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 3),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Flexible(
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              mainCount,
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.w900,
-                                color: t.textPrimary,
-                                letterSpacing: -0.5,
-                              ),
-                            ),
+              t.bgCard,
+            ],
+          ),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: badgeColor.withValues(alpha: isDark ? 0.28 : 0.20),
+            width: 1,
+          ),
+          boxShadow: GShadow.s2(isDark),
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 2.5,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      badgeColor,
+                      badgeColor.withValues(alpha: 0.45),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: badgeColor.withValues(alpha: isDark ? 0.18 : 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: badgeColor.withValues(alpha: isDark ? 0.36 : 0.28),
+                            width: 1,
                           ),
                         ),
-                        if (trendText.isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isPositiveTrend ? SoftPalette.emerald350.withValues(alpha: 0.12) : SoftPalette.red400.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(6),
+                        child: Icon(badgeIcon, color: badgeColor, size: 17),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            child: Row(
+                            const SizedBox(height: 3),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Flexible(
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      mainCount,
+                                      style: TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w900,
+                                        color: t.textPrimary,
+                                        letterSpacing: -0.5,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (trendText.isNotEmpty) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 5.5, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: trendColor.withValues(alpha: isDark ? 0.18 : 0.12),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          isPositiveTrend ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                                          size: 10,
+                                          color: trendColor,
+                                        ),
+                                        const SizedBox(width: 2),
+                                        Text(
+                                          trendText,
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                            color: trendColor,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: t.bgCardAlt,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: t.bgRule, width: 0.8),
+                    ),
+                    child: Row(
+                      children: subItems.map((item) {
+                        return Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Icon(
-                                  isPositiveTrend ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
-                                  size: 10,
-                                  color: isPositiveTrend ? SoftPalette.emerald350 : SoftPalette.red400,
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(
+                                    item['label'] ?? '',
+                                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: t.textTertiary),
+                                    textAlign: TextAlign.center,
+                                  ),
                                 ),
-                                const SizedBox(width: 2),
-                                Text(
-                                  trendText,
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w700,
-                                    color: isPositiveTrend ? SoftPalette.emerald350 : SoftPalette.red400,
+                                const SizedBox(height: 3),
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(
+                                    item['val'] ?? '0',
+                                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: t.textPrimary),
+                                    textAlign: TextAlign.center,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-            decoration: BoxDecoration(
-              color: t.bg.withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: t.bgRule.withValues(alpha: 0.5), width: 0.5),
-            ),
-            child: Row(
-              children: subItems.map((item) {
-                return Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            item['label'] ?? '',
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: t.textTertiary),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            item['val'] ?? '0',
-                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: t.textPrimary),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      ],
+                        );
+                      }).toList(),
                     ),
                   ),
-                );
-              }).toList(),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1271,11 +1370,35 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   // ───────────────────────────────────────────────────────────────────────────
 
   Widget _buildMiddleSection(BuildContext context, RoleThemeData t, String branchId) {
-    return _buildPerformanceChartCard(context, t, branchId);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final perfCard = _buildPerformanceChartCard(context, t, branchId);
+        final mixCard = _buildTokenMixAndPipelineCard(context, t, branchId);
+        if (constraints.maxWidth >= 980) {
+          return IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(flex: 2, child: perfCard),
+                const SizedBox(width: 14),
+                Expanded(flex: 1, child: mixCard),
+              ],
+            ),
+          );
+        }
+        return Column(
+          children: [
+            perfCard,
+            const SizedBox(height: 14),
+            mixCard,
+          ],
+        );
+      },
+    );
   }
 
   Widget _buildPerformanceChartCard(BuildContext context, RoleThemeData t, String branchId) {
-    final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = t.isDarkCanvas;
     final dispState = ref.watch(dispensaryProvider(branchId));
     final perfData = _computeRealPerformanceData(branchId, _chartRange, extraRecords: dispState.records);
     final tokensData = (perfData['tokens'] as List<double>?) ?? [];
@@ -1287,8 +1410,19 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final prescTotal = prescData.fold<double>(0.0, (a, b) => a + b).toInt();
     final dispTotal = dispData.fold<double>(0.0, (a, b) => a + b).toInt();
 
+    final c = context.comfort;
+    final tokensColor = c.chart1;
+    final prescColor = c.chart3;
+    final dispColor = c.info;
+
+    double maxY = 4;
+    for (final v in [...tokensData, ...prescData, ...dispData]) {
+      if (v > maxY) maxY = v;
+    }
+    maxY = (maxY * 1.18).ceilToDouble();
+
     return Container(
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: t.bgCard,
         borderRadius: BorderRadius.circular(16),
@@ -1299,35 +1433,53 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Performance Overview",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: t.textPrimary),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _selectedCampFilter == 'haji'
-                        ? "Haji Camp Dispensary Data"
-                        : (_selectedCampFilter == 'saddar' ? "Saddar Dispensary Data" : "Collective Branch Performance"),
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: t.accent),
-                  ),
-                ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Performance Overview',
+                      style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800, color: t.textPrimary),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _selectedCampFilter == 'haji'
+                          ? 'Haji Camp Dispensary Data'
+                          : (_selectedCampFilter == 'saddar' ? 'Saddar Dispensary Data' : 'Collective Branch Performance'),
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: t.accent),
+                    ),
+                  ],
+                ),
               ),
+              Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: t.bgCardAlt,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: t.bgRule),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _chartModeButton(t, label: 'Trend', icon: Icons.show_chart_rounded, active: !_showBarChart, onTap: () => setState(() => _showBarChart = false)),
+                    _chartModeButton(t, label: 'Bars', icon: Icons.bar_chart_rounded, active: _showBarChart, onTap: () => setState(() => _showBarChart = true)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
               DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _chartRange,
+                  isDense: true,
                   dropdownColor: t.bgCard,
                   icon: Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: t.textSecondary),
                   style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: t.textPrimary),
                   items: const [
-                    DropdownMenuItem(value: '7d', child: Text("Last 7 Days")),
-                    DropdownMenuItem(value: '14d', child: Text("Last 14 Days")),
-                    DropdownMenuItem(value: '30d', child: Text("Last 30 Days")),
-                    DropdownMenuItem(value: 'month', child: Text("This Month")),
+                    DropdownMenuItem(value: '7d', child: Text('Last 7 Days')),
+                    DropdownMenuItem(value: '14d', child: Text('Last 14 Days')),
+                    DropdownMenuItem(value: '30d', child: Text('Last 30 Days')),
+                    DropdownMenuItem(value: 'month', child: Text('This Month')),
                   ],
                   onChanged: (val) {
                     if (val != null) setState(() => _chartRange = val);
@@ -1336,88 +1488,386 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          // Prominent total numbers and series indicators
+          const SizedBox(height: 10),
           Wrap(
-            spacing: 10,
-            runSpacing: 8,
+            spacing: 8,
+            runSpacing: 6,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _buildTotalMetricBadge(
-                label: "Tokens",
-                count: tokensTotal,
-                color: SoftPalette.indigo500,
-                icon: Icons.confirmation_number_outlined,
-                t: t,
-              ),
-              _buildTotalMetricBadge(
-                label: "Prescriptions",
-                count: prescTotal,
-                color: SoftPalette.emerald350,
-                icon: Icons.medical_services_outlined,
-                t: t,
-              ),
-              _buildTotalMetricBadge(
-                label: "Dispensed",
-                count: dispTotal,
-                color: SoftPalette.amber300,
-                icon: Icons.medication_outlined,
-                t: t,
-              ),
-              _buildTotalMetricBadge(
-                label: "Total Activity",
-                count: tokensTotal + prescTotal + dispTotal,
-                color: t.accent,
-                icon: Icons.query_stats_rounded,
-                t: t,
-              ),
+              _buildTotalMetricBadge(label: 'Tokens', count: tokensTotal, color: tokensColor, icon: Icons.confirmation_number_outlined, t: t),
+              _buildTotalMetricBadge(label: 'Prescriptions', count: prescTotal, color: prescColor, icon: Icons.medical_services_outlined, t: t),
+              _buildTotalMetricBadge(label: 'Dispensed', count: dispTotal, color: dispColor, icon: Icons.medication_outlined, t: t),
+              _buildTotalMetricBadge(label: 'Total Activity', count: tokensTotal + prescTotal + dispTotal, color: t.accent, icon: Icons.query_stats_rounded, t: t),
             ],
           ),
-          const SizedBox(height: 18),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final w = constraints.maxWidth;
-              return MouseRegion(
-                onHover: (event) {
-                  final x = event.localPosition.dx;
-                  if (tokensData.length > 1) {
-                    final xStep = w / (tokensData.length - 1);
-                    final idx = (x / xStep).round().clamp(0, tokensData.length - 1);
-                    if (_hoveredChartIndex.value != idx) {
-                      _hoveredChartIndex.value = idx;
-                    }
-                  }
-                },
-                onExit: (_) {
-                  if (_hoveredChartIndex.value != null) {
-                    _hoveredChartIndex.value = null;
-                  }
-                },
-                child: SizedBox(
-                  height: 220,
-                  width: double.infinity,
-                  child: ValueListenableBuilder<int?>(
-                    valueListenable: _hoveredChartIndex,
-                    builder: (context, hovered, _) => CustomPaint(
-                    painter: _PerformanceMultiLinePainter(
-                      theme: t,
-                      tokensColor: SoftPalette.indigo500,
-                      prescriptionsColor: SoftPalette.emerald350,
-                      dispensaryColor: SoftPalette.amber300,
-                      tokensData: tokensData,
-                      prescriptionsData: prescData,
-                      dispensaryData: dispData,
-                      dateLabels: labels,
-                      hoveredIndex: hovered,
-                    ),
-                  ),
-                  ),
-                ),
-              );
-            },
+          const SizedBox(height: 12),
+          Container(
+            height: 215,
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(10, 14, 14, 8),
+            decoration: BoxDecoration(
+              color: isDark ? t.bgCard : Colors.white.withValues(alpha: 0.65),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: t.bgRule),
+            ),
+            child: tokensData.isEmpty
+                ? Center(child: Text('No chart data for this period', style: TextStyle(color: t.textSecondary, fontSize: 12)))
+                : (_showBarChart
+                    ? _buildFlBarChart(t, labels, tokensData, prescData, dispData, tokensColor, prescColor, dispColor, maxY)
+                    : _buildFlLineChart(t, labels, tokensData, prescData, dispData, tokensColor, prescColor, dispColor, maxY)),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _chartModeButton(RoleThemeData t, {required String label, required IconData icon, required bool active, required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: active ? t.accent.withValues(alpha: 0.14) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: active ? t.accent : t.textSecondary),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: active ? t.accent : t.textSecondary)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFlLineChart(
+    RoleThemeData t,
+    List<String> labels,
+    List<double> tokensData,
+    List<double> prescData,
+    List<double> dispData,
+    Color tokensColor,
+    Color prescColor,
+    Color dispColor,
+    double maxY,
+  ) {
+    final step = labels.length > 10 ? (labels.length / 6).ceil() : 1;
+    return LineChart(
+      LineChartData(
+        minY: 0,
+        maxY: maxY,
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          getDrawingHorizontalLine: (_) => FlLine(color: t.bgRule, strokeWidth: 1, dashArray: [4, 4]),
+        ),
+        borderData: FlBorderData(show: false),
+        titlesData: FlTitlesData(
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 34,
+              getTitlesWidget: (val, meta) {
+                if (val == meta.max && val % 1 != 0) return const SizedBox.shrink();
+                return Text(
+                  val.toInt().toString(),
+                  style: TextStyle(fontSize: 10, color: t.textTertiary, fontWeight: FontWeight.w600),
+                );
+              },
+            ),
+          ),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 22,
+              interval: 1,
+              getTitlesWidget: (val, _) {
+                final i = val.toInt();
+                if (i < 0 || i >= labels.length || i % step != 0) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(labels[i], style: TextStyle(fontSize: 10, color: t.textSecondary, fontWeight: FontWeight.w600)),
+                );
+              },
+            ),
+          ),
+        ),
+        lineTouchData: LineTouchData(
+          touchTooltipData: LineTouchTooltipData(
+            getTooltipColor: (_) => t.bgCard,
+            tooltipBorder: BorderSide(color: t.bgRule),
+            getTooltipItems: (spots) => spots.map((s) {
+              final name = s.barIndex == 0 ? 'Tokens' : (s.barIndex == 1 ? 'Prescribed' : 'Dispensed');
+              return LineTooltipItem('$name: ${s.y.toInt()}', TextStyle(color: s.bar.color ?? t.textPrimary, fontWeight: FontWeight.w700, fontSize: 11.5));
+            }).toList(),
+          ),
+        ),
+        lineBarsData: [
+          LineChartBarData(
+            spots: [for (var i = 0; i < tokensData.length; i++) FlSpot(i.toDouble(), tokensData[i])],
+            isCurved: true,
+            preventCurveOverShooting: true,
+            color: tokensColor,
+            barWidth: 2.6,
+            dotData: FlDotData(show: tokensData.length <= 14),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [tokensColor.withValues(alpha: 0.18), tokensColor.withValues(alpha: 0.0)],
+              ),
+            ),
+          ),
+          LineChartBarData(
+            spots: [for (var i = 0; i < prescData.length; i++) FlSpot(i.toDouble(), prescData[i])],
+            isCurved: true,
+            preventCurveOverShooting: true,
+            color: prescColor,
+            barWidth: 2.2,
+            dotData: const FlDotData(show: false),
+          ),
+          LineChartBarData(
+            spots: [for (var i = 0; i < dispData.length; i++) FlSpot(i.toDouble(), dispData[i])],
+            isCurved: true,
+            preventCurveOverShooting: true,
+            color: dispColor,
+            barWidth: 2.2,
+            dashArray: [5, 3],
+            dotData: const FlDotData(show: false),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFlBarChart(
+    RoleThemeData t,
+    List<String> labels,
+    List<double> tokensData,
+    List<double> prescData,
+    List<double> dispData,
+    Color tokensColor,
+    Color prescColor,
+    Color dispColor,
+    double maxY,
+  ) {
+    final step = labels.length > 10 ? (labels.length / 6).ceil() : 1;
+    final barW = labels.length > 14 ? 6.0 : 12.0;
+    return BarChart(
+      BarChartData(
+        minY: 0,
+        maxY: maxY,
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          getDrawingHorizontalLine: (_) => FlLine(color: t.bgRule, strokeWidth: 1, dashArray: [4, 4]),
+        ),
+        borderData: FlBorderData(show: false),
+        titlesData: FlTitlesData(
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 34,
+              getTitlesWidget: (val, meta) {
+                if (val == meta.max && val % 1 != 0) return const SizedBox.shrink();
+                return Text(val.toInt().toString(), style: TextStyle(fontSize: 10, color: t.textTertiary, fontWeight: FontWeight.w600));
+              },
+            ),
+          ),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 22,
+              getTitlesWidget: (val, _) {
+                final i = val.toInt();
+                if (i < 0 || i >= labels.length || i % step != 0) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(labels[i], style: TextStyle(fontSize: 10, color: t.textSecondary, fontWeight: FontWeight.w600)),
+                );
+              },
+            ),
+          ),
+        ),
+        barTouchData: BarTouchData(
+          touchTooltipData: BarTouchTooltipData(
+            getTooltipColor: (_) => t.bgCard,
+            tooltipBorder: BorderSide(color: t.bgRule),
+            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+              final name = rodIndex == 0 ? 'Tokens' : (rodIndex == 1 ? 'Prescribed' : 'Dispensed');
+              return BarTooltipItem('$name: ${rod.toY.toInt()}', TextStyle(color: rod.color ?? t.textPrimary, fontWeight: FontWeight.w700, fontSize: 11.5));
+            },
+          ),
+        ),
+        barGroups: [
+          for (var i = 0; i < tokensData.length; i++)
+            BarChartGroupData(
+              x: i,
+              barsSpace: 2,
+              barRods: [
+                BarChartRodData(toY: tokensData[i], color: tokensColor, width: barW, borderRadius: const BorderRadius.vertical(top: Radius.circular(3))),
+                BarChartRodData(toY: i < prescData.length ? prescData[i] : 0, color: prescColor, width: barW, borderRadius: const BorderRadius.vertical(top: Radius.circular(3))),
+                BarChartRodData(toY: i < dispData.length ? dispData[i] : 0, color: dispColor, width: barW, borderRadius: const BorderRadius.vertical(top: Radius.circular(3))),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTokenMixAndPipelineCard(BuildContext context, RoleThemeData t, String branchId) {
+    final isDark = t.isDarkCanvas;
+    final data = ref.watch(serialsSummaryProvider(branchId)).value ?? {};
+    final total = data['total'] ?? 0;
+    final zakat = data['v1'] ?? 0;
+    final nonZakat = data['v2'] ?? 0;
+    final gmwf = data['v3'] ?? 0;
+    final prescribed = data['presc_prescribed'] ?? 0;
+    final waiting = data['presc_waiting'] ?? 0;
+    final dispensed = data['disp_dispensed'] ?? 0;
+    final pendingDisp = data['disp_pending'] ?? 0;
+
+    final c = context.comfort;
+    final zakatColor = c.chart1;
+    final nonZakatColor = c.chart2;
+    final gmwfColor = c.chart3;
+    final dispColor = c.info;
+    final warnColor = c.chart4;
+
+    final hasMix = total > 0;
+    final prescPct = total > 0 ? (prescribed / total).clamp(0.0, 1.0) : 0.0;
+    final dispPct = total > 0 ? (dispensed / total).clamp(0.0, 1.0) : 0.0;
+    final queueCount = waiting + pendingDisp;
+    final queuePct = total > 0 ? (queueCount / total).clamp(0.0, 1.0) : 0.0;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: t.bgCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: t.bgRule, width: 1),
+        boxShadow: GShadow.s1(isDark),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Token Mix & Pipeline', style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800, color: t.textPrimary)),
+          const SizedBox(height: 2),
+          Text('Category split & stage completion', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: t.textSecondary)),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: isDark ? t.bgCard : Colors.white.withValues(alpha: 0.65),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: t.bgRule),
+            ),
+            child: Column(
+              children: [
+                SizedBox(
+                  width: 112,
+                  height: 112,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      PieChart(
+                        PieChartData(
+                          centerSpaceRadius: 36,
+                          sectionsSpace: hasMix ? 3 : 0,
+                          sections: hasMix
+                              ? [
+                                  if (zakat > 0) PieChartSectionData(value: zakat.toDouble(), color: zakatColor, radius: 16, showTitle: false),
+                                  if (nonZakat > 0) PieChartSectionData(value: nonZakat.toDouble(), color: nonZakatColor, radius: 16, showTitle: false),
+                                  if (gmwf > 0) PieChartSectionData(value: gmwf.toDouble(), color: gmwfColor, radius: 16, showTitle: false),
+                                ]
+                              : [PieChartSectionData(value: 1, color: t.bgRule, radius: 15, showTitle: false)],
+                        ),
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(NumberFormat('#,###').format(total), style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: t.textPrimary)),
+                          Text('tokens', style: TextStyle(fontSize: 10, color: t.textSecondary)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    _mixPillChip(t, 'Zakat', zakat, zakatColor),
+                    _mixPillChip(t, 'Non-Zakat', nonZakat, nonZakatColor),
+                    _mixPillChip(t, 'Free', gmwf, gmwfColor),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _pipelineProgressRow(t, 'Doctor Prescribed', prescribed, total, prescPct, gmwfColor),
+          const SizedBox(height: 10),
+          _pipelineProgressRow(t, 'Medicine Dispensed', dispensed, total, dispPct, dispColor),
+          const SizedBox(height: 10),
+          _pipelineProgressRow(t, 'Active Queue (Wait + Disp)', queueCount, total, queuePct, warnColor),
+        ],
+      ),
+    );
+  }
+
+  Widget _mixPillChip(RoleThemeData t, String label, int count, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: t.bgCardAlt,
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: t.bgRule),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          const SizedBox(width: 6),
+          Text('$label  ', style: TextStyle(fontSize: 11, color: t.textSecondary, fontWeight: FontWeight.w600)),
+          Text('$count', style: TextStyle(fontSize: 11, color: t.textPrimary, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+
+  Widget _pipelineProgressRow(RoleThemeData t, String label, int count, int total, double pct, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: t.textSecondary)),
+            Text('$count / $total (${(pct * 100).round()}%)', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: t.textPrimary)),
+          ],
+        ),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: LinearProgressIndicator(
+            value: pct,
+            minHeight: 7,
+            backgroundColor: t.bgCardAlt,
+            valueColor: AlwaysStoppedAnimation<Color>(color),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1428,13 +1878,13 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     required IconData icon,
     required RoleThemeData t,
   }) {
-    final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = t.isDarkCanvas;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: isDark ? 0.16 : 0.08),
+        color: Color.alphaBlend(color.withValues(alpha: isDark ? 0.18 : 0.10), t.bgCard),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: isDark ? 0.35 : 0.25), width: 1.2),
+        border: Border.all(color: color.withValues(alpha: isDark ? 0.38 : 0.28), width: 1.2),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1460,7 +1910,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   // ───────────────────────────────────────────────────────────────────────────
 
   Widget _buildPatientRecordsSection(BuildContext context, RoleThemeData t, String branchId) {
-    final isDark = t.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = t.isDarkCanvas;
     final dispState = ref.watch(dispensaryProvider(branchId));
     final allList = List<Map<String, dynamic>>.from(dispState.records);
 
@@ -1647,13 +2097,15 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               ),
               Builder(builder: (context) {
                 final allowsVitals = _isVitalsAllowedForBranchOrCamp(branchId, campId: _selectedCampFilter);
-                final badgeColor = allowsVitals ? SoftPalette.emerald350 : SoftPalette.indigo500;
+                final badgeColor = allowsVitals
+                    ? (isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald)
+                    : (isDark ? SoftPalette.softIndigo : SoftPalette.luminousIndigo);
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: badgeColor.withValues(alpha: 0.12),
+                    color: badgeColor.withValues(alpha: isDark ? 0.16 : 0.10),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: badgeColor.withValues(alpha: 0.3)),
+                    border: Border.all(color: badgeColor.withValues(alpha: isDark ? 0.38 : 0.28)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1678,20 +2130,33 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   ),
                 );
               }),
+              if (dispState.isSyncing)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: t.accent.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: t.accent.withValues(alpha: 0.25)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(strokeWidth: 1.8, color: t.accent),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Syncing',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: t.accent),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ),
-          if (dispState.isSyncing) ...[
-            const SizedBox(height: 10),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                minHeight: 4,
-                backgroundColor: t.bgRule,
-                color: t.accent,
-              ),
-            ),
-          ],
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
 
           // Dynamic Camp Selector for any branch configured with multiple camps
           if (CampSessionService.hasCampsForBranch(branchId) || branchId.toLowerCase().contains('karachi') || branchId.toLowerCase() == 'all') ...[
@@ -1717,11 +2182,11 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 if (campOptions.isEmpty) return const SizedBox.shrink();
 
                 final colors = [
-                  SoftPalette.indigo500,
-                  SoftPalette.amber300,
-                  SoftPalette.emerald350,
-                  SoftPalette.pink400,
-                  SoftPalette.blue500,
+                  isDark ? SoftPalette.softLavender : SoftPalette.royalViolet,
+                  isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold,
+                  isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
+                  isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral,
+                  isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan,
                 ];
 
                 final bDisplayName = branchId == 'all' ? 'All' : _selectedBranchName;
@@ -1736,7 +2201,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         _buildCampFilterChip('All $bDisplayName (Collective)', _selectedCampFilter == 'all', () {
                           setState(() { _selectedCampFilter = 'all'; _currentPage = 1; });
                           ref.read(branchSubDispensaryFilterProvider.notifier).state = null;
-                        }, SoftPalette.teal500, t),
+                        }, isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald, t),
                         for (int i = 0; i < campOptions.length; i++)
                           _buildCampFilterChip(
                             campOptions[i]['name']!,
@@ -1768,6 +2233,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
 
               final tokenCat = ref.watch(branchTokenCategoryFilterProvider);
               final allowsVitals = _isVitalsAllowedForBranchOrCamp(branchId, campId: _selectedCampFilter);
+              final allRecCol = isDark ? SoftPalette.softLavender : SoftPalette.royalViolet;
+              final vitalsCol = isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid;
+              final normalCol = isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
+              final waitDocCol = isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold;
+              final waitDispCol = isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue;
+              final dispensedCol = isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
 
               final filterPills = isNarrow
                   ? SingleChildScrollView(
@@ -1778,34 +2249,34 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             ref.read(branchStageFilterProvider.notifier).state = 'all';
                             ref.read(branchTokenCategoryFilterProvider.notifier).state = 'all';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.indigo500, t),
+                          }, allRecCol, t),
                           if (allowsVitals || vitalsCount > 0) ...[
                             const SizedBox(width: 8),
                             _buildStageTabPill("🩺 Vitals ($vitalsCount)", vitalsCount, tokenCat == 'vitals', () {
                               ref.read(branchTokenCategoryFilterProvider.notifier).state = 'vitals';
                               setState(() => _currentPage = 1);
-                            }, SoftPalette.violet500, t),
+                            }, vitalsCol, t),
                           ],
                           const SizedBox(width: 8),
                           _buildStageTabPill("🎟️ Normal ($normalCount)", normalCount, tokenCat == 'normal', () {
                             ref.read(branchTokenCategoryFilterProvider.notifier).state = 'normal';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.sky400, t),
+                          }, normalCol, t),
                           const SizedBox(width: 8),
                           _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
                             ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.amber300, t),
+                          }, waitDocCol, t),
                           const SizedBox(width: 8),
                           _buildStageTabPill("Waiting for Dispensary", waitingDispCount, stageFilter == 'waiting_dispensary', () {
                             ref.read(branchStageFilterProvider.notifier).state = 'waiting_dispensary';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.blue500, t),
+                          }, waitDispCol, t),
                           const SizedBox(width: 8),
                           _buildStageTabPill("Dispensed", dispensedCount, stageFilter == 'dispensed', () {
                             ref.read(branchStageFilterProvider.notifier).state = 'dispensed';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.emerald350, t),
+                          }, dispensedCol, t),
                         ],
                       ),
                     )
@@ -1817,28 +2288,28 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           ref.read(branchStageFilterProvider.notifier).state = 'all';
                           ref.read(branchTokenCategoryFilterProvider.notifier).state = 'all';
                           setState(() => _currentPage = 1);
-                        }, SoftPalette.indigo500, t),
+                        }, allRecCol, t),
                         if (allowsVitals || vitalsCount > 0)
                           _buildStageTabPill("🩺 Vitals ($vitalsCount)", vitalsCount, tokenCat == 'vitals', () {
                             ref.read(branchTokenCategoryFilterProvider.notifier).state = 'vitals';
                             setState(() => _currentPage = 1);
-                          }, SoftPalette.violet500, t),
+                          }, vitalsCol, t),
                         _buildStageTabPill("🎟️ Normal ($normalCount)", normalCount, tokenCat == 'normal', () {
                           ref.read(branchTokenCategoryFilterProvider.notifier).state = 'normal';
                           setState(() => _currentPage = 1);
-                        }, SoftPalette.sky400, t),
+                        }, normalCol, t),
                         _buildStageTabPill("Waiting for Doctor", waitingDoctorCount, stageFilter == 'waiting_doctor', () {
                           ref.read(branchStageFilterProvider.notifier).state = 'waiting_doctor';
                           setState(() => _currentPage = 1);
-                        }, SoftPalette.amber300, t),
+                        }, waitDocCol, t),
                         _buildStageTabPill("Waiting for Dispensary", waitingDispCount, stageFilter == 'waiting_dispensary', () {
                           ref.read(branchStageFilterProvider.notifier).state = 'waiting_dispensary';
                           setState(() => _currentPage = 1);
-                        }, SoftPalette.blue500, t),
+                        }, waitDispCol, t),
                         _buildStageTabPill("Dispensed", dispensedCount, stageFilter == 'dispensed', () {
                           ref.read(branchStageFilterProvider.notifier).state = 'dispensed';
                           setState(() => _currentPage = 1);
-                        }, SoftPalette.emerald350, t),
+                        }, dispensedCol, t),
                       ],
                     );
 
@@ -1848,7 +2319,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     child: Container(
                       height: 38,
                       decoration: BoxDecoration(
-                        color: t.bg,
+                        color: t.bgCardAlt,
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: t.bgRule),
                       ),
@@ -1897,7 +2368,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     icon: Icon(Icons.tune_rounded, size: 14, color: t.textSecondary),
                     label: Text("Filters", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary)),
                     style: OutlinedButton.styleFrom(
-                      backgroundColor: t.bg,
+                      backgroundColor: t.bgCardAlt,
                       side: BorderSide(color: t.bgRule),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -1926,11 +2397,21 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               );
             },
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 12),
 
           // Records Table / Mobile Cards
           if (dispState.isSyncing && allList.isEmpty)
-            Center(child: Padding(padding: const EdgeInsets.all(40), child: CircularProgressIndicator(color: t.accent)))
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 28),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: t.accent)),
+                  const SizedBox(width: 10),
+                  Text('Loading branch records…', style: TextStyle(color: t.textSecondary, fontSize: 13, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            )
           else if (filtered.isEmpty)
             Center(
               child: Padding(
@@ -1984,7 +2465,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             label: const Text("View Last 7 Days"),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: t.accent,
-                              foregroundColor: SoftPalette.gray50,
+                              foregroundColor: GColor.onAccent(t.accent),
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             ),
@@ -2002,6 +2483,8 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             icon: const Icon(Icons.calendar_month_rounded, size: 14),
                             label: const Text("View This Month"),
                             style: OutlinedButton.styleFrom(
+                              foregroundColor: t.textPrimary,
+                              backgroundColor: t.bgCardAlt,
                               side: BorderSide(color: t.bgRule),
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -2020,6 +2503,8 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             icon: const Icon(Icons.history_rounded, size: 14),
                             label: const Text("View All Time"),
                             style: OutlinedButton.styleFrom(
+                              foregroundColor: t.textPrimary,
+                              backgroundColor: t.bgCardAlt,
                               side: BorderSide(color: t.bgRule),
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -2053,6 +2538,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildStageTabPill(String label, int count, bool isSelected, VoidCallback onTap, Color activeColor, RoleThemeData t) {
+    final isDark = t.isDarkCanvas;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
@@ -2060,10 +2546,15 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? activeColor.withValues(alpha: 0.12) : t.bg,
+          color: isSelected
+              ? Color.alphaBlend(
+                  activeColor.withValues(alpha: isDark ? 0.22 : 0.12),
+                  t.bgCard,
+                )
+              : t.bgCardAlt,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: isSelected ? activeColor.withValues(alpha: 0.5) : t.bgRule,
+            color: isSelected ? activeColor.withValues(alpha: 0.65) : t.bgRule,
             width: isSelected ? 1.5 : 1,
           ),
         ),
@@ -2082,15 +2573,18 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: isSelected ? activeColor.withValues(alpha: 0.2) : t.bgRule.withValues(alpha: 0.5),
+                color: isSelected
+                    ? activeColor.withValues(alpha: isDark ? 0.28 : 0.18)
+                    : t.bgCard,
                 borderRadius: BorderRadius.circular(6),
+                border: isSelected ? null : Border.all(color: t.bgRule, width: 0.8),
               ),
               child: Text(
                 "$count",
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.bold,
-                  color: isSelected ? activeColor : t.textTertiary,
+                  color: isSelected ? activeColor : t.textSecondary,
                 ),
               ),
             ),
@@ -2126,12 +2620,15 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         ? (tokenSerial.contains('-NZ-') || tokenSerial.contains('NZ') ? 'non-zakat' : (tokenSerial.contains('-G-') ? 'gmwf' : 'zakat'))
         : rawType;
 
+    final isDark = t.isDarkCanvas;
     final stage = _recordStage(p);
     final statusColor = stage == 'dispensed'
-        ? SoftPalette.emerald350
+        ? (isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald)
         : stage == 'waiting_dispensary'
-            ? SoftPalette.blue500
-            : SoftPalette.amber300;
+            ? (isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue)
+            : (isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold);
+    final vitalsBadgeColor = isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid;
+    final regularBannerColor = isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
     final statusLabel = stage == 'dispensed'
         ? 'Dispensed'
         : stage == 'waiting_dispensary'
@@ -2206,12 +2703,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: isVitalsOnly ? SoftPalette.violet500.withValues(alpha: 0.15) : t.accent.withValues(alpha: 0.12),
+                      color: (isVitalsOnly ? vitalsBadgeColor : t.accent).withValues(alpha: isDark ? 0.20 : 0.12),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Icon(
                       isVitalsOnly ? Icons.monitor_heart_rounded : Icons.medical_services_rounded,
-                      color: isVitalsOnly ? SoftPalette.violet500 : t.accent,
+                      color: isVitalsOnly ? vitalsBadgeColor : t.accent,
                       size: 24,
                     ),
                   ),
@@ -2265,14 +2762,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: isVitalsOnly
-                              ? SoftPalette.violet500.withValues(alpha: 0.12)
-                              : SoftPalette.emerald350.withValues(alpha: 0.1),
+                          color: (isVitalsOnly ? vitalsBadgeColor : regularBannerColor).withValues(alpha: isDark ? 0.16 : 0.10),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: isVitalsOnly
-                                ? SoftPalette.violet500.withValues(alpha: 0.35)
-                                : SoftPalette.emerald350.withValues(alpha: 0.3),
+                            color: (isVitalsOnly ? vitalsBadgeColor : regularBannerColor).withValues(alpha: isDark ? 0.40 : 0.30),
                           ),
                         ),
                         child: Row(
@@ -2280,7 +2773,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             Icon(
                               isVitalsOnly ? Icons.monitor_heart_outlined : Icons.medication_rounded,
                               size: 18,
-                              color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.emerald350,
+                              color: isVitalsOnly ? vitalsBadgeColor : regularBannerColor,
                             ),
                             const SizedBox(width: 10),
                             Expanded(
@@ -2292,7 +2785,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                     style: TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w800,
-                                      color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.emerald350,
+                                      color: isVitalsOnly ? vitalsBadgeColor : regularBannerColor,
                                     ),
                                   ),
                                   Text(
@@ -2307,7 +2800,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                               decoration: BoxDecoration(
-                                color: statusColor.withValues(alpha: 0.15),
+                                color: statusColor.withValues(alpha: isDark ? 0.20 : 0.14),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
@@ -2324,7 +2817,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: t.bg,
+                          color: t.bgCardAlt,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: t.bgRule),
                         ),
@@ -2340,7 +2833,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                 Text(name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: t.textPrimary)),
                               ],
                             ),
-                            const Divider(height: 14),
+                            Divider(height: 14, color: t.bgRule),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2348,7 +2841,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                 Text(formattedCnic + (isChild ? ' (Guardian)' : ''), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary)),
                               ],
                             ),
-                            const Divider(height: 14),
+                            Divider(height: 14, color: t.bgRule),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2360,7 +2853,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                               ],
                             ),
                             if (hasPhone) ...[
-                              const Divider(height: 14),
+                              Divider(height: 14, color: t.bgRule),
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -2369,7 +2862,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                 ],
                               ),
                             ],
-                            const Divider(height: 14),
+                            Divider(height: 14, color: t.bgRule),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2386,7 +2879,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: t.bg,
+                          color: t.bgCardAlt,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: t.bgRule),
                         ),
@@ -2399,11 +2892,11 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                               spacing: 12,
                               runSpacing: 10,
                               children: [
-                                _buildVitalPill("Blood Pressure", bp != null ? "$bp mmHg" : "—", Icons.favorite_rounded, SoftPalette.red400, t),
-                                _buildVitalPill("Blood Sugar", sugar != null ? "$sugar mg/dL" : "—", Icons.bloodtype_rounded, SoftPalette.amber300, t),
-                                _buildVitalPill("Temperature", temp != null ? "$temp °F" : "—", Icons.thermostat_rounded, SoftPalette.teal500, t),
-                                _buildVitalPill("Weight", weight != null ? "$weight kg" : "—", Icons.scale_rounded, SoftPalette.blue500, t),
-                                _buildVitalPill("Pulse", pulse != null ? "$pulse bpm" : "—", Icons.monitor_heart_rounded, SoftPalette.violet500, t),
+                                _buildVitalPill("Blood Pressure", bp != null ? "$bp mmHg" : "—", Icons.favorite_rounded, isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral, t),
+                                _buildVitalPill("Blood Sugar", sugar != null ? "$sugar mg/dL" : "—", Icons.bloodtype_rounded, isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold, t),
+                                _buildVitalPill("Temperature", temp != null ? "$temp °C" : "—", Icons.thermostat_rounded, isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan, t),
+                                _buildVitalPill("Weight", weight != null ? "$weight kg" : "—", Icons.scale_rounded, isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue, t),
+                                _buildVitalPill("Pulse", pulse != null ? "$pulse bpm" : "—", Icons.monitor_heart_rounded, isDark ? SoftPalette.softLavender : SoftPalette.royalViolet, t),
                               ],
                             ),
                           ],
@@ -2415,7 +2908,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: t.bg,
+                          color: t.bgCardAlt,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: t.bgRule),
                         ),
@@ -2431,7 +2924,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                                 Flexible(child: Text(condition, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textPrimary), textAlign: TextAlign.right)),
                               ],
                             ),
-                            const Divider(height: 14),
+                            Divider(height: 14, color: t.bgRule),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -2440,7 +2933,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                               ],
                             ),
                             if (doctorName != 'N/A') ...[
-                              const Divider(height: 14),
+                              Divider(height: 14, color: t.bgRule),
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -2459,7 +2952,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         Container(
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: t.bg,
+                            color: t.bgCardAlt,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: t.bgRule),
                           ),
@@ -2545,7 +3038,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                     label: const Text("Full Profile"),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: t.accent,
-                      foregroundColor: SoftPalette.gray50,
+                      foregroundColor: GColor.onAccent(t.accent),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                   ),
@@ -2559,12 +3052,13 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildVitalPill(String label, String value, IconData icon, Color color, RoleThemeData t) {
+    final isDark = t.isDarkCanvas;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
+        color: color.withValues(alpha: isDark ? 0.16 : 0.10),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withValues(alpha: 0.2)),
+        border: Border.all(color: color.withValues(alpha: isDark ? 0.34 : 0.24)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2585,8 +3079,24 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildRecordsTable(BuildContext context, RoleThemeData t, List<Map<String, dynamic>> records, String branchId, {int startIndex = 0}) {
+    final isDark = t.isDarkCanvas;
+    final vitalsBadgeColor = isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid;
+    final normalBadgeColor = isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
+    final phoneColor = isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+    final courseColor = isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral;
+
+    Widget colHead(IconData icon, String label) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13.5, color: t.textTertiary),
+            const SizedBox(width: 5),
+            Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textSecondary)),
+          ],
+        );
+
     return Container(
       decoration: BoxDecoration(
+        color: t.bgCard,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: t.bgRule),
       ),
@@ -2594,24 +3104,25 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: DataTable(
-          headingRowColor: WidgetStateProperty.all(t.bg.withValues(alpha: 0.8)),
-          headingTextStyle: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: t.textSecondary, letterSpacing: 0.3),
-          dataRowMinHeight: 52,
-          dataRowMaxHeight: 58,
-          columnSpacing: 20,
+          headingRowColor: WidgetStateProperty.all(Colors.transparent),
+          headingRowHeight: 42,
+          dividerThickness: 0.7,
+          dataRowMinHeight: 50,
+          dataRowMaxHeight: 56,
+          columnSpacing: 22,
           horizontalMargin: 16,
-          columns: const [
-            DataColumn(label: Text("#")),
-            DataColumn(label: Text("TOKEN #")),
-            DataColumn(label: Text("TOKEN TYPE")),
-            DataColumn(label: Text("PATIENT NAME")),
-            DataColumn(label: Text("CNIC")),
-            DataColumn(label: Text("PHONE NUMBER")),
-            DataColumn(label: Text("TYPE")),
-            DataColumn(label: Text("STATUS")),
-            DataColumn(label: Text("FACILITY & SHIFT")),
-            DataColumn(label: Text("RELATIONS / COURSE")),
-            DataColumn(label: Text("ACTIONS")),
+          columns: [
+            DataColumn(label: Text('#', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: t.textTertiary))),
+            DataColumn(label: colHead(Icons.confirmation_number_outlined, 'Token')),
+            DataColumn(label: colHead(Icons.layers_outlined, 'Mode')),
+            DataColumn(label: colHead(Icons.person_outline_rounded, 'Patient')),
+            DataColumn(label: colHead(Icons.badge_outlined, 'CNIC')),
+            DataColumn(label: colHead(Icons.phone_outlined, 'Phone')),
+            DataColumn(label: colHead(Icons.category_outlined, 'Type')),
+            DataColumn(label: colHead(Icons.donut_large_rounded, 'Status')),
+            DataColumn(label: colHead(Icons.local_hospital_outlined, 'Facility & Shift')),
+            DataColumn(label: colHead(Icons.medication_outlined, 'Relations / Course')),
+            DataColumn(label: colHead(Icons.more_horiz_rounded, 'Actions')),
           ],
           rows: records.asMap().entries.map((entry) {
             final rowIndex = startIndex + entry.key + 1;
@@ -2628,10 +3139,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
             final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
             final stage = _recordStage(p);
             final statusColor = stage == 'dispensed'
-              ? SoftPalette.emerald350
+              ? (isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald)
               : stage == 'waiting_dispensary'
-                ? SoftPalette.blue500
-                : SoftPalette.amber300;
+                ? (isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue)
+                : (isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold);
             final statusLabel = stage == 'dispensed'
               ? 'Dispensed'
               : stage == 'waiting_dispensary'
@@ -2653,13 +3164,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 p['vitalsOnly'] == true ||
                 (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
 
+            final c = context.comfort;
             Color typeColor;
             if (type == 'zakat') {
-              typeColor = SoftPalette.indigo500;
+              typeColor = c.chart1;
             } else if (type == 'non-zakat') {
-              typeColor = SoftPalette.blue500;
+              typeColor = c.chart2;
             } else if (type == 'gmwf') {
-              typeColor = SoftPalette.emerald350;
+              typeColor = c.chart3;
             } else {
               typeColor = t.textSecondary;
             }
@@ -2710,14 +3222,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                     decoration: BoxDecoration(
-                      color: isVitalsOnly
-                          ? SoftPalette.violet500.withValues(alpha: 0.12)
-                          : SoftPalette.sky400.withValues(alpha: 0.12),
+                      color: (isVitalsOnly ? vitalsBadgeColor : normalBadgeColor).withValues(alpha: isDark ? 0.18 : 0.11),
                       borderRadius: BorderRadius.circular(6),
                       border: Border.all(
-                        color: isVitalsOnly
-                            ? SoftPalette.violet500.withValues(alpha: 0.3)
-                            : SoftPalette.sky400.withValues(alpha: 0.3),
+                        color: (isVitalsOnly ? vitalsBadgeColor : normalBadgeColor).withValues(alpha: isDark ? 0.40 : 0.30),
                       ),
                     ),
                     child: Row(
@@ -2726,7 +3234,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         Icon(
                           isVitalsOnly ? Icons.monitor_heart_outlined : Icons.confirmation_number_outlined,
                           size: 11,
-                          color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400,
+                          color: isVitalsOnly ? vitalsBadgeColor : normalBadgeColor,
                         ),
                         const SizedBox(width: 4),
                         Text(
@@ -2734,7 +3242,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           style: TextStyle(
                             fontSize: 10,
                             fontWeight: FontWeight.w700,
-                            color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400,
+                            color: isVitalsOnly ? vitalsBadgeColor : normalBadgeColor,
                           ),
                         ),
                       ],
@@ -2848,7 +3356,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.phone_rounded, size: 12, color: SoftPalette.emerald350),
+                                Icon(Icons.phone_rounded, size: 12, color: phoneColor),
                                 const SizedBox(width: 5),
                                 Text(
                                   rawPhone,
@@ -2870,9 +3378,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                     decoration: BoxDecoration(
-                      color: typeColor.withValues(alpha: 0.1),
+                      color: typeColor.withValues(alpha: isDark ? 0.16 : 0.10),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: typeColor.withValues(alpha: 0.3)),
+                      border: Border.all(color: typeColor.withValues(alpha: isDark ? 0.38 : 0.30)),
                     ),
                     child: Text(
                       BranchLabels.text(type.toUpperCase(), branchId),
@@ -2886,9 +3394,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: statusColor.withValues(alpha: 0.12),
+                      color: statusColor.withValues(alpha: isDark ? 0.18 : 0.11),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: statusColor.withValues(alpha: 0.35)),
+                      border: Border.all(color: statusColor.withValues(alpha: isDark ? 0.42 : 0.34)),
                     ),
                     child: Text(
                       statusLabel,
@@ -2917,16 +3425,16 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                           decoration: BoxDecoration(
-                            color: SoftPalette.violet500.withValues(alpha: 0.15),
+                            color: vitalsBadgeColor.withValues(alpha: isDark ? 0.18 : 0.13),
                             borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: SoftPalette.violet500.withValues(alpha: 0.4)),
+                            border: Border.all(color: vitalsBadgeColor.withValues(alpha: isDark ? 0.44 : 0.38)),
                           ),
-                          child: const Row(
+                          child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.monitor_heart_outlined, size: 11, color: SoftPalette.violet500),
-                              SizedBox(width: 4),
-                              Text('Vitals Only', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: SoftPalette.violet500)),
+                              Icon(Icons.monitor_heart_outlined, size: 11, color: vitalsBadgeColor),
+                              const SizedBox(width: 4),
+                              Text('Vitals Only', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: vitalsBadgeColor)),
                             ],
                           ),
                         )
@@ -2939,10 +3447,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                             decoration: BoxDecoration(
-                              color: SoftPalette.red400.withValues(alpha: 0.12),
+                              color: courseColor.withValues(alpha: isDark ? 0.18 : 0.12),
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: Text('$days d course', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: SoftPalette.red400)),
+                            child: Text('$days d course', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: courseColor)),
                           ),
                       ],
                     ],
@@ -2952,6 +3460,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 // 9. Actions
                 DataCell(
                   PopupMenuButton<String>(
+                    color: t.bgCard,
                     icon: Icon(Icons.more_vert_rounded, size: 18, color: t.textSecondary),
                     onSelected: (val) {
                       if (val == 'details') {
@@ -3043,6 +3552,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildMobilePatientCard(BuildContext context, RoleThemeData t, Map<String, dynamic> p, String branchId, {int? index}) {
+    final isDark = t.isDarkCanvas;
+    final vitalsBadgeColor = isDark ? SoftPalette.brightOrchid : SoftPalette.plumOrchid;
+    final normalBadgeColor = isDark ? SoftPalette.brightCyan : SoftPalette.deepCyan;
+    final phoneColor = isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald;
+    final courseColor = isDark ? SoftPalette.brightCoral : SoftPalette.roseCoral;
+
     final pid = p['patientId']?.toString() ?? p['id']?.toString() ?? '';
     final tokenSerial = p['serial']?.toString() ?? p['id']?.toString() ?? 'TK-000';
     final rawName = LocalStorageService.firstRealValue([p['patientName'], p['name'], p['fullName']]);
@@ -3055,10 +3570,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
     final hasPhone = rawPhone.isNotEmpty && rawPhone != 'N/A' && rawPhone != '-';
     final stage = _recordStage(p);
     final statusColor = stage == 'dispensed'
-        ? SoftPalette.emerald350
+        ? (isDark ? SoftPalette.brightMint : SoftPalette.jadeEmerald)
         : stage == 'waiting_dispensary'
-            ? SoftPalette.blue500
-            : SoftPalette.amber300;
+            ? (isDark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue)
+            : (isDark ? SoftPalette.brightGold : SoftPalette.warmMarigold);
     final statusLabel = stage == 'dispensed'
         ? 'Dispensed'
         : stage == 'waiting_dispensary'
@@ -3080,13 +3595,14 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         p['vitalsOnly'] == true ||
         (p['visitReason']?.toString().toLowerCase().contains('vitals') ?? false);
 
+    final c = context.comfort;
     Color typeColor;
     if (type == 'zakat') {
-      typeColor = SoftPalette.indigo500;
+      typeColor = c.chart1;
     } else if (type == 'non-zakat') {
-      typeColor = SoftPalette.blue500;
+      typeColor = c.chart2;
     } else if (type == 'gmwf') {
-      typeColor = SoftPalette.emerald350;
+      typeColor = c.chart3;
     } else {
       typeColor = t.textSecondary;
     }
@@ -3098,10 +3614,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
 
     return Container(
       decoration: BoxDecoration(
-        color: t.bg,
+        color: t.bgCardAlt,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: t.bgRule),
-        boxShadow: GShadow.s1(Theme.of(context).brightness == Brightness.dark),
+        boxShadow: GShadow.s1(isDark),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -3123,7 +3639,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
                           decoration: BoxDecoration(
-                            color: t.bgRule.withValues(alpha: 0.25),
+                            color: t.bgCard,
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(color: t.bgRule),
                           ),
@@ -3138,9 +3654,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: t.accent.withValues(alpha: 0.1),
+                            color: t.accent.withValues(alpha: isDark ? 0.16 : 0.10),
                             borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: t.accent.withValues(alpha: 0.3)),
+                            border: Border.all(color: t.accent.withValues(alpha: isDark ? 0.38 : 0.30)),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
@@ -3159,10 +3675,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
                         decoration: BoxDecoration(
-                          color: (isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400).withValues(alpha: 0.12),
+                          color: (isVitalsOnly ? vitalsBadgeColor : normalBadgeColor).withValues(alpha: isDark ? 0.18 : 0.11),
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
-                            color: (isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400).withValues(alpha: 0.3),
+                            color: (isVitalsOnly ? vitalsBadgeColor : normalBadgeColor).withValues(alpha: isDark ? 0.40 : 0.30),
                           ),
                         ),
                         child: Row(
@@ -3171,7 +3687,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                             Icon(
                               isVitalsOnly ? Icons.monitor_heart_outlined : Icons.confirmation_number_outlined,
                               size: 10,
-                              color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400,
+                              color: isVitalsOnly ? vitalsBadgeColor : normalBadgeColor,
                             ),
                             const SizedBox(width: 3),
                             Text(
@@ -3179,7 +3695,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                               style: TextStyle(
                                 fontSize: 9,
                                 fontWeight: FontWeight.w800,
-                                color: isVitalsOnly ? SoftPalette.violet500 : SoftPalette.sky400,
+                                color: isVitalsOnly ? vitalsBadgeColor : normalBadgeColor,
                               ),
                             ),
                           ],
@@ -3188,9 +3704,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
                         decoration: BoxDecoration(
-                          color: typeColor.withValues(alpha: 0.12),
+                          color: typeColor.withValues(alpha: isDark ? 0.18 : 0.11),
                           borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: typeColor.withValues(alpha: 0.25)),
+                          border: Border.all(color: typeColor.withValues(alpha: isDark ? 0.38 : 0.28)),
                         ),
                         child: Text(
                           BranchLabels.text(type.toUpperCase(), branchId),
@@ -3206,9 +3722,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: statusColor.withValues(alpha: 0.12),
+                      color: statusColor.withValues(alpha: isDark ? 0.18 : 0.11),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                      border: Border.all(color: statusColor.withValues(alpha: isDark ? 0.42 : 0.32)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -3288,9 +3804,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
-                      color: t.accent.withValues(alpha: 0.1),
+                      color: t.accent.withValues(alpha: isDark ? 0.16 : 0.10),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+                      border: Border.all(color: t.accent.withValues(alpha: isDark ? 0.34 : 0.24)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -3373,7 +3889,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.phone_rounded, size: 11, color: SoftPalette.emerald350),
+                          Icon(Icons.phone_rounded, size: 11, color: phoneColor),
                           const SizedBox(width: 4),
                           Text(
                             rawPhone,
@@ -3392,8 +3908,9 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                 decoration: BoxDecoration(
-                  color: t.bgCard.withValues(alpha: 0.6),
+                  color: t.bgCard,
                   borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: t.bgRule.withValues(alpha: 0.7)),
                 ),
                 child: Row(
                   children: [
@@ -3409,10 +3926,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: SoftPalette.violet500.withValues(alpha: 0.15),
+                          color: vitalsBadgeColor.withValues(alpha: isDark ? 0.18 : 0.13),
                           borderRadius: BorderRadius.circular(4),
                         ),
-                        child: const Text('🩺 Vitals Only', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: SoftPalette.violet500)),
+                        child: Text('🩺 Vitals Only', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: vitalsBadgeColor)),
                       )
                     else ...[
                       if (visits > 1) ...[
@@ -3424,10 +3941,10 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
                           decoration: BoxDecoration(
-                            color: SoftPalette.red400.withValues(alpha: 0.12),
+                            color: courseColor.withValues(alpha: isDark ? 0.18 : 0.12),
                             borderRadius: BorderRadius.circular(4),
                           ),
-                          child: Text('$days d course', style: const TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: SoftPalette.red400)),
+                          child: Text('$days d course', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.bold, color: courseColor)),
                         ),
                       ],
                     ],
@@ -3595,6 +4112,7 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
   }
 
   Widget _buildCampFilterChip(String label, bool isSelected, VoidCallback onTap, Color color, RoleThemeData t) {
+    final isDark = t.isDarkCanvas;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
@@ -3602,7 +4120,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? color.withValues(alpha: 0.15) : t.bg,
+          color: isSelected
+              ? Color.alphaBlend(
+                  color.withValues(alpha: isDark ? 0.22 : 0.12),
+                  t.bgCard,
+                )
+              : t.bgCardAlt,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: isSelected ? color : t.bgRule,
@@ -3665,9 +4188,9 @@ class _PerformanceMultiLinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final isDark = theme.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = theme.isDarkCanvas;
     final gridPaint = Paint()
-      ..color = theme.bgRule.withValues(alpha: isDark ? 0.35 : 0.6)
+      ..color = theme.bgRule.withValues(alpha: isDark ? 0.45 : 0.65)
       ..strokeWidth = 1;
 
     // Available chart curve height (leaving 26px for date labels at bottom)
@@ -3714,7 +4237,7 @@ class _PerformanceMultiLinePainter extends CustomPainter {
             style: TextStyle(
               fontSize: 9.5,
               fontWeight: FontWeight.w600,
-              color: theme.textSecondary.withValues(alpha: 0.8),
+              color: theme.textSecondary.withValues(alpha: 0.85),
             ),
           ),
           textDirection: ui.TextDirection.ltr,
@@ -3742,7 +4265,6 @@ class _PerformanceMultiLinePainter extends CustomPainter {
     final int n = tokensData.length;
     if (n == 0) return;
     final double xStep = size.width / (n - 1).clamp(1, 9999);
-    final isDark = theme.isDarkCanvas || UserThemeService.isDarkMode();
 
     for (int i = 0; i < n; i++) {
       if (hoveredIndex == i) continue; // Hover tooltip renders full breakdown
@@ -3765,7 +4287,7 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           x: x,
           y: yT - 8,
           text: '0',
-          textColor: theme.textTertiary.withValues(alpha: 0.5),
+          textColor: theme.textTertiary.withValues(alpha: 0.55),
           bgColor: Colors.transparent,
           borderColor: Colors.transparent,
           isZero: true,
@@ -3781,9 +4303,9 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           x: x,
           y: yT - 16,
           text: '$tVal',
-          textColor: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-          bgColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-          borderColor: tokensColor.withValues(alpha: 0.65),
+          textColor: theme.textPrimary,
+          bgColor: theme.bgCardAlt,
+          borderColor: tokensColor.withValues(alpha: 0.70),
           isBold: true,
         );
         continue;
@@ -3798,8 +4320,8 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           y: yT - 15,
           text: 'T: $tVal',
           textColor: tokensColor,
-          bgColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-          borderColor: tokensColor.withValues(alpha: 0.5),
+          bgColor: theme.bgCard,
+          borderColor: tokensColor.withValues(alpha: 0.60),
           isBold: true,
         );
         continue;
@@ -3812,8 +4334,8 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           y: yP - 15,
           text: 'Rx: $pVal',
           textColor: prescriptionsColor,
-          bgColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-          borderColor: prescriptionsColor.withValues(alpha: 0.5),
+          bgColor: theme.bgCard,
+          borderColor: prescriptionsColor.withValues(alpha: 0.60),
           isBold: true,
         );
         continue;
@@ -3826,8 +4348,8 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           y: yD - 15,
           text: 'D: $dVal',
           textColor: dispensaryColor,
-          bgColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-          borderColor: dispensaryColor.withValues(alpha: 0.5),
+          bgColor: theme.bgCard,
+          borderColor: dispensaryColor.withValues(alpha: 0.60),
           isBold: true,
         );
         continue;
@@ -3885,12 +4407,12 @@ class _PerformanceMultiLinePainter extends CustomPainter {
       );
       canvas.drawRRect(
         rrect,
-        Paint()..color = isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+        Paint()..color = theme.bgCardAlt,
       );
       canvas.drawRRect(
         rrect,
         Paint()
-          ..color = theme.bgRule.withValues(alpha: 0.7)
+          ..color = theme.bgRule.withValues(alpha: 0.85)
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.0,
       );
@@ -3916,11 +4438,11 @@ class _PerformanceMultiLinePainter extends CustomPainter {
 
     final double xStep = size.width / (tokensData.length - 1).clamp(1, 9999);
     final double x = idx * xStep;
-    final isDark = theme.isDarkCanvas || UserThemeService.isDarkMode();
+    final isDark = theme.isDarkCanvas;
 
     // 1. Vertical indicator line
     final linePaint = Paint()
-      ..color = theme.accent.withValues(alpha: isDark ? 0.45 : 0.35)
+      ..color = theme.accent.withValues(alpha: isDark ? 0.50 : 0.35)
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
     canvas.drawLine(Offset(x, 0), Offset(x, h), linePaint);
@@ -3955,7 +4477,7 @@ class _PerformanceMultiLinePainter extends CustomPainter {
             style: TextStyle(
               fontSize: 10.5,
               fontWeight: FontWeight.w800,
-              color: isDark ? SoftPalette.gray100 : SoftPalette.slate900,
+              color: theme.textPrimary,
             ),
           ),
         TextSpan(
@@ -4012,13 +4534,13 @@ class _PerformanceMultiLinePainter extends CustomPainter {
 
     canvas.drawRRect(
       rrect,
-      Paint()..color = isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+      Paint()..color = theme.bgCard,
     );
 
     canvas.drawRRect(
       rrect,
       Paint()
-        ..color = theme.accent.withValues(alpha: 0.35)
+        ..color = theme.accent.withValues(alpha: 0.45)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2,
     );
@@ -4118,7 +4640,7 @@ class _PerformanceMultiLinePainter extends CustomPainter {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            color.withValues(alpha: 0.16),
+            color.withValues(alpha: 0.22),
             color.withValues(alpha: 0.0),
           ],
         ).createShader(Rect.fromLTWH(0, 0, size.width, h));
@@ -4134,15 +4656,25 @@ class _PerformanceMultiLinePainter extends CustomPainter {
 
     // Draw dots
     final dotPaint = Paint()..color = color;
-    final dotWhite = Paint()..color = SoftPalette.gray50;
+    final dotRing = Paint()..color = theme.bgCard;
     for (int i = 0; i < normalizedPoints.length; i++) {
       final x = i * xStep;
       final y = normalizedPoints[i] * h;
-      canvas.drawCircle(Offset(x, y), 3.5, dotWhite);
+      canvas.drawCircle(Offset(x, y), 3.6, dotRing);
       canvas.drawCircle(Offset(x, y), 2.5, dotPaint);
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _PerformanceMultiLinePainter oldDelegate) {
+    return oldDelegate.theme != theme ||
+        oldDelegate.tokensColor != tokensColor ||
+        oldDelegate.prescriptionsColor != prescriptionsColor ||
+        oldDelegate.dispensaryColor != dispensaryColor ||
+        oldDelegate.hoveredIndex != hoveredIndex ||
+        oldDelegate.tokensData != tokensData ||
+        oldDelegate.prescriptionsData != prescriptionsData ||
+        oldDelegate.dispensaryData != dispensaryData ||
+        oldDelegate.dateLabels != dateLabels;
+  }
 }

@@ -212,8 +212,8 @@ class MadrassaOverviewView extends ConsumerWidget {
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         color: theme.cardColor,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: isDark ? SoftPalette.gray50A10 : SoftPalette.slate150),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: theme.dividerColor.withValues(alpha: isDark ? 0.5 : 0.7)),
         boxShadow: [
           BoxShadow(
             color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
@@ -237,10 +237,10 @@ class MadrassaOverviewView extends ConsumerWidget {
                       Container(
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
-                          color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.12),
+                          color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Icon(Icons.auto_graph_rounded, color: context.adapt(SoftPalette.emerald350), size: 20),
+                        child: Icon(Icons.auto_graph_rounded, color: Theme.of(context).colorScheme.primary, size: 20),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -275,7 +275,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                           decoration: BoxDecoration(
-                            color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.12),
+                            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.3)),
                           ),
@@ -622,7 +622,7 @@ class MadrassaOverviewView extends ConsumerWidget {
           subtitle: context.isUrdu ? 'ہفتہ وار سب سے زیادہ حفظ کرنے والے' : 'Highest weekly memorization gain',
           students: topPerformers,
           isGood: true,
-          gradient: const [SoftPalette.emerald600, SoftPalette.teal550],
+          gradient: [Theme.of(context).colorScheme.primary, Color.lerp(Theme.of(context).colorScheme.primary, Colors.black, 0.18)!],
         );
 
         final worstCard = _buildInsightsCard(
@@ -671,7 +671,7 @@ class MadrassaOverviewView extends ConsumerWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
             color: gradient.first.withValues(alpha: 0.35),
@@ -956,7 +956,7 @@ class MadrassaOverviewView extends ConsumerWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
             color: SoftPalette.teal550.withValues(alpha: 0.35),
@@ -1778,8 +1778,8 @@ class MadrassaOverviewView extends ConsumerWidget {
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: isDark ? SoftPalette.gray50A10 : SoftPalette.slate150),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: theme.dividerColor.withValues(alpha: isDark ? 0.5 : 0.7)),
             boxShadow: [
               BoxShadow(
                 color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),

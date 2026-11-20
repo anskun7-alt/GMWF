@@ -1,5 +1,6 @@
 // lib/pages/user_detail_screen.dart — Role-Theme Aware
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -1921,7 +1922,7 @@ class _UserDetailScreenState extends State<UserDetailScreen>
     return Scaffold(
       backgroundColor: t.bg,
       body: ValueListenableBuilder<Box>(
-        valueListenable: Hive.box('local_users').listenable(),
+        valueListenable: DebouncedBoxListenable.shared(Hive.box('local_users')),
         builder: (context, box, _) {
           final localUser = _getLocalUser();
           final Map<String, dynamic> merged = {};

@@ -5,17 +5,27 @@ import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../realtime/connection_manager.dart';
-import '../realtime/realtime_manager.dart';
 import '../services/user_theme_service.dart';
 import '../services/auto_update_service.dart';
 import '../design/components/app_toast.dart';
 import '../design/tokens/breakpoints.dart';
 import '../services/dispensary_preferences_service.dart';
 import '../pages/dispensary/widgets/pharmacy_pane_layout_dialog.dart';
-import 'lan_server_config_dialog.dart';
-import 'sync_status_indicator.dart';
-import 'queue_doctor_dialog.dart';
-import '../services/hidden_force_uploader.dart';
+import 'desk_connection_pill.dart';
+import 'appearance_dialog.dart';
+
+/// An item a desk adds to the "Desk" group of the shared ⋮ menu
+/// (e.g. the Doctor's templates and stock requests).
+class GmwfMenuAction {
+  const GmwfMenuAction({required this.id, required this.label, required this.icon, required this.onTap, this.badge = 0});
+  final String id;
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  /// Shown on the item and summed on the ⋮ button (e.g. pending requests).
+  final int badge;
+}
 
 class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
@@ -33,8 +43,14 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onInventory;
   final VoidCallback? onUserSettings;
   final bool useMenuButton;
+  final Widget? customMenuButton;
   final List<Widget>? extraActions;
+  final List<Widget>? trailingActions;
+
+  /// Count shown on the header inventory button (e.g. restock alerts).
+  final int inventoryBadge;
   final PreferredSizeWidget? bottom;
+  final Widget? centerWidget;
   final bool showThemeToggle;
   final double toolbarHeight;
   final bool isFloating;
@@ -60,8 +76,12 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.onInventory,
     this.onUserSettings,
     this.useMenuButton = true,
+    this.customMenuButton,
     this.extraActions,
+    this.trailingActions,
+    this.inventoryBadge = 0,
     this.bottom,
+    this.centerWidget,
     this.showThemeToggle = true,
     this.toolbarHeight = 68,
     this.isFloating = true,
@@ -71,10 +91,14 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.onToggleHybridLayout,
     this.onToggleTimingFormat,
     this.onTogglePaneOrder,
+    this.deskActions = const [],
   });
 
   final bool showPaneOrderToggle;
   final VoidCallback? onTogglePaneOrder;
+
+  /// Desk-specific items for the "Desk" group of the ⋮ menu.
+  final List<GmwfMenuAction> deskActions;
 
   @override
   Size get preferredSize {
@@ -92,11 +116,12 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
           Hive.box('app_settings').listenable(keys: ['is_dark_mode']),
       builder: (context, box, _) {
         final isDark = box.get('is_dark_mode', defaultValue: false) == true;
+        final brand = Theme.of(context).colorScheme.primary;
 
         final barContent = Container(
           height: toolbarHeight,
           decoration: BoxDecoration(
-            color: isDark ? SoftPalette.slate800 : SoftPalette.slate50,
+            color: Theme.of(context).cardColor,
             borderRadius: isFloating ? BorderRadius.circular(18) : BorderRadius.zero,
             border: isFloating
                 ? Border.all(
@@ -124,17 +149,17 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
           clipBehavior: Clip.antiAlias,
           child: Row(
                   children: [
-                    // Left Green Logo Block
-                    _buildLogoBadge(isMobile),
+                    // Left Branded Logo Block
+                    _buildLogoBadge(isMobile, brand),
 
                     SizedBox(width: isMobile ? 8 : 12),
 
-                    // Vertical Green Accent Divider Line
+                    // Vertical Accent Divider Line
                     Container(
                       width: 2.5,
                       height: isMobile ? 22 : 26,
                       decoration: BoxDecoration(
-                        color: SoftPalette.emerald350,
+                        color: brand,
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
@@ -158,9 +183,7 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
                                 style: TextStyle(
                                   fontSize: isMobile ? 14 : 17,
                                   fontWeight: FontWeight.bold,
-                                  color: isDark
-                                      ? SoftPalette.gray50
-                                      : SoftPalette.teal750,
+                                  color: isDark ? SoftPalette.gray50 : brand,
                                   letterSpacing: -0.2,
                                 ),
                               ),
@@ -201,59 +224,49 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
                       ),
                     ),
 
-                    // LAN Status Pill
-                    if (connectionStatus != null && !isMobile) ...[
+                    // Centered header widget (e.g. Separate-View tabs pill bar)
+                    if (!isMobile && centerWidget != null) ...[
                       const SizedBox(width: 8),
-                      _buildLanStatusPill(
-                        context: context,
-                        isDark: isDark,
-                        status: connectionStatus!,
-                        isCompact: isCompact,
-                      ),
+                      centerWidget!,
+                      const Spacer(),
                     ],
 
-                    // Internet Status Pill (no fake dropdown arrow)
-                    if (!isMobile) ...[
-                      const SizedBox(width: 8),
-                      _buildInternetStatusPill(
-                        isDark: isDark,
-                        isCompact: isCompact,
-                      ),
-                    ],
-
-                    // Extra Actions (e.g. Camp Selector, Inventory)
+                    // Extra Actions (e.g. Camp Selector)
                     if (extraActions != null && extraActions!.isNotEmpty) ...[
                       const SizedBox(width: 6),
                       ...extraActions!,
                     ],
 
-                    // Sync Status Indicator Pill (Queue Doctor trigger)
-                    const SizedBox(width: 6),
-                    SyncStatusIndicator(isDark: isDark),
-                    if (!isMobile) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-                          ),
-                        ),
-                        child: Text(
-                          'v${AutoUpdateService.currentVersion}',
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w700,
-                            color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
-                          ),
-                        ),
-                      ),
+                    // One connection pill: local server + internet + cloud queue.
+                    // Tapping it opens Connection & sync (details, upload, queue doctor).
+                    // The version lives once, at the foot of the ⋮ menu.
+                    const SizedBox(width: 8),
+                    DeskConnectionPill(
+                      isDark: isDark,
+                      isOnline: isOnline,
+                      connectionStatus: connectionStatus,
+                      onRetryConnection: onRetryConnection,
+                      onForceSync: onSync,
+                      isSyncing: isSyncing,
+                      compact: isMobile,
+                      dense: isCompact && !isMobile,
+                    ),
+                    // Trailing header actions (between the connection pill and the ⋮ menu)
+                    if (trailingActions != null && trailingActions!.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      ...trailingActions!,
                     ],
-
+                    // Stock / medicine inventory shortcut
+                    if (onInventory != null) ...[
+                      SizedBox(width: isMobile ? 6 : 8),
+                      _buildInventoryButton(isDark: isDark, isMobile: isMobile),
+                    ],
                     // Right Action Controls
-                    if (useMenuButton) ...[
+                    if (customMenuButton != null) ...[
+                      const SizedBox(width: 8),
+                      customMenuButton!,
+                      SizedBox(width: isMobile ? 4 : 8),
+                    ] else if (useMenuButton) ...[
                       const SizedBox(width: 8),
                       _buildMenuButton(
                         context: context,
@@ -361,12 +374,12 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
   }
 
-  Widget _buildLogoBadge(bool isMobile) {
+  Widget _buildLogoBadge(bool isMobile, Color brandColor) {
     return Container(
       width: isMobile ? 44 : 70,
       height: double.infinity,
-      decoration: const BoxDecoration(
-        color: SoftPalette.emerald600,
+      decoration: BoxDecoration(
+        color: brandColor,
       ),
       child: Center(
         child: Image.asset(
@@ -383,238 +396,46 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
   }
 
-  Widget _buildLanStatusPill({
-    required BuildContext context,
-    required bool isDark,
-    required ConnectionStatus status,
-    required bool isCompact,
-  }) {
-    // Re-evaluate every 2 s so the pill follows the real link state without waiting for a rebuild.
-    return StreamBuilder<int>(
-      stream: Stream<int>.periodic(const Duration(seconds: 2), (i) => i),
-      builder: (context, snapshot) => _buildLanStatusPillNow(context: context, isDark: isDark, status: status, isCompact: isCompact),
-    );
-  }
-
-  Widget _buildLanStatusPillNow({
-    required BuildContext context,
-    required bool isDark,
-    required ConnectionStatus status,
-    required bool isCompact,
-  }) {
-    final rm = RealtimeManager();
-    // Liveness, not a cached snapshot: stays accurate when the server disappears or changes.
-    final isConnected = rm.isLinkAlive;
-    final isSearching = !isConnected && (status.isSearching || status.isConnecting);
-
-    Color badgeBg = SoftPalette.emerald100;
-    Color dotColor = SoftPalette.emerald350;
-    String statusLabel = 'Connected';
-
-    // Desk health: is anything written here not yet confirmed by the server, and is this
-    // desk missing tokens the server already has? Staff see at a glance if a screen is behind.
-    final unsent = rm.unsentCount;
-    final missing = RealtimeManager.unconfirmedTokensNotifier.value;
-    if (isConnected) {
-      if (rm.isBehindServer && missing > 0) {
-        badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
-        dotColor = SoftPalette.orange350;
-        statusLabel = 'Catching up ($missing)';
-      } else if (unsent > 0) {
-        badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
-        dotColor = SoftPalette.orange350;
-        statusLabel = 'Sending ($unsent)';
-      } else {
-        badgeBg = isDark ? SoftPalette.emerald700 : SoftPalette.emerald100;
-        dotColor = SoftPalette.emerald350;
-        statusLabel = 'Live';
-      }
-    } else if (isSearching) {
-      badgeBg = isDark ? SoftPalette.orange700 : SoftPalette.amber100;
-      dotColor = SoftPalette.orange350;
-      statusLabel = status.isConnecting ? 'Connecting…' : 'Searching…';
-      if (unsent > 0) statusLabel = '$statusLabel $unsent unsent';
-    } else {
-      badgeBg = isDark ? SoftPalette.red700 : SoftPalette.red150m;
-      dotColor = SoftPalette.red400;
-      statusLabel = RealtimeManager.versionRejectedNotifier.value != null
-          ? 'Update required'
-          : (unsent > 0 ? 'Offline – $unsent unsent' : 'Offline');
-    }
-
-    final displayIp = status.ip ?? rm.serverIp;
-    final displayPort = status.port ?? rm.port;
-
-    return InkWell(
-      onTap: () {
-        // When disconnected and retry callback exists, retry immediately
-        // instead of opening the config dialog.
-        if (!isConnected && onRetryConnection != null) {
-          onRetryConnection!();
-          return;
-        }
-        LanServerConfigDialog.show(context);
-      },
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-            width: 1,
+  /// Header shortcut to the medicine inventory (same look as the ⋮ button).
+  Widget _buildInventoryButton({required bool isDark, required bool isMobile}) {
+    final size = isMobile ? 36.0 : 40.0;
+    final button = Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onInventory,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: size,
+          width: size,
+          decoration: BoxDecoration(
+            color: isDark ? SoftPalette.slate700 : SoftPalette.slate100,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isDark ? SoftPalette.slate600 : SoftPalette.slate200,
+              width: 1,
+            ),
           ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: badgeBg,
-              ),
-              child: Center(
-                child: isSearching
-                    ? SizedBox(
-                        width: 11,
-                        height: 11,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: dotColor,
-                        ),
-                      )
-                    : Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: dotColor,
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(width: 7),
-            Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  statusLabel,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.bold,
-                    color: dotColor,
-                  ),
-                ),
-                if (!isCompact) ...[
-                  Text(
-                    displayIp != null
-                        ? '$displayIp:$displayPort'
-                        : 'LAN Local',
-                    style: TextStyle(
-                      fontSize: 9.5,
-                      color: isDark
-                          ? SoftPalette.slate350
-                          : SoftPalette.slate550,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(width: 6),
-            if (isConnected)
-              const Icon(
-                Icons.check_circle_rounded,
-                color: SoftPalette.emerald350,
-                size: 16,
-              )
-            else if (onRetryConnection != null)
-              Icon(
-                Icons.refresh_rounded,
-                color: dotColor,
-                size: 16,
-              ),
-          ],
+          child: Icon(
+            Icons.inventory_2_outlined,
+            size: 20,
+            color: isDark ? SoftPalette.slate350 : SoftPalette.emerald600,
+          ),
         ),
       ),
     );
-  }
-
-  Widget _buildInternetStatusPill({
-    required bool isDark,
-    required bool isCompact,
-  }) {
-    return Container(
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-          width: 1,
+    return Tooltip(
+      message: inventoryBadge > 0
+          ? 'Medicine inventory ($inventoryBadge restock alert${inventoryBadge == 1 ? '' : 's'})'
+          : 'Medicine inventory (Stock)',
+      child: Badge(
+        isLabelVisible: inventoryBadge > 0,
+        offset: const Offset(2, -2),
+        backgroundColor: SoftPalette.orange350,
+        label: Text(
+          inventoryBadge > 99 ? '99+' : '$inventoryBadge',
+          style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: SoftPalette.gray50),
         ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 22,
-            height: 22,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isOnline
-                  ? (isDark
-                      ? SoftPalette.sky700
-                      : SoftPalette.slate100)
-                  : (isDark
-                      ? SoftPalette.slate700
-                      : SoftPalette.slate100),
-            ),
-            child: Center(
-              child: Icon(
-                isOnline ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
-                size: 14,
-                color: isOnline
-                    ? SoftPalette.sky500
-                    : SoftPalette.slate350,
-              ),
-            ),
-          ),
-          const SizedBox(width: 7),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Internet',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.bold,
-                  color: isDark ? SoftPalette.gray50 : SoftPalette.teal750,
-                ),
-              ),
-              if (!isCompact) ...[
-                Text(
-                  isOnline ? 'Online' : 'Offline',
-                  style: TextStyle(
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w500,
-                    color: isOnline
-                        ? (isDark
-                            ? SoftPalette.slate350
-                            : SoftPalette.slate550)
-                        : SoftPalette.red400,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ],
+        child: button,
       ),
     );
   }
@@ -722,6 +543,21 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
   }
 
+  /// A small grey group label inside the ⋮ menu.
+  PopupMenuItem<String> _menuHeader(String text, bool isDark) => PopupMenuItem<String>(
+        enabled: false,
+        height: 26,
+        child: Text(
+          text.toUpperCase(),
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.8,
+            color: isDark ? SoftPalette.slate400 : SoftPalette.slate400,
+          ),
+        ),
+      );
+
   Widget _buildMenuButton({
     required BuildContext context,
     required bool isDark,
@@ -751,7 +587,13 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
       color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
       elevation: 8,
       offset: const Offset(0, 46),
-      child: menuBtn,
+      child: Badge(
+        isLabelVisible: deskActions.any((a) => a.badge > 0),
+        backgroundColor: SoftPalette.orange350,
+        label: Text('${deskActions.fold<int>(0, (s, a) => s + a.badge)}',
+            style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: SoftPalette.gray50)),
+        child: menuBtn,
+      ),
       onSelected: (val) async {
         switch (val) {
           case 'toggle_hybrid_layout':
@@ -791,25 +633,21 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
               onTitleLongPress!.call();
             }
             break;
-          case 'sync':
-            if (onSync != null && !isSyncing) {
-              onSync!.call();
-            } else {
-              HiddenForceUploader.instance.runSilentForceUpload();
-            }
-            break;
-          case 'queue_doctor':
-            QueueDoctorDialog.show(context);
-            break;
-          case 'theme':
-            await UserThemeService.setDarkMode(!isDark);
+          case 'appearance':
+            await AppearanceDialog.show(context, userKey: userId);
             break;
           case 'logout':
             onLogout?.call();
             break;
+          default:
+            for (final a in deskActions) {
+              if (val == 'desk:${a.id}') a.onTap();
+            }
         }
       },
       itemBuilder: (ctx) => [
+        if (showHybridLayoutToggle || showPaneOrderToggle || showTimingFormatToggle)
+          _menuHeader('Desk layout', isDark),
         if (showHybridLayoutToggle)
           PopupMenuItem<String>(
             value: 'toggle_hybrid_layout',
@@ -962,20 +800,31 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
           ),
         if (showHybridLayoutToggle || showPaneOrderToggle || showTimingFormatToggle)
           const PopupMenuDivider(height: 8),
-        if (onInventory != null)
-          PopupMenuItem(
-            value: 'inventory',
+        if (deskActions.isNotEmpty) _menuHeader('Desk', isDark),
+        for (final a in deskActions)
+          PopupMenuItem<String>(
+            value: 'desk:${a.id}',
             child: Row(
               children: [
-                Icon(Icons.inventory_2_outlined, size: 18, color: isDark ? SoftPalette.sky350 : SoftPalette.emerald600),
+                Icon(a.icon, size: 18, color: isDark ? SoftPalette.sky350 : SoftPalette.emerald600),
                 const SizedBox(width: 10),
-                Text(
-                  'Medicine Inventory',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.slate800),
+                Expanded(
+                  child: Text(
+                    a.label,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.slate800),
+                  ),
                 ),
+                if (a.badge > 0)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(color: SoftPalette.orange350, borderRadius: BorderRadius.circular(8)),
+                    child: Text('${a.badge}', style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: SoftPalette.gray50)),
+                  ),
               ],
             ),
           ),
+        if (deskActions.isNotEmpty) const PopupMenuDivider(height: 8),
+        _menuHeader('Account', isDark),
         if (onUserSettings != null || onTitleLongPress != null)
           PopupMenuItem(
             value: 'settings',
@@ -990,47 +839,25 @@ class GmwfAppBar extends StatelessWidget implements PreferredSizeWidget {
               ],
             ),
           ),
-        PopupMenuItem(
-          value: 'sync',
-          child: Row(
-            children: [
-              Icon(Icons.cloud_upload_outlined, size: 18, color: isDark ? SoftPalette.sky350 : SoftPalette.emerald600),
-              const SizedBox(width: 10),
-              Text(
-                isSyncing ? 'Syncing...' : 'Force Cloud Sync (Upload All)',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.slate800),
-              ),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'queue_doctor',
-          child: Row(
-            children: [
-              Icon(Icons.medical_services_outlined, size: 18, color: isDark ? SoftPalette.sky350 : SoftPalette.emerald600),
-              const SizedBox(width: 10),
-              Text(
-                'Queue Doctor (Offline Sync)',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.slate800),
-              ),
-            ],
-          ),
-        ),
         if (showThemeToggle)
           PopupMenuItem(
-            value: 'theme',
+            value: 'appearance',
             child: Row(
               children: [
-                Icon(isDark ? Icons.wb_sunny_outlined : Icons.dark_mode_outlined, size: 18, color: isDark ? SoftPalette.amber200 : SoftPalette.emerald600),
+                Icon(Icons.palette_outlined, size: 18, color: isDark ? SoftPalette.sky350 : SoftPalette.emerald600),
                 const SizedBox(width: 10),
                 Text(
-                  isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode',
+                  'Appearance',
                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.gray50 : SoftPalette.slate800),
+                ),
+                const Spacer(),
+                Text(
+                  isDark ? 'Dark' : 'Light',
+                  style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.slate350 : SoftPalette.slate550),
                 ),
               ],
             ),
-          ),
-        if (onLogout != null)
+          ),        if (onLogout != null)
           PopupMenuItem(
             value: 'logout',
             child: Row(

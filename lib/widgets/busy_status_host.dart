@@ -80,25 +80,26 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
           ),
         ),
 
-        // Non-blocking pill
+        // Non-blocking pill — bottom centre, staying clear of top headers,
+        // left sidebars, and bottom-right AppToast notifications.
         Positioned(
           left: 16,
           right: 16,
-          bottom: 18,
+          bottom: 14,
           child: IgnorePointer(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 220),
               transitionBuilder: (child, anim) => FadeTransition(
                 opacity: anim,
                 child: SlideTransition(
-                  position: Tween(begin: const Offset(0, 0.4), end: Offset.zero).animate(anim),
+                  position: Tween(begin: const Offset(0, 0.35), end: Offset.zero).animate(anim),
                   child: child,
                 ),
               ),
               child: (task != null && !task.blocking)
                   ? Align(
                       key: ValueKey('busy_pill_${task.background}'),
-                      alignment: task.background ? Alignment.bottomLeft : Alignment.bottomCenter,
+                      alignment: Alignment.bottomCenter,
                       child: _StatusPill(task: task, isDark: isDark),
                     )
                   : const SizedBox.shrink(key: ValueKey('busy_pill_none')),
@@ -106,9 +107,9 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
           ),
         ),
 
-        // Post-freeze notice
+        // Post-freeze notice (above the pill when both show)
         Positioned(
-          top: 14,
+          bottom: (task != null && !task.blocking) ? 62 : 14,
           left: 16,
           right: 16,
           child: AnimatedSwitcher(
@@ -116,7 +117,7 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
             child: notice != null
                 ? Align(
                     key: ValueKey(notice.at),
-                    alignment: Alignment.topCenter,
+                    alignment: Alignment.bottomCenter,
                     child: _RecoveredNotice(notice: notice, isDark: isDark),
                   )
                 : const SizedBox.shrink(key: ValueKey('busy_notice_none')),

@@ -6,7 +6,6 @@ import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
@@ -16,10 +15,16 @@ import 'dart:async';
 import 'inventory_update.dart';
 import 'medicine_ledger.dart';
 import 'universal_proforma_sheet.dart';
+import 'stock_check_report.dart';
+import '../widgets/medicine_icon_badge.dart';
 import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/stock_actions.dart';
+import 'package:gmwf/services/stock/stock_ledger.dart';
+import 'package:gmwf/services/stock/stock_pool.dart';
+import 'package:gmwf/services/stock/stock_reader.dart';
 import 'package:gmwf/widgets/global_module_wrapper.dart';
 import 'package:gmwf/widgets/app_back_button.dart';
 import 'package:gmwf/widgets/camp_selector_chip.dart';
@@ -63,6 +68,47 @@ class InventoryPage extends StatefulWidget {
         role.contains('admin');
   }
 
+  static bool canRegisterMedicineFromRole(Map<dynamic, dynamic>? userData) {
+    final raw = userData == null ? '' : (userData['role'] ?? userData['userRole'] ?? '').toString();
+    final role = raw.trim().toLowerCase();
+    if (role.isEmpty) return false;
+
+    // Explicitly exclude dispensary staff roles
+    if (role == 'dispenser' ||
+        role.contains('dispens') ||
+        role == 'doctor' ||
+        role.contains('doctor') ||
+        role == 'receptionist' ||
+        role.contains('receptionist') ||
+        role == 'rec+dis' ||
+        role == 'doc+dis' ||
+        role == 'doc+rec' ||
+        role == 'doc+rec+dis') {
+      return false;
+    }
+
+    // Allowed: HQ Manager, Branch Manager, Supervisor, and executive roles above them
+    return role == 'branch manager' ||
+        role == 'branch_manager' ||
+        role == 'bm' ||
+        role == 'supervisor' ||
+        role.contains('supervisor') ||
+        role.contains('branch manager') ||
+        role.contains('branch_manager') ||
+        role == 'hq manager' ||
+        role == 'hq_manager' ||
+        role == 'hqmanager' ||
+        role == 'headquarters manager' ||
+        role.contains('headquarters') ||
+        role.contains('hq') ||
+        role == 'chairman' ||
+        role == 'ceo' ||
+        role == 'president' ||
+        role == 'director' ||
+        role.contains('admin') ||
+        role == 'manager';
+  }
+
   @override
   State<InventoryPage> createState() => _InventoryPageState();
 }
@@ -72,24 +118,19 @@ class _InventoryPageState extends State<InventoryPage>
   @override
   bool get wantKeepAlive => true;
   // ── Palette ───────────────────────────────────────────────────────────────
-  static const _teal = SoftPalette.teal600;
-  static const _tealDark = SoftPalette.teal700;
-  static const _bg = SoftPalette.teal100t;
+  Color get _teal => context.comfort.brand;
+  Color get _tealDark => context.comfort.brandStrong;
   static const _white = SoftPalette.gray50;
-  static const _green50 = SoftPalette.green100m;
   static const _green100 = SoftPalette.green200;
   static const _green600 = SoftPalette.green550;
   static const _red = SoftPalette.red500; // More vibrant, premium red
-  static const _orange = SoftPalette.orange400;
   static const _amber = SoftPalette.orange350;
-  static const _blue = SoftPalette.blue500;
-  static const _purple = SoftPalette.purple600;
   static const _indigo = SoftPalette.indigo700;
   static const _brown = SoftPalette.red700m;
   static const _textDark = SoftPalette.slate800;
   static const _textMid = SoftPalette.slate600;
   static const _textLight = SoftPalette.slate500;
-  static const _border = SoftPalette.teal200;
+  Color get _border => context.comfort.border;
   static const _shadow = SoftPalette.teal600A9;
 
   bool get _isDark {
@@ -156,8 +197,17 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   bool get _canRegisterMedicine {
-    if (widget.isReadOnly || _isDoctorUser) return false;
-    return true;
+    if (widget.isReadOnly || widget.isDispenser || _isDoctorUser) return false;
+    if (widget.isAdmin) return true;
+    try {
+      if (Hive.isBoxOpen('app_settings')) {
+        final uData = Hive.box('app_settings').get('user_data') ?? Hive.box('app_settings').get('currentUser');
+        if (uData is Map) {
+          return InventoryPage.canRegisterMedicineFromRole(Map<dynamic, dynamic>.from(uData));
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   static const _editRequestTypes = {'edit_medicine', 'delete_medicine'};
@@ -290,7 +340,7 @@ class _InventoryPageState extends State<InventoryPage>
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_handleKeyboardShortcuts);
-    int tabCount = 6; // Stock, Proforma, Ledger, Pending, Log, History
+    int tabCount = 6; // Stock, Proforma, Report, Pending, Log, History
     if (_isSupervisorUser || _isDoctorUser) {
       tabCount = 1;
     } else {
@@ -339,6 +389,14 @@ class _InventoryPageState extends State<InventoryPage>
           _stockListenable = box.listenable()..addListener(_debouncedLoadDataFromHive);
           _loadDataFromHive();
         }
+      });
+    }
+    // The stock book also needs its movements box; reload once both are open.
+    if (!StockLedger.isOpen) {
+      StockLedger.ensureOpen().then((_) {
+        if (mounted) _loadDataFromHive();
+      }).catchError((Object e) {
+        debugPrint('[Inventory] Stock book open failed: $e');
       });
     }
   }
@@ -399,6 +457,38 @@ class _InventoryPageState extends State<InventoryPage>
       }
     } catch (_) {}
     return 'karachi';
+  }
+
+  // ── Stock book pools ──────────────────────────────────────────────────────
+  /// The pools this screen shows: the selected camp's pool, or every pool of the branch
+  /// for the "all camps" view (each record keeps its own `pool`).
+  List<StockPool> _viewPools() {
+    final branch = _effectiveBranchId;
+    final sel = (_selectedCampFilter ?? '').trim();
+    if (sel.isEmpty || sel.toLowerCase() == 'all') return StockPool.allFor(branch);
+    final p = StockPool.of(branch, sel, fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+    return p == null ? const [] : [p];
+  }
+
+  /// Pool for writing when the screen shows exactly one pool (else null).
+  StockPool? get _singleViewPool {
+    final pools = _viewPools();
+    return pools.length == 1 ? pools.first : null;
+  }
+
+  /// (pool, medicineId) of every ledger batch behind a displayed row.
+  List<(StockPool, String)> _batchRefs(Map batchData) {
+    final ids = List<String>.from(batchData['_docIds'] as List? ?? const []);
+    final pools = List<String>.from(batchData['_docPools'] as List? ?? const []);
+    final fallback = _singleViewPool;
+    final out = <(StockPool, String)>[];
+    for (var i = 0; i < ids.length; i++) {
+      final id = ids[i].trim();
+      if (id.isEmpty || id == 'unknown') continue;
+      final pool = (i < pools.length ? StockPool.fromKey(pools[i]) : null) ?? fallback;
+      if (pool != null) out.add((pool, id));
+    }
+    return out;
   }
 
   void _initSync() {
@@ -541,31 +631,28 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   void _loadDataFromHive() {
-    final box = Hive.box(LocalStorageService.stockBox);
-    final normBranch = widget.branchId.toLowerCase().trim();
+    // Stock book: each ledger record is one real batch of one pool. No de-duplication,
+    // branch guessing or camp rewriting is needed any more.
     final allMapDocs = <Map<String, dynamic>>[];
-    final seenIds = <String>{};
 
-    for (final key in box.keys) {
-      final val = box.get(key);
-      if (val is Map) {
-        final m = Map<String, dynamic>.from(val);
-        final kStr = key.toString();
-        final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'])?.toString().trim();
-        final cleanId = (rawId != null && rawId.isNotEmpty && rawId != 'unknown' && rawId != 'null')
-            ? rawId
-            : (kStr.startsWith('stock:') ? kStr.substring(6) : kStr);
-        m['id'] = cleanId;
+    for (final pool in _viewPools()) {
+      for (final rec in StockReader.batches(pool)) {
+        final m = Map<String, dynamic>.from(rec);
+        m['id'] = (m['medicineId'] ?? m['id']).toString();
+        m['pool'] = pool.key;
 
-        // Skip duplicate records in stockBox (which stores both 'stock:$id' and '$id')
-        final itemCamp = (m['campId'] ?? m['dispensaryId'] ?? '').toString().toLowerCase().trim();
-        final dedupKey = '${itemCamp}_${cleanId.toLowerCase().trim()}';
-        if (seenIds.contains(dedupKey)) continue;
-        seenIds.add(dedupKey);
-
-        // Auto-normalize medicine name & formula to latest master catalog for unedited items
+        // Auto-normalize medicine name, formula, code & 3-digit Proforma barcode
         final isCustom = m['isCustomized'] == true || m['userEdited'] == true;
         if (!isCustom) {
+          MasterProformaService.alignStockItemWithProforma(m);
+          final curBar = (m['barcode'] ?? '').toString().trim();
+          final normBar = MasterProformaService.normalizeProformaBarcode(curBar);
+          if (normBar != null) {
+            m['barcode'] = normBar;
+            m['rollNo'] = normBar;
+          } else {
+            m['barcode'] = '';
+          }
           final rawName = (m['name'] ?? m['formula'] ?? '').toString();
           final cleanName = MasterProformaService.cleanBrandToFormula(rawName);
           if (cleanName.isNotEmpty) {
@@ -574,94 +661,13 @@ class _InventoryPageState extends State<InventoryPage>
           }
         }
 
-        // Auto-normalize Kapayya/Kapaya camp to Saddar
-        final rawCamp = (m['campId'] ?? m['dispensaryId'] ?? '').toString().toLowerCase();
-        final rawIdLower = cleanId.toLowerCase();
-        if (rawCamp.contains('kapay') || rawCamp == 'kapayya' || rawCamp == 'kapaya' || rawIdLower.startsWith('kapay')) {
-          m['campId'] = 'saddar';
-          m['dispensaryId'] = 'saddar';
-        }
-
         allMapDocs.add(m);
-      }
-    }
-
-    // Collapse ghost copies of the same batch (same name/type/dose/expiry/camp saved under
-    // different ids). Without this their quantities were added together, so the Stock table
-    // showed double what the Update Stock screen (which already de-duplicates) showed.
-    {
-      final byBatch = <String, Map<String, dynamic>>{};
-      for (final m in allMapDocs) {
-        final name = (m['name'] ?? m['formula'] ?? '').toString().trim().toLowerCase();
-        final type = (m['type'] ?? m['dosageForm'] ?? m['form'] ?? '').toString().trim().toLowerCase();
-        final dose = (m['dose'] ?? '').toString().trim().toLowerCase();
-        final camp = (m['campId'] ?? m['dispensaryId'] ?? '').toString().trim().toLowerCase();
-        final exp = (m['expiryDate'] ?? '').toString().trim();
-        final monthYear = (exp.length == 10 && exp[2] == '-' && exp[5] == '-') ? exp.substring(3) : exp;
-        if (name.isEmpty || type.isEmpty) {
-          byBatch['id:${m['id']}|$camp'] = m;
-          continue;
-        }
-        final key = '$name|$type|$dose|$monthYear|$camp';
-        final existing = byBatch[key];
-        if (existing == null) {
-          byBatch[key] = m;
-          continue;
-        }
-        final nUp = DateTime.tryParse((m['updatedAt'] ?? m['lastUpdated'] ?? '').toString());
-        final eUp = DateTime.tryParse((existing['updatedAt'] ?? existing['lastUpdated'] ?? '').toString());
-        final newer = (nUp != null && eUp != null)
-            ? nUp.isAfter(eUp)
-            : (nUp != null && eUp == null) ||
-                (nUp == null && eUp == null && _asInt(m['quantity']) > 0 && _asInt(existing['quantity']) == 0);
-        if (newer) byBatch[key] = m;
-      }
-      allMapDocs
-        ..clear()
-        ..addAll(byBatch.values);
-    }
-
-    var filtered = allMapDocs.where((v) {
-      if (normBranch == 'all' || normBranch.isEmpty) return true;
-      final b = v['branchId']?.toString().toLowerCase().trim();
-      if (b == null || b.isEmpty) return true; // Branch stock fallback
-      if (CampSessionService.areBranchesMatching(normBranch, b)) return true;
-      if (CampSessionService.isKarachiFamily(normBranch) && CampSessionService.isKarachiFamily(b)) return true;
-      return b == normBranch ||
-          b == 'branch_$normBranch' ||
-          'branch_$b' == normBranch ||
-          (normBranch.isNotEmpty && b.contains(normBranch)) ||
-          (b.isNotEmpty && normBranch.contains(b));
-    }).toList();
-
-    if (CampSessionService.hasCampsForBranch(widget.branchId) || CampSessionService.isKarachiFamily(widget.branchId)) {
-      final activeCamp = _selectedCampFilter ?? 'all';
-
-      if (activeCamp.isNotEmpty && activeCamp != 'all') {
-        filtered = filtered.where((v) {
-          return CampSessionService.matchesCamp(
-            selectedCamp: activeCamp,
-            dispensaryId: v['dispensaryId']?.toString(),
-            campId: v['campId']?.toString(),
-            dispensaryTag: v['dispensaryTag']?.toString(),
-            serial: (v['barcode'] ?? v['code'] ?? v['id'])?.toString(),
-          );
-        }).toList();
-
-        // Safety fallback: if activeCamp is haji_camp and filtered result is empty,
-        // but allMapDocs has Karachi items, do not leave the dispenser stranded with an empty screen
-        if (filtered.isEmpty && allMapDocs.isNotEmpty && CampSessionService.isKarachiFamily(widget.branchId)) {
-          filtered = allMapDocs.where((v) {
-            final b = v['branchId']?.toString().toLowerCase().trim() ?? '';
-            return b.isEmpty || CampSessionService.isKarachiFamily(b);
-          }).toList();
-        }
       }
     }
 
     if (mounted) {
       setState(() {
-        _rawItems = filtered;
+        _rawItems = allMapDocs;
         _processData();
       });
     }
@@ -684,9 +690,10 @@ class _InventoryPageState extends State<InventoryPage>
       final name = b['name'].toString().toLowerCase();
       final formula = (b['formula'] ?? '').toString().toLowerCase();
       final barcode = (b['barcode'] ?? b['code'] ?? '').toString().toLowerCase();
+      final packBarcode = (b['packBarcode'] ?? '').toString().toLowerCase();
       final type = b['type'];
       final query = _searchCtrl.text.trim().toLowerCase();
-      return (name.contains(query) || formula.contains(query) || barcode.contains(query)) &&
+      return (name.contains(query) || formula.contains(query) || barcode.contains(query) || packBarcode.contains(query)) &&
           (_filterType == 'All' || type == _filterType);
     }).toList();
 
@@ -908,7 +915,9 @@ class _InventoryPageState extends State<InventoryPage>
       final qty = _asInt(data['quantity']);
       final price = _parsePrice(data['price']);
       final formula = (data['formula'] ?? '').toString().trim();
-      final barcode = (data['barcode'] ?? data['code'] ?? '').toString().trim();
+      final barcode = (data['barcode'] ?? data['rollNo'] ?? '').toString().trim();
+      final itemCode = (data['code'] ?? data['itemCode'] ?? '').toString().trim();
+      final packBarcode = (data['packBarcode'] ?? '').toString().trim();
 
       String monthYear = '';
       if (expiry.length == 10 && expiry[2] == '-' && expiry[5] == '-') {
@@ -921,6 +930,7 @@ class _InventoryPageState extends State<InventoryPage>
       if (type == 'Nebulization' && dose.isEmpty) doseDisplay = 'per session';
 
       final docId = (data['id'] ?? data['medicineId'] ?? 'unknown').toString();
+      final docPool = (data['pool'] ?? '').toString();
 
       String key;
       String displayName = name;
@@ -947,14 +957,30 @@ class _InventoryPageState extends State<InventoryPage>
       if (map.containsKey(key)) {
         final existing = map[key]!;
         final existingDocIds = existing['_docIds'] as List<String>;
-        if (!existingDocIds.contains(docId)) {
+        final existingDocPools = existing['_docPools'] as List<String>;
+        var seen = false;
+        for (var i = 0; i < existingDocIds.length; i++) {
+          if (existingDocIds[i] == docId && existingDocPools[i] == docPool) {
+            seen = true;
+            break;
+          }
+        }
+        if (!seen) {
           existingDocIds.add(docId);
+          existingDocPools.add(docPool);
           existing['quantity'] = (existing['quantity'] as int) + qty;
           existing['_mergedCount'] = ((existing['_mergedCount'] as int?) ?? 1) + 1;
         }
-        // Keep the first non-empty barcode found for this batch
+        // Keep the first non-empty barcode, itemCode, and packBarcode found for this batch
         if ((existing['barcode'] as String? ?? '').isEmpty && barcode.isNotEmpty) {
           existing['barcode'] = barcode;
+        }
+        if ((existing['code'] as String? ?? '').isEmpty && itemCode.isNotEmpty) {
+          existing['code'] = itemCode;
+          existing['itemCode'] = itemCode;
+        }
+        if ((existing['packBarcode'] as String? ?? '').isEmpty && packBarcode.isNotEmpty) {
+          existing['packBarcode'] = packBarcode;
         }
 
         if (_mergeByFormula) {
@@ -989,6 +1015,9 @@ class _InventoryPageState extends State<InventoryPage>
           'dose': doseDisplay,
           'formula': displayFormula,
           'barcode': barcode,
+          'code': itemCode,
+          'itemCode': itemCode,
+          if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
           'expiryDate': monthYear,
           'quantity': qty,
           'price': price,
@@ -997,6 +1026,8 @@ class _InventoryPageState extends State<InventoryPage>
           'dispensaryId': data['dispensaryId'] ?? itemCamp,
           'branchId': data['branchId'],
           '_docIds': <String>[docId],
+          '_docPools': <String>[docPool],
+          'pool': docPool,
           '_mergedCount': 1,
           '_isMerged': _mergeByFormula,
         };
@@ -1048,6 +1079,7 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Widget _buildMobileSubNav(BuildContext context) {
+    final c = context.comfort;
     final List<Map<String, dynamic>> menuItems = _isDoctorUser
         ? [
             {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
@@ -1057,125 +1089,104 @@ class _InventoryPageState extends State<InventoryPage>
             if (!_isSupervisorOrReadOnly) {'label': 'Update Stock', 'icon': Icons.add_box_rounded},
             if (_canRegisterMedicine) {'label': 'Register Medicine', 'icon': Icons.medication_liquid_rounded},
             if (!_isSupervisorUser) {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
-            {'label': 'Ledger', 'icon': Icons.receipt_long_rounded},
-            {'label': 'Pending', 'icon': Icons.pending_actions_rounded},
-            {'label': 'Log', 'icon': Icons.history_edu_rounded},
-            {'label': 'History', 'icon': Icons.history_rounded},
-          ];
-
-    final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
-    final hasCamps = (widget.branchId.toLowerCase().contains('karachi') ||
-        CampSessionService.hasCampsForBranch(widget.branchId) ||
-        _canDeleteInventoryItem) && branchCamps.isNotEmpty;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Tabs
-        Container(
-          height: 42,
-          decoration: BoxDecoration(
-            color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-            border: Border(
-              bottom: BorderSide(
-                color: _isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-                width: 1,
-              ),
-            ),
-          ),
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            itemCount: menuItems.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 6),
-            itemBuilder: (context, index) {
-              final item = menuItems[index];
-              final isActive = _tabCtrl.index == index;
-              return InkWell(
-                onTap: () {
-                  _tabCtrl.animateTo(index);
-                  setState(() {});
-                },
-                borderRadius: BorderRadius.circular(20),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? (_isDark ? SoftPalette.teal550 : _teal)
-                        : (_isDark ? SoftPalette.slate700 : SoftPalette.slate100),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: isActive ? (_isDark ? SoftPalette.teal350 : _teal) : Colors.transparent,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        item['icon'] as IconData,
-                        size: 13,
-                        color: isActive ? SoftPalette.gray50 : (_isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        item['label'] as String,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: isActive ? FontWeight.bold : FontWeight.w600,
-                          color: isActive ? SoftPalette.gray50 : (_isDark ? SoftPalette.slate150 : SoftPalette.slate700),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-
-      ],
-    );
-  }
-
-  Widget _buildSidebarContent(BuildContext context) {
-    final List<Map<String, dynamic>> menuItems = _isDoctorUser
-        ? [
-            {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
-          ]
-        : [
-            {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
-            if (!_isSupervisorOrReadOnly) {'label': 'Update Stock', 'icon': Icons.add_box_rounded},
-            if (_canRegisterMedicine) {'label': 'Register Medicine', 'icon': Icons.medication_liquid_rounded},
-            if (!_isSupervisorUser) {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
-            {'label': 'Ledger', 'icon': Icons.receipt_long_rounded},
+            {'label': 'Report', 'icon': Icons.receipt_long_rounded},
             {'label': 'Pending', 'icon': Icons.pending_actions_rounded},
             {'label': 'Log', 'icon': Icons.history_edu_rounded},
             {'label': 'History', 'icon': Icons.history_rounded},
           ];
 
     return Container(
-      color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+      height: 44,
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border(bottom: BorderSide(color: c.border, width: 1)),
+      ),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        itemCount: menuItems.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (context, index) {
+          final item = menuItems[index];
+          final isActive = _tabCtrl.index == index;
+          return InkWell(
+            onTap: () {
+              _tabCtrl.animateTo(index);
+              setState(() {});
+            },
+            borderRadius: BorderRadius.circular(20),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              decoration: BoxDecoration(
+                color: isActive ? c.brand : c.surfaceSunken,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: isActive ? c.brand : c.border),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    item['icon'] as IconData,
+                    size: 13,
+                    color: isActive ? c.onBrand : c.textSecondary,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    item['label'] as String,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: isActive ? FontWeight.w700 : FontWeight.w600,
+                      color: isActive ? c.onBrand : c.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSidebarContent(BuildContext context) {
+    final c = context.comfort;
+    final List<Map<String, dynamic>> menuItems = _isDoctorUser
+        ? [
+            {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
+          ]
+        : [
+            {'label': 'Stock', 'icon': Icons.inventory_2_rounded},
+            if (!_isSupervisorOrReadOnly) {'label': 'Update Stock', 'icon': Icons.add_box_rounded},
+            if (_canRegisterMedicine) {'label': 'Register Medicine', 'icon': Icons.medication_liquid_rounded},
+            if (!_isSupervisorUser) {'label': 'Proforma Sheet', 'icon': Icons.list_alt_rounded},
+            {'label': 'Report', 'icon': Icons.receipt_long_rounded},
+            {'label': 'Pending', 'icon': Icons.pending_actions_rounded},
+            {'label': 'Log', 'icon': Icons.history_edu_rounded},
+            {'label': 'History', 'icon': Icons.history_rounded},
+          ];
+
+    return Container(
+      color: c.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 14),
             child: Row(
               children: [
                 Image.asset(
                   'assets/logo/gmwf-1.webp',
-                  width: 42,
-                  height: 42,
+                  width: 40,
+                  height: 40,
                   errorBuilder: (context, error, stackTrace) {
                     return Container(
                       padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                        color: _teal,
+                        color: c.brand,
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: const Icon(FontAwesomeIcons.pills, color: SoftPalette.gray50, size: 16),
+                      child: Icon(FontAwesomeIcons.pills, color: c.onBrand, size: 16),
                     );
                   },
                 ),
@@ -1187,19 +1198,20 @@ class _InventoryPageState extends State<InventoryPage>
                       Text(
                         'Gulzar Madina',
                         style: TextStyle(
-                          color: _isDark ? SoftPalette.gray50 : _tealDark,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 0.5,
+                          color: c.textPrimary,
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.3,
                         ),
                       ),
                       Text(
                         '${_getBranchName()} Inventory',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: _isDark ? SoftPalette.slate350 : _textLight,
-                          fontSize: 10,
+                          color: c.textSecondary,
+                          fontSize: 11,
                           fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
                         ),
                       ),
                     ],
@@ -1208,22 +1220,20 @@ class _InventoryPageState extends State<InventoryPage>
               ],
             ),
           ),
-          Divider(height: 1, color: _isDark ? SoftPalette.slate700 : null),
-          const SizedBox(height: 12),
+          Divider(height: 1, color: c.border),
+          const SizedBox(height: 10),
           Expanded(
             child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
               itemCount: menuItems.length,
               itemBuilder: (context, index) {
                 final item = menuItems[index];
                 final isActive = _tabCtrl.index == index;
                 return Container(
-                  margin: const EdgeInsets.only(bottom: 6),
+                  margin: const EdgeInsets.only(bottom: 4),
                   decoration: BoxDecoration(
-                    color: isActive
-                        ? (_isDark ? SoftPalette.teal550 : _teal)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(8),
+                    color: isActive ? c.brand : Colors.transparent,
+                    borderRadius: BorderRadius.circular(10),
                   ),
                   child: InkWell(
                     onTap: () {
@@ -1234,27 +1244,26 @@ class _InventoryPageState extends State<InventoryPage>
                         if (mounted) setState(() {});
                       }
                     },
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(10),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       child: Row(
                         children: [
                           Icon(
                             item['icon'] as IconData,
-                            color: isActive
-                                ? SoftPalette.gray50
-                                : (_isDark ? SoftPalette.slate350 : _textMid),
-                            size: 16,
+                            color: isActive ? c.onBrand : c.textSecondary,
+                            size: 17,
                           ),
-                          const SizedBox(width: 12),
-                          Text(
-                            item['label'] as String,
-                            style: TextStyle(
-                              color: isActive
-                                  ? SoftPalette.gray50
-                                  : (_isDark ? SoftPalette.slate200 : _textDark),
-                              fontSize: 13,
-                              fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Text(
+                              item['label'] as String,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: isActive ? c.onBrand : c.textPrimary,
+                                fontSize: 13,
+                                fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                              ),
                             ),
                           ),
                         ],
@@ -1265,18 +1274,24 @@ class _InventoryPageState extends State<InventoryPage>
               },
             ),
           ),
-          Divider(height: 1, color: _isDark ? SoftPalette.slate700 : null),
+          Divider(height: 1, color: c.border),
           Container(
-            padding: const EdgeInsets.all(16),
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: c.surfaceSunken,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.border),
+            ),
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(7),
                   decoration: BoxDecoration(
-                    color: _isDark ? SoftPalette.teal550.withValues(alpha: 0.2) : _teal.withValues(alpha: 0.1),
+                    color: c.brandSoft,
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(Icons.store_rounded, color: _isDark ? SoftPalette.sky350 : _teal, size: 18),
+                  child: Icon(Icons.store_rounded, color: c.brand, size: 16),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -1286,9 +1301,9 @@ class _InventoryPageState extends State<InventoryPage>
                       Text(
                         _getBranchName(),
                         style: TextStyle(
-                          color: _isDark ? SoftPalette.gray50 : _textDark,
+                          color: c.textPrimary,
                           fontSize: 12,
-                          fontWeight: FontWeight.bold,
+                          fontWeight: FontWeight.w700,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -1299,8 +1314,8 @@ class _InventoryPageState extends State<InventoryPage>
                           return Text(
                             'v$version',
                             style: TextStyle(
-                              color: _isDark ? SoftPalette.slate550 : _textLight,
-                              fontSize: 10,
+                              color: c.textMuted,
+                              fontSize: 10.5,
                               fontWeight: FontWeight.w500,
                             ),
                           );
@@ -1320,28 +1335,32 @@ class _InventoryPageState extends State<InventoryPage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final c = context.comfort;
     final bool isWrapped = GlobalModuleWrapper.isWrapped(context);
     final bool isMobile = GBreakpoint.isCompact(context);
 
     if (_isSupervisorUser || _isDoctorUser) {
       return Scaffold(
-        backgroundColor: _isDark ? SoftPalette.slate900 : _bg,
+        backgroundColor: c.background,
         appBar: (!widget.isEmbedded && !isWrapped) ? _buildAppBar(isMobile: isMobile) : null,
         body: _stockTab(),
       );
     }
 
     return Scaffold(
-      backgroundColor: _isDark ? SoftPalette.slate900 : _bg,
+      backgroundColor: c.background,
       appBar: (!widget.isEmbedded && !isWrapped) ? _buildAppBar(isMobile: isMobile) : null,
-      drawer: (isMobile && !widget.isDispenser) ? Drawer(
-        backgroundColor: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        child: _buildSidebarContent(context),
-      ) : null,
+      drawer: (isMobile && !widget.isDispenser)
+          ? Drawer(
+              backgroundColor: c.surface,
+              child: _buildSidebarContent(context),
+            )
+          : null,
       floatingActionButton: (_isSupervisorOrReadOnly || widget.isAdmin || !isMobile)
           ? null
           : FloatingActionButton.extended(
-              backgroundColor: _teal,
+              backgroundColor: c.brand,
+              foregroundColor: c.onBrand,
               onPressed: () => Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -1351,23 +1370,24 @@ class _InventoryPageState extends State<InventoryPage>
                             isDispenser: widget.isDispenser,
                             isDoctor: widget.isDoctor,
                           ))),
-              icon: const Icon(Icons.add_rounded, color: SoftPalette.gray50),
-              label: const Text('Update Stock',
-                  style: TextStyle(
-                      color: SoftPalette.gray50, fontWeight: FontWeight.bold)),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text(
+                'Update Stock',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
             ),
       body: BlurredUnderDialogBackground(
         child: Row(
-        children: [
-          if (!isMobile)
-            Container(
-              width: 220,
-              decoration: BoxDecoration(
-                color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                border: Border(right: BorderSide(color: _isDark ? SoftPalette.slate700 : SoftPalette.gray100, width: 1)),
+          children: [
+            if (!isMobile)
+              Container(
+                width: 220,
+                decoration: BoxDecoration(
+                  color: c.surface,
+                  border: Border(right: BorderSide(color: c.border, width: 1)),
+                ),
+                child: _buildSidebarContent(context),
               ),
-              child: _buildSidebarContent(context),
-            ),
           Expanded(
             child: Column(
               children: [
@@ -1406,9 +1426,11 @@ class _InventoryPageState extends State<InventoryPage>
                             _loadDataFromHive();
                           },
                         ),
-                        MedicineLedgerPage(
+                        // Report: the medicine ledger + stock check results in one place.
+                        StockReportPage(
                           branchId: widget.branchId,
                           isEmbedded: true,
+                          canAdjust: !_isDoctorUser,
                         ),
                         _pendingTab(),
                         _logTab(),
@@ -1489,58 +1511,13 @@ class _InventoryPageState extends State<InventoryPage>
     if (shouldDelete != true || !mounted) return;
 
     try {
-      final activeCamp = (_selectedCampFilter != null && _selectedCampFilter!.isNotEmpty && _selectedCampFilter != 'all')
-          ? _selectedCampFilter!
-          : (CampSessionService.getActiveCamp(widget.branchId) ?? 'all');
-
-      // 1. Delete from local Hive cache FIRST (instant 0ms response)
-      final box = Hive.box(LocalStorageService.stockBox);
+      // Stock book: hide each batch behind this row (kept for history). StockActions sends
+      // the change to the LAN server and the cloud.
       int deletedHiveCount = 0;
-      final targetBatchName = (batchData['name'] ?? '').toString().toLowerCase().trim();
-      final targetBatchType = (batchData['type'] ?? '').toString().toLowerCase().trim();
-      final targetBatchDose = (batchData['dose'] ?? '').toString().toLowerCase().trim();
-      final targetBatchExpiry = (batchData['expiryDate'] ?? batchData['expiry'] ?? '').toString().toLowerCase().trim();
-      final validDocIds = docIds.where((id) => id.isNotEmpty && id != 'unknown').toSet();
-
-      final keysToRemove = <dynamic>{};
-
-      for (final id in validDocIds) {
-        keysToRemove.add('stock:$id');
-        keysToRemove.add(id);
-      }
-
-      for (final k in box.keys) {
-        final kStr = k.toString().toLowerCase();
-        for (final id in validDocIds) {
-          if (kStr == id.toLowerCase() || kStr == 'stock:${id.toLowerCase()}' || kStr.endsWith(':${id.toLowerCase()}')) {
-            keysToRemove.add(k);
-          }
-        }
-        if (validDocIds.isEmpty) {
-          final val = box.get(k);
-          if (val is Map) {
-            final vName = (val['name'] ?? '').toString().toLowerCase().trim();
-            final vType = (val['type'] ?? '').toString().toLowerCase().trim();
-            final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
-            final vExpiry = (val['expiryDate'] ?? val['expiry'] ?? '').toString().toLowerCase().trim();
-            final vCamp = (val['campId'] ?? val['dispensaryId'] ?? '').toString().toLowerCase().trim();
-            final campMatch = activeCamp == 'all' || activeCamp.isEmpty || vCamp.isEmpty || vCamp == activeCamp.toLowerCase().trim();
-            if (campMatch &&
-                vName == targetBatchName &&
-                vType == targetBatchType &&
-                (targetBatchDose.isEmpty || vDose == targetBatchDose) &&
-                (targetBatchExpiry.isEmpty || vExpiry == targetBatchExpiry)) {
-              keysToRemove.add(k);
-            }
-          }
-        }
-      }
-
-      for (final k in keysToRemove) {
-        await box.delete(k);
+      for (final (pool, id) in _batchRefs(batchData)) {
+        await StockActions.deleteBatch(pool, id);
         deletedHiveCount++;
       }
-      await box.flush();
 
       // Refresh UI instantly
       if (mounted) {
@@ -1555,73 +1532,6 @@ class _InventoryPageState extends State<InventoryPage>
         );
       }
 
-      // 2. Broadcast over LAN WebSocket to all peer PCs
-      try {
-        for (final id in docIds) {
-          if (id.isNotEmpty && id != 'unknown') {
-            RealtimeManager().sendMessage(RealtimeEvents.payload(
-              type: RealtimeEvents.deleteStockItem,
-              branchId: widget.branchId,
-              data: {'medicineId': id},
-            ));
-          }
-        }
-      } catch (_) {}
-
-      // 3. Enqueue for persistent cloud sync
-      for (final id in docIds) {
-        if (id.isNotEmpty && id != 'unknown') {
-          await LocalStorageService.enqueueSync({
-            'type': 'delete_inventory_item',
-            'branchId': widget.branchId,
-            'campId': activeCamp,
-            'medicineId': id,
-            'data': {'id': id, 'name': batchData['name']},
-          });
-        }
-      }
-      SyncService().triggerUpload();
-
-      // 4. Background cloud delete from all potential collections. A desk on the LAN leaves it
-      // to the server (the deleteStockItem LAN message above); an SDK write here would wait in
-      // the SDK's queue while the desk is offline from Firestore and land later.
-      if (!LanFirestoreGate.isLanDesk) unawaited(() async {
-        try {
-          final db = FirebaseFirestore.instance;
-          final batch = db.batch();
-          final collections = <CollectionReference>{
-            db.collection('branches').doc(widget.branchId).collection('inventory'),
-          };
-
-          if (activeCamp.isNotEmpty && activeCamp != 'all') {
-            final campPath = CampSessionService.getCampInventoryPath(branchId: widget.branchId, campId: activeCamp);
-            collections.add(db.collection('branches').doc(widget.branchId).collection(campPath));
-          }
-
-          if (widget.branchId.toLowerCase().contains('karachi')) {
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji'));
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji_camp'));
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_saddar'));
-          }
-
-          bool hasDeletes = false;
-          for (final col in collections) {
-            for (final id in docIds) {
-              if (id.isNotEmpty && id != 'unknown') {
-                batch.delete(col.doc(id));
-                hasDeletes = true;
-              }
-            }
-          }
-
-          if (hasDeletes) {
-            await batch.commit().timeout(const Duration(seconds: 8));
-            debugPrint('[InventoryDelete] ✅ Background Firestore batch delete successful for $docIds');
-          }
-        } catch (e) {
-          debugPrint('[InventoryDelete] ⚠️ Background Firestore delete deferred to sync queue: $e');
-        }
-      }());
     } catch (e, st) {
       debugPrint('[InventoryDelete] ❌ ERROR: $e\n$st');
       if (mounted) {
@@ -1706,7 +1616,13 @@ class _InventoryPageState extends State<InventoryPage>
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Row(
                           children: [
-                            const Icon(Icons.medication_rounded, size: 14, color: SoftPalette.red400),
+                            MedicineIconBadge(
+                              name: sb['name']?.toString() ?? '',
+                              type: sb['type']?.toString() ?? '',
+                              size: 20,
+                              iconSize: 12,
+                              borderRadius: 5,
+                            ),
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
@@ -1746,142 +1662,15 @@ class _InventoryPageState extends State<InventoryPage>
     if (confirmed != true || !mounted) return;
 
     try {
-      final activeCamp = (_selectedCampFilter != null && _selectedCampFilter!.isNotEmpty && _selectedCampFilter != 'all')
-          ? _selectedCampFilter!
-          : (CampSessionService.getActiveCamp(widget.branchId) ?? 'all');
-
-      final allDocIds = <String>{};
-      final batchTargetFilters = <Map<String, String>>[];
-
-      for (final batch in selectedBatches) {
-        final docIds = List<String>.from(batch['_docIds'] as List? ?? []);
-        final validIds = docIds.where((id) => id.isNotEmpty && id != 'unknown').toList();
-        allDocIds.addAll(validIds);
-        if (validIds.isEmpty) {
-          batchTargetFilters.add({
-            'name': (batch['name'] ?? '').toString().toLowerCase().trim(),
-            'type': (batch['type'] ?? '').toString().toLowerCase().trim(),
-            'dose': (batch['dose'] ?? '').toString().toLowerCase().trim(),
-            'expiryDate': (batch['expiryDate'] ?? batch['expiry'] ?? '').toString().toLowerCase().trim(),
-          });
-        }
-      }
-
-      // 1. Delete from local Hive cache FIRST (instant 0ms response)
-      final box = Hive.box(LocalStorageService.stockBox);
+      // Stock book: hide every batch behind the selected rows (kept for history).
+      // StockActions sends each change to the LAN server and the cloud.
       int deletedHiveCount = 0;
-      final keysToRemove = <dynamic>{};
-
-      for (final id in allDocIds) {
-        keysToRemove.add('stock:$id');
-        keysToRemove.add(id);
-      }
-
-      for (final k in box.keys) {
-        final kStr = k.toString().toLowerCase();
-        for (final id in allDocIds) {
-          if (kStr == id.toLowerCase() || kStr == 'stock:${id.toLowerCase()}' || kStr.endsWith(':${id.toLowerCase()}')) {
-            keysToRemove.add(k);
-          }
-        }
-        if (batchTargetFilters.isNotEmpty) {
-          final val = box.get(k);
-          if (val is Map) {
-            final vName = (val['name'] ?? '').toString().toLowerCase().trim();
-            final vType = (val['type'] ?? '').toString().toLowerCase().trim();
-            final vDose = (val['dose'] ?? '').toString().toLowerCase().trim();
-            final vExpiry = (val['expiryDate'] ?? val['expiry'] ?? '').toString().toLowerCase().trim();
-            final vCamp = (val['campId'] ?? val['dispensaryId'] ?? '').toString().toLowerCase().trim();
-            final campMatch = activeCamp == 'all' || activeCamp.isEmpty || vCamp.isEmpty || vCamp == activeCamp.toLowerCase().trim();
-            if (campMatch) {
-              for (final filter in batchTargetFilters) {
-                final fExp = filter['expiryDate'] ?? '';
-                if (vName == filter['name'] &&
-                    vType == filter['type'] &&
-                    (filter['dose']!.isEmpty || vDose == filter['dose']) &&
-                    (fExp.isEmpty || vExpiry == fExp)) {
-                  keysToRemove.add(k);
-                  break;
-                }
-              }
-            }
-          }
+      for (final batch in selectedBatches) {
+        for (final (pool, id) in _batchRefs(batch)) {
+          await StockActions.deleteBatch(pool, id);
+          deletedHiveCount++;
         }
       }
-
-      for (final k in keysToRemove) {
-        await box.delete(k);
-        deletedHiveCount++;
-      }
-      await box.flush();
-
-      // 2. Broadcast over LAN WebSocket to all peer PCs
-      try {
-        for (final id in allDocIds) {
-          RealtimeManager().sendMessage(RealtimeEvents.payload(
-            type: RealtimeEvents.deleteStockItem,
-            branchId: widget.branchId,
-            data: {'medicineId': id},
-          ));
-        }
-      } catch (_) {}
-
-      // 3. Enqueue for persistent cloud sync
-      for (final id in allDocIds) {
-        await LocalStorageService.enqueueSync({
-          'type': 'delete_inventory_item',
-          'branchId': widget.branchId,
-          'campId': activeCamp,
-          'medicineId': id,
-          'data': {'id': id},
-        });
-      }
-      SyncService().triggerUpload();
-
-      // 4. Background cloud delete from all potential collections. A desk on the LAN leaves it
-      // to the server (the deleteStockItem LAN message above); an SDK write here would wait in
-      // the SDK's queue while the desk is offline from Firestore and land later.
-      if (!LanFirestoreGate.isLanDesk) unawaited(() async {
-        try {
-          final db = FirebaseFirestore.instance;
-          final collections = <CollectionReference>{
-            db.collection('branches').doc(widget.branchId).collection('inventory'),
-          };
-
-          if (activeCamp.isNotEmpty && activeCamp != 'all') {
-            final campPath = CampSessionService.getCampInventoryPath(branchId: widget.branchId, campId: activeCamp);
-            collections.add(db.collection('branches').doc(widget.branchId).collection(campPath));
-          }
-
-          if (widget.branchId.toLowerCase().contains('karachi')) {
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji'));
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_haji_camp'));
-            collections.add(db.collection('branches').doc(widget.branchId).collection('inventory_saddar'));
-          }
-
-          WriteBatch batch = db.batch();
-          int batchOpCount = 0;
-
-          for (final col in collections) {
-            for (final id in allDocIds) {
-              batch.delete(col.doc(id));
-              batchOpCount++;
-              if (batchOpCount >= 350) {
-                await batch.commit();
-                batch = db.batch();
-                batchOpCount = 0;
-              }
-            }
-          }
-
-          if (batchOpCount > 0) {
-            await batch.commit();
-          }
-          debugPrint('[InventoryDelete] ✅ Background batch deleted ${allDocIds.length} doc IDs across collections');
-        } catch (e) {
-          debugPrint('[InventoryDelete] ⚠️ Background batch delete deferred to sync queue: $e');
-        }
-      }());
 
       if (mounted) {
         setState(() {
@@ -2192,9 +1981,9 @@ class _InventoryPageState extends State<InventoryPage>
                     ),
                   OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: _isDark ? SoftPalette.teal200 : _teal,
+                      foregroundColor: _teal,
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      side: BorderSide(color: _isDark ? SoftPalette.teal200 : _teal),
+                      side: BorderSide(color: _teal),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                     onPressed: () async {
@@ -2362,6 +2151,7 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Widget _buildCampFilterChip(String campId, String label) {
+    final c = context.comfort;
     final active = _selectedCampFilter ?? 'all';
     final isSelected = active == campId || (campId == 'haji_camp' && active == 'haji') || (campId == 'haji' && active == 'haji_camp');
     return InkWell(
@@ -2373,19 +2163,20 @@ class _InventoryPageState extends State<InventoryPage>
         });
         CampSessionService.setActiveCamp(campId, isManual: true);
       },
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: isSelected ? _teal : Colors.transparent,
-          borderRadius: BorderRadius.circular(6),
+          color: isSelected ? c.brand : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
           label,
           style: TextStyle(
             fontSize: 11.5,
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-            color: isSelected ? SoftPalette.gray50 : (_isDark ? SoftPalette.gray150 : SoftPalette.slate700),
+            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+            color: isSelected ? c.onBrand : c.textSecondary,
           ),
         ),
       ),
@@ -2393,328 +2184,95 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Widget _buildFilterSection() {
+    final c = context.comfort;
     final isCompact = GBreakpoint.isCompact(context);
     final branchCamps = CampSessionService.getCampsForBranch(widget.branchId);
     final hasCamps = (widget.branchId.toLowerCase().contains('karachi') ||
-        CampSessionService.hasCampsForBranch(widget.branchId) ||
-        _canDeleteInventoryItem) && branchCamps.isNotEmpty;
+            CampSessionService.hasCampsForBranch(widget.branchId) ||
+            _canDeleteInventoryItem) &&
+        branchCamps.isNotEmpty;
+    final ctrlHeight = isCompact ? 34.0 : 38.0;
 
-    if (isCompact) {
+    Widget buildSearchField() {
       return Container(
-        color: _isDark ? SoftPalette.slate900 : _bg,
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
-        child: Column(
+        height: ctrlHeight,
+        decoration: BoxDecoration(
+          color: c.surfaceSunken,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: c.borderStrong),
+        ),
+        child: TextField(
+          controller: _searchCtrl,
+          cursorColor: c.brand,
+          onChanged: (_) {
+            setState(() {});
+            _onSearchChanged();
+          },
+          style: TextStyle(fontSize: 13, color: c.textPrimary),
+          decoration: InputDecoration(
+            prefixIcon: Icon(Icons.search_rounded, color: c.brand, size: 18),
+            suffixIcon: _searchCtrl.text.isNotEmpty
+                ? IconButton(
+                    icon: Icon(Icons.close_rounded, size: 16, color: c.textSecondary),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Clear search',
+                    onPressed: () {
+                      _searchCtrl.clear();
+                      _displayLimit = 50;
+                      setState(() => _processData());
+                    },
+                  )
+                : null,
+            hintText: isCompact
+                ? 'Search formula, name or barcode...'
+                : 'Search medicine, formula, or barcode...',
+            hintStyle: TextStyle(color: c.textMuted, fontSize: 12),
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.symmetric(vertical: isCompact ? 8 : 10),
+          ),
+        ),
+      );
+    }
+
+    Widget buildDropdownChip({
+      required String value,
+      required List<String> items,
+      required IconData icon,
+      required ValueChanged<String?> onChanged,
+    }) {
+      return Container(
+        height: ctrlHeight,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+          color: c.surfaceSunken,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: c.border),
+        ),
+        child: Row(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Row 1: Search and Type Dropdown
-            Row(
-              children: [
-                Expanded(
-                  child: Container(
-                    height: 38,
-                    decoration: BoxDecoration(
-                      color: _isDark ? SoftPalette.slate700 : _white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
-                    ),
-                    child: TextField(
-                      controller: _searchCtrl,
-                      cursorColor: _isDark ? SoftPalette.sky350 : _teal,
-                      onChanged: (_) => _onSearchChanged(),
-                      style: TextStyle(fontSize: 13, color: _isDark ? SoftPalette.gray50 : _textDark),
-                      decoration: InputDecoration(
-                        prefixIcon: Icon(Icons.search_rounded, color: _isDark ? SoftPalette.slate350 : _textLight, size: 18),
-                        hintText: 'Search formula, name or barcode...',
-                        hintStyle: TextStyle(color: _isDark ? SoftPalette.slate550 : _textLight, fontSize: 11.5),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: _isDark ? SoftPalette.slate700 : _white,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: _filterType,
-                      dropdownColor: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                      icon: Icon(Icons.arrow_drop_down, color: _isDark ? SoftPalette.slate350 : _textLight),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() {
-                            _filterType = val;
-                            _displayLimit = 50;
-                            _processData();
-                          });
-                        }
-                      },
-                      items: _types
-                          .map((t) => DropdownMenuItem(
-                                value: t,
-                                child: Text(t, style: TextStyle(fontSize: 12, color: _isDark ? SoftPalette.gray50 : _textDark)),
-                              ))
-                          .toList(),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-
-            // Row 2: Camp Selection Filter (Desk selector)
-            if (hasCamps && !widget.isDoctor && branchCamps.isNotEmpty) ...[
-              Container(
-                height: 34,
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: _isDark ? SoftPalette.slate700 : SoftPalette.gray150),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.location_on_outlined, size: 14, color: _isDark ? SoftPalette.sky350 : _teal),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Desk:',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87),
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            _buildCampFilterChip('all', '🏥 All'),
-                            for (final camp in branchCamps) ...[
-                              const SizedBox(width: 4),
-                              _buildCampFilterChip(
-                                (camp['id'] ?? '').toString(),
-                                '📍 ${(camp['name'] ?? camp['id'] ?? '').toString()}',
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 6),
-            ],
-
-            // Row 3: Action Buttons (Register Med, Proforma Sheet, Proforma PDF, Batch filter)
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  // Register Medicine Action
-                  if (_canRegisterMedicine) ...[
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        final regIdx = 2;
-                        if (regIdx < _tabCtrl.length) {
-                          _tabCtrl.animateTo(regIdx);
-                          setState(() {});
-                        } else {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => InventoryUpdatePage(
-                                branchId: widget.branchId,
-                                isAdmin: widget.isAdmin,
-                                isDispenser: widget.isDispenser,
-                                isDoctor: widget.isDoctor,
-                                showMode: 2,
-                              ),
-                            ),
-                          );
-                        }
-                      },
-                      icon: const Icon(Icons.add_circle_outline_rounded, color: SoftPalette.gray50, size: 14),
-                      label: const Text('Register Med', style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11.5)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.teal600,
-                        foregroundColor: SoftPalette.gray50,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        minimumSize: const Size(0, 32),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-
-                  // Proforma Sheet Button
-                  if (!_isSupervisorUser) ...[
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _teal,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        minimumSize: const Size(0, 32),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-                        elevation: 1,
-                      ),
-                      onPressed: () async {
-                        final res = await Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => UniversalProformaSheetPage(
-                              branchId: widget.branchId,
-                              isDispenser: widget.isDispenser,
-                              isAdmin: widget.isAdmin,
+            Icon(icon, size: 15, color: c.brand),
+            const SizedBox(width: 5),
+            DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: items.contains(value) ? value : items.first,
+                isDense: true,
+                dropdownColor: c.surface,
+                icon: Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: c.textSecondary),
+                onChanged: onChanged,
+                items: items
+                    .map((v) => DropdownMenuItem(
+                          value: v,
+                          child: Text(
+                            v,
+                            style: TextStyle(
+                              fontSize: isCompact ? 12 : 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: c.textPrimary,
                             ),
                           ),
-                        );
-                        if (res == true) {
-                          _loadDataFromHive();
-                        }
-                      },
-                      icon: const Icon(FontAwesomeIcons.fileExcel, size: 12, color: SoftPalette.gray50),
-                      label: const Text(
-                        'Proforma Sheet',
-                        style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11.5),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-
-                  // Download Proforma / Inventory Checklist PDF button
-                  _isExportingPdf
-                      ? Container(
-                          height: 32,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: _tealDark,
-                            borderRadius: BorderRadius.circular(7),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50),
-                              ),
-                              SizedBox(width: 6),
-                              Text('Exporting...', style: TextStyle(color: SoftPalette.gray50, fontSize: 11, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        )
-                      : ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: _tealDark,
-                            foregroundColor: SoftPalette.gray50,
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            minimumSize: const Size(0, 32),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-                            elevation: 1,
-                          ),
-                          onPressed: _exportPdf,
-                          icon: const Icon(Icons.picture_as_pdf_rounded, size: 14, color: SoftPalette.gray50),
-                          label: const Text(
-                            'Proforma PDF',
-                            style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11.5),
-                          ),
-                        ),
-                  const SizedBox(width: 6),
-
-                  // Batch Dropdown
-                  Container(
-                    height: 32,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    decoration: BoxDecoration(
-                      color: _isDark ? SoftPalette.slate700 : _white,
-                      borderRadius: BorderRadius.circular(7),
-                      border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
-                    ),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        value: _filterBatch,
-                        dropdownColor: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                        icon: Icon(Icons.arrow_drop_down, color: _isDark ? SoftPalette.slate350 : _textLight, size: 18),
-                        onChanged: (val) {
-                          if (val != null) {
-                            setState(() {
-                              _filterBatch = val;
-                              _displayLimit = 50;
-                              _processData();
-                            });
-                          }
-                        },
-                        items: _batchKeys
-                            .map((b) => DropdownMenuItem(
-                                  value: b,
-                                  child: Text(b, style: TextStyle(fontSize: 11.5, color: _isDark ? SoftPalette.gray50 : _textDark)),
-                                ))
-                            .toList(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  _buildMergeFormulaCheckButton(isCompact: true),
-
-                  if (_canDeleteInventoryItem && _showRemoveAllMeds) ...[
-                    const SizedBox(width: 6),
-                    ElevatedButton.icon(
-                      onPressed: _confirmRemoveAllMedsFromCurrentCamp,
-                      icon: const Icon(Icons.delete_sweep_rounded, color: SoftPalette.gray50, size: 14),
-                      label: const Text('Clear Camp', style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.red550,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: const Size(0, 32),
-                      ),
-                    ),
-                  ],
-                  if (_canDeleteInventoryItem) ...[
-                    const SizedBox(width: 6),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          _isSelectMode = !_isSelectMode;
-                          if (!_isSelectMode) {
-                            _selectedBatchKeys.clear();
-                          }
-                        });
-                      },
-                      icon: Icon(
-                        _isSelectMode ? Icons.close_rounded : Icons.checklist_rounded,
-                        color: SoftPalette.gray50,
-                        size: 14,
-                      ),
-                      label: Text(
-                        _isSelectMode ? 'Cancel' : 'Select & Delete',
-                        style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isSelectMode ? SoftPalette.slate700 : SoftPalette.red500,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: const Size(0, 32),
-                      ),
-                    ),
-                  ],
-                  if (_canDeleteInventoryItem) ...[
-                    const SizedBox(width: 6),
-                    ElevatedButton.icon(
-                      onPressed: _syncInventoryFromCloud,
-                      icon: const Icon(Icons.cloud_download_rounded, color: SoftPalette.gray50, size: 14),
-                      label: const Text('Sync', style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 11)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.slate600,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: const Size(0, 32),
-                      ),
-                    ),
-                  ],
-                ],
+                        ))
+                    .toList(),
               ),
             ),
           ],
@@ -2722,326 +2280,358 @@ class _InventoryPageState extends State<InventoryPage>
       );
     }
 
-    final widgets = [
-      SizedBox(
-        width: 320,
-        child: Container(
-          height: 38,
-          decoration: BoxDecoration(
-            color: _isDark ? SoftPalette.slate700 : _white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
-          ),
-          child: TextField(
-            controller: _searchCtrl,
-            cursorColor: _isDark ? SoftPalette.sky350 : _teal,
-            onChanged: (_) => _onSearchChanged(),
-            style: TextStyle(fontSize: 13, color: _isDark ? SoftPalette.gray50 : _textDark),
-            decoration: InputDecoration(
-              prefixIcon: Icon(Icons.search_rounded, color: _isDark ? SoftPalette.slate350 : _textLight, size: 18),
-              hintText: 'Search name, formula or barcode (Tap row to edit)...',
-              hintStyle: TextStyle(color: _isDark ? SoftPalette.slate550 : _textLight, fontSize: 11.5),
-              border: InputBorder.none,
-              contentPadding: const EdgeInsets.symmetric(vertical: 10),
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(width: 8),
-      Container(
-        height: 38,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
+    Widget buildCampBar() {
+      return Container(
+        padding: const EdgeInsets.all(3),
         decoration: BoxDecoration(
-          color: _isDark ? SoftPalette.slate700 : _white,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
+          color: c.surfaceSunken,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: c.border),
         ),
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            value: _filterType,
-            dropdownColor: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-            icon: Icon(Icons.arrow_drop_down, color: _isDark ? SoftPalette.slate350 : _textLight),
-            onChanged: (val) {
-              if (val != null) {
-                setState(() {
-                  _filterType = val;
-                  _displayLimit = 50;
-                  _processData();
-                });
-              }
-            },
-            items: _types
-                .map((t) => DropdownMenuItem(
-                      value: t,
-                      child: Text(t, style: TextStyle(fontSize: 12.5, color: _isDark ? SoftPalette.gray50 : _textDark)),
-                    ))
-                .toList(),
-          ),
-        ),
-      ),
-      const SizedBox(width: 8),
-      Container(
-        height: 38,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        decoration: BoxDecoration(
-          color: _isDark ? SoftPalette.slate700 : _white,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100, width: 1),
-        ),
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            value: _filterBatch,
-            dropdownColor: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-            icon: Icon(Icons.arrow_drop_down, color: _isDark ? SoftPalette.slate350 : _textLight),
-            onChanged: (val) {
-              if (val != null) {
-                setState(() {
-                  _filterBatch = val;
-                  _displayLimit = 50;
-                  _processData();
-                });
-              }
-            },
-            items: _batchKeys
-                .map((b) => DropdownMenuItem(
-                      value: b,
-                      child: Text(b, style: TextStyle(fontSize: 12.5, color: _isDark ? SoftPalette.gray50 : _textDark)),
-                    ))
-                .toList(),
-          ),
-        ),
-      ),
-      const SizedBox(width: 8),
-      _buildMergeFormulaCheckButton(isCompact: false),
-      if (hasCamps && !widget.isDoctor && branchCamps.isNotEmpty) ...[
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          decoration: BoxDecoration(
-            color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _isDark ? SoftPalette.slate600 : SoftPalette.gray150),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildCampFilterChip('all', '🏥 All Camps'),
-              for (final camp in branchCamps) ...[
-                const SizedBox(width: 4),
-                _buildCampFilterChip(
-                  (camp['id'] ?? '').toString(),
-                  '📍 ${(camp['name'] ?? camp['id'] ?? '').toString()}',
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    ];
-
-    // Universal Proforma Sheet Button (Hidden for Supervisor)
-    if (!_isSupervisorUser) {
-      widgets.add(const SizedBox(width: 8));
-      widgets.add(
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _teal,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            elevation: 2,
-          ),
-          onPressed: () async {
-            final res = await Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => UniversalProformaSheetPage(
-                  branchId: widget.branchId,
-                  isDispenser: widget.isDispenser,
-                  isAdmin: widget.isAdmin,
-                ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildCampFilterChip('all', isCompact ? '🏥 All' : '🏥 All Camps'),
+            for (final camp in branchCamps) ...[
+              const SizedBox(width: 2),
+              _buildCampFilterChip(
+                (camp['id'] ?? '').toString(),
+                '📍 ${(camp['name'] ?? camp['id'] ?? '').toString()}',
               ),
-            );
-            if (res == true) {
-              _loadDataFromHive();
-            }
-          },
-          icon: const Icon(FontAwesomeIcons.fileExcel, size: 14, color: SoftPalette.gray50),
-          label: const Text(
-            'Proforma Sheet',
-            style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
+            ],
+          ],
         ),
       );
     }
 
-    // Download PDF button
-    widgets.add(const SizedBox(width: 8));
-    widgets.add(
-      _isExportingPdf
-          ? const SizedBox(
-              width: 38,
-              height: 38,
-              child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: _teal),
+    List<Widget> buildActionButtons() {
+      final btns = <Widget>[];
+      final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(10));
+      final btnPad = EdgeInsets.symmetric(horizontal: isCompact ? 8 : 10);
+      final labelStyle = TextStyle(fontWeight: FontWeight.w700, fontSize: isCompact ? 11.5 : 12);
+
+      if (!_isSupervisorUser) {
+        btns.add(
+          SizedBox(
+            height: ctrlHeight,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: c.brand,
+                foregroundColor: c.onBrand,
+                elevation: 0,
+                padding: btnPad,
+                shape: shape,
+              ),
+              onPressed: () async {
+                final res = await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => UniversalProformaSheetPage(
+                      branchId: widget.branchId,
+                      isDispenser: widget.isDispenser,
+                      isAdmin: widget.isAdmin,
+                    ),
+                  ),
+                );
+                if (res == true) _loadDataFromHive();
+              },
+              icon: const Icon(FontAwesomeIcons.fileExcel, size: 13),
+              label: Text('Proforma Sheet', style: labelStyle),
+            ),
+          ),
+        );
+      }
+
+      btns.add(
+        _isExportingPdf
+            ? Container(
+                height: ctrlHeight,
+                padding: btnPad,
+                decoration: BoxDecoration(
+                  color: c.surfaceSunken,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: c.brand.withValues(alpha: 0.4)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
+                    ),
+                    const SizedBox(width: 6),
+                    Text('Exporting...', style: labelStyle.copyWith(color: c.brand)),
+                  ],
+                ),
+              )
+            : SizedBox(
+                height: ctrlHeight,
+                child: Tooltip(
+                  message: 'Download Inventory Checklist / Proforma PDF',
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: c.surfaceSunken,
+                      foregroundColor: c.brand,
+                      side: BorderSide(color: c.brand.withValues(alpha: 0.45)),
+                      padding: btnPad,
+                      shape: shape,
+                    ),
+                    onPressed: _exportPdf,
+                    icon: const Icon(Icons.picture_as_pdf_rounded, size: 15),
+                    label: Text(isCompact ? 'Proforma PDF' : 'PDF', style: labelStyle),
+                  ),
                 ),
               ),
-            )
-          : Tooltip(
-              message: 'Download Inventory Checklist / Proforma PDF',
-              child: InkWell(
-                onTap: _exportPdf,
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(
-                    color: _tealDark,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                        color: _teal.withValues(alpha: 0.3), width: 1),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.picture_as_pdf_rounded,
-                        color: SoftPalette.gray50,
-                        size: 16,
+      );
+
+      if (_canRegisterMedicine) {
+        btns.add(
+          SizedBox(
+            height: ctrlHeight,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                const regIdx = 2;
+                if (regIdx < _tabCtrl.length) {
+                  _tabCtrl.animateTo(regIdx);
+                  setState(() {});
+                } else {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => InventoryUpdatePage(
+                        branchId: widget.branchId,
+                        isAdmin: widget.isAdmin,
+                        isDispenser: widget.isDispenser,
+                        isDoctor: widget.isDoctor,
+                        showMode: 2,
                       ),
-                      SizedBox(width: 6),
-                      Text('PDF', style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12)),
+                    ),
+                  );
+                }
+              },
+              icon: const Icon(Icons.add_circle_outline_rounded, size: 15),
+              label: Text(isCompact ? 'Register Med' : 'Register Medicine', style: labelStyle),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: c.brandStrong,
+                foregroundColor: c.onBrand,
+                elevation: 0,
+                padding: btnPad,
+                shape: shape,
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (_canDeleteInventoryItem && _showRemoveAllMeds) {
+        final isSpecificCampSelected = _selectedCampFilter != null && _selectedCampFilter != 'all';
+        final campLabel = isSpecificCampSelected
+            ? CampSessionService.getCampLabel(_selectedCampFilter!)
+            : 'Camp';
+        btns.add(
+          SizedBox(
+            height: ctrlHeight,
+            child: ElevatedButton.icon(
+              onPressed: _confirmRemoveAllMedsFromCurrentCamp,
+              icon: const Icon(Icons.delete_sweep_rounded, size: 15),
+              label: Text(
+                isCompact
+                    ? 'Clear Camp'
+                    : (isSpecificCampSelected
+                        ? 'Remove All Meds From $campLabel'
+                        : 'Remove Camp Meds (Select Camp)'),
+                style: labelStyle,
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isSpecificCampSelected ? SoftPalette.red550 : SoftPalette.gray550,
+                foregroundColor: SoftPalette.gray50,
+                elevation: 0,
+                padding: btnPad,
+                shape: shape,
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (_canDeleteInventoryItem) {
+        btns.add(
+          SizedBox(
+            height: ctrlHeight,
+            child: ElevatedButton.icon(
+              onPressed: _syncInventoryFromCloud,
+              icon: const Icon(Icons.cloud_download_rounded, size: 15),
+              label: Text(isCompact ? 'Sync' : 'Sync / Restore Cloud', style: labelStyle),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: SoftPalette.slate600,
+                foregroundColor: SoftPalette.gray50,
+                elevation: 0,
+                padding: btnPad,
+                shape: shape,
+              ),
+            ),
+          ),
+        );
+
+        btns.add(
+          SizedBox(
+            height: ctrlHeight,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                setState(() {
+                  _isSelectMode = !_isSelectMode;
+                  if (!_isSelectMode) _selectedBatchKeys.clear();
+                });
+              },
+              icon: Icon(
+                _isSelectMode ? Icons.close_rounded : Icons.checklist_rounded,
+                size: 15,
+              ),
+              label: Text(
+                _isSelectMode ? (isCompact ? 'Cancel' : 'Cancel Selection') : 'Select & Delete',
+                style: labelStyle,
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isSelectMode ? SoftPalette.slate700 : SoftPalette.red500,
+                foregroundColor: SoftPalette.gray50,
+                elevation: 0,
+                padding: btnPad,
+                shape: shape,
+              ),
+            ),
+          ),
+        );
+      }
+
+      return btns;
+    }
+
+    final typeDropdown = buildDropdownChip(
+      value: _filterType,
+      items: _types,
+      icon: Icons.category_outlined,
+      onChanged: (val) {
+        if (val != null) {
+          setState(() {
+            _filterType = val;
+            _displayLimit = 50;
+            _processData();
+          });
+        }
+      },
+    );
+
+    final batchDropdown = buildDropdownChip(
+      value: _filterBatch,
+      items: _batchKeys,
+      icon: Icons.layers_outlined,
+      onChanged: (val) {
+        if (val != null) {
+          setState(() {
+            _filterBatch = val;
+            _displayLimit = 50;
+            _processData();
+          });
+        }
+      },
+    );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 10 : 12,
+        vertical: isCompact ? 8 : 10,
+      ),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
+      ),
+      child: isCompact
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: buildSearchField()),
+                    const SizedBox(width: 8),
+                    typeDropdown,
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (hasCamps && !widget.isDoctor) ...[
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: buildCampBar(),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      batchDropdown,
+                      const SizedBox(width: 6),
+                      _buildMergeFormulaCheckButton(isCompact: true),
+                      for (final btn in buildActionButtons()) ...[
+                        const SizedBox(width: 6),
+                        btn,
+                      ],
                     ],
                   ),
                 ),
-              ),
+              ],
+            )
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                if (constraints.maxWidth >= 820) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minWidth: 150),
+                          child: buildSearchField(),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      typeDropdown,
+                      const SizedBox(width: 6),
+                      batchDropdown,
+                      const SizedBox(width: 6),
+                      _buildMergeFormulaCheckButton(isCompact: false),
+                      if (hasCamps && !widget.isDoctor) ...[
+                        const SizedBox(width: 6),
+                        buildCampBar(),
+                      ],
+                      for (final btn in buildActionButtons()) ...[
+                        const SizedBox(width: 6),
+                        btn,
+                      ],
+                    ],
+                  );
+                }
+                return Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    SizedBox(width: 220, child: buildSearchField()),
+                    typeDropdown,
+                    batchDropdown,
+                    _buildMergeFormulaCheckButton(isCompact: false),
+                    if (hasCamps && !widget.isDoctor) buildCampBar(),
+                    ...buildActionButtons(),
+                  ],
+                );
+              },
             ),
-    );
-
-    if (_canRegisterMedicine) {
-      widgets.add(const SizedBox(width: 8));
-      widgets.add(
-        ElevatedButton.icon(
-          onPressed: () {
-            final regIdx = 2;
-            if (regIdx < _tabCtrl.length) {
-              _tabCtrl.animateTo(regIdx);
-              setState(() {});
-            }
-          },
-          icon: const Icon(Icons.add_circle_outline_rounded, color: SoftPalette.gray50, size: 16),
-          label: const Text(
-            'Register Medicine',
-            style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: SoftPalette.teal600,
-            foregroundColor: SoftPalette.gray50,
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            minimumSize: const Size(0, 38),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-        ),
-      );
-    }
-
-    if (_canDeleteInventoryItem && _showRemoveAllMeds) {
-      widgets.add(const SizedBox(width: 8));
-      final isSpecificCampSelected = _selectedCampFilter != null && _selectedCampFilter != 'all';
-      final campLabel = isSpecificCampSelected
-          ? CampSessionService.getCampLabel(_selectedCampFilter!)
-          : 'Camp';
-      widgets.add(
-        ElevatedButton.icon(
-          onPressed: _confirmRemoveAllMedsFromCurrentCamp,
-          icon: const Icon(Icons.delete_sweep_rounded, color: SoftPalette.gray50, size: 16),
-          label: Text(
-            isSpecificCampSelected
-                ? 'Remove All Meds From $campLabel'
-                : 'Remove Camp Meds (Select Camp)',
-            style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: isSpecificCampSelected ? SoftPalette.red550 : SoftPalette.gray550,
-            foregroundColor: SoftPalette.gray50,
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            minimumSize: const Size(0, 38),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-        ),
-      );
-    }
-
-    if (_canDeleteInventoryItem) {
-      // Restore / Sync from Cloud button
-      widgets.add(const SizedBox(width: 8));
-      widgets.add(
-        ElevatedButton.icon(
-          onPressed: _syncInventoryFromCloud,
-          icon: const Icon(Icons.cloud_download_rounded, color: SoftPalette.gray50, size: 16),
-          label: const Text(
-            'Sync / Restore Cloud',
-            style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: SoftPalette.slate600,
-            foregroundColor: SoftPalette.gray50,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            minimumSize: const Size(0, 38),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-        ),
-      );
-
-      // Select & Delete Toggle button for HQ Manager / Admin / Chairman
-      widgets.add(const SizedBox(width: 8));
-      widgets.add(
-        ElevatedButton.icon(
-          onPressed: () {
-            setState(() {
-              _isSelectMode = !_isSelectMode;
-              if (!_isSelectMode) {
-                _selectedBatchKeys.clear();
-              }
-            });
-          },
-          icon: Icon(
-            _isSelectMode ? Icons.close_rounded : Icons.checklist_rounded,
-            color: SoftPalette.gray50,
-            size: 16,
-          ),
-          label: Text(
-            _isSelectMode ? 'Cancel Selection' : 'Select & Delete',
-            style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _isSelectMode ? SoftPalette.slate700 : SoftPalette.red500,
-            foregroundColor: SoftPalette.gray50,
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            minimumSize: const Size(0, 38),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      color: _isDark ? SoftPalette.slate900 : _bg,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      // Wrap instead of a sideways-scrolling row so every control stays visible on any width.
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: widgets.where((w) => w is! SizedBox || (w.width == null && w.height == null && w.child != null)).toList(),
-      ),
     );
   }
 
   Widget _buildMergeFormulaCheckButton({bool isCompact = false}) {
+    final c = context.comfort;
     return Tooltip(
       message: _mergeByFormula
           ? 'Formulas merged: Showing combined quantities of same formula. Click to view normal separated batches.'
@@ -3057,46 +2647,34 @@ class _InventoryPageState extends State<InventoryPage>
             _processData();
           });
         },
-        borderRadius: BorderRadius.circular(isCompact ? 7 : 8),
-        child: Container(
-          height: isCompact ? 32 : 38,
+        borderRadius: BorderRadius.circular(10),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          height: isCompact ? 34 : 38,
           padding: EdgeInsets.symmetric(horizontal: isCompact ? 8 : 10),
           decoration: BoxDecoration(
-            color: _mergeByFormula
-                ? (_isDark ? SoftPalette.teal550 : _teal)
-                : (_isDark ? SoftPalette.slate700 : SoftPalette.gray50),
-            borderRadius: BorderRadius.circular(isCompact ? 7 : 8),
+            color: _mergeByFormula ? c.brandSoft : c.surfaceSunken,
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: _mergeByFormula
-                  ? (_isDark ? SoftPalette.teal350 : _tealDark)
-                  : (_isDark ? SoftPalette.slate600 : SoftPalette.gray150),
-              width: _mergeByFormula ? 1.5 : 1.0,
+              color: _mergeByFormula ? c.brand : c.border,
+              width: _mergeByFormula ? 1.3 : 1.0,
             ),
-            boxShadow: _mergeByFormula
-                ? [
-                    BoxShadow(
-                      color: _teal.withValues(alpha: 0.25),
-                      blurRadius: 4,
-                      offset: const Offset(0, 1),
-                    ),
-                  ]
-                : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 _mergeByFormula ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
-                size: isCompact ? 16 : 18,
-                color: _mergeByFormula ? SoftPalette.gray50 : (_isDark ? SoftPalette.slate350 : _teal),
+                size: isCompact ? 16 : 17,
+                color: _mergeByFormula ? c.brand : c.textSecondary,
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 6),
               Text(
                 'Merge Formula',
                 style: TextStyle(
-                  fontSize: isCompact ? 11.5 : 12,
-                  fontWeight: FontWeight.bold,
-                  color: _mergeByFormula ? SoftPalette.gray50 : (_isDark ? SoftPalette.gray50 : _textDark),
+                  fontSize: isCompact ? 11.5 : 12.5,
+                  fontWeight: _mergeByFormula ? FontWeight.w700 : FontWeight.w600,
+                  color: _mergeByFormula ? c.brand : c.textPrimary,
                 ),
               ),
             ],
@@ -3202,68 +2780,20 @@ class _InventoryPageState extends State<InventoryPage>
     if (confirmed != true || !mounted) return;
 
     try {
-      final count = await LocalStorageService.clearLocalCampStock(widget.branchId, activeCamp);
-
-      // LAN broadcast
-      try {
-        RealtimeManager().sendMessage(RealtimeEvents.payload(
-          type: RealtimeEvents.deleteStockItem,
-          branchId: widget.branchId,
-          data: {'clearCamp': activeCamp, 'count': count},
-        ));
-      } catch (_) {}
-
-      // Background permanent Firestore purge for ONLY this camp (not from a desk on the LAN:
-      // only the server talks to Firestore there; run it on the server PC).
-      if (!LanFirestoreGate.isLanDesk) unawaited(() async {
-        try {
-          final db = FirebaseFirestore.instance;
-          final isHaji = activeCamp.toLowerCase().contains('haji');
-          final isSaddar = activeCamp.toLowerCase().contains('sadd') || activeCamp.toLowerCase().contains('kap');
-
-          for (final bId in [widget.branchId, widget.branchId.toLowerCase(), widget.branchId.toUpperCase()]) {
-            final invColRef = db.collection('branches').doc(bId).collection('inventory');
-            final snap = await invColRef.get();
-            if (snap.docs.isNotEmpty) {
-              final batch = db.batch();
-              int batchCount = 0;
-              for (final doc in snap.docs) {
-                final dId = doc.id.toLowerCase();
-                final dData = doc.data();
-                final dCamp = (dData['campId'] ?? dData['dispensaryId'] ?? '').toString().toLowerCase();
-
-                bool shouldDelete = false;
-                if (isHaji && (dId.startsWith('haji') || dCamp.contains('haji'))) {
-                  shouldDelete = true;
-                } else if (isSaddar && (dId.startsWith('kapayya') || dId.startsWith('saddar') || dCamp.contains('sadd') || dCamp.contains('kap'))) {
-                  shouldDelete = true;
-                }
-
-                if (shouldDelete) {
-                  batch.delete(doc.reference);
-                  batchCount++;
-                }
-              }
-              if (batchCount > 0) {
-                await batch.commit();
-                debugPrint('[ClearCampMeds] Deleted $batchCount Firestore docs for $activeCamp in branches/$bId/inventory');
-              }
-            }
-
-            final subColName = isHaji ? 'inventory_haji' : 'inventory_saddar';
-            final subSnap = await db.collection('branches').doc(bId).collection(subColName).get();
-            if (subSnap.docs.isNotEmpty) {
-              final batch = db.batch();
-              for (final doc in subSnap.docs) {
-                batch.delete(doc.reference);
-              }
-              await batch.commit();
-            }
-          }
-        } catch (e) {
-          debugPrint('[ClearCampMeds] Background Firestore delete error: $e');
-        }
-      }());
+      // Stock book: hide every batch of this camp's pool only (kept for history). Other
+      // camps are separate pools and stay untouched. StockActions sends each change to the
+      // LAN server and the cloud.
+      final pool = StockPool.of(_effectiveBranchId, activeCamp);
+      if (pool == null || !pool.hasCamp) {
+        throw 'Could not work out the stock place for "$campLabel". Choose a camp first.';
+      }
+      var count = 0;
+      for (final rec in StockLedger.items(pool: pool.key)) {
+        final id = (rec['medicineId'] ?? rec['id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        await StockActions.deleteBatch(pool, id);
+        count++;
+      }
 
       if (mounted) {
         _loadDataFromHive();
@@ -3337,7 +2867,7 @@ class _InventoryPageState extends State<InventoryPage>
         cursorColor: _teal,
         style: TextStyle(color: context.adapt(_textDark), fontSize: 14),
         decoration: InputDecoration(
-          prefixIcon: const Icon(Icons.search_rounded, color: _teal, size: 20),
+          prefixIcon: Icon(Icons.search_rounded, color: _teal, size: 20),
           hintText: 'Search formula or name (Tap row to edit)...',
           hintStyle: TextStyle(color: context.adapt(_textLight), fontSize: 13),
           filled: true,
@@ -3352,7 +2882,7 @@ class _InventoryPageState extends State<InventoryPage>
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: _teal, width: 1.5),
+            borderSide: BorderSide(color: _teal, width: 1.5),
           ),
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         ),
@@ -3362,6 +2892,7 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Widget _buildMetricsRow(List<Map<String, dynamic>> batches, bool isMobile) {
+    final c = context.comfort;
     final totalMedicines = batches.length;
     final lowStockCount = batches.where((b) => (b['quantity'] as int) < 10).length;
     final expiringSoonCount = batches.where((b) => _isExpiringSoon(b['expiryDate'] as String?)).length;
@@ -3369,102 +2900,147 @@ class _InventoryPageState extends State<InventoryPage>
 
     final numberFormat = NumberFormat('#,###');
 
-    if (isMobile) {
-      return Container(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          physics: const BouncingScrollPhysics(),
-          child: Row(
-            children: [
-              _buildMetricItem(FontAwesomeIcons.boxOpen, _teal, '$totalMedicines', 'Formulas', onTap: _resetFilters),
-              _buildVerticalDivider(),
-              _buildMetricItem(Icons.inventory_2_outlined, _teal, numberFormat.format(totalStockQty), 'Units', onTap: _resetFilters),
-              _buildVerticalDivider(),
-              _buildMetricItem(Icons.warning_amber_rounded, _red, '$lowStockCount', 'Low Stock', onTap: _applyLowStockSort),
-              _buildVerticalDivider(),
-              _buildMetricItem(Icons.calendar_today_rounded, _blue, '$expiringSoonCount', 'Expiring', onTap: _applyExpirySort),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-      decoration: BoxDecoration(
-        color: _isDark ? SoftPalette.slate800 : _white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _isDark ? SoftPalette.slate700 : SoftPalette.gray100, width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(child: _buildMetricItem(FontAwesomeIcons.boxOpen, _teal, '$totalMedicines', 'Formulas', onTap: _resetFilters)),
-          _buildVerticalDivider(),
-          Expanded(child: _buildMetricItem(Icons.inventory_2_outlined, _teal, numberFormat.format(totalStockQty), 'Units', onTap: _resetFilters)),
-          _buildVerticalDivider(),
-          Expanded(child: _buildMetricItem(Icons.warning_amber_rounded, _red, '$lowStockCount', 'Low Stock', onTap: _applyLowStockSort)),
-          _buildVerticalDivider(),
-          Expanded(child: _buildMetricItem(Icons.calendar_today_rounded, _blue, '$expiringSoonCount', 'Expiring', onTap: _applyExpirySort)),
-        ],
-      ),
+    final card1 = _buildMetricItem(
+      Icons.medication_outlined,
+      c.brand,
+      c.brandSoft,
+      '$totalMedicines',
+      'Formulas',
+      onTap: _resetFilters,
     );
-  }
+    final card2 = _buildMetricItem(
+      Icons.inventory_2_outlined,
+      c.info,
+      c.infoBg,
+      numberFormat.format(totalStockQty),
+      'Total Units',
+      onTap: _resetFilters,
+    );
+    final card3 = _buildMetricItem(
+      Icons.warning_amber_rounded,
+      c.danger,
+      c.dangerBg,
+      '$lowStockCount',
+      'Low Stock',
+      onTap: _applyLowStockSort,
+    );
+    final card4 = _buildMetricItem(
+      Icons.event_busy_rounded,
+      c.warning,
+      c.warningBg,
+      '$expiringSoonCount',
+      'Expiring Soon',
+      onTap: _applyExpirySort,
+    );
 
-  Widget _buildMetricItem(IconData icon, Color color, String value, String label, {VoidCallback? onTap}) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.min,
+    if (isMobile) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: Column(
           children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+            Row(
               children: [
-                Text(
-                  value,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: _isDark ? SoftPalette.slate350 : _textLight,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Expanded(child: card1),
+                const SizedBox(width: 8),
+                Expanded(child: card2),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(child: card3),
+                const SizedBox(width: 8),
+                Expanded(child: card4),
               ],
             ),
           ],
         ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        children: [
+          Expanded(child: card1),
+          const SizedBox(width: 8),
+          Expanded(child: card2),
+          const SizedBox(width: 8),
+          Expanded(child: card3),
+          const SizedBox(width: 8),
+          Expanded(child: card4),
+        ],
       ),
     );
   }
 
-  Widget _buildVerticalDivider() {
-    return Container(
-      height: 24,
-      width: 1,
-      color: _isDark ? SoftPalette.slate600 : SoftPalette.gray100,
-      margin: const EdgeInsets.symmetric(horizontal: 16),
+  Widget _buildMetricItem(
+    IconData icon,
+    Color accentColor,
+    Color bgTint,
+    String value,
+    String label, {
+    VoidCallback? onTap,
+  }) {
+    final c = context.comfort;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: bgTint,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: accentColor.withValues(alpha: _isDark ? 0.22 : 0.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: accentColor, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: c.textPrimary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        height: 1.1,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: accentColor,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -3667,6 +3243,7 @@ class _InventoryPageState extends State<InventoryPage>
   // ── Stock Table (wide screens) ─────────────────────────────────────────────
   Widget _stockTable(
       List<Map<String, dynamic>> data, double screenWidth, int totalCount, [double? availableHeight]) {
+    final c = context.comfort;
     final double cardInnerWidth = screenWidth - 32;
     final double w = cardInnerWidth < 1000 ? 1000 : cardInnerWidth;
     
@@ -3686,12 +3263,12 @@ class _InventoryPageState extends State<InventoryPage>
           width: w,
           padding: const EdgeInsets.symmetric(vertical: 12),
           alignment: Alignment.center,
-          color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+          color: c.surface,
           child: Text(
             data.length >= totalCount
                 ? 'Showing all $totalCount medicines'
                 : 'Loading more...',
-            style: TextStyle(color: _isDark ? SoftPalette.slate350 : _textLight, fontSize: 12, fontWeight: FontWeight.w500),
+            style: TextStyle(color: c.textMuted, fontSize: 12, fontWeight: FontWeight.w500),
           ),
         );
       }
@@ -3700,32 +3277,29 @@ class _InventoryPageState extends State<InventoryPage>
       final isSelected = _selectedBatchKeys.contains(batchKey);
       final qty = b['quantity'] as int;
       final type = b['type'] as String;
-      final barcode = (b['barcode'] ?? b['code'] ?? '').toString().trim();
+      final barcode = (b['barcode'] ?? b['rollNo'] ?? '').toString().trim();
+      final itemCode = (b['code'] ?? b['itemCode'] ?? '').toString().trim();
+      final packBarcode = (b['packBarcode'] ?? '').toString().trim();
       final lowStock = qty < 10;
       final expSoon = _isExpiringSoon(b['expiryDate'] as String?);
       final expText = _formatDate(b['expiryDate'] as String?);
       final isWarning = lowStock || expSoon;
       final rowColor = isSelected
-          ? (_isDark ? SoftPalette.red400.withValues(alpha: 0.22) : SoftPalette.pink100m)
-          : (_isDark
-              ? (isWarning
-                  ? SoftPalette.red900
-                  : (i % 2 == 0 ? SoftPalette.slate800 : SoftPalette.slate900))
-              : (isWarning
-                  ? SoftPalette.red50t
-                  : (i % 2 == 0 ? _white : SoftPalette.gray50)));
+          ? c.dangerBg
+          : (isWarning
+              ? c.dangerBg.withValues(alpha: _isDark ? 0.25 : 0.45)
+              : (i.isEven ? c.surface : c.surfaceSunken.withValues(alpha: 0.4)));
 
       final rowContent = Container(
         decoration: BoxDecoration(
           color: rowColor,
           border: Border(
             bottom: BorderSide(
-                color: isSelected
-                    ? SoftPalette.red400
-                    : (isWarning
-                        ? (_isDark ? SoftPalette.red600 : _red.withValues(alpha: 0.15))
-                        : (_isDark ? SoftPalette.slate700 : SoftPalette.gray100)),
-                width: isSelected ? 1.5 : 1.0),
+              color: isSelected
+                  ? c.danger
+                  : (isWarning ? c.danger.withValues(alpha: 0.25) : c.border),
+              width: isSelected ? 1.5 : 1.0,
+            ),
           ),
         ),
         child: Stack(
@@ -3742,11 +3316,11 @@ class _InventoryPageState extends State<InventoryPage>
                     child: Container(
                       padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                        color: SoftPalette.red400.withValues(alpha: 0.1),
+                        color: c.dangerBg,
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: SoftPalette.red400.withValues(alpha: 0.25)),
+                        border: Border.all(color: c.danger.withValues(alpha: 0.3)),
                       ),
-                      child: const Icon(Icons.delete_forever_rounded, size: 15, color: SoftPalette.red400),
+                      child: Icon(Icons.delete_forever_rounded, size: 15, color: c.danger),
                     ),
                   ),
                 ),
@@ -3763,21 +3337,21 @@ class _InventoryPageState extends State<InventoryPage>
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
-                        color: SoftPalette.orange400.withValues(alpha: 0.15),
+                        color: c.warningBg,
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: SoftPalette.orange400.withValues(alpha: 0.4)),
+                        border: Border.all(color: c.warning.withValues(alpha: 0.4)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.notification_important_rounded, size: 14, color: SoftPalette.orange400),
-                          SizedBox(width: 4),
+                        children: [
+                          Icon(Icons.notification_important_rounded, size: 14, color: c.warning),
+                          const SizedBox(width: 4),
                           Text(
                             'Restock',
                             style: TextStyle(
-                              color: SoftPalette.orange400,
+                              color: c.warning,
                               fontSize: 11,
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                         ],
@@ -3796,27 +3370,25 @@ class _InventoryPageState extends State<InventoryPage>
                             height: 22,
                             child: Checkbox(
                               value: isSelected,
-                              activeColor: SoftPalette.red500,
+                              activeColor: c.danger,
                               onChanged: (_) => _toggleSelectItem(batchKey),
                             ),
                           ),
                         )
                       : Text('${i + 1}',
-                          style: TextStyle(color: _isDark ? SoftPalette.slate350 : _textMid, fontSize: 12.5, fontWeight: FontWeight.bold))),
+                          style: TextStyle(color: c.textSecondary, fontSize: 12.5, fontWeight: FontWeight.w700))),
               _dCell(
                   cols[1].w,
                   RichText(
                     overflow: TextOverflow.ellipsis,
                     text: TextSpan(
-                      style: TextStyle(fontSize: 13, color: _isDark ? SoftPalette.gray50 : _textDark),
+                      style: TextStyle(fontSize: 13, color: c.textPrimary),
                       children: [
                         TextSpan(
                           text: b['name'] ?? '',
                           style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: _isDark
-                                ? (isWarning ? SoftPalette.red350 : SoftPalette.gray50)
-                                : (isWarning ? _red.withValues(alpha: 0.9) : _textDark),
+                            fontWeight: FontWeight.w700,
+                            color: isWarning ? c.danger : c.textPrimary,
                           ),
                         ),
                         if (b['formula'] != null && (b['formula'] as String).isNotEmpty) ...[
@@ -3824,9 +3396,7 @@ class _InventoryPageState extends State<InventoryPage>
                           TextSpan(
                             text: '(${b['formula']})',
                             style: TextStyle(
-                              color: _isDark
-                                  ? (isWarning ? SoftPalette.red300 : SoftPalette.slate350)
-                                  : (isWarning ? _red.withValues(alpha: 0.7) : _textLight),
+                              color: isWarning ? c.danger.withValues(alpha: 0.8) : c.textSecondary,
                               fontWeight: FontWeight.normal,
                               fontSize: 12,
                             ),
@@ -3835,12 +3405,12 @@ class _InventoryPageState extends State<InventoryPage>
                       ],
                     ),
                   )),
-              _dCell(cols[2].w, _barcodeCell(barcode)),
+              _dCell(cols[2].w, _barcodeCell(barcode, itemCode: itemCode, packBarcode: packBarcode)),
               _dCell(cols[3].w, _typePill(type)),
               _dCell(
                   cols[4].w,
                   Text(b['dose'] ?? '—',
-                      style: TextStyle(color: _isDark ? SoftPalette.gray50 : _textDark, fontSize: 12.5))),
+                      style: TextStyle(color: c.textSecondary, fontSize: 12.5))),
               _dCell(
                   cols[5].w,
                   Row(
@@ -3848,26 +3418,24 @@ class _InventoryPageState extends State<InventoryPage>
                     children: [
                       Text(NumberFormat('#,###').format(qty),
                           style: TextStyle(
-                              color: _isDark
-                                  ? (lowStock ? SoftPalette.red350 : SoftPalette.gray50)
-                                  : (lowStock ? _red : _textDark),
-                              fontWeight: lowStock ? FontWeight.bold : FontWeight.w500,
+                              color: lowStock ? c.danger : c.textPrimary,
+                              fontWeight: lowStock ? FontWeight.w700 : FontWeight.w600,
                               fontSize: 12.5)),
                       if (_mergeByFormula && (b['_mergedCount'] as int? ?? 1) > 1) ...[
                         const SizedBox(width: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                           decoration: BoxDecoration(
-                            color: _teal.withValues(alpha: _isDark ? 0.35 : 0.15),
+                            color: c.brandSoft,
                             borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: _teal.withValues(alpha: 0.4), width: 0.8),
+                            border: Border.all(color: c.brand.withValues(alpha: 0.35), width: 0.8),
                           ),
                           child: Text(
                             'Merged',
                             style: TextStyle(
                               fontSize: 9.5,
-                              fontWeight: FontWeight.bold,
-                              color: _isDark ? SoftPalette.teal200 : _tealDark,
+                              fontWeight: FontWeight.w700,
+                              color: c.brandStrong,
                             ),
                           ),
                         ),
@@ -3879,10 +3447,8 @@ class _InventoryPageState extends State<InventoryPage>
                   Text(
                     b['hasMultipleExpiries'] == true ? '$expText (Earliest)' : expText,
                     style: TextStyle(
-                        color: _isDark
-                            ? (expSoon ? SoftPalette.red350 : SoftPalette.gray50)
-                            : (expSoon ? _red : _textDark),
-                        fontWeight: expSoon ? FontWeight.bold : FontWeight.normal,
+                        color: expSoon ? c.danger : c.textSecondary,
+                        fontWeight: expSoon ? FontWeight.w700 : FontWeight.normal,
                         fontSize: 12.5))),
             ]),
           ],
@@ -3899,13 +3465,13 @@ class _InventoryPageState extends State<InventoryPage>
       } else {
         handleTap = () {
           if (widget.isDispenser && mounted) {
-            AppToast.showSnackBar(context, 
+            AppToast.showSnackBar(context,
               SnackBar(
                 content: const Text(
                   '💡 Dispensers must use "Update Stock" to submit medicine changes for Supervisor approval.',
                   style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold),
                 ),
-                backgroundColor: _isDark ? SoftPalette.teal550 : _teal,
+                backgroundColor: c.brand,
                 duration: const Duration(seconds: 3),
               ),
             );
@@ -3915,7 +3481,7 @@ class _InventoryPageState extends State<InventoryPage>
 
       return InkWell(
         onTap: handleTap,
-        hoverColor: _isDark ? SoftPalette.slate700 : SoftPalette.gray100,
+        hoverColor: c.surfaceSunken,
         child: rowContent,
       );
     }
@@ -3923,16 +3489,9 @@ class _InventoryPageState extends State<InventoryPage>
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
       decoration: BoxDecoration(
-        color: _isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _isDark ? SoftPalette.slate700 : SoftPalette.gray100, width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: _shadow.withValues(alpha: 0.04),
-            blurRadius: 15,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        color: c.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.border),
       ),
       clipBehavior: Clip.antiAlias,
       child: LayoutBuilder(
@@ -3940,16 +3499,19 @@ class _InventoryPageState extends State<InventoryPage>
           final tableContent = Column(
             children: [
               Container(
-                height: 38,
-                color: _isDark ? SoftPalette.teal550 : _teal,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.surfaceSunken,
+                  border: Border(bottom: BorderSide(color: c.borderStrong)),
+                ),
                 child: Row(
                     children: cols.asMap().entries.map((entry) {
                       final idx = entry.key;
-                      final c = entry.value;
+                      final col = entry.value;
                       if (idx == 0 && _isSelectMode) {
                         return Container(
-                          width: c.w,
-                          height: 38,
+                          width: col.w,
+                          height: 40,
                           alignment: Alignment.center,
                           child: SizedBox(
                             width: 22,
@@ -3957,15 +3519,15 @@ class _InventoryPageState extends State<InventoryPage>
                             child: Checkbox(
                               value: _allFilteredSelected,
                               tristate: _selectedBatchKeys.isNotEmpty && !_allFilteredSelected,
-                              activeColor: SoftPalette.gray50,
-                              checkColor: _teal,
-                              side: const BorderSide(color: SoftPalette.gray50, width: 1.5),
+                              activeColor: c.brand,
+                              checkColor: c.onBrand,
+                              side: BorderSide(color: c.textSecondary, width: 1.5),
                               onChanged: (_) => _toggleSelectAll(),
                             ),
                           ),
                         );
                       }
-                      return _hCell(c.w, c.label, c.sort);
+                      return _hCell(col.w, col.label, col.sort);
                     }).toList()),
               ),
               Expanded(
@@ -4004,6 +3566,7 @@ class _InventoryPageState extends State<InventoryPage>
         padding: const EdgeInsets.all(12),
         itemCount: data.length + 1,
         itemBuilder: (ctx, i) {
+          final c = ctx.comfort;
           if (i == data.length) {
             return Container(
               padding: const EdgeInsets.symmetric(vertical: 12),
@@ -4012,7 +3575,7 @@ class _InventoryPageState extends State<InventoryPage>
                 data.length >= totalCount
                     ? 'Showing all $totalCount medicines'
                     : 'Loading more...',
-                style: TextStyle(color: _isDark ? SoftPalette.slate350 : _textLight, fontSize: 12, fontWeight: FontWeight.w500),
+                style: TextStyle(color: c.textMuted, fontSize: 12, fontWeight: FontWeight.w500),
               ),
             );
           }
@@ -4022,7 +3585,8 @@ class _InventoryPageState extends State<InventoryPage>
           final qty = _asInt(b['quantity']);
           final type = b['type']?.toString() ?? '';
           final price = _parsePrice(b['price']);
-          final barcode = (b['barcode'] ?? b['code'] ?? '').toString().trim();
+          final barcode = (b['barcode'] ?? b['rollNo'] ?? '').toString().trim();
+          final packBarcode = (b['packBarcode'] ?? '').toString().trim();
           final lowStock = qty < 10;
           final expSoon = _isExpiringSoon(b['expiryDate']?.toString());
           final expText = _formatDate(b['expiryDate']?.toString());
@@ -4034,25 +3598,15 @@ class _InventoryPageState extends State<InventoryPage>
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
               color: isSelected
-                  ? (_isDark ? SoftPalette.red400.withValues(alpha: 0.22) : SoftPalette.pink100m)
-                  : (_isDark
-                      ? (isWarning ? SoftPalette.red900 : SoftPalette.slate800)
-                      : (isWarning ? SoftPalette.pink100m : _white)),
+                  ? c.dangerBg
+                  : (isWarning ? c.dangerBg.withValues(alpha: 0.35) : c.surface),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: isSelected
-                    ? SoftPalette.red500
-                    : (isWarning ? (_isDark ? SoftPalette.red350 : _red) : (_isDark ? SoftPalette.slate700 : SoftPalette.gray150)),
-                width: isSelected || isWarning ? 2.0 : 0.8,
+                    ? c.danger
+                    : (isWarning ? c.danger.withValues(alpha: 0.45) : c.border),
+                width: isSelected ? 1.6 : 1.0,
               ),
-              boxShadow: [
-                BoxShadow(
-                    color: isWarning
-                        ? (_isDark ? SoftPalette.red400.withValues(alpha: 0.3) : _red.withValues(alpha: 0.18))
-                        : (_isDark ? SoftPalette.gray900A26 : _shadow),
-                    blurRadius: isWarning ? 10 : 6,
-                    offset: const Offset(0, 3))
-              ],
             ),
             child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -4066,7 +3620,7 @@ class _InventoryPageState extends State<InventoryPage>
                           height: 22,
                           child: Checkbox(
                             value: isSelected,
-                            activeColor: SoftPalette.red500,
+                            activeColor: c.danger,
                             onChanged: (_) => _toggleSelectItem(batchKey),
                           ),
                         ),
@@ -4074,13 +3628,11 @@ class _InventoryPageState extends State<InventoryPage>
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                          color: isWarning
-                              ? (_isDark ? SoftPalette.red400.withValues(alpha: 0.2) : _red.withValues(alpha: 0.1))
-                              : (_isDark ? SoftPalette.slate700 : _green50),
+                          color: isWarning ? c.dangerBg : c.brandSoft,
                           borderRadius: BorderRadius.circular(8)),
                       child: _typeIconWidget(type,
                           size: 13,
-                          color: isWarning ? (_isDark ? SoftPalette.red350 : _red) : (_isDark ? SoftPalette.sky350 : null)),
+                          color: isWarning ? c.danger : c.brand),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -4092,10 +3644,8 @@ class _InventoryPageState extends State<InventoryPage>
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                              color: _isDark
-                                  ? (isWarning ? SoftPalette.red350 : SoftPalette.gray50)
-                                  : (isWarning ? _red : _textDark),
-                              fontWeight: FontWeight.bold,
+                              color: isWarning ? c.danger : c.textPrimary,
+                              fontWeight: FontWeight.w700,
                               fontSize: 13.5),
                         ),
                       ],
@@ -4111,11 +3661,11 @@ class _InventoryPageState extends State<InventoryPage>
                             child: Container(
                               padding: const EdgeInsets.all(6),
                               decoration: BoxDecoration(
-                                color: SoftPalette.red400.withValues(alpha: 0.1),
+                                color: c.dangerBg,
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: SoftPalette.red400.withValues(alpha: 0.25)),
+                                border: Border.all(color: c.danger.withValues(alpha: 0.3)),
                               ),
-                              child: const Icon(Icons.delete_forever_rounded, size: 15, color: SoftPalette.red400),
+                              child: Icon(Icons.delete_forever_rounded, size: 15, color: c.danger),
                             ),
                           ),
                         ),
@@ -4131,21 +3681,21 @@ class _InventoryPageState extends State<InventoryPage>
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(
-                                color: SoftPalette.orange400.withValues(alpha: 0.15),
+                                color: c.warningBg,
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: SoftPalette.orange400.withValues(alpha: 0.4)),
+                                border: Border.all(color: c.warning.withValues(alpha: 0.4)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  Icon(Icons.notification_important_rounded, size: 13, color: SoftPalette.orange400),
-                                  SizedBox(width: 4),
+                                children: [
+                                  Icon(Icons.notification_important_rounded, size: 13, color: c.warning),
+                                  const SizedBox(width: 4),
                                   Text(
                                     'Restock',
                                     style: TextStyle(
-                                      color: SoftPalette.orange400,
+                                      color: c.warning,
                                       fontSize: 11,
-                                      fontWeight: FontWeight.bold,
+                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ],
@@ -4171,25 +3721,27 @@ class _InventoryPageState extends State<InventoryPage>
                   Wrap(spacing: 6, runSpacing: 4, children: [
                     _typePill(type),
                     if ((b['dose'] ?? '').toString().isNotEmpty)
-                      _infoBadge(b['dose'].toString(), _isDark ? SoftPalette.slate350 : _textMid),
+                      _infoBadge(b['dose'].toString(), c.textSecondary),
                     if (barcode.isNotEmpty)
-                      _infoBadge(barcode, _isDark ? SoftPalette.sky350 : _indigo, icon: Icons.qr_code_rounded),
+                      _infoBadge(barcode, c.brandStrong, icon: Icons.qr_code_rounded),
+                    if (packBarcode.isNotEmpty)
+                      _infoBadge(packBarcode, c.brand, icon: Icons.qr_code_scanner_rounded),
                     _priceBadge(price),
                     _expBadge(b['hasMultipleExpiries'] == true ? '$expText (Earliest)' : expText, expSoon),
                     if (_mergeByFormula && (b['_mergedCount'] as int? ?? 1) > 1)
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: _teal.withValues(alpha: _isDark ? 0.35 : 0.15),
+                          color: c.brandSoft,
                           borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: _teal.withValues(alpha: 0.4), width: 0.8),
+                          border: Border.all(color: c.brand.withValues(alpha: 0.35), width: 0.8),
                         ),
                         child: Text(
                           'Merged (${b['_mergedCount']} batches)',
                           style: TextStyle(
                             fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: _isDark ? SoftPalette.teal200 : _tealDark,
+                            fontWeight: FontWeight.w700,
+                            color: c.brandStrong,
                           ),
                         ),
                       ),
@@ -4209,13 +3761,13 @@ class _InventoryPageState extends State<InventoryPage>
           } else {
             handleCardTap = () {
               if (widget.isDispenser && mounted) {
-                AppToast.showSnackBar(context, 
+                AppToast.showSnackBar(context,
                   SnackBar(
                     content: const Text(
                       '💡 Dispensers must use "Update Stock" to submit medicine changes for Supervisor approval.',
                       style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold),
                     ),
-                    backgroundColor: _isDark ? SoftPalette.teal550 : _teal,
+                    backgroundColor: c.brand,
                     duration: const Duration(seconds: 3),
                   ),
                 );
@@ -4230,29 +3782,45 @@ class _InventoryPageState extends State<InventoryPage>
         },
       );
 
-  // Small pill showing the batch barcode (or a muted placeholder when absent)
-  Widget _barcodeCell(String barcode) {
-    if (barcode.isEmpty) {
-      return Text('—', style: TextStyle(color: _isDark ? SoftPalette.slate350 : _textLight.withValues(alpha: 0.6), fontSize: 12.5));
+  // Small pill showing the 3-digit Proforma barcode (and optional packBarcode)
+  Widget _barcodeCell(String barcode, {String itemCode = '', String packBarcode = ''}) {
+    final c = context.comfort;
+    if (barcode.isEmpty && packBarcode.isEmpty) {
+      return Text('—', style: TextStyle(color: c.textMuted, fontSize: 12.5));
     }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: _isDark ? SoftPalette.sky700 : _indigo.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: _isDark ? SoftPalette.sky500 : _indigo.withValues(alpha: 0.25)),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.qr_code_rounded, size: 12, color: _isDark ? SoftPalette.sky350 : _indigo),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            barcode,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: _isDark ? SoftPalette.sky300 : _indigo, fontSize: 11, fontWeight: FontWeight.bold),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (barcode.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: c.brandSoft,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: c.brand.withValues(alpha: 0.3)),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.qr_code_rounded, size: 12, color: c.brandStrong),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  barcode,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: c.brandStrong, fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ]),
           ),
-        ),
-      ]),
+        if (packBarcode.isNotEmpty) ...[
+          const SizedBox(height: 1),
+          Text(
+            'Pack: $packBarcode',
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: c.textSecondary, fontSize: 9.5, fontWeight: FontWeight.w500),
+          ),
+        ],
+      ],
     );
   }
 
@@ -4268,9 +3836,8 @@ class _InventoryPageState extends State<InventoryPage>
       }
       return;
     }
-    final docIds =
-        List<String>.from(batchData['_docIds'] as List? ?? []);
-    if (docIds.isEmpty) return;
+    final refs = _batchRefs(batchData);
+    if (refs.isEmpty) return;
 
     showModalBottomSheet(
       context: context,
@@ -4278,7 +3845,8 @@ class _InventoryPageState extends State<InventoryPage>
       backgroundColor: Colors.transparent,
       builder: (_) => _EditMedicineSheet(
         branchId: widget.branchId,
-        docIds: docIds,
+        docIds: [for (final r in refs) r.$2],
+        docPools: [for (final r in refs) r.$1],
         initial: batchData,
         medicineTypes: _types.where((t) => t != 'All').toList(),
         formatDate: _formatDate,
@@ -4301,7 +3869,7 @@ class _InventoryPageState extends State<InventoryPage>
             .get(const GetOptions(source: Source.serverAndCache)),
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(
+            return Center(
                 child: CircularProgressIndicator(color: _teal));
           }
           var docs = snap.data?.docs ?? [];
@@ -4346,7 +3914,7 @@ class _InventoryPageState extends State<InventoryPage>
         stream: _logState.stream,
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(
+            return Center(
                 child: CircularProgressIndicator(color: _teal));
           }
           
@@ -4373,6 +3941,7 @@ class _InventoryPageState extends State<InventoryPage>
       );
 
   Widget _logCard(Map<String, dynamic> data) {
+    final c = context.comfort;
     final action = data['action']?.toString() ?? '';
     final medicineName = data['medicineName']?.toString() ?? '—';
     final medicineType = data['medicineType']?.toString() ?? '';
@@ -4386,28 +3955,22 @@ class _InventoryPageState extends State<InventoryPage>
     final isRegistration = action == 'medicine_registered' ||
         action == 'medicine_registered_directly';
     final isEdited = action == 'medicine_edited';
-    final Color accentColor = isEdited ? context.adapt(_purple) : (isRegistration ? context.adapt(_blue) : context.adapt(_green600));
+    final Color accentColor = isEdited ? c.info : (isRegistration ? c.brand : c.success);
     final IconData actionIcon = isEdited
         ? Icons.edit_rounded
         : (isRegistration ? Icons.medication_liquid_rounded : Icons.add_box_rounded);
     final String actionLabel = isEdited
         ? 'MEDICINE EDITED'
         : (isRegistration ? 'NEW MEDICINE' : 'STOCK ADDED');
-    final Color labelBg = isEdited
-        ? context.adapt(SoftPalette.purple150m)
-        : (isRegistration ? context.adapt(SoftPalette.slate100) : context.adapt(SoftPalette.green100m));
-    final Color labelFg = isEdited ? context.adapt(_purple) : (isRegistration ? context.adapt(_blue) : context.adapt(_green600));
+    final Color labelBg = isEdited ? c.infoBg : (isRegistration ? c.brandSoft : c.successBg);
+    final Color labelFg = isEdited ? c.info : (isRegistration ? c.brandStrong : c.success);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: context.adapt(_white),
+        color: c.surface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: accentColor.withValues(alpha: 0.2)),
-        boxShadow: [
-          BoxShadow(
-              color: _shadow, blurRadius: 6, offset: const Offset(0, 2))
-        ],
+        border: Border.all(color: c.border),
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -4415,7 +3978,7 @@ class _InventoryPageState extends State<InventoryPage>
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: accentColor.withValues(alpha: 0.1),
+              color: labelBg,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(actionIcon, color: accentColor, size: 18),
@@ -4436,26 +3999,26 @@ class _InventoryPageState extends State<InventoryPage>
                     style: TextStyle(
                         color: labelFg,
                         fontSize: 10,
-                        fontWeight: FontWeight.bold)),
+                        fontWeight: FontWeight.w700)),
               ),
               if (data['_isPending'] == true) ...[
                 const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                   decoration: BoxDecoration(
-                    color: _orange.withValues(alpha: 0.12),
+                    color: c.warningBg,
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: _orange.withValues(alpha: 0.3)),
+                    border: Border.all(color: c.warning.withValues(alpha: 0.35)),
                   ),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.bolt_rounded, size: 9, color: _orange),
-                    SizedBox(width: 3),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.bolt_rounded, size: 10, color: c.warning),
+                    const SizedBox(width: 3),
                     Text('PENDING SYNC',
                         style: TextStyle(
-                            color: _orange,
-                            fontSize: 8,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.5)),
+                            color: c.warning,
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.4)),
                   ]),
                 ),
               ],
@@ -4463,39 +4026,39 @@ class _InventoryPageState extends State<InventoryPage>
             const SizedBox(height: 6),
             Text(medicineName,
                 style: TextStyle(
-                    color: context.adapt(_textDark),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15)),
+                    color: c.textPrimary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14.5)),
             const SizedBox(height: 6),
             Wrap(spacing: 8, runSpacing: 5, children: [
               if (medicineType.isNotEmpty)
-                _miniChip(medicineType, _teal),
-              if (dose.isNotEmpty) _miniChip(dose, context.adapt(_textMid)),
+                _miniChip(medicineType, c.brandStrong),
+              if (dose.isNotEmpty) _miniChip(dose, c.textSecondary),
               _miniChip('+$qtyAdded units', accentColor),
               if (isRegistration && price.isNotEmpty)
-                _miniChip('PKR $price', _orange),
+                _miniChip('PKR $price', c.warning),
               if (isRegistration && expiry.isNotEmpty)
-                _miniChip('Exp: ${_formatDate(expiry)}', context.adapt(_textMid)),
+                _miniChip('Exp: ${_formatDate(expiry)}', c.textSecondary),
             ]),
             const SizedBox(height: 8),
             Row(children: [
               Icon(Icons.person_outline_rounded,
-                  size: 13, color: context.adapt(_textLight)),
+                  size: 13, color: c.textMuted),
               const SizedBox(width: 5),
               Text(performedBy,
                   style: TextStyle(
-                      color: context.adapt(_textMid),
+                      color: c.textSecondary,
                       fontSize: 12,
                       fontWeight: FontWeight.w600)),
               if (ts != null) ...[
                 const SizedBox(width: 10),
                 Icon(Icons.access_time_rounded,
-                    size: 12, color: context.adapt(_textLight)),
+                    size: 12, color: c.textMuted),
                 const SizedBox(width: 4),
                 Text(
                   DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate()),
                   style: TextStyle(
-                      color: context.adapt(_textLight), fontSize: 11),
+                      color: c.textMuted, fontSize: 11),
                 ),
               ]
             ]),
@@ -4507,24 +4070,50 @@ class _InventoryPageState extends State<InventoryPage>
 
   // ── History Tab ───────────────────────────────────────────────────────────
   Widget _historyTab() {
+    final c = context.comfort;
     return DefaultTabController(
       length: 2,
       child: Column(children: [
         Container(
-          color: context.adapt(_white),
+          margin: const EdgeInsets.fromLTRB(14, 10, 14, 2),
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: c.border),
+          ),
           child: TabBar(
-            indicatorColor: _teal,
-            labelColor: _teal,
-            unselectedLabelColor: context.adapt(_textLight),
-            labelStyle: TextStyle(fontWeight: FontWeight.bold),
+            indicator: BoxDecoration(
+              color: c.brand,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            indicatorSize: TabBarIndicatorSize.tab,
+            labelColor: c.onBrand,
+            unselectedLabelColor: c.textSecondary,
+            labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+            dividerColor: Colors.transparent,
             isScrollable: false,
-            tabs: [
+            tabs: const [
               Tab(
-                  icon: Icon(Icons.check_circle_rounded, size: 16),
-                  text: 'Approved'),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.check_circle_rounded, size: 16),
+                    SizedBox(width: 6),
+                    Text('Approved'),
+                  ],
+                ),
+              ),
               Tab(
-                  icon: Icon(Icons.cancel_rounded, size: 16),
-                  text: 'Rejected'),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.cancel_rounded, size: 16),
+                    SizedBox(width: 6),
+                    Text('Rejected'),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
@@ -4546,7 +4135,7 @@ class _InventoryPageState extends State<InventoryPage>
             .get(const GetOptions(source: Source.serverAndCache)),
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(
+            return Center(
                 child: CircularProgressIndicator(color: _teal));
           }
           var docs = snap.data?.docs ?? [];
@@ -4638,6 +4227,7 @@ class _InventoryPageState extends State<InventoryPage>
 
   Widget _requestCard(
       String docId, Map<String, dynamic> data, String status) {
+    final c = context.comfort;
     final requestType = data['requestType']?.toString() ?? '';
     final reason = data['reason']?.toString() ?? '';
     final ts = data['requestedAt'] as Timestamp?;
@@ -4666,30 +4256,19 @@ class _InventoryPageState extends State<InventoryPage>
                 .catchError((_) => 'User');
 
     Color badgeBg = switch (requestType) {
-      'edit_medicine' => context.adapt(SoftPalette.purple150m),
-      'delete_medicine' => context.adapt(SoftPalette.pink100m),
-      _ => context.adapt(SoftPalette.gray100),
+      'edit_medicine' => c.infoBg,
+      'delete_medicine' => c.dangerBg,
+      _ => c.surfaceSunken,
     };
     Color badgeFg = switch (requestType) {
-      'edit_medicine' => context.adapt(_purple),
-      'delete_medicine' => context.adapt(_red),
-      _ => context.adapt(_textMid),
+      'edit_medicine' => c.info,
+      'delete_medicine' => c.danger,
+      _ => c.textSecondary,
     };
     String typeLabel = switch (requestType) {
       'edit_medicine' => 'EDIT MEDICINE',
       'delete_medicine' => 'DELETE MEDICINE',
       _ => requestType.replaceAll('_', ' ').toUpperCase(),
-    };
-
-    Color statusColor = switch (status) {
-      'approved' => _green600,
-      'rejected' => _red,
-      _ => _orange,
-    };
-    IconData statusIcon = switch (status) {
-      'approved' => Icons.check_circle_rounded,
-      'rejected' => Icons.cancel_rounded,
-      _ => Icons.pending_rounded,
     };
 
     final rawItems = status == 'pending'
@@ -4699,10 +4278,12 @@ class _InventoryPageState extends State<InventoryPage>
 
     final campLabel = _resolveCampLabel(data);
 
-    return Card(
-      color: context.adapt(_green50),
-      elevation: status == 'pending' ? 4 : 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.border),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child:
@@ -4716,29 +4297,29 @@ class _InventoryPageState extends State<InventoryPage>
                   _ => 'Inventory Request',
                 },
                 style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: context.adapt(_tealDark)),
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w700,
+                    color: c.textPrimary),
               ),
             ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
               decoration: BoxDecoration(
-                color: SoftPalette.sky500.withValues(alpha: 0.15),
+                color: c.brandSoft,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: SoftPalette.sky500.withValues(alpha: 0.3)),
+                border: Border.all(color: c.brand.withValues(alpha: 0.3)),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.holiday_village_rounded, size: 13, color: SoftPalette.sky500),
+                  Icon(Icons.holiday_village_rounded, size: 13, color: c.brandStrong),
                   const SizedBox(width: 4),
                   Text(
                     campLabel.toUpperCase(),
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: SoftPalette.sky500,
+                      fontWeight: FontWeight.w700,
+                      color: c.brandStrong,
                       letterSpacing: 0.4,
                     ),
                   ),
@@ -4755,7 +4336,7 @@ class _InventoryPageState extends State<InventoryPage>
               child: Text(typeLabel,
                   style: TextStyle(
                       fontSize: 11,
-                      fontWeight: FontWeight.bold,
+                      fontWeight: FontWeight.w700,
                       color: badgeFg)),
             ),
           ]),
@@ -4763,23 +4344,23 @@ class _InventoryPageState extends State<InventoryPage>
           FutureBuilder<String>(
             future: nameFuture,
             builder: (_, snap) => Row(children: [
-              const Icon(Icons.person_rounded, size: 15, color: _teal),
+              Icon(Icons.person_rounded, size: 15, color: c.brand),
               const SizedBox(width: 6),
               Text('By: ${snap.data ?? '…'}',
                   style:
-                      TextStyle(fontSize: 13, color: context.adapt(_textDark))),
+                      TextStyle(fontSize: 13, color: c.textPrimary)),
             ]),
           ),
           const SizedBox(height: 4),
           Row(children: [
-            Icon(Icons.location_on_rounded, size: 14, color: context.adapt(_tealDark)),
+            Icon(Icons.location_on_rounded, size: 14, color: c.brand),
             const SizedBox(width: 6),
             Text(
               'Facility Camp: $campLabel',
               style: TextStyle(
                 fontSize: 12.5,
-                fontWeight: FontWeight.bold,
-                color: context.adapt(_tealDark),
+                fontWeight: FontWeight.w600,
+                color: c.brandStrong,
               ),
             ),
           ]),
@@ -4787,13 +4368,13 @@ class _InventoryPageState extends State<InventoryPage>
           if (ts != null)
             Row(children: [
               Icon(Icons.access_time_rounded,
-                  size: 14, color: context.adapt(_textLight)),
+                  size: 14, color: c.textMuted),
               const SizedBox(width: 6),
               Text(
                 DateFormat('dd MMM yyyy, hh:mm a')
                     .format(ts.toDate()),
                 style:
-                    TextStyle(fontSize: 12, color: context.adapt(_textLight)),
+                    TextStyle(fontSize: 12, color: c.textSecondary),
               ),
             ]),
           const SizedBox(height: 12),
@@ -4806,20 +4387,20 @@ class _InventoryPageState extends State<InventoryPage>
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: context.adapt(_white),
+                color: c.surfaceSunken,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: context.adapt(_border)),
+                border: Border.all(color: c.border),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Icon(Icons.comment_rounded,
-                      size: 14, color: context.adapt(_textLight)),
+                      size: 14, color: c.textMuted),
                   const SizedBox(width: 8),
                   Expanded(
                       child: Text('Reason: $reason',
                           style: TextStyle(
-                              fontSize: 13, color: context.adapt(_textDark)))),
+                              fontSize: 13, color: c.textPrimary))),
                 ],
               ),
             ),
@@ -4829,14 +4410,10 @@ class _InventoryPageState extends State<InventoryPage>
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: status == 'approved'
-                    ? context.adapt(SoftPalette.green100m)
-                    : context.adapt(SoftPalette.pink100m),
+                color: status == 'approved' ? c.successBg : c.dangerBg,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                  color: status == 'approved'
-                      ? _green600.withValues(alpha: 0.35)
-                      : _red.withValues(alpha: 0.35),
+                  color: (status == 'approved' ? c.success : c.danger).withValues(alpha: 0.35),
                 ),
               ),
               child: Column(
@@ -4848,7 +4425,7 @@ class _InventoryPageState extends State<InventoryPage>
                           ? Icons.verified_user_rounded
                           : Icons.gavel_rounded,
                       size: 14,
-                      color: status == 'approved' ? context.adapt(_green600) : context.adapt(_red),
+                      color: status == 'approved' ? c.success : c.danger,
                     ),
                     const SizedBox(width: 6),
                     Text(
@@ -4856,7 +4433,7 @@ class _InventoryPageState extends State<InventoryPage>
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: status == 'approved' ? context.adapt(_green600) : context.adapt(_red),
+                        color: status == 'approved' ? c.success : c.danger,
                       ),
                     ),
                     const SizedBox(width: 6),
@@ -4865,8 +4442,8 @@ class _InventoryPageState extends State<InventoryPage>
                         data['reviewedByName']?.toString() ?? '—',
                         style: TextStyle(
                           fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: status == 'approved' ? context.adapt(_green600) : context.adapt(_red),
+                          fontWeight: FontWeight.w700,
+                          color: status == 'approved' ? c.success : c.danger,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -4876,13 +4453,13 @@ class _InventoryPageState extends State<InventoryPage>
                     const SizedBox(height: 4),
                     Row(children: [
                       Icon(Icons.access_time_rounded,
-                          size: 12, color: context.adapt(_textLight)),
+                          size: 12, color: c.textMuted),
                       const SizedBox(width: 5),
                       Text(
                         DateFormat('dd MMM yyyy, hh:mm a').format(
                             (data['reviewedAt'] as Timestamp).toDate()),
                         style: TextStyle(
-                            fontSize: 11, color: context.adapt(_textLight)),
+                            fontSize: 11, color: c.textSecondary),
                       ),
                     ]),
                   ],
@@ -4890,7 +4467,6 @@ class _InventoryPageState extends State<InventoryPage>
               ),
             ),
           ],
-          const SizedBox(height: 14),
         ]),
       ),
     );
@@ -4933,33 +4509,42 @@ class _InventoryPageState extends State<InventoryPage>
 
           if (itemsToUse.isNotEmpty) {
             await _applyEditMedicine(
-                branchRef, data, itemsToUse, reviewerUid, reviewerName);
+                branchRef, data, itemsToUse, reviewerUid, reviewerName,
+                requestId: docId);
           }
         } else if (requestType == 'delete_medicine') {
           final itemsToUse = _safeItemList(data['draftItems']).isNotEmpty
               ? _safeItemList(data['draftItems'])
               : _safeItemList(data['items']);
-          await _applyDeleteMedicine(branchRef, itemsToUse);
+          await _applyDeleteMedicine(data, itemsToUse);
         } else if (requestType == 'register_medicine') {
           final itemsToUse = _safeItemList(data['draftItems']).isNotEmpty
               ? _safeItemList(data['draftItems'])
               : _safeItemList(data['items']);
           if (itemsToUse.isNotEmpty) {
+            // Stock book: a new batch in the request's pool with its first stock. The
+            // request id makes the first stock once-only (approving twice adds nothing).
+            final pool = _requestPool(data);
+            if (pool == null) {
+              throw 'Could not work out the stock place (camp) for this request. Choose a camp first.';
+            }
             for (final item in itemsToUse) {
               final name = item['name']?.toString() ?? '';
               final type = item['type'] ?? '';
               final dose = item['dose'] ?? '';
               final exp  = item['expiryDate'] ?? '';
               final id = RequestUtils.generateDocId(name, type, dose, exp);
-              
-              await branchRef.collection('inventory').doc(id).set({
+              final qty = _asInt(item['quantity']).toDouble();
+              final details = _stockDetailsOnly({
                 ...item,
-                'addedAt': FieldValue.serverTimestamp(),
                 'createdBy': data['requestedBy'],
                 'createdByName': data['requesterName'],
                 'approvedBy': reviewerUid,
                 'approvedByName': reviewerName ?? 'Supervisor',
+                'addedAt': DateTime.now().toIso8601String(),
               });
+              await StockActions.addBatch(pool, id, details,
+                  initialQty: qty, ref: 'approved registration', opKey: docId);
             }
           }
         }
@@ -5015,12 +4600,18 @@ class _InventoryPageState extends State<InventoryPage>
       Map<String, dynamic> requestData,
       List<Map<String, dynamic>> items,
       String? reviewerUid,
-      String? reviewerName) async {
-    final inventory = branchRef.collection('inventory');
-    final batch = FirebaseFirestore.instance.batch();
-
+      String? reviewerName,
+      {String? requestId}) async {
     final originalDocId = requestData['docId']?.toString();
     final effCamp = (requestData['dispensaryId'] ?? requestData['campId'])?.toString();
+    // Stock book: the request's pool. Details via saveDetails, quantity only via a counted
+    // difference (setCounted), never an absolute overwrite.
+    final pool = _requestPool(requestData);
+    if (pool == null) {
+      throw 'Could not work out the stock place (camp) for this request. Choose a camp first.';
+    }
+    final original = requestData['originalData'];
+    final originalQty = original is Map && original['quantity'] != null ? _asInt(original['quantity']) : null;
 
     for (final item in items) {
       final name = (item['name'] ?? '').toString().trim();
@@ -5029,7 +4620,9 @@ class _InventoryPageState extends State<InventoryPage>
       final formula = (item['formula'] ?? item['name'] ?? '').toString().trim();
       final price = _parsePrice(item['price']);
       final expiry = (item['expiryDate'] ?? '').toString().trim();
-      final barcode = (item['barcode'] ?? item['code'] ?? '').toString().trim();
+      final barcode = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+      final itemCode = (item['code'] ?? item['itemCode'] ?? '').toString().trim();
+      final packBarcode = (item['packBarcode'] ?? '').toString().trim();
       final qty = (item['quantity'] is num)
           ? (item['quantity'] as num).toInt()
           : (int.tryParse(item['quantity']?.toString() ?? '') ?? 0);
@@ -5043,17 +4636,15 @@ class _InventoryPageState extends State<InventoryPage>
         'formula_lower': formula.toLowerCase(),
         'type': type,
         'dose': type == 'Nebulization' ? '' : dose,
-        'quantity': qty,
         'price': price,
         if (barcode.isNotEmpty) 'barcode': barcode,
-        if (barcode.isNotEmpty) 'code': barcode,
+        if (barcode.isNotEmpty) 'rollNo': barcode,
+        if (itemCode.isNotEmpty) 'code': itemCode,
+        if (itemCode.isNotEmpty) 'itemCode': itemCode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
         'expiryDate': expiry,
-        'updatedAt': FieldValue.serverTimestamp(),
         'approvedBy': reviewerUid,
         'approvedByName': reviewerName ?? 'Supervisor',
-        if (effCamp != null && effCamp.isNotEmpty) 'dispensaryId': effCamp,
-        if (effCamp != null && effCamp.isNotEmpty)
-          'dispensaryTag': CampSessionService.getDispensaryKeyword(effCamp),
       };
       if (type == 'Nebulization') {
         updateData['distilledWater'] = distilledWater ?? 0;
@@ -5075,69 +4666,78 @@ class _InventoryPageState extends State<InventoryPage>
         drops: drops,
         campId: effCamp,
       );
+      // Only a quantity the request really changed is applied (as a counted difference),
+      // so stock dispensed since the request was made is not undone.
+      final qtyChanged = originalQty == null || originalQty != qty;
 
       if (targetDocId.isNotEmpty && targetDocId == newId) {
-        batch.update(inventory.doc(targetDocId), updateData);
-      } else {
-        if (targetDocId.isNotEmpty) {
-          batch.delete(inventory.doc(targetDocId));
-          LocalStorageService.deleteLocalStockItem(targetDocId);
-          RealtimeManager().sendMessage({
-            'event_type': RealtimeEvents.deleteStockItem,
-            'id': targetDocId,
-            'branchId': widget.branchId,
-          });
+        await StockActions.saveDetails(pool, targetDocId, updateData);
+        if (qtyChanged) {
+          await StockActions.setCounted(pool, targetDocId, qty.toDouble(), reason: 'approved edit');
         }
-        updateData['addedAt'] = FieldValue.serverTimestamp();
-        batch.set(inventory.doc(newId), updateData);
+      } else {
+        // The id changes: hide the old batch and open the new one with the old batch's
+        // current stock. The request id makes that transfer once-only.
+        final oldItem = targetDocId.isEmpty ? null : StockLedger.item(pool.key, targetDocId);
+        final carried = oldItem == null ? 0.0 : StockReader.qty(oldItem);
+        if (oldItem != null) await StockActions.deleteBatch(pool, targetDocId);
+        updateData['addedAt'] = DateTime.now().toIso8601String();
+        await StockActions.addBatch(pool, newId, updateData,
+            initialQty: carried,
+            ref: 'approved edit (renamed)',
+            opKey: requestId ?? 'edit:$targetDocId');
+        if (qtyChanged || oldItem == null) {
+          await StockActions.setCounted(pool, newId, qty.toDouble(), reason: 'approved edit');
+        }
       }
-
-      final finalMedId =
-          (targetDocId.isNotEmpty && targetDocId == newId) ? targetDocId : newId;
-      final nowIso = DateTime.now().toIso8601String();
-      final hiveData = Map<String, dynamic>.from(updateData);
-      hiveData['id'] = finalMedId;
-      hiveData['branchId'] = widget.branchId;
-      hiveData['updatedAt'] = nowIso;
-      if (hiveData.containsKey('addedAt')) {
-        hiveData['addedAt'] = nowIso;
-      }
-      LocalStorageService.saveLocalInventoryItem(hiveData);
-
-      RealtimeManager().sendMessage({
-        'event_type': RealtimeEvents.saveStockItem,
-        'branchId': widget.branchId,
-        'data': hiveData,
-      });
     }
 
-    await batch.commit();
     _loadDataFromHive();
   }
 
-  Future<void> _applyDeleteMedicine(
-      DocumentReference branchRef,
-      List<Map<String, dynamic>> items) async {
-    final inventory = branchRef.collection('inventory');
-    final batch = FirebaseFirestore.instance.batch();
+  /// Pool of an edit/registration request: its camp, else this PC's active camp.
+  StockPool? _requestPool(Map requestData) {
+    final camp = (requestData['dispensaryId'] ?? requestData['campId'])?.toString();
+    return StockPool.of(_effectiveBranchId, camp, fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
+  }
 
+  /// Item details without quantity / server-only fields (the stock book keeps quantity).
+  static Map<String, dynamic> _stockDetailsOnly(Map item) {
+    final out = <String, dynamic>{};
+    item.forEach((k, v) {
+      final key = k.toString();
+      if (v is FieldValue || v is Timestamp) return;
+      if (const {'quantity', 'stock', '_quantityDelta', 'pool', 'id', 'medicineId', 'docId'}.contains(key)) return;
+      out[key] = v;
+    });
+    return out;
+  }
+
+  Future<void> _applyDeleteMedicine(
+      Map<String, dynamic> requestData,
+      List<Map<String, dynamic>> items) async {
+    // Stock book: hide the matching batches of the request's pool (kept for history).
+    final pool = _requestPool(requestData);
+    if (pool == null) {
+      throw 'Could not work out the stock place (camp) for this request. Choose a camp first.';
+    }
     for (final item in items) {
       final name = item['name']?.toString();
       final type = item['type']?.toString();
       if (name == null || type == null) continue;
-      
-      final q = await inventory
-          .where('name_lower', isEqualTo: name.toLowerCase())
-          .where('type', isEqualTo: type)
-          .get();
-      for (final doc in q.docs) {
-        batch.delete(doc.reference);
+      for (final rec in StockLedger.items(pool: pool.key)) {
+        final rName = (rec['name'] ?? '').toString().toLowerCase();
+        final rType = (rec['type'] ?? '').toString();
+        if (rName != name.toLowerCase() || rType != type) continue;
+        final id = (rec['medicineId'] ?? rec['id'] ?? '').toString();
+        if (id.isNotEmpty) await StockActions.deleteBatch(pool, id);
       }
     }
-    await batch.commit();
+    _loadDataFromHive();
   }
 
   Widget _buildMedicineEditComparison(Map<String, dynamic> data) {
+    final c = context.comfort;
     final originalData = data['originalData'] as Map<String, dynamic>? ?? {};
     final rawItems = data['draftItems'] ?? data['items'] ?? [];
     final items = _safeItemList(rawItems);
@@ -5168,20 +4768,20 @@ class _InventoryPageState extends State<InventoryPage>
       return Container(
         margin: const EdgeInsets.symmetric(vertical: 8),
         decoration: BoxDecoration(
-          color: context.adapt(SoftPalette.gray50),
+          color: c.surfaceSunken,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: context.adapt(_border).withValues(alpha: 0.5)),
+          border: Border.all(color: c.border),
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: DataTable(
-            headingRowColor: WidgetStateProperty.all(_teal.withValues(alpha: 0.05)),
+            headingRowColor: WidgetStateProperty.all(c.brandSoft),
             columnSpacing: 20,
             horizontalMargin: 16,
-            columns: const [
-              DataColumn(label: Text('Field', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              DataColumn(label: Text('Original', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              DataColumn(label: Text('Proposed', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+            columns: [
+              DataColumn(label: Text('Field', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: c.textSecondary))),
+              DataColumn(label: Text('Original', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: c.textSecondary))),
+              DataColumn(label: Text('Proposed', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: c.textSecondary))),
             ],
             rows: fields.map((f) {
               final key = f['key'] as String;
@@ -5190,15 +4790,15 @@ class _InventoryPageState extends State<InventoryPage>
               final isChanged = oldVal != newVal && newVal != '—';
 
               return DataRow(cells: [
-                DataCell(Text(f['label']!, style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12))),
+                DataCell(Text(f['label']!, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12, color: c.textPrimary))),
                 DataCell(Text(oldVal, style: TextStyle(
-                  color: isChanged ? context.adapt(SoftPalette.gray350) : context.adapt(_textDark),
+                  color: isChanged ? c.textMuted : c.textPrimary,
                   decoration: isChanged ? TextDecoration.lineThrough : null,
                   fontSize: 12,
                 ))),
                 DataCell(Text(newVal, style: TextStyle(
-                  color: isChanged ? context.adapt(SoftPalette.blue500) : context.adapt(_textDark),
-                  fontWeight: isChanged ? FontWeight.bold : FontWeight.normal,
+                  color: isChanged ? c.info : c.textPrimary,
+                  fontWeight: isChanged ? FontWeight.w700 : FontWeight.normal,
                   fontSize: 12,
                 ))),
               ]);
@@ -5212,8 +4812,8 @@ class _InventoryPageState extends State<InventoryPage>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: EdgeInsets.only(bottom: 8, top: 4),
-          child: Text('Proposed Changes:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(_tealDark))),
+          padding: const EdgeInsets.only(bottom: 8, top: 4),
+          child: Text('Proposed Changes:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.brandStrong)),
         ),
         ...fields.map((f) {
           final key = f['key'] as String;
@@ -5227,27 +4827,27 @@ class _InventoryPageState extends State<InventoryPage>
             margin: const EdgeInsets.only(bottom: 4),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: context.adapt(SoftPalette.gray50),
+              color: c.surfaceSunken,
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: context.adapt(_border).withValues(alpha: 0.3)),
+              border: Border.all(color: c.border),
             ),
             child: Row(
               children: [
                 SizedBox(
                   width: 60,
-                  child: Text(label, style: TextStyle(fontSize: 11, color: context.adapt(_textLight), fontWeight: FontWeight.bold)),
+                  child: Text(label, style: TextStyle(fontSize: 11, color: c.textSecondary, fontWeight: FontWeight.w700)),
                 ),
                 Expanded(
                   child: Wrap(
                     alignment: WrapAlignment.start,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Text(oldVal, style: TextStyle(fontSize: 11, color: context.adapt(SoftPalette.gray350), decoration: TextDecoration.lineThrough)),
+                      Text(oldVal, style: TextStyle(fontSize: 11, color: c.textMuted, decoration: TextDecoration.lineThrough)),
                       Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 6),
-                        child: Icon(Icons.arrow_forward, size: 10, color: context.adapt(SoftPalette.gray350)),
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Icon(Icons.arrow_forward, size: 10, color: c.textMuted),
                       ),
-                      Text(newVal, style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.blue550), fontWeight: FontWeight.bold)),
+                      Text(newVal, style: TextStyle(fontSize: 12, color: c.info, fontWeight: FontWeight.w700)),
                     ],
                   ),
                 ),
@@ -5341,7 +4941,7 @@ class _InventoryPageState extends State<InventoryPage>
                 border: Border.all(color: _teal.withValues(alpha: 0.3)),
               ),
               child: Text(campLabel,
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _teal)),
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _teal)),
             )),
             DataCell(Text(
                 (m['barcode']?.toString().isNotEmpty ?? false)
@@ -5375,7 +4975,7 @@ class _InventoryPageState extends State<InventoryPage>
         final qty = m['quantity'] ?? 0;
         final price = _parsePrice(m['price']);
         final expiry = _formatDate(m['expiryDate']?.toString());
-        final barcode = m['barcode']?.toString() ?? '';
+        final barcode = (m['barcode'] ?? m['rollNo'] ?? '').toString().trim();
         final campId = (m['dispensaryId'] ?? m['campId'] ?? 'all').toString();
         final campLabel = CampSessionService.getCampLabel(campId);
 
@@ -5420,28 +5020,28 @@ class _InventoryPageState extends State<InventoryPage>
   }
 
   Widget _hCell(double w, String label, String? sort) {
+    final c = context.comfort;
     final active = _sortField == sort;
     return InkWell(
       onTap: sort != null ? () => _sort(sort) : null,
       child: Container(
         width: w,
-        padding:
-            const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         child: Row(children: [
           Text(label,
               style: TextStyle(
-                  color: active ? SoftPalette.gray50 : SoftPalette.gray50A70,
+                  color: active ? c.brand : c.textSecondary,
                   fontWeight: FontWeight.w700,
                   fontSize: 12,
-                  letterSpacing: 0.3)),
+                  letterSpacing: 0.2)),
           if (active) ...[
-            const SizedBox(width: 3),
+            const SizedBox(width: 4),
             Icon(
                 _isAscending
                     ? Icons.arrow_upward_rounded
                     : Icons.arrow_downward_rounded,
-                size: 12,
-                color: SoftPalette.gray50),
+                size: 13,
+                color: c.brand),
           ],
         ]),
       ),
@@ -5677,6 +5277,8 @@ class _InventoryPageState extends State<InventoryPage>
 class _EditMedicineSheet extends StatefulWidget {
   final String branchId;
   final List<String> docIds;
+  /// Pool of each entry in [docIds] (same order).
+  final List<StockPool> docPools;
   final Map<String, dynamic> initial;
   final List<String> medicineTypes;
   final String Function(String?) formatDate;
@@ -5687,6 +5289,7 @@ class _EditMedicineSheet extends StatefulWidget {
   const _EditMedicineSheet({
     required this.branchId,
     required this.docIds,
+    required this.docPools,
     required this.initial,
     required this.medicineTypes,
     required this.formatDate,
@@ -5700,21 +5303,13 @@ class _EditMedicineSheet extends StatefulWidget {
 }
 
 class _EditMedicineSheetState extends State<_EditMedicineSheet> {
-  static const _teal = SoftPalette.teal600;
-  static const _tealDark = SoftPalette.teal700;
-  static const _green50 = SoftPalette.green100m;
-  static const _green600 = SoftPalette.green550;
-  static const _red = SoftPalette.red550;
-  static const _border = SoftPalette.teal200;
-  static const _textDark = SoftPalette.slate800;
-  static const _textLight = SoftPalette.slate500;
-
   late final TextEditingController _nameCtrl;
   late final TextEditingController _doseCtrl;
   late final TextEditingController _qtyCtrl;
   late final TextEditingController _priceCtrl;
   late final TextEditingController _expiryCtrl;
   late final TextEditingController _barcodeCtrl;
+  late final TextEditingController _packBarcodeCtrl;
   late String _selectedType;
 
   bool _saving = false;
@@ -5732,6 +5327,11 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
           ? p.toInt().toString()
           : p.toStringAsFixed(2);
 
+  int _toInt(dynamic v) {
+    if (v is num) return v.toInt();
+    return int.tryParse(v?.toString() ?? '') ?? (double.tryParse(v?.toString() ?? '')?.toInt() ?? 0);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -5748,6 +5348,8 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
         text: widget.initial['expiryDate']?.toString() ?? '');
     _barcodeCtrl = TextEditingController(
         text: widget.initial['barcode']?.toString() ?? '');
+    _packBarcodeCtrl = TextEditingController(
+        text: widget.initial['packBarcode']?.toString() ?? '');
     _selectedType = widget.medicineTypes
             .contains(widget.initial['type'])
         ? widget.initial['type'].toString()
@@ -5762,6 +5364,7 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
     _priceCtrl.dispose();
     _expiryCtrl.dispose();
     _barcodeCtrl.dispose();
+    _packBarcodeCtrl.dispose();
     super.dispose();
   }
 
@@ -5770,72 +5373,74 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
     setState(() => _saving = true);
 
     try {
-      final col = FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('inventory');
-
-      final batch = FirebaseFirestore.instance.batch();
       final qty = int.tryParse(_qtyCtrl.text.trim()) ?? 0;
       final price = double.tryParse(_priceCtrl.text.trim()) ?? 0.0;
-      final perDoc = (qty / widget.docIds.length).floor();
-      final remainder = qty - perDoc * widget.docIds.length;
-      final barcode = _barcodeCtrl.text.trim();
+      final rawBar = _barcodeCtrl.text.trim();
+      final barcode = MasterProformaService.normalizeProformaBarcode(rawBar) ?? rawBar;
+      final packBarcode = _packBarcodeCtrl.text.trim();
+      final existingCode = (widget.initial['code'] ?? '').toString().trim();
+      final existingFormula = (widget.initial['formula'] ?? '').toString();
+      final n = widget.docIds.length < widget.docPools.length ? widget.docIds.length : widget.docPools.length;
 
-      for (int i = 0; i < widget.docIds.length; i++) {
+      // 1. Details (name, type, dose, expiry, price, codes) on every batch of this row.
+      //    Quantity is never part of the details.
+      for (int i = 0; i < n; i++) {
         final id = widget.docIds[i];
-        final ref = col.doc(id);
-        final nowIso = DateTime.now().toIso8601String();
-        final existingFormula = (widget.initial['formula'] ?? '').toString();
-        final uData = {
-          'formula': existingFormula,
+        final pool = widget.docPools[i];
+        var formula = existingFormula;
+        if (formula.isEmpty) {
+          formula = (StockLedger.item(pool.key, id)?['formula'] ?? '').toString();
+        }
+        await StockActions.saveDetails(pool, id, {
+          if (formula.isNotEmpty) 'formula': formula,
           'name': _nameCtrl.text.trim(),
           'name_lower': _nameCtrl.text.trim().toLowerCase(),
           'type': _selectedType,
           'dose': _doseCtrl.text.trim(),
-          'quantity': perDoc + (i == 0 ? remainder : 0),
           'price': price,
           'barcode': barcode,
-          'code': barcode,
+          'rollNo': barcode,
+          if (existingCode.isNotEmpty) 'code': existingCode,
+          'packBarcode': packBarcode,
           'expiryDate': _expiryCtrl.text.trim(),
-          'updatedAt': nowIso,
-        };
-
-        // Populate Firestore batch
-        batch.set(ref, {...uData, 'updatedAt': FieldValue.serverTimestamp()}, SetOptions(merge: true));
-
-        try {
-          final stockBox = Hive.box(LocalStorageService.stockBox);
-          final existing = stockBox.get('stock:$id') ?? stockBox.get(id);
-          final base = (existing is Map) ? Map<String, dynamic>.from(existing) : <String, dynamic>{'id': id, 'docId': id};
-          if (existingFormula.isEmpty && base['formula'] != null) {
-            uData['formula'] = base['formula'].toString();
-          }
-          final updated = base..addAll(uData);
-          LocalStorageService.saveLocalInventoryItem(updated);
-
-          RealtimeManager().sendMessage({
-            'event_type': RealtimeEvents.saveStockItem,
-            'branchId': widget.branchId,
-            'data': updated,
-          });
-
-          // Always enqueue sync to ensure durability across cloud & offline
-          LocalStorageService.enqueueSync({
-            'type': 'register_medicine',
-            'branchId': widget.branchId,
-            'medicineId': id,
-            'data': updated,
-          });
-        } catch (_) {}
+        });
       }
 
-      // Commit to Firestore in background without blocking UI. A desk on the LAN skips it: the
-      // saveStockItem message above reaches the server, which uploads the change.
-      if (!LanFirestoreGate.isLanDesk) unawaited(batch.commit().catchError((e) {
-        debugPrint('[Inventory] Background batch commit error: $e');
-      }));
-      SyncService().triggerUpload();
+      // 2. Quantity: only if the user changed the figure, and only as a counted difference
+      //    on ONE batch (for a grouped row the earliest-expiry batch). A fall below zero
+      //    carries on to the next batches. Never spread a total over the batches.
+      final shownQty = _toInt(widget.initial['quantity']);
+      final diff = qty - shownQty;
+      if (diff != 0 && n > 0) {
+        final batches = <Map<String, dynamic>>[];
+        for (int i = 0; i < n; i++) {
+          final it = StockLedger.item(widget.docPools[i].key, widget.docIds[i]);
+          batches.add({
+            ...?it,
+            'id': widget.docIds[i],
+            'medicineId': widget.docIds[i],
+            '_pool': widget.docPools[i],
+            'quantity': it == null ? 0.0 : StockReader.qty(it),
+          });
+        }
+        StockReader.sortFefo(batches);
+        if (diff > 0) {
+          final b = batches.first;
+          await StockActions.setCounted(b['_pool'] as StockPool, b['id'].toString(),
+              StockReader.qty(b) + diff, reason: 'edit medicine');
+        } else {
+          var left = -diff.toDouble();
+          for (final b in batches) {
+            if (left <= 0) break;
+            final have = StockReader.qty(b);
+            if (have <= 0) continue;
+            final take = left <= have ? left : have;
+            await StockActions.setCounted(b['_pool'] as StockPool, b['id'].toString(),
+                have - take, reason: 'edit medicine');
+            left -= take;
+          }
+        }
+      }
 
       if (!mounted) return;
       Navigator.pop(context);
@@ -5853,24 +5458,23 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.comfort;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     return Container(
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius:
-            const BorderRadius.vertical(top: Radius.circular(24)),
+        color: c.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        border: Border(top: BorderSide(color: c.border)),
       ),
       padding: EdgeInsets.fromLTRB(20, 0, 20, bottom + 24),
-      child:
-          Column(mainAxisSize: MainAxisSize.min, children: [
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
         Center(
           child: Container(
             margin: const EdgeInsets.symmetric(vertical: 12),
             width: 40,
             height: 4,
             decoration: BoxDecoration(
-              color: isDark ? SoftPalette.slate600 : SoftPalette.gray150,
+              color: c.borderStrong,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -5879,11 +5483,10 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: _teal.withValues(alpha: 0.1),
+              color: c.brandSoft,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(Icons.edit_rounded,
-                color: _teal, size: 18),
+            child: Icon(Icons.edit_rounded, color: c.brand, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -5893,21 +5496,21 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
               Text('Edit Medicine',
                   style: TextStyle(
                       fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      color: isDark ? SoftPalette.gray50 : _tealDark)),
+                      fontWeight: FontWeight.w700,
+                      color: c.textPrimary)),
               Text('${widget.docIds.length} batch doc(s) will be updated',
                   style: TextStyle(
-                      fontSize: 11, color: isDark ? SoftPalette.slate350 : _textLight)),
+                      fontSize: 11.5, color: c.textSecondary)),
             ]),
           ),
           IconButton(
-            icon: Icon(Icons.close_rounded, color: isDark ? SoftPalette.slate350 : _textLight),
+            icon: Icon(Icons.close_rounded, color: c.textMuted),
             onPressed: () => Navigator.pop(context),
           ),
         ]),
-        const SizedBox(height: 16),
-        Divider(height: 1, color: isDark ? SoftPalette.slate700 : null),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
+        Divider(height: 1, color: c.border),
+        const SizedBox(height: 14),
         Form(
           key: _formKey,
           child: SingleChildScrollView(
@@ -5916,7 +5519,6 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                 controller: _nameCtrl,
                 label: 'Formula',
                 icon: Icons.medication_rounded,
-                isDark: isDark,
                 validator: (v) =>
                     (v == null || v.trim().isEmpty) ? 'Required' : null,
               ),
@@ -5928,31 +5530,27 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                     style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: isDark ? SoftPalette.slate350 : _textLight)),
+                        color: c.textSecondary)),
                 const SizedBox(height: 6),
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
                   decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.slate900 : _green50,
+                    color: c.surfaceSunken,
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: isDark ? SoftPalette.slate700 : _border),
+                    border: Border.all(color: c.border),
                   ),
                   child: DropdownButton<String>(
                     value: _selectedType,
                     isExpanded: true,
                     underline: const SizedBox(),
-                    dropdownColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                    style: TextStyle(
-                        color: isDark ? SoftPalette.gray50 : _textDark, fontSize: 14),
-                    icon: const Icon(Icons.expand_more_rounded,
-                        color: _teal),
+                    dropdownColor: c.surface,
+                    style: TextStyle(color: c.textPrimary, fontSize: 14),
+                    icon: Icon(Icons.expand_more_rounded, color: c.brand),
                     items: widget.medicineTypes
-                        .map((t) => DropdownMenuItem(
-                            value: t, child: Text(t)))
+                        .map((t) => DropdownMenuItem(value: t, child: Text(t)))
                         .toList(),
-                    onChanged: (v) => setState(
-                        () => _selectedType = v ?? _selectedType),
+                    onChanged: (v) =>
+                        setState(() => _selectedType = v ?? _selectedType),
                   ),
                 ),
               ]),
@@ -5961,20 +5559,29 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                 controller: _doseCtrl,
                 label: 'Dose (e.g. 500mg, 5ml)',
                 icon: Icons.vaccines_rounded,
-                isDark: isDark,
               ),
               const SizedBox(height: 12),
               Builder(builder: (context) {
                 const canEditBarcode = true;
                 return _field(
                   controller: _barcodeCtrl,
-                  label: 'Barcode',
+                  label: 'Proforma Barcode (001–999)',
                   icon: Icons.qr_code_rounded,
-                  keyboardType: TextInputType.text,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(3),
+                  ],
                   enabled: canEditBarcode,
-                  isDark: isDark,
                 );
               }),
+              const SizedBox(height: 12),
+              _field(
+                controller: _packBarcodeCtrl,
+                label: 'Pack Barcode (Optional)',
+                icon: Icons.qr_code_scanner_rounded,
+                keyboardType: TextInputType.text,
+              ),
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(
@@ -5983,7 +5590,6 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                   label: 'Total Quantity',
                   icon: Icons.numbers_rounded,
                   keyboardType: TextInputType.number,
-                  isDark: isDark,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly
                   ],
@@ -5996,7 +5602,6 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                   controller: _priceCtrl,
                   label: 'Price (PKR)',
                   icon: Icons.payments_rounded,
-                  isDark: isDark,
                   keyboardType: const TextInputType.numberWithOptions(
                       decimal: true),
                   inputFormatters: [
@@ -6017,7 +5622,6 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                 controller: _expiryCtrl,
                 label: 'Expiry (MM-YYYY or DD-MM-YYYY)',
                 icon: Icons.calendar_today_rounded,
-                isDark: isDark,
               ),
               const SizedBox(height: 24),
               SizedBox(
@@ -6026,25 +5630,23 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
                 child: ElevatedButton.icon(
                   onPressed: _saving ? null : _save,
                   icon: _saving
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: SoftPalette.gray50))
-                      : const Icon(Icons.save_rounded,
-                          color: SoftPalette.gray50, size: 18),
+                              strokeWidth: 2, color: c.onBrand))
+                      : const Icon(Icons.save_rounded, size: 18),
                   label: Text(_saving ? 'Saving…' : 'Save Changes',
                       style: const TextStyle(
-                          color: SoftPalette.gray50,
-                          fontWeight: FontWeight.bold,
+                          fontWeight: FontWeight.w700,
                           fontSize: 15)),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _teal,
-                    disabledBackgroundColor:
-                        _teal.withValues(alpha: 0.5),
+                    backgroundColor: c.brand,
+                    foregroundColor: c.onBrand,
+                    disabledBackgroundColor: c.brand.withValues(alpha: 0.45),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12)),
-                    elevation: 3,
+                    elevation: 0,
                   ),
                 ),
               ),
@@ -6064,57 +5666,57 @@ class _EditMedicineSheetState extends State<_EditMedicineSheet> {
     String? Function(String?)? validator,
     bool enabled = true,
     String? helperText,
-    bool isDark = false,
-  }) =>
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label,
-            style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: isDark ? SoftPalette.slate350 : _textLight)),
-        const SizedBox(height: 6),
-        TextFormField(
-          controller: controller,
-          keyboardType: keyboardType,
-          inputFormatters: inputFormatters,
-          validator: validator,
-          enabled: enabled,
-          readOnly: !enabled,
-          cursorColor: _teal,
+  }) {
+    final c = context.comfort;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label,
           style: TextStyle(
-              color: enabled
-                  ? (isDark ? SoftPalette.gray50 : _textDark)
-                  : (isDark ? SoftPalette.slate550 : SoftPalette.gray550),
-              fontSize: 14),
-          decoration: InputDecoration(
-            prefixIcon: Icon(icon, size: 17, color: enabled ? _teal : SoftPalette.gray350),
-            suffixIcon: !enabled ? const Icon(Icons.lock_rounded, size: 16, color: SoftPalette.gray350) : null,
-            helperText: helperText,
-            helperStyle: TextStyle(color: SoftPalette.orange350, fontSize: 11, fontWeight: FontWeight.bold),
-            filled: true,
-            fillColor: enabled
-                ? (isDark ? SoftPalette.slate900 : _green50)
-                : (isDark ? SoftPalette.slate800 : SoftPalette.gray100),
-            border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide.none),
-            enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _border)),
-            focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: _teal, width: 1.5)),
-            disabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.gray150)),
-            errorBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: _red)),
-            contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14, vertical: 13),
-          ),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: c.textSecondary)),
+      const SizedBox(height: 6),
+      TextFormField(
+        controller: controller,
+        keyboardType: keyboardType,
+        inputFormatters: inputFormatters,
+        validator: validator,
+        enabled: enabled,
+        readOnly: !enabled,
+        cursorColor: c.brand,
+        style: TextStyle(
+            color: enabled ? c.textPrimary : c.textMuted,
+            fontSize: 14),
+        decoration: InputDecoration(
+          prefixIcon: Icon(icon, size: 17, color: enabled ? c.brand : c.textMuted),
+          suffixIcon: !enabled ? Icon(Icons.lock_rounded, size: 16, color: c.textMuted) : null,
+          helperText: helperText,
+          helperStyle: TextStyle(color: c.warning, fontSize: 11, fontWeight: FontWeight.w700),
+          filled: true,
+          fillColor: enabled ? c.surfaceSunken : c.background,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide.none),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.brand, width: 1.6)),
+          disabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border)),
+          errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.danger)),
+          focusedErrorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.danger, width: 1.5)),
+          contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14, vertical: 13),
         ),
-      ]);
+      ),
+    ]);
+  }
 }
 
 class _Col {

@@ -12,6 +12,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'package:flutter/material.dart';
+import 'package:gmwf/theme/app_visual_theme.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' as ui show GTheme, GThemeChoice;
 
 import '../tokens/colors.dart';
 import '../tokens/comfort_colors.dart';
@@ -28,12 +30,24 @@ class GTheme {
     required Brightness brightness,
     double cardRadius = Gr.r4,
     PageTransitionsTheme? pageTransitionsTheme,
+    AppVisualTheme? visualTheme,
+    Color? customAccent,
+    // The user's theme (GMWF / Nexus / Twilight). When set it decides every
+    // colour, from the shared design system; [visualTheme] is then ignored.
+    ui.GThemeChoice? choice,
   }) {
     final isDark = brightness == Brightness.dark;
-    final c = isDark ? GComfortColors.dark : GComfortColors.light;
-    final primary = isDark ? GColor.accentOnDark(seedColor) : seedColor;
+    final dsColors = choice == null ? null : ui.GTheme.colors(brightness, family: choice.family, brandOverride: customAccent);
+    final c = dsColors != null
+        ? GComfortColors.fromDesignSystem(dsColors)
+        : visualTheme != null
+            ? GComfortColors.fromVisualTheme(visualTheme, overrideAccent: customAccent)
+            : (isDark ? GComfortColors.dark : GComfortColors.light);
+    final effectiveSeed = customAccent ?? (visualTheme != null || dsColors != null ? c.brand : seedColor);
+    // The design-system brand is already readable on dark surfaces.
+    final primary = dsColors != null ? c.brand : (isDark ? GColor.accentOnDark(effectiveSeed) : effectiveSeed);
     final onPrimary = GColor.onAccent(primary);
-    final error = isDark ? SoftPalette.red350 : SoftPalette.red550;
+    final error = c.danger;
 
     // Controls are a little tighter than cards so nested corners look right.
     final controlRadius = BorderRadius.circular((cardRadius * 0.625).clamp(6.0, 14.0));
@@ -47,26 +61,26 @@ class GTheme {
     );
 
     final scheme = ColorScheme.fromSeed(
-      seedColor: seedColor,
+      seedColor: effectiveSeed,
       brightness: brightness,
     ).copyWith(
       primary: primary,
       onPrimary: onPrimary,
       primaryContainer: Color.alphaBlend(primary.withValues(alpha: isDark ? 0.22 : 0.12), c.surface),
-      onPrimaryContainer: isDark ? c.textPrimary : seedColor,
-      secondary: isDark ? SoftPalette.slate300 : SoftPalette.slate600,
-      onSecondary: isDark ? SoftPalette.slate900 : SoftPalette.slate50,
+      onPrimaryContainer: isDark ? c.textPrimary : effectiveSeed,
+      secondary: c.textSecondary,
+      onSecondary: c.surface,
       error: error,
       onError: GColor.onAccent(error),
       surface: c.surface,
       onSurface: c.textPrimary,
       onSurfaceVariant: c.textSecondary,
       surfaceTint: Colors.transparent,
-      surfaceContainerLowest: isDark ? SoftPalette.slate900 : SoftPalette.slate50,
+      surfaceContainerLowest: isDark ? c.background : c.surface,
       surfaceContainerLow: c.surface,
-      surfaceContainer: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-      surfaceContainerHigh: isDark ? SoftPalette.slate750 : SoftPalette.slate150,
-      surfaceContainerHighest: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
+      surfaceContainer: isDark ? c.surface : c.background,
+      surfaceContainerHigh: c.surfaceSunken,
+      surfaceContainerHighest: c.border,
       outline: c.borderStrong,
       outlineVariant: c.border,
       shadow: SoftPalette.slate900,
@@ -91,7 +105,9 @@ class GTheme {
       colorScheme: scheme,
       textTheme: text,
       // Semantic eye-comfort colours for every screen: context.comfort.<role>.
-      extensions: [c],
+      // Semantic colours for app screens (context.comfort), for gmwf_ui
+      // widgets, and the theme choice (context.adapt follows it).
+      extensions: [c, ?dsColors, if (choice != null && dsColors != null) GmwfThemeChoice(choice, dsColors)],
       scaffoldBackgroundColor: c.background,
       canvasColor: c.background,
       dividerColor: c.border,
@@ -148,11 +164,11 @@ class GTheme {
 
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: isDark ? SoftPalette.slate900 : SoftPalette.slate50,
+        fillColor: c.surfaceSunken,
         hoverColor: Colors.transparent,
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         border: inputBorder(c.borderStrong),
-        enabledBorder: inputBorder(isDark ? c.borderStrong : SoftPalette.slate200),
+        enabledBorder: inputBorder(c.borderStrong),
         disabledBorder: inputBorder(c.border),
         focusedBorder: inputBorder(primary, 1.6),
         errorBorder: inputBorder(error),

@@ -293,25 +293,31 @@ class _DataCleanupScreenState extends State<DataCleanupScreen> {
   Future<void> _formatAllPatientCnics() async {
     setState(() {
       _isProcessing = true;
-      _log("🔄 Formatting all 13-digit raw CNICs into standard xxxxx-xxxxxxx-x format...");
+      _log("🔄 Standardizing CNICs (xxxxx-xxxxxxx-x) & deduplicating patient records locally and on Firestore...");
     });
     try {
-      final count = await LocalStorageService.formatAllRawCnics(
+      final stats = await LocalStorageService.standardizeAndDeduplicateAllPatients(
         branchId: _currentBranch.isNotEmpty ? _currentBranch : null,
+        processRemote: true,
+        onProgress: _log,
       );
+      final localUpdated = stats['localUpdated'] ?? 0;
+      final localMerged = stats['localDuplicatesMerged'] ?? 0;
+      final remoteUpdated = stats['remoteUpdated'] ?? 0;
+      final remoteMerged = stats['remoteDuplicatesMerged'] ?? 0;
+      final remoteDeleted = stats['remoteDocsDeleted'] ?? 0;
+
       if (mounted) {
         setState(() => _isProcessing = false);
         AppToast.showSnackBar(context, SnackBar(
-          content: Text(count > 0
-              ? "✅ Updated $count patient(s) with formatted CNIC (xxxxx-xxxxxxx-x). Queued for background sync."
-              : "✅ All patient CNICs are already properly formatted (xxxxx-xxxxxxx-x)."),
+          content: Text("✅ Standardized $localUpdated local & $remoteUpdated remote patients. Merged $localMerged local & $remoteMerged remote duplicates (purged $remoteDeleted docs)."),
           backgroundColor: SoftPalette.teal500,
         ));
       }
-      _log("✨ Completed CNIC formatting: $count records updated to xxxxx-xxxxxxx-x and queued for sync.");
+      _log("✨ Completed CNIC standardization & deduplication: Local: (updated=$localUpdated, merged=$localMerged), Firestore: (updated=$remoteUpdated, merged=$remoteMerged, purged=$remoteDeleted).");
     } catch (e) {
       if (mounted) setState(() => _isProcessing = false);
-      _log("❌ Failed to format patient CNICs: $e");
+      _log("❌ Failed to standardize and deduplicate patient CNICs: $e");
     }
   }
 

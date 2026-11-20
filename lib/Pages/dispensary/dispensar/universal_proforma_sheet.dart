@@ -2,18 +2,19 @@
 
 import 'dart:async';
 import 'package:flutter/foundation.dart' show ValueListenable;
-import 'package:gmwf/design/tokens/soft_palette.dart';
-import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/components/app_toast.dart';
+import 'package:gmwf/design/design_system.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/stock_actions.dart';
+import 'package:gmwf/services/stock/stock_pool.dart';
+import 'package:gmwf/services/stock/stock_reader.dart';
 import 'package:gmwf/utils/string_similarity_helper.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
@@ -44,15 +45,9 @@ class UniversalProformaSheetPage extends StatefulWidget {
 
 class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage> {
   // ── Palette ───────────────────────────────────────────────────────────────
-  static const _teal = SoftPalette.teal600;
-  static const _tealDark = SoftPalette.teal700;
-  static const _bg = SoftPalette.gray100;
-  static const _white = SoftPalette.gray50;
-  static const _headerBg = SoftPalette.teal100m;
-  static const _gridBorder = SoftPalette.teal200;
+  Color get _teal => context.comfort.brand;
   static const _textDark = SoftPalette.slate800;
   static const _textMid = SoftPalette.slate600;
-  static const _textLight = SoftPalette.slate500;
   static const _green600 = SoftPalette.green550;
   static const _red = SoftPalette.red500;
 
@@ -309,6 +304,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     final doseCtrl = TextEditingController(text: '500 mg');
     final nextBarcode = MasterProformaService.getNextRollNumber();
     final barcodeCtrl = TextEditingController(text: nextBarcode);
+    final packBarcodeCtrl = TextEditingController();
     final itemCodeCtrl = TextEditingController();
     final reasonCtrl = TextEditingController();
     String selectedType = 'Tablet';
@@ -430,7 +426,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                   ),
                   const SizedBox(height: 12),
 
-                  // Barcode & Item Code (Separate Fields)
+                  // Proforma Barcode (001–999) & Item Code (Separate Fields)
                   Row(
                     children: [
                       Expanded(
@@ -438,10 +434,15 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Barcode *', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.sky350 : _teal)),
+                            Text('Proforma Barcode (001–999) *', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.sky350 : _teal)),
                             const SizedBox(height: 4),
                             TextField(
                               controller: barcodeCtrl,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                                LengthLimitingTextInputFormatter(3),
+                              ],
                               style: TextStyle(color: isDark ? SoftPalette.gray50 : _textDark, fontSize: 13),
                               decoration: InputDecoration(
                                 hintText: 'e.g. $nextBarcode',
@@ -479,6 +480,21 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text('Pack Barcode (Optional)', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: isDark ? SoftPalette.sky350 : _teal)),
+                  const SizedBox(height: 4),
+                  TextField(
+                    controller: packBarcodeCtrl,
+                    style: TextStyle(color: isDark ? SoftPalette.gray50 : _textDark, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'External / manufacturer barcode (e.g. 8964000123456)',
+                      hintStyle: TextStyle(color: isDark ? SoftPalette.slate550 : SoftPalette.gray300, fontSize: 12),
+                      filled: true,
+                      fillColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                   ),
                   const SizedBox(height: 14),
 
@@ -534,7 +550,19 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                 final role = (uData['role'] ?? uData['userRole'] ?? 'HQ Manager').toString();
                 final uid = (uData['uid'] ?? uData['id'] ?? FirebaseAuth.instance.currentUser?.uid ?? '').toString();
 
-                final barcode = barcodeCtrl.text.trim().isEmpty ? MasterProformaService.getNextRollNumber() : barcodeCtrl.text.trim().padLeft(3, '0');
+                final rawBarcodeInput = barcodeCtrl.text.trim();
+                final barcode = rawBarcodeInput.isEmpty
+                    ? MasterProformaService.getNextRollNumber()
+                    : MasterProformaService.normalizeProformaBarcode(rawBarcodeInput);
+                if (barcode == null) {
+                  AppToast.showSnackBar(context, const SnackBar(content: Text('Proforma Barcode must be a 3-digit number from 001 to 999'), backgroundColor: SoftPalette.red400));
+                  return;
+                }
+                if (MasterProformaService.findExactBarcodeMatch(barcode) != null) {
+                  AppToast.showSnackBar(context, SnackBar(content: Text('Proforma Barcode $barcode is already assigned to another medicine'), backgroundColor: SoftPalette.red400));
+                  return;
+                }
+                final packBarcode = packBarcodeCtrl.text.trim();
                 String itemCode = itemCodeCtrl.text.trim();
                 if (itemCode.isEmpty) {
                   final initials = name.split(RegExp(r'\s+')).take(3).map((w) => w.isNotEmpty ? w[0].toUpperCase() : '').join();
@@ -552,6 +580,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                   'medicineDose': dose,
                   'rollNo': barcode,
                   'barcode': barcode,
+                  if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
                   'itemCode': itemCode,
                   'reason': reason,
                   'performedBy': uid,
@@ -566,6 +595,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                   'itemCode': itemCode,
                   'barcode': barcode,
                   'rollNo': barcode,
+                  if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
                   'name': cleanFormula,
                   'formula': cleanFormula,
                   'type': selectedType,
@@ -989,44 +1019,46 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     );
   }
 
+  /// Queues an audit entry for the cloud inventory_log (Medicine Ledger history). Stock
+  /// figures themselves travel as stock-book movements, never through this.
+  Future<void> _uploadInventoryLog(String branch, Map<String, dynamic> logData) async {
+    try {
+      await LocalStorageService.enqueueSync({
+        'type': 'save_inventory_log',
+        'branchId': branch,
+        'data': logData,
+      });
+    } catch (e) {
+      debugPrint('[Proforma] inventory log upload queue failed: $e');
+    }
+  }
+
+  /// Branch this sheet works on (falls back to this PC's branch).
+  String _resolvedBranch() {
+    var b = widget.branchId.trim();
+    if (b.isEmpty || b.toLowerCase() == 'default' || b.toLowerCase() == 'all') {
+      b = LocalStorageService.getActiveBranchId() ?? 'karachi';
+    }
+    return b;
+  }
+
+  /// The real stock pool for [branch]: its active camp (never "all"). Null when the branch
+  /// has camps but none is chosen.
+  StockPool? _stockPool(String branch) =>
+      StockPool.of(branch, CampSessionService.getActiveCamp(branch),
+          fallbackCamp: CampSessionService.getActiveCamp(branch));
+
   void _loadProformaData() {
     final list = MasterProformaService.getAllProformaItems();
     final defaultExp = DateTime.now().add(const Duration(days: 365));
-    final String activeBranch = widget.branchId.isEmpty ? 'default' : widget.branchId;
-    final String activeCamp = (CampSessionService.getActiveCamp() ?? '').toLowerCase().trim();
-
+    // Stock book: batches of this PC's pool (branch + active camp).
     final List<Map<String, dynamic>> existingStock = [];
-    final Set<String> seenStockIds = {};
     try {
-      if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
-        final box = Hive.box(LocalStorageService.stockBox);
-        for (final k in box.keys) {
-          final val = box.get(k);
-          if (val is Map) {
-            final m = Map<String, dynamic>.from(val);
-            if (m['status'] == 'deleted') continue;
-
-            final kStr = k.toString();
-            final rawId = (m['id'] ?? m['medicineId'] ?? m['docId'])?.toString().trim();
-            final cleanId = (rawId != null && rawId.isNotEmpty && rawId != 'unknown' && rawId != 'null')
-                ? rawId.toLowerCase()
-                : (kStr.startsWith('stock:') ? kStr.substring(6).toLowerCase() : kStr.toLowerCase());
-            if (seenStockIds.contains(cleanId)) continue;
-            seenStockIds.add(cleanId);
-            m['id'] = cleanId;
-
-            final itemBranch = (m['branchId'] ?? '').toString().trim().toLowerCase();
-            if (activeBranch.isNotEmpty && activeBranch != 'default' && itemBranch.isNotEmpty && itemBranch != activeBranch.toLowerCase()) {
-              continue;
-            }
-
-            final itemCamp = (m['dispensaryId'] ?? m['campId'] ?? '').toString().trim().toLowerCase();
-            if (activeCamp.isNotEmpty && itemCamp.isNotEmpty && itemCamp != 'all' && itemCamp != activeCamp) {
-              continue;
-            }
-
-            existingStock.add(m);
-          }
+      final pool = _stockPool(_resolvedBranch());
+      if (pool != null) {
+        for (final rec in StockReader.batches(pool)) {
+          if (rec['status'] == 'deleted') continue;
+          existingStock.add(Map<String, dynamic>.from(rec));
         }
       }
     } catch (_) {}
@@ -1209,7 +1241,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
+            colorScheme: ColorScheme.light(
               primary: _teal,
               onPrimary: SoftPalette.gray50,
               onSurface: _textDark,
@@ -1271,11 +1303,22 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     setState(() => _isSavingBatch = true);
 
     try {
-      String activeBranch = widget.branchId.trim();
-      if (activeBranch.isEmpty || activeBranch.toLowerCase() == 'default' || activeBranch.toLowerCase() == 'all') {
-        activeBranch = LocalStorageService.getActiveBranchId() ?? 'karachi';
+      final String activeBranch = _resolvedBranch();
+      // Stock book: everything goes into ONE real pool (never "all").
+      final pool = _stockPool(activeBranch);
+      if (pool == null) {
+        if (mounted) {
+          setState(() => _isSavingBatch = false);
+          AppToast.showSnackBar(context,
+            const SnackBar(
+              content: Text('Please choose a camp first, then add the medicines to stock.'),
+              backgroundColor: _red,
+            ),
+          );
+        }
+        return;
       }
-      final stockBox = Hive.box(LocalStorageService.stockBox);
+      final poolBatches = StockReader.batches(pool);
       final user = FirebaseAuth.instance.currentUser;
       String addedBy = 'Dispenser';
       String performedByRole = 'Dispenser';
@@ -1310,7 +1353,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
       int totalAdded = 0;
       int totalNewCount = 0;
 
-      final String activeCamp = CampSessionService.getActiveCamp(activeBranch) ?? '';
+      final String activeCamp = pool.camp ?? '';
 
       for (final entry in itemsToSave) {
         final rawProf = entry['proforma'];
@@ -1324,7 +1367,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         final double price = entry['price'] as double;
         final String exp = entry['expiryDate'] as String;
 
-        // Search stockBox for an existing item matching Name/Formula + Type + Dose (or exact barcode)
+        // Search this pool's batches for an existing item matching Name/Formula + Type + Dose (or exact barcode)
         final cleanCode = code.trim().toLowerCase();
         final cleanN = (formula.isNotEmpty ? formula : name).trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
         final cleanF = formula.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
@@ -1333,16 +1376,9 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
 
         Map<String, dynamic>? existingStockData;
 
-        for (final k in stockBox.keys) {
-          final val = stockBox.get(k);
-          if (val is Map) {
+        for (final val in poolBatches) {
+          {
             final map = Map<String, dynamic>.from(val);
-
-            // Camp filter check
-            final itemCamp = (map['dispensaryId'] ?? map['campId'])?.toString().trim().toLowerCase() ?? '';
-            if (activeCamp.isNotEmpty && itemCamp.isNotEmpty && itemCamp != 'all' && itemCamp != activeCamp.toLowerCase()) {
-              continue;
-            }
 
             final itemN = MasterProformaService.cleanBrandToFormula((map['name'] ?? '').toString().toLowerCase().trim());
             final itemF = MasterProformaService.cleanBrandToFormula((map['formula'] ?? '').toString().toLowerCase().trim());
@@ -1369,16 +1405,21 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
         if (existingStockData != null) {
           final oldQty = (existingStockData['quantity'] as num?)?.toInt() ?? 0;
           final newTotalQty = oldQty + qty;
-          final existingDocId = (existingStockData['id'] ?? existingStockData['docId'] ?? existingStockData['medicineId'] ?? code).toString();
+          final existingDocId = (existingStockData['medicineId'] ?? existingStockData['id'] ?? code).toString();
 
-          final updatedStock = Map<String, dynamic>.from(existingStockData);
-          updatedStock['quantity'] = newTotalQty;
-          if (price > 0) updatedStock['price'] = price;
-          if (exp.isNotEmpty) updatedStock['expiryDate'] = exp;
-          updatedStock['lastUpdated'] = DateTime.now().toIso8601String();
-          updatedStock['updatedAt'] = DateTime.now().toIso8601String();
-
-          LocalStorageService.saveLocalInventoryItem(updatedStock);
+          // Stock book: ONE restock movement (+qty) on that batch; price/expiry as details.
+          // StockActions applies it here and sends it to the LAN server and the cloud.
+          await StockActions.restock(
+            pool,
+            existingDocId,
+            qty.toDouble(),
+            details: {
+              if (price > 0) 'price': price,
+              if (exp.isNotEmpty) 'expiryDate': exp,
+              'lastUpdated': DateTime.now().toIso8601String(),
+            },
+            ref: 'proforma restock',
+          );
           totalAdded += qty;
           totalNewCount++;
 
@@ -1411,29 +1452,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           };
 
           await LocalStorageService.saveLocalInventoryLog(logData);
-
-          RealtimeManager().sendMessage({
-            'event_type': RealtimeEvents.saveStockItem,
-            'branchId': activeBranch,
-            'data': {
-              ...updatedStock,
-              '_quantityDelta': qty,   // the amount being added this restock, NOT newTotalQty
-            },
-            'logData': logData,
-          });
-
-          // LAN Server First routing: a LAN client desk delegates to the LAN server;
-          // the LAN Server PC itself (or any offline/standalone PC) enqueues for Firestore sync.
-          await LocalStorageService.enqueueSync({
-            'type': 'add_inventory_stock',
-            'branchId': activeBranch,
-            'medicineId': existingDocId,
-            'quantity': qty,
-            'campId': activeCamp,
-            'dispensaryId': activeCamp,
-            'data': updatedStock,
-            'logData': logData,
-          });
+          await _uploadInventoryLog(activeBranch, logData);
           continue;
         }
 
@@ -1452,12 +1471,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           'formula': formula,
           'type': type,
           'dose': dose,
-          'quantity': qty,
           'price': price,
           'expiryDate': exp,
-          'branchId': activeBranch,
-          'dispensaryId': activeCamp.isNotEmpty ? activeCamp : 'all',
-          'campId': activeCamp.isNotEmpty ? activeCamp : 'all',
           'isProforma': true,
           'source': 'Universal Proforma Catalog',
           'addedBy': addedBy,
@@ -1468,7 +1483,15 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           'lastUpdated': DateTime.now().toIso8601String(),
         };
 
-        LocalStorageService.saveLocalInventoryItem(stockData);
+        // Stock book: a new batch in this pool with its first stock (the pool stamps
+        // branch/camp on the record). A unique opKey, so re-importing the same batch id
+        // later (e.g. after it was removed) still adds its stock.
+        await StockActions.addBatch(pool, docId, stockData,
+            initialQty: qty.toDouble(),
+            ref: 'proforma import',
+            opKey: 'proforma-${DateTime.now().microsecondsSinceEpoch}');
+        // A second line for the same medicine in this import now restocks this batch.
+        poolBatches.add({...stockData, 'id': docId, 'medicineId': docId, 'pool': pool.key, 'quantity': qty});
         totalAdded += qty;
         totalNewCount++;
 
@@ -1504,24 +1527,9 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           'createdAt': DateTime.now().toIso8601String(),
         };
 
-        // Save locally to audit logs Hive box
+        // Save locally to audit logs Hive box, and queue it for the cloud inventory_log
         await LocalStorageService.saveLocalInventoryLog(logData);
-
-        // LAN Broadcast
-        RealtimeManager().sendMessage({
-          'event_type': RealtimeEvents.saveStockItem,
-          'branchId': activeBranch,
-          'data': stockData,
-          'logData': logData,
-        });
-
-        // Offline & LAN Server resilience: enqueue locally (enqueueSync delegates when a LAN client is linked to a LAN server)
-        await LocalStorageService.enqueueSync({
-          'type': 'add_proforma_stock',
-          'branchId': activeBranch,
-          'data': stockData,
-          'logData': logData,
-        });
+        await _uploadInventoryLog(activeBranch, logData);
       }
 
       if (!mounted) return;
@@ -1585,76 +1593,106 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
   bool get _isDark {
     try {
       if (Hive.isBoxOpen('app_settings')) {
-        return Hive.box('app_settings').get('is_dark_mode', defaultValue: false) == true;
+        final dark = Hive.box('app_settings').get('is_dark_mode');
+        if (dark != null) return dark == true;
       }
     } catch (_) {}
-    return false;
+    if (!mounted) return false;
+    return Theme.of(context).brightness == Brightness.dark;
   }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = _isDark;
+    final c = context.comfort;
+    final hideAppBar = widget.isEmbedded || HomeModuleHost.isModuleRoot(context);
+
     return Scaffold(
-      backgroundColor: isDark ? SoftPalette.slate900 : _bg,
-      appBar: AppBar(
-        backgroundColor: isDark ? SoftPalette.slate900 : _tealDark,
-        elevation: 2,
-        automaticallyImplyLeading: false,
-        leading: (!widget.isEmbedded && Navigator.canPop(context))
-            ? AppBackButton(color: SoftPalette.gray50)
-            : null,
-        iconTheme: const IconThemeData(color: SoftPalette.gray50),
-        title: Row(
-          children: [
-            const Icon(FontAwesomeIcons.fileExcel, color: SoftPalette.gray50, size: 22),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+      backgroundColor: c.background,
+      appBar: hideAppBar
+          ? null
+          : AppBar(
+              backgroundColor: c.surface,
+              foregroundColor: c.textPrimary,
+              surfaceTintColor: Colors.transparent,
+              elevation: 0,
+              automaticallyImplyLeading: false,
+              leading: (!widget.isEmbedded && Navigator.canPop(context))
+                  ? AppBackButton(color: c.textPrimary)
+                  : null,
+              iconTheme: IconThemeData(color: c.textPrimary),
+              title: Row(
                 children: [
-                  const Text(
-                    'Universal Proforma Sheet',
-                    style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 18),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: c.brandSoft,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(FontAwesomeIcons.fileExcel, color: c.brand, size: 18),
                   ),
-                  const Text(
-                    'Master Generic Formula Catalog (Universal)',
-                    style: TextStyle(color: SoftPalette.teal300, fontSize: 11.5, fontWeight: FontWeight.w600),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Universal Proforma Sheet',
+                          style: TextStyle(
+                            color: c.textPrimary,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 16,
+                          ),
+                        ),
+                        Text(
+                          'Master Generic Formula Catalog (Universal)',
+                          style: TextStyle(
+                            color: c.textSecondary,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
-        actions: [
-          if (_canManageProforma)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: SoftPalette.teal500,
-                  foregroundColor: SoftPalette.gray50,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  elevation: 2,
+              actions: [
+                if (_canManageProforma)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: c.brand,
+                        foregroundColor: c.onBrand,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        elevation: 0,
+                      ),
+                      onPressed: _showAddMedicineDialog,
+                      icon: const Icon(Icons.add_circle_outline, size: 16),
+                      label: const Text(
+                        'Add Medicine',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                IconButton(
+                  tooltip: 'Auto-Select Items with Qty > 0',
+                  icon: Icon(FontAwesomeIcons.listCheck, color: c.brand, size: 17),
+                  onPressed: _selectItemsWithQty,
                 ),
-                onPressed: _showAddMedicineDialog,
-                icon: const Icon(Icons.add_circle_outline, size: 16, color: SoftPalette.gray50),
-                label: const Text('Add Medicine', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5)),
+                const SizedBox(width: 8),
+              ],
+              bottom: PreferredSize(
+                preferredSize: const Size.fromHeight(1),
+                child: Divider(height: 1, color: c.border),
               ),
             ),
-          IconButton(
-            tooltip: 'Auto-Select Items with Qty > 0',
-            icon: const Icon(FontAwesomeIcons.listCheck, color: SoftPalette.gray50, size: 18),
-            onPressed: _selectItemsWithQty,
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
       body: BlurredUnderDialogBackground(
         child: Column(
           children: [
-            // ── Top Search & Filter Bar ───────────────────────────────────────
+            // ── Top KPI Row + Search & Filter Bar ────────────────────────────
             _buildFilterHeader(),
 
             Expanded(
@@ -1674,157 +1712,61 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     );
   }
 
-  Widget _buildFilterHeader() {
-    final isDark = _isDark;
+  Widget _buildKpiCard({
+    required IconData icon,
+    required Color accentColor,
+    required Color bgTint,
+    required String value,
+    required String label,
+  }) {
+    final c = context.comfort;
     return Container(
-      color: isDark ? SoftPalette.slate800 : _white,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Column(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: bgTint,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+      ),
+      child: Row(
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _searchCtrl,
-                  style: TextStyle(color: isDark ? SoftPalette.gray50 : _textDark),
-                  decoration: InputDecoration(
-                    hintText: 'Search Proforma by Barcode, Item Code, Name, Formula...',
-                    hintStyle: TextStyle(color: isDark ? SoftPalette.slate350 : _textLight),
-                    prefixIcon: Icon(Icons.search, color: isDark ? SoftPalette.sky350 : _teal),
-                    suffixIcon: _searchCtrl.text.isNotEmpty
-                        ? IconButton(
-                            icon: Icon(Icons.clear, size: 18, color: isDark ? SoftPalette.slate350 : SoftPalette.gray350),
-                            onPressed: () => _searchCtrl.clear(),
-                          )
-                        : null,
-                    filled: true,
-                    fillColor: isDark ? SoftPalette.slate900 : _bg,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : _gridBorder),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(color: isDark ? SoftPalette.sky350 : _teal, width: 2),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: isDark ? SoftPalette.sky350 : _teal,
-                  side: BorderSide(color: isDark ? SoftPalette.sky350 : _teal),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-                onPressed: _selectItemsWithQty,
-                icon: const Icon(FontAwesomeIcons.checkDouble, size: 14),
-                label: const Text('Auto Select Qty > 0'),
-              ),
-            ],
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: accentColor.withValues(alpha: _isDark ? 0.22 : 0.14),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: accentColor, size: 18),
           ),
-          const SizedBox(height: 10),
-
-          // ── Medicine Count Badges ──
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDark ? SoftPalette.teal550.withValues(alpha: 0.2) : _teal.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: isDark ? SoftPalette.teal550 : _teal.withValues(alpha: 0.2)),
-                ),
-                child: Text(
-                  'Total Master Catalog: ${_proformaMasterList.length} Medicines',
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.sky350 : _tealDark,
+                    color: c.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    height: 1.1,
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDark ? SoftPalette.teal750m : SoftPalette.slate100,
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: isDark ? SoftPalette.sky500 : SoftPalette.sky300),
-                ),
-                child: Text(
-                  'Showing: ${_filteredList.length} Matching',
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.sky300 : SoftPalette.blue600,
+                    color: accentColor,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _selectedCount > 0
-                      ? (isDark ? SoftPalette.emerald600 : SoftPalette.green100m)
-                      : (isDark ? SoftPalette.slate700 : SoftPalette.gray100),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: _selectedCount > 0
-                        ? (isDark ? SoftPalette.emerald350 : SoftPalette.green300)
-                        : (isDark ? SoftPalette.slate600 : SoftPalette.gray150),
-                  ),
-                ),
-                child: Text(
-                  'Selected: $_selectedCount',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: _selectedCount > 0
-                        ? (isDark ? SoftPalette.emerald300 : SoftPalette.green550)
-                        : (isDark ? SoftPalette.slate350 : SoftPalette.gray500),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-
-          // Category filter pills
-          SizedBox(
-            height: 34,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: _typeCategories.length,
-              separatorBuilder: (_, index) => const SizedBox(width: 6),
-              itemBuilder: (context, idx) {
-                final cat = _typeCategories[idx];
-                final isSelected = _selectedTypeFilter == cat;
-                return ChoiceChip(
-                  checkmarkColor: SoftPalette.gray50,
-                  label: Text(
-                    cat,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                      color: isSelected ? SoftPalette.gray50 : (isDark ? SoftPalette.slate200 : _textMid),
-                    ),
-                  ),
-                  selected: isSelected,
-                  selectedColor: isDark ? SoftPalette.teal550 : _teal,
-                  backgroundColor: isDark ? SoftPalette.slate700 : _bg,
-                  onSelected: (val) {
-                    if (val) {
-                      setState(() {
-                        _selectedTypeFilter = cat;
-                        _filterData();
-                      });
-                    }
-                  },
-                );
-              },
+              ],
             ),
           ),
         ],
@@ -1832,41 +1774,263 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
     );
   }
 
+  Widget _buildFilterHeader() {
+    final c = context.comfort;
+    final isCompact = GBreakpoint.isCompact(context);
+    final selectedCount = _selectedCount;
+
+    final card1 = _buildKpiCard(
+      icon: Icons.menu_book_rounded,
+      accentColor: c.brand,
+      bgTint: c.brandSoft,
+      value: '${_proformaMasterList.length}',
+      label: 'Catalog Formulas',
+    );
+    final card2 = _buildKpiCard(
+      icon: Icons.filter_alt_outlined,
+      accentColor: c.info,
+      bgTint: c.infoBg,
+      value: '${_filteredList.length}',
+      label: 'Showing Matching',
+    );
+    final card3 = _buildKpiCard(
+      icon: Icons.inventory_2_outlined,
+      accentColor: c.success,
+      bgTint: c.successBg,
+      value: '${_inStockCodes.length}',
+      label: 'Already In Stock',
+    );
+    final card4 = _buildKpiCard(
+      icon: Icons.check_circle_outline_rounded,
+      accentColor: selectedCount > 0 ? c.warning : c.textSecondary,
+      bgTint: selectedCount > 0 ? c.warningBg : c.surfaceSunken,
+      value: '$selectedCount',
+      label: 'Selected to Add',
+    );
+
+    final searchField = Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.borderStrong),
+      ),
+      child: TextField(
+        controller: _searchCtrl,
+        cursorColor: c.brand,
+        style: TextStyle(color: c.textPrimary, fontSize: 13),
+        decoration: InputDecoration(
+          hintText: 'Search Proforma by barcode, item code, name, or formula...',
+          hintStyle: TextStyle(color: c.textMuted, fontSize: 12),
+          prefixIcon: Icon(Icons.search_rounded, color: c.brand, size: 18),
+          suffixIcon: _searchCtrl.text.isNotEmpty
+              ? IconButton(
+                  icon: Icon(Icons.close_rounded, size: 16, color: c.textSecondary),
+                  padding: EdgeInsets.zero,
+                  onPressed: () => _searchCtrl.clear(),
+                )
+              : null,
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        ),
+      ),
+    );
+
+    final autoSelectBtn = SizedBox(
+      height: 38,
+      child: OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          backgroundColor: c.surfaceSunken,
+          foregroundColor: c.brand,
+          side: BorderSide(color: c.brand.withValues(alpha: 0.45)),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+        onPressed: _selectItemsWithQty,
+        icon: const Icon(FontAwesomeIcons.checkDouble, size: 13),
+        label: const Text(
+          'Auto Select Qty > 0',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+
+    final addMedicineBtn = _canManageProforma
+        ? SizedBox(
+            height: 38,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: c.brand,
+                foregroundColor: c.onBrand,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              onPressed: _showAddMedicineDialog,
+              icon: const Icon(Icons.add_circle_outline_rounded, size: 16),
+              label: const Text(
+                'Add Medicine',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+              ),
+            ),
+          )
+        : null;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Row 1 — 4 Soft-Tinted KPI Cards
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: isCompact
+              ? Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: card1),
+                        const SizedBox(width: 8),
+                        Expanded(child: card2),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(child: card3),
+                        const SizedBox(width: 8),
+                        Expanded(child: card4),
+                      ],
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: card1),
+                    const SizedBox(width: 8),
+                    Expanded(child: card2),
+                    const SizedBox(width: 8),
+                    Expanded(child: card3),
+                    const SizedBox(width: 8),
+                    Expanded(child: card4),
+                  ],
+                ),
+        ),
+
+        // Row 2 — Unified c.surface Filter & Action Card
+        Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompact ? 10 : 12,
+            vertical: isCompact ? 8 : 10,
+          ),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: c.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (isCompact) ...[
+                searchField,
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    autoSelectBtn,
+                    if (addMedicineBtn != null) addMedicineBtn,
+                  ],
+                ),
+              ] else
+                Row(
+                  children: [
+                    Expanded(child: searchField),
+                    const SizedBox(width: 8),
+                    autoSelectBtn,
+                    if (addMedicineBtn != null) ...[
+                      const SizedBox(width: 8),
+                      addMedicineBtn,
+                    ],
+                  ],
+                ),
+              const SizedBox(height: 8),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (int i = 0; i < _typeCategories.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 6),
+                      Builder(builder: (_) {
+                        final cat = _typeCategories[i];
+                        final isSelected = _selectedTypeFilter == cat;
+                        return InkWell(
+                          onTap: () {
+                            setState(() {
+                              _selectedTypeFilter = cat;
+                              _filterData();
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(20),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: isSelected ? c.brand : c.surfaceSunken,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: isSelected ? c.brand : c.border),
+                            ),
+                            child: Text(
+                              cat,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                                color: isSelected ? c.onBrand : c.textSecondary,
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildExcelGridSheet([double? availableHeight]) {
+    final c = context.comfort;
     final isDark = _isDark;
     final double tableWidth = _canManageProforma ? 1360 : 1240;
 
-    final headerBg = isDark ? SoftPalette.teal550 : _headerBg;
-    final headerTextColor = isDark ? SoftPalette.gray50 : _tealDark;
-    final rowBgNormal = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final rowBgAlt = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-    final rowBgSelected = isDark ? SoftPalette.teal750m : _teal.withValues(alpha: 0.08);
-    final borderColor = isDark ? SoftPalette.slate700 : _gridBorder.withValues(alpha: 0.6);
-    final textColor = isDark ? SoftPalette.gray50 : _textDark;
+    final headerTextColor = c.textSecondary;
+    final borderColor = c.border;
 
     return Container(
-      margin: const EdgeInsets.all(12),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       decoration: BoxDecoration(
-        color: rowBgNormal,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: isDark ? SoftPalette.slate700 : _gridBorder),
-        boxShadow: const [
-          BoxShadow(color: SoftPalette.gray900A6, blurRadius: 6, offset: Offset(0, 3)),
-        ],
+        color: c.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.border),
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(14),
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: SizedBox(
             width: tableWidth,
-            height: availableHeight != null ? (availableHeight - 24).clamp(100.0, double.infinity) : null,
+            height: availableHeight != null
+                ? (availableHeight - 10).clamp(100.0, double.infinity)
+                : null,
             child: Column(
               children: [
                 // ── Header Row ──
                 Container(
-                  height: 48,
-                  color: headerBg,
+                  height: 42,
+                  color: c.surfaceSunken,
                   child: Row(
                     children: [
                       SizedBox(
@@ -1875,35 +2039,144 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                           children: [
                             Checkbox(
                               value: _selectAllChecked,
-                              activeColor: _teal,
+                              activeColor: c.brand,
                               onChanged: _toggleSelectAll,
                             ),
-                            Text('Select', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)),
+                            Text(
+                              'Select',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: headerTextColor,
+                                fontSize: 12,
+                              ),
+                            ),
                           ],
                         ),
                       ),
                       _vDivider(borderColor),
-                      SizedBox(width: 85, child: Center(child: Text('Barcode', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 85,
+                        child: Center(
+                          child: Text(
+                            'Barcode',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       _vDivider(borderColor),
-                      SizedBox(width: 145, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Item Code', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 145,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Item Code',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       _vDivider(borderColor),
-                      Expanded(flex: 4, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Medicine Formula (Generic)', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      Expanded(
+                        flex: 4,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Medicine Formula (Generic)',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       if (_canManageProforma) ...[
                         _vDivider(borderColor),
-                        SizedBox(width: 120, child: Center(child: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                        SizedBox(
+                          width: 120,
+                          child: Center(
+                            child: Text(
+                              'Actions',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: headerTextColor,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                       _vDivider(borderColor),
-                      SizedBox(width: 125, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Type', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 125,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Type',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       _vDivider(borderColor),
-                      SizedBox(width: 115, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Dose', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 115,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Dose',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       _vDivider(borderColor),
-                      SizedBox(width: 150, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Expiry Date *', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 150,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Expiry Date *',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                       _vDivider(borderColor),
-                      SizedBox(width: 185, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Text('Quantity to Add *', style: TextStyle(fontWeight: FontWeight.bold, color: headerTextColor, fontSize: 13.5)))),
+                      SizedBox(
+                        width: 185,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'Quantity to Add *',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: headerTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
-                Divider(height: 1, color: borderColor),
+                Divider(height: 1, color: c.borderStrong),
                 // ── Rows (Virtualised ListView.builder for instant 60 FPS performance) ──
                 Expanded(
                   child: ListView.separated(
@@ -1913,7 +2186,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                       final item = _filteredList[index];
                       final code = item['code'] as String? ?? 'MED-GEN';
                       final itemCode = (item['itemCode'] ?? item['code'] ?? '').toString();
-                      final barcode = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim().isNotEmpty && int.tryParse((item['barcode'] ?? item['rollNo'] ?? '').toString().trim()) != null
+                      final barcode = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim().isNotEmpty &&
+                              int.tryParse((item['barcode'] ?? item['rollNo'] ?? '').toString().trim()) != null
                           ? (item['barcode'] ?? item['rollNo'] ?? '').toString().trim().padLeft(3, '0')
                           : (item['rollNo'] ?? '').toString().trim().isNotEmpty
                               ? (item['rollNo'] ?? '').toString().trim().padLeft(3, '0')
@@ -1922,10 +2196,15 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                       final isInStock = inStockQty > 0;
                       final isChecked = _selectedItems[code] ?? false;
                       final expDate = _expiryDates[code] ?? DateTime.now().add(const Duration(days: 365));
-                      final bg = isChecked ? rowBgSelected : (index % 2 == 0 ? rowBgNormal : rowBgAlt);
+                      final medType = item['type'] as String? ?? 'Tablet';
+                      final rawTc = _getTypeBadgeColor(medType);
+                      final typeColor = isDark ? Color.lerp(rawTc, SoftPalette.gray50, 0.3)! : rawTc;
+                      final bg = isChecked
+                          ? c.brandSoft.withValues(alpha: isDark ? 0.35 : 0.55)
+                          : (index.isEven ? c.surface : c.surfaceSunken.withValues(alpha: 0.4));
 
                       return Container(
-                        height: 58,
+                        height: 54,
                         color: bg,
                         child: Row(
                           children: [
@@ -1937,7 +2216,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                   message: isChecked ? 'Deselect item' : 'Select item to add stock',
                                   child: Checkbox(
                                     value: isChecked,
-                                    activeColor: _teal,
+                                    activeColor: c.brand,
                                     onChanged: (val) {
                                       setState(() {
                                         final flag = val ?? false;
@@ -1963,19 +2242,17 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: isDark ? SoftPalette.teal550.withValues(alpha: 0.25) : _teal.withValues(alpha: 0.1),
+                                    color: c.brandSoft,
                                     borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(
-                                      color: isDark ? SoftPalette.sky350.withValues(alpha: 0.4) : _teal.withValues(alpha: 0.3),
-                                    ),
+                                    border: Border.all(color: c.brand.withValues(alpha: 0.3)),
                                   ),
                                   child: Text(
                                     barcode,
                                     style: TextStyle(
                                       fontFamily: 'monospace',
                                       fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: isDark ? SoftPalette.sky350 : _teal,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.brandStrong,
                                     ),
                                   ),
                                 ),
@@ -1989,13 +2266,11 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 10),
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: isDark ? SoftPalette.sky700 : SoftPalette.gray100,
+                                    color: c.surfaceSunken,
                                     borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(
-                                      color: isDark ? SoftPalette.sky500 : SoftPalette.gray150,
-                                    ),
+                                    border: Border.all(color: c.border),
                                   ),
                                   child: Text(
                                     itemCode.isNotEmpty ? itemCode : code,
@@ -2003,8 +2278,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                     style: TextStyle(
                                       fontFamily: 'monospace',
                                       fontSize: 11.5,
-                                      fontWeight: FontWeight.bold,
-                                      color: isDark ? SoftPalette.sky300 : _textDark,
+                                      fontWeight: FontWeight.w600,
+                                      color: c.textSecondary,
                                     ),
                                   ),
                                 ),
@@ -2024,8 +2299,8 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                         item['formula'] as String? ?? item['name'] as String? ?? '',
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: textColor,
+                                          fontWeight: FontWeight.w700,
+                                          color: c.textPrimary,
                                           fontSize: 13.5,
                                         ),
                                       ),
@@ -2035,16 +2310,16 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                         margin: const EdgeInsets.only(left: 6),
                                         decoration: BoxDecoration(
-                                          color: isDark ? SoftPalette.emerald600 : SoftPalette.emerald100,
+                                          color: c.successBg,
                                           borderRadius: BorderRadius.circular(12),
-                                          border: Border.all(color: isDark ? SoftPalette.emerald500 : SoftPalette.emerald350),
+                                          border: Border.all(color: c.success.withValues(alpha: 0.35)),
                                         ),
                                         child: Text(
                                           'In Stock: $inStockQty',
                                           style: TextStyle(
                                             fontSize: 10.5,
-                                            color: isDark ? SoftPalette.emerald300 : SoftPalette.emerald600,
-                                            fontWeight: FontWeight.bold,
+                                            color: c.success,
+                                            fontWeight: FontWeight.w700,
                                           ),
                                         ),
                                       ),
@@ -2061,7 +2336,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     IconButton(
-                                      icon: Icon(Icons.edit_note_rounded, size: 20, color: isDark ? SoftPalette.sky350 : _teal),
+                                      icon: Icon(Icons.edit_note_rounded, size: 20, color: c.brand),
                                       tooltip: 'Edit Formula Name (HQ/Chairman)',
                                       onPressed: () => _showEditMedicineNameDialog(item),
                                       padding: EdgeInsets.zero,
@@ -2069,7 +2344,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                     ),
                                     const SizedBox(width: 8),
                                     IconButton(
-                                      icon: const Icon(Icons.delete_outline_rounded, size: 19, color: _red),
+                                      icon: Icon(Icons.delete_outline_rounded, size: 19, color: c.danger),
                                       tooltip: 'Delete from Proforma (HQ/Chairman)',
                                       onPressed: () => _showDeleteMedicineDialog(item),
                                       padding: EdgeInsets.zero,
@@ -2077,7 +2352,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                     ),
                                     const SizedBox(width: 8),
                                     IconButton(
-                                      icon: Icon(Icons.history_rounded, size: 18, color: isDark ? SoftPalette.slate350 : SoftPalette.gray500),
+                                      icon: Icon(Icons.history_rounded, size: 18, color: c.textMuted),
                                       tooltip: 'View Audit Log & Change Reasons',
                                       onPressed: () => _showAuditTrailDialog(item),
                                       padding: EdgeInsets.zero,
@@ -2089,19 +2364,30 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                             ],
                             _vDivider(borderColor),
 
-                            // Type
+                            // Type (Soft-tinted pill)
                             SizedBox(
                               width: 125,
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 8),
-                                child: Chip(
-                                  label: Text(
-                                    item['type'] as String? ?? 'Tablet',
-                                    style: const TextStyle(fontSize: 11, color: SoftPalette.gray50, fontWeight: FontWeight.bold),
+                                padding: const EdgeInsets.symmetric(horizontal: 10),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: typeColor.withValues(alpha: isDark ? 0.2 : 0.12),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: typeColor.withValues(alpha: 0.35)),
+                                    ),
+                                    child: Text(
+                                      medType,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: typeColor,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
                                   ),
-                                  backgroundColor: _getTypeBadgeColor(item['type'] as String? ?? 'Tablet'),
-                                  visualDensity: VisualDensity.compact,
-                                  padding: EdgeInsets.zero,
                                 ),
                               ),
                             ),
@@ -2115,7 +2401,7 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                 child: Text(
                                   item['dose'] as String? ?? '-',
                                   overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(color: isDark ? SoftPalette.slate200 : _textDark, fontSize: 13),
+                                  style: TextStyle(color: c.textSecondary, fontSize: 12.5),
                                 ),
                               ),
                             ),
@@ -2125,26 +2411,30 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                             SizedBox(
                               width: 150,
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                padding: const EdgeInsets.symmetric(horizontal: 10),
                                 child: InkWell(
                                   onTap: () => _pickExpiryDate(code),
-                                  borderRadius: BorderRadius.circular(6),
+                                  borderRadius: BorderRadius.circular(8),
                                   child: Container(
-                                    height: 38,
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                    height: 34,
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
                                     decoration: BoxDecoration(
-                                      border: Border.all(color: isDark ? SoftPalette.sky350 : _teal.withValues(alpha: 0.5)),
-                                      borderRadius: BorderRadius.circular(6),
-                                      color: isDark ? SoftPalette.slate700 : _white,
+                                      border: Border.all(color: c.borderStrong),
+                                      borderRadius: BorderRadius.circular(8),
+                                      color: c.surfaceSunken,
                                     ),
                                     child: Row(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        Icon(Icons.calendar_today, size: 13, color: isDark ? SoftPalette.sky350 : _teal),
+                                        Icon(Icons.calendar_today_rounded, size: 13, color: c.brand),
                                         const SizedBox(width: 6),
                                         Text(
                                           DateFormat('yyyy-MM-dd').format(expDate),
-                                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isDark ? SoftPalette.gray50 : _tealDark),
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: c.textPrimary,
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -2160,30 +2450,52 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                               child: Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.remove_circle_outline, color: _red, size: 20),
-                                    onPressed: () {
+                                  InkWell(
+                                    onTap: () {
                                       final current = int.tryParse(_qtyControllers[code]?.text ?? '0') ?? 0;
                                       if (current > 0) {
                                         _qtyControllers[code]?.text = (current - 1).toString();
                                       }
                                     },
+                                    borderRadius: BorderRadius.circular(7),
+                                    child: Container(
+                                      width: 28,
+                                      height: 28,
+                                      decoration: BoxDecoration(
+                                        color: c.surfaceSunken,
+                                        borderRadius: BorderRadius.circular(7),
+                                        border: Border.all(color: c.border),
+                                      ),
+                                      child: Icon(Icons.remove_rounded, size: 16, color: c.textSecondary),
+                                    ),
                                   ),
-                                  SizedBox(
-                                    width: 64,
-                                    height: 38,
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    width: 58,
+                                    height: 32,
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: c.surfaceSunken,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isChecked ? c.brand : c.borderStrong,
+                                      ),
+                                    ),
                                     child: TextField(
                                       controller: _qtyControllers[code],
                                       keyboardType: TextInputType.number,
                                       textAlign: TextAlign.center,
                                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                                      style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: textColor),
-                                      decoration: InputDecoration(
+                                      cursorColor: c.brand,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        color: c.textPrimary,
+                                      ),
+                                      decoration: const InputDecoration(
                                         isDense: true,
-                                        contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-                                        filled: isDark,
-                                        fillColor: isDark ? SoftPalette.slate700 : null,
+                                        border: InputBorder.none,
+                                        contentPadding: EdgeInsets.symmetric(vertical: 6),
                                       ),
                                       onChanged: (val) {
                                         final qty = int.tryParse(val) ?? 0;
@@ -2193,15 +2505,26 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
                                       },
                                     ),
                                   ),
-                                  IconButton(
-                                    icon: const Icon(Icons.add_circle_outline, color: _green600, size: 20),
-                                    onPressed: () {
+                                  const SizedBox(width: 6),
+                                  InkWell(
+                                    onTap: () {
                                       final current = int.tryParse(_qtyControllers[code]?.text ?? '0') ?? 0;
                                       _qtyControllers[code]?.text = (current + 1).toString();
                                       if (_selectedItems[code] != true) {
                                         setState(() => _selectedItems[code] = true);
                                       }
                                     },
+                                    borderRadius: BorderRadius.circular(7),
+                                    child: Container(
+                                      width: 28,
+                                      height: 28,
+                                      decoration: BoxDecoration(
+                                        color: c.brandSoft,
+                                        borderRadius: BorderRadius.circular(7),
+                                        border: Border.all(color: c.brand.withValues(alpha: 0.3)),
+                                      ),
+                                      child: Icon(Icons.add_rounded, size: 16, color: c.brand),
+                                    ),
                                   ),
                                 ],
                               ),
@@ -2225,16 +2548,16 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
   }
 
   Widget _buildEmptyState() {
-    final isDark = _isDark;
+    final c = context.comfort;
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(FontAwesomeIcons.magnifyingGlass, size: 48, color: isDark ? SoftPalette.slate550 : SoftPalette.gray350),
+          Icon(FontAwesomeIcons.magnifyingGlass, size: 48, color: c.textMuted),
           const SizedBox(height: 16),
           Text(
             'No master proforma items matching "${_searchCtrl.text}"',
-            style: TextStyle(fontSize: 16, color: isDark ? SoftPalette.slate200 : _textMid),
+            style: TextStyle(fontSize: 15, color: c.textSecondary, fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -2242,16 +2565,13 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
   }
 
   Widget _buildBottomToolbar() {
+    final c = context.comfort;
     final count = _selectedCount;
-    final isDark = _isDark;
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        border: Border(top: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.gray100)),
-        boxShadow: const [
-          BoxShadow(color: SoftPalette.gray900A10, blurRadius: 10, offset: Offset(0, -4)),
-        ],
+        color: c.surface,
+        border: Border(top: BorderSide(color: c.border)),
       ),
       child: Row(
         children: [
@@ -2262,12 +2582,16 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
               children: [
                 Text(
                   '$count of ${_proformaMasterList.length} Medicines Selected',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isDark ? SoftPalette.gray50 : _tealDark),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    color: c.textPrimary,
+                  ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   'Showing ${_filteredList.length} of ${_proformaMasterList.length} total catalog medicines • Specifications protected.',
-                  style: TextStyle(fontSize: 11.5, color: isDark ? SoftPalette.slate350 : _textMid),
+                  style: TextStyle(fontSize: 11.5, color: c.textSecondary),
                 ),
               ],
             ),
@@ -2275,22 +2599,25 @@ class _UniversalProformaSheetPageState extends State<UniversalProformaSheetPage>
           const SizedBox(width: 16),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
-              backgroundColor: count > 0 ? (isDark ? SoftPalette.teal550 : _teal) : SoftPalette.gray350,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              backgroundColor: count > 0 ? c.brand : c.surfaceSunken,
+              foregroundColor: count > 0 ? c.onBrand : c.textMuted,
+              disabledBackgroundColor: c.surfaceSunken,
+              disabledForegroundColor: c.textMuted,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              elevation: 4,
+              elevation: 0,
             ),
             onPressed: count > 0 && !_isSavingBatch ? _saveBatchToInventory : null,
             icon: _isSavingBatch
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2),
+                ? SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 2),
                   )
-                : const Icon(FontAwesomeIcons.floppyDisk, color: SoftPalette.gray50, size: 16),
+                : const Icon(FontAwesomeIcons.floppyDisk, size: 15),
             label: Text(
               _isSavingBatch ? 'Adding to Inventory...' : 'Add Selected to Stock',
-              style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 14),
+              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
             ),
           ),
         ],

@@ -15,9 +15,14 @@ class SchoolGrade {
   final String date;
   final String enteredBy;
   final String remarks;
-  final String attachmentUrl;  // Base64 data URI or URL of Excel/PDF/Image attachment
+
+  /// Reference to a single shared attachment in `school_grade_attachments`
+  /// (Phase 5 — avoids duplicating large base64 files into every student row).
+  final String attachmentId;
+  final String attachmentUrl; // Legacy inline base64/URL (empty for new saves)
   final String attachmentName; // e.g. "Term1_Marksheet.xlsx", "GradeSheet.pdf"
   final String attachmentType; // 'excel', 'pdf', 'image'
+  final String academicYear;
   final String branchId;
   final String syncStatus;
   final String lastModified;
@@ -37,9 +42,11 @@ class SchoolGrade {
     required this.date,
     required this.enteredBy,
     this.remarks = '',
+    this.attachmentId = '',
     this.attachmentUrl = '',
     this.attachmentName = '',
     this.attachmentType = '',
+    this.academicYear = '',
     required this.branchId,
     this.syncStatus = 'synced',
     this.lastModified = '',
@@ -83,9 +90,11 @@ class SchoolGrade {
       date: map['date']?.toString() ?? '',
       enteredBy: map['enteredBy']?.toString() ?? 'Teacher',
       remarks: map['remarks']?.toString() ?? '',
+      attachmentId: map['attachmentId']?.toString() ?? '',
       attachmentUrl: map['attachmentUrl']?.toString() ?? '',
       attachmentName: map['attachmentName']?.toString() ?? '',
       attachmentType: map['attachmentType']?.toString() ?? '',
+      academicYear: map['academicYear']?.toString() ?? '',
       branchId: map['branchId']?.toString() ?? '',
       syncStatus: map['syncStatus']?.toString() ?? 'synced',
       lastModified: map['lastModified']?.toString() ?? '',
@@ -94,6 +103,9 @@ class SchoolGrade {
 
   Map<String, dynamic> toMap() {
     return {
+      // The id must travel with the record: without it every loaded grade had
+      // id '' and re-saves collided on one key.
+      'id': id,
       'studentId': studentId,
       'studentName': studentName,
       'rollNo': rollNo,
@@ -107,9 +119,11 @@ class SchoolGrade {
       'date': date,
       'enteredBy': enteredBy,
       'remarks': remarks,
+      if (attachmentId.isNotEmpty) 'attachmentId': attachmentId,
       'attachmentUrl': attachmentUrl,
       'attachmentName': attachmentName,
       'attachmentType': attachmentType,
+      if (academicYear.isNotEmpty) 'academicYear': academicYear,
       'branchId': branchId,
       'syncStatus': syncStatus,
       'lastModified': lastModified,

@@ -15,6 +15,7 @@ class NexusTopHeader extends StatelessWidget {
   final VoidCallback? onRefresh;
   final VoidCallback? onCatchUp;
   final VoidCallback? onCloudSync;
+  final VoidCallback? onOpenQueueDialog;
   final String adminName;
   final String branchDisplay;
   /// Opens the "Server location" dialog (branch + camp this server serves).
@@ -28,6 +29,7 @@ class NexusTopHeader extends StatelessWidget {
     this.onLogout,
     this.onLocationTap,
     this.locationWarning,
+    this.onOpenQueueDialog,
     super.key,
     required this.breadcrumbSection,
     required this.breadcrumbPage,
@@ -47,7 +49,7 @@ class NexusTopHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 64,
+      height: 58,
       padding: const EdgeInsets.symmetric(horizontal: 24),
       decoration: BoxDecoration(
         color: NexusColors.cardBg,
@@ -57,20 +59,21 @@ class NexusTopHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // ── Breadcrumbs ──────────────────────────────────────────────
+          // ── Breadcrumbs & Live Status ────────────────────────────────
           Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(
                 breadcrumbSection,
                 style: GoogleFonts.inter(
-                  fontSize: 13,
+                  fontSize: 12.5,
                   fontWeight: FontWeight.w500,
                   color: NexusColors.textSecondary,
                 ),
               ),
               Padding(
-                padding: EdgeInsets.symmetric(horizontal: 6),
-                child: Icon(Icons.chevron_right_rounded, size: 16, color: NexusColors.textSecondary),
+                padding: const EdgeInsets.symmetric(horizontal: 5),
+                child: Icon(Icons.chevron_right_rounded, size: 15, color: NexusColors.textMuted),
               ),
               Text(
                 breadcrumbPage,
@@ -80,20 +83,13 @@ class NexusTopHeader extends StatelessWidget {
                   color: NexusColors.textMain,
                 ),
               ),
-            ],
-          ),
-
-          const Spacer(),
-
-          // ── Status & Telemetry Indicators ────────────────────────────
-          Row(
-            children: [
+              const SizedBox(width: 12),
               // Operational Status Pill
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                 decoration: BoxDecoration(
                   color: isRunning ? NexusColors.successMuted : NexusColors.warningMuted,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(999),
                   border: Border.all(
                     color: isRunning ? NexusColors.successBorder : NexusColors.warningBorder,
                   ),
@@ -102,18 +98,18 @@ class NexusTopHeader extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Container(
-                      width: 7,
-                      height: 7,
+                      width: 6.5,
+                      height: 6.5,
                       decoration: BoxDecoration(
                         color: isRunning ? NexusColors.success : NexusColors.warning,
                         shape: BoxShape.circle,
                       ),
                     ),
-                    const SizedBox(width: 7),
+                    const SizedBox(width: 6),
                     Text(
-                      isRunning ? 'System Operational' : 'Gateway Standby',
+                      isRunning ? 'Operational' : 'Standby',
                       style: GoogleFonts.inter(
-                        fontSize: 11.5,
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
                         color: isRunning ? NexusColors.success : NexusColors.warning,
                       ),
@@ -121,221 +117,213 @@ class NexusTopHeader extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
+            ],
+          ),
 
-              // Synced Today Badge
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                decoration: BoxDecoration(
-                  color: NexusColors.mainBg,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: NexusColors.cardBorder),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      isOnline ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
-                      size: 14,
-                      color: isOnline ? NexusColors.success : NexusColors.textSecondary,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      '$syncedToday Synced',
-                      style: GoogleFonts.inter(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                        color: NexusColors.textMain,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
+          const Spacer(),
 
-              // Queue Size (if > 0)
-              if (queueSize > 0) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: NexusColors.warningMuted,
+          // ── Sync Status, Actions & Account ───────────────────────────
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Sync Status / Outbox Pill (single unified indicator)
+              if (queueSize > 0)
+                Tooltip(
+                  message: '$syncedToday synced today • Click to inspect $queueSize queued items',
+                  child: InkWell(
+                    onTap: onOpenQueueDialog,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: NexusColors.warningBorder),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.pending_actions_rounded, size: 14, color: NexusColors.warning),
-                      const SizedBox(width: 6),
-                      Text(
-                        '$queueSize Queued',
-                        style: GoogleFonts.inter(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: NexusColors.warning,
-                        ),
+                    child: Container(
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: NexusColors.warningMuted,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: NexusColors.warningBorder),
                       ),
-                    ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.pending_actions_rounded, size: 13.5, color: NexusColors.warning),
+                          const SizedBox(width: 6),
+                          Text(
+                            '$queueSize Queued',
+                            style: GoogleFonts.inter(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: NexusColors.warning,
+                              fontFeatures: const [FontFeature.tabularFigures()],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                )
+              else
+                Tooltip(
+                  message: isOnline ? 'Cloud sync connected ($syncedToday synced today)' : 'Offline mode',
+                  child: Container(
+                    height: 32,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: NexusColors.mainBg,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: NexusColors.cardBorder),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isOnline ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                          size: 13.5,
+                          color: isOnline ? NexusColors.success : NexusColors.textSecondary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          isOnline ? '$syncedToday Synced' : 'Offline',
+                          style: GoogleFonts.inter(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: NexusColors.textMain,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(width: 10),
-              ],
 
-              // Catch-Up & Reconcile Button
+              // Reconcile / Catch-Up Action
               if (onCatchUp != null) ...[
-                OutlinedButton.icon(
-                  onPressed: isCatchingUp ? null : onCatchUp,
-                  icon: isCatchingUp
-                      ? SizedBox(
-                          width: 13,
-                          height: 13,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: NexusColors.primary),
-                        )
-                      : Icon(Icons.sync_rounded, size: 14, color: NexusColors.primary),
-                  label: Text(
-                    isCatchingUp ? 'Catching up...' : 'Catch-Up & Reconcile',
-                    style: GoogleFonts.inter(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w600,
-                      color: NexusColors.primary,
-                    ),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: NexusColors.primary,
-                    side: BorderSide(color: NexusColors.primary),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    minimumSize: const Size(0, 32),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Catch-Up & Reconcile desks and cloud records',
+                  child: _HeaderActionButton(
+                    label: isCatchingUp ? 'Reconciling…' : 'Reconcile',
+                    icon: Icons.sync_rounded,
+                    color: NexusColors.primary,
+                    isLoading: isCatchingUp,
+                    onTap: isCatchingUp ? null : onCatchUp,
                   ),
                 ),
-                const SizedBox(width: 8),
               ],
 
-              // Manual Cloud Sync Button
+              // Manual Cloud Sync Action
               if (onCloudSync != null) ...[
-                OutlinedButton.icon(
-                  onPressed: isSyncing ? null : onCloudSync,
-                  icon: isSyncing
-                      ? SizedBox(
-                          width: 13,
-                          height: 13,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: NexusColors.success),
-                        )
-                      : Icon(Icons.cloud_upload_rounded, size: 14, color: NexusColors.success),
-                  label: Text(
-                    isSyncing ? 'Syncing...' : 'Cloud Sync',
-                    style: GoogleFonts.inter(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w600,
-                      color: NexusColors.success,
-                    ),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: NexusColors.success,
-                    side: BorderSide(color: NexusColors.success),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    minimumSize: const Size(0, 32),
+                const SizedBox(width: 6),
+                Tooltip(
+                  message: 'Push pending queue & pull updates from cloud',
+                  child: _HeaderActionButton(
+                    label: isSyncing ? 'Syncing…' : 'Cloud Sync',
+                    icon: Icons.cloud_upload_outlined,
+                    color: NexusColors.success,
+                    isLoading: isSyncing,
+                    onTap: isSyncing ? null : onCloudSync,
                   ),
                 ),
-                const SizedBox(width: 8),
               ],
 
-              // Refresh Button
-              if (onRefresh != null)
+              // Refresh Icon
+              if (onRefresh != null) ...[
+                const SizedBox(width: 4),
                 IconButton(
                   onPressed: onRefresh,
                   tooltip: 'Refresh telemetry & sync status',
-                  icon: Icon(Icons.refresh_rounded, size: 18, color: NexusColors.textSecondary),
-                  splashRadius: 18,
-                  constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                  icon: Icon(Icons.refresh_rounded, size: 17, color: NexusColors.textSecondary),
+                  splashRadius: 16,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                   padding: EdgeInsets.zero,
                 ),
+              ],
 
-              const SizedBox(width: 8),
-
-              // Theme Switcher Button
+              const SizedBox(width: 6),
               const ServerThemeSelectorButton(),
 
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               SizedBox(
                 height: 20,
                 child: VerticalDivider(color: NexusColors.cardBorder, width: 1),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
 
-              // Server identity & location (click to change the location)
+              // Server Location Selector
               Tooltip(
                 message: locationWarning ?? 'Server location — click to change',
                 child: InkWell(
                   onTap: onLocationTap,
                   borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  child: Container(
+                    height: 34,
+                    padding: const EdgeInsets.symmetric(horizontal: 9),
+                    decoration: BoxDecoration(
+                      color: locationWarning != null ? NexusColors.warningMuted : NexusColors.mainBg,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: locationWarning != null ? NexusColors.warningBorder : NexusColors.cardBorder,
+                      ),
+                    ),
                     child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Container(
-                          width: 32,
-                          height: 32,
-                          decoration: BoxDecoration(
-                            color: locationWarning != null ? NexusColors.warningMuted : NexusColors.primaryMuted,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: (locationWarning != null ? NexusColors.warning : NexusColors.primary)
-                                  .withValues(alpha: 0.35),
-                            ),
-                          ),
-                          child: Icon(
-                            locationWarning != null ? Icons.warning_amber_rounded : Icons.dns_rounded,
-                            size: 16,
-                            color: locationWarning != null ? NexusColors.warning : NexusColors.primary,
-                          ),
+                        Icon(
+                          locationWarning != null ? Icons.warning_amber_rounded : Icons.location_on_outlined,
+                          size: 14,
+                          color: locationWarning != null ? NexusColors.warning : NexusColors.primary,
                         ),
-                        const SizedBox(width: 8),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              adminName.isNotEmpty ? adminName : 'Server Control Panel',
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: NexusColors.textMain,
-                              ),
+                        const SizedBox(width: 6),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 160),
+                          child: Text(
+                            branchDisplay.isNotEmpty ? branchDisplay : 'Set location',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: locationWarning != null ? NexusColors.warning : NexusColors.textMain,
                             ),
-                            Text(
-                              branchDisplay.isNotEmpty ? branchDisplay : 'Location not set',
-                              style: GoogleFonts.inter(
-                                fontSize: 10.5,
-                                fontWeight: locationWarning != null ? FontWeight.w600 : FontWeight.w400,
-                                color: locationWarning != null ? NexusColors.warning : NexusColors.textSecondary,
-                              ),
-                            ),
-                          ],
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                         if (onLocationTap != null) ...[
-                          const SizedBox(width: 4),
-                          Icon(Icons.expand_more_rounded, size: 16, color: NexusColors.textMuted),
+                          const SizedBox(width: 3),
+                          Icon(Icons.expand_more_rounded, size: 15, color: NexusColors.textMuted),
                         ],
                       ],
                     ),
                   ),
                 ),
               ),
+
               if (onLogout != null) ...[
                 const SizedBox(width: 8),
                 Tooltip(
                   message: 'Log out (stops the server)',
-                  child: OutlinedButton.icon(
-                    onPressed: onLogout,
-                    icon: Icon(Icons.logout_rounded, size: 15, color: NexusColors.error),
-                    label: Text(
-                      'Logout',
-                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: NexusColors.error),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: NexusColors.errorBorder),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  child: InkWell(
+                    onTap: onLogout,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      height: 34,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: NexusColors.errorMuted,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: NexusColors.errorBorder),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.logout_rounded, size: 14, color: NexusColors.error),
+                          const SizedBox(width: 5),
+                          Text(
+                            'Logout',
+                            style: GoogleFonts.inter(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: NexusColors.error,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -348,3 +336,57 @@ class NexusTopHeader extends StatelessWidget {
   }
 }
 
+class _HeaderActionButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final bool isLoading;
+  final VoidCallback? onTap;
+
+  const _HeaderActionButton({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.isLoading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.30)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isLoading)
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.8, color: color),
+              )
+            else
+              Icon(icon, size: 13.5, color: color),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: GoogleFonts.inter(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

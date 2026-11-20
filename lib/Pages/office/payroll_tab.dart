@@ -1,5 +1,6 @@
 // lib/pages/office/payroll_tab.dart
 
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/design_system.dart';
 import 'package:flutter/services.dart';
@@ -361,7 +362,7 @@ class _PayrollTabState extends State<PayrollTab> {
     }).toList();
 
     return ValueListenableBuilder(
-      valueListenable: FinanceLocalStorage.salaryLedgerBox.listenable(),
+      valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.salaryLedgerBox),
       builder: (c, Box ledgerBox, _) {
         int paidCount = 0;
         double disbursedTotal = 0.0;
@@ -1135,7 +1136,7 @@ class _PayrollTabState extends State<PayrollTab> {
         ),
         Expanded(
           child: ValueListenableBuilder(
-            valueListenable: FinanceLocalStorage.salaryLedgerBox.listenable(),
+            valueListenable: DebouncedBoxListenable.shared(FinanceLocalStorage.salaryLedgerBox),
             builder: (ctx, Box box, _) {
               final query = _ledgerSearchCtrl.text.trim().toLowerCase();
               final entries = FinanceLocalStorage.getLedgerEntries(widget.branchId).where((e) {

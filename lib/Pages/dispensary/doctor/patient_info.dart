@@ -48,7 +48,6 @@ class PatientInfo extends StatelessWidget {
     this.onSkipPatient,
   });
 
-  static const Color _teal  = SoftPalette.teal600;
   static const Color _amber = SoftPalette.amber300;
 
   /// Extract a clean token number (e.g. '#005' or '#002') strictly within 001..999
@@ -145,15 +144,15 @@ class PatientInfo extends StatelessWidget {
     final val = double.tryParse(cleanStr);
     if (val == null) {
       return VitalEvaluation(
-        displayValue: s,
+        displayValue: s.replaceAll('°F', '°C'),
         status: VitalStatus.neutral,
         color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
       );
     }
 
-    // Auto-detect Celsius vs Fahrenheit: val <= 50 -> Celsius, > 50 -> Fahrenheit
+    // Clinical thresholds handle Celsius (<= 50) and legacy numeric entries (> 50), always displaying °C
     final isCelsius = val <= 50.0;
-    final displayVal = s.contains('°') ? s : (isCelsius ? '$val°C' : '$val°F');
+    final displayVal = '$val°C';
 
     bool isCritical = false;
     bool isWarning = false;
@@ -330,63 +329,172 @@ class PatientInfo extends StatelessWidget {
     final eval  = vital['eval'] as VitalEvaluation;
     final icon  = vital['icon'] as IconData;
     final sub   = vital['sub'] as String?;
+    final unit  = (vital['unit'] ?? '').toString();
 
-    final iconColor = eval.status == VitalStatus.neutral
-        ? (isDark ? SoftPalette.slate550 : SoftPalette.slate350)
-        : eval.color;
+    final isWarn = eval.status == VitalStatus.warning;
+    final isCrit = eval.status == VitalStatus.critical;
 
-    return Padding(
-      padding: EdgeInsets.symmetric(horizontal: compact ? 4 : 8),
+    final Color bgColor;
+    final Color borderColor;
+    final Color valueColor;
+    final String? statusTag;
+    final Color tagColor;
+
+    if (isCrit) {
+      bgColor = isDark
+          ? SoftPalette.red700.withValues(alpha: 0.22)
+          : SoftPalette.red50;
+      borderColor = isDark
+          ? SoftPalette.red400.withValues(alpha: 0.45)
+          : SoftPalette.red200;
+      valueColor = isDark ? SoftPalette.red300 : SoftPalette.red600;
+      statusTag = 'HIGH';
+      tagColor = isDark ? SoftPalette.red300 : SoftPalette.red600;
+    } else if (isWarn) {
+      bgColor = isDark
+          ? SoftPalette.amber800.withValues(alpha: 0.35)
+          : SoftPalette.amber50m;
+      borderColor = isDark
+          ? SoftPalette.amber400.withValues(alpha: 0.45)
+          : SoftPalette.amber200;
+      valueColor = isDark ? SoftPalette.amber300 : SoftPalette.amber500;
+      statusTag = 'WATCH';
+      tagColor = isDark ? SoftPalette.amber300 : SoftPalette.amber500;
+    } else if (eval.status == VitalStatus.normal) {
+      final Color accent = label == 'Sugar'
+          ? SoftPalette.sky500
+          : (label == 'Blood'
+              ? SoftPalette.red500
+              : (label == 'Weight' ? SoftPalette.emerald500 : SoftPalette.teal500));
+      bgColor = accent.withValues(alpha: isDark ? 0.14 : 0.07);
+      borderColor = accent.withValues(alpha: isDark ? 0.35 : 0.25);
+      valueColor = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
+      statusTag = null;
+      tagColor = accent;
+    } else {
+      bgColor = isDark ? SoftPalette.slate900 : SoftPalette.slate50;
+      borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+      valueColor = isDark ? SoftPalette.slate550 : SoftPalette.slate400;
+      statusTag = null;
+      tagColor = Colors.transparent;
+    }
+
+    final iconColor = isCrit || isWarn
+        ? tagColor
+        : (eval.status == VitalStatus.normal
+            ? tagColor
+            : (isDark ? SoftPalette.slate350 : SoftPalette.slate550));
+
+    // Strip unit from displayValue if we render unit separately for clean hierarchy
+    String mainVal = eval.displayValue.replaceAll('°F', '°C');
+    if (unit.isNotEmpty && mainVal.endsWith(unit)) {
+      mainVal = mainVal.substring(0, mainVal.length - unit.length).trim();
+    }
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 10,
+        vertical: compact ? 7 : 8,
+      ),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: eval.status == VitalStatus.neutral
+              ? borderColor.withValues(alpha: 0.55)
+              : borderColor,
+          width: (isCrit || isWarn) ? 1.2 : 1.0,
+        ),
+      ),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: compact ? 12 : 13, color: iconColor),
+              Icon(icon, size: compact ? 11 : 12, color: iconColor),
               const SizedBox(width: 4),
-              Text(
-                label.toUpperCase(),
-                style: TextStyle(
-                  fontSize: compact ? 9.5 : 10,
-                  fontWeight: FontWeight.bold,
-                  color: isDark ? SoftPalette.slate550 : SoftPalette.slate350,
-                  letterSpacing: 0.5,
+              Expanded(
+                child: Text(
+                  label.toUpperCase(),
+                  style: TextStyle(
+                    fontSize: compact ? 9.5 : 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                    color: isCrit || isWarn
+                        ? tagColor
+                        : (isDark ? SoftPalette.slate350 : SoftPalette.slate550),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (statusTag != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: tagColor.withValues(alpha: isDark ? 0.25 : 0.14),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    statusTag,
+                    style: TextStyle(
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w800,
+                      color: tagColor,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 2),
-          Text(
-            eval.displayValue,
-            style: TextStyle(
-              fontSize: compact ? 13 : 15,
-              fontWeight: FontWeight.w900,
-              color: eval.color,
-              letterSpacing: 0.2,
+          const SizedBox(height: 5),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  eval.status == VitalStatus.neutral ? '—' : mainVal,
+                  style: TextStyle(
+                    fontSize: compact ? 14 : 16,
+                    fontWeight: FontWeight.w800,
+                    color: valueColor,
+                    letterSpacing: -0.2,
+                  ),
+                  maxLines: 1,
+                ),
+                if (eval.status != VitalStatus.neutral &&
+                    (unit.isNotEmpty || label == 'BP')) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    unit.isNotEmpty ? unit : 'mmHg',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      color: isCrit || isWarn
+                          ? tagColor.withValues(alpha: 0.85)
+                          : (isDark ? SoftPalette.slate400 : SoftPalette.slate550),
+                    ),
+                  ),
+                ],
+              ],
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
           ),
           if (sub != null && sub.isNotEmpty) ...[
             const SizedBox(height: 2),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate800 : SoftPalette.gray100,
-                borderRadius: BorderRadius.circular(4),
+            Text(
+              sub,
+              style: TextStyle(
+                fontSize: 8.5,
+                fontWeight: FontWeight.w600,
+                color: isDark ? SoftPalette.slate350 : SoftPalette.gray550,
               ),
-              child: Text(
-                sub,
-                style: TextStyle(
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? SoftPalette.slate350 : SoftPalette.gray550,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ],
         ],
@@ -575,7 +683,7 @@ class PatientInfo extends StatelessWidget {
                   ],
                   decoration: InputDecoration(
                     labelText: 'Temperature (°C)',
-                    hintText: 'e.g. 98.6',
+                    hintText: 'e.g. 37.0',
                     prefixIcon: const Icon(Icons.thermostat),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -628,8 +736,8 @@ class PatientInfo extends StatelessWidget {
           ),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
-              backgroundColor: _teal,
-              foregroundColor: SoftPalette.gray50,
+              backgroundColor: context.comfort.brand,
+              foregroundColor: context.comfort.onBrand,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
             icon: const Icon(Icons.save_rounded, size: 18),
@@ -792,38 +900,54 @@ class PatientInfo extends StatelessWidget {
       final clinicalVitals = [
         {
           'label': 'BP',
+          'flex': 14,
           'eval': bpEval,
           'icon': Icons.favorite_rounded,
+          'unit': '',
           'sub': hasDocUpdate && recBp != null && recBp.toString() != vitals['bp']?.toString() ? 'Rec: $recBp' : null,
         },
         {
           'label': 'Temp',
+          'flex': 10,
           'eval': tempEval,
           'icon': Icons.thermostat_rounded,
+          'unit': '°C',
           'sub': hasDocUpdate && recTemp != null && recTemp.toString() != vitals['temp']?.toString() ? 'Rec: $recTemp°C' : null,
         },
         {
           'label': 'Sugar',
+          'flex': 10,
           'eval': sugarEval,
           'icon': Icons.water_drop_rounded,
+          'unit': 'mg/dL',
           'sub': hasDocUpdate && recSugar != null && recSugar.toString() != vitals['sugar']?.toString() ? 'Rec: $recSugar' : null,
         },
         {
           'label': 'Weight',
+          'flex': 9,
           'eval': weightEval,
           'icon': Icons.monitor_weight_rounded,
+          'unit': 'kg',
           'sub': hasDocUpdate && recWeight != null && recWeight.toString() != vitals['weight']?.toString() ? 'Rec: ${recWeight}kg' : null,
         },
         {
           'label': 'Blood',
+          'flex': 7,
           'eval': bgEval,
           'icon': Icons.bloodtype_rounded,
+          'unit': '',
           'sub': null,
         },
       ];
 
       final rawSerial = (patient['serial'] ?? patient['id'] ?? '-').toString();
       final displayToken = formatDisplayToken(rawSerial);
+      final rawQt = (patient['queueType'] ?? patient['status'] ?? 'zakat').toString().toUpperCase();
+      final queueBadgeLabel = rawQt.contains('NON')
+          ? 'NON-ZAKAT'
+          : (rawQt.contains('GMWF') ? 'GMWF' : 'ZAKAT');
+      final mrNo = (patient['mrNumber'] ?? patient['patientId'] ?? '').toString().trim();
+      final visitCount = patient['visitCount'];
 
       final prescDays = (() {
         final d = patient['daysOfMedicine'] ?? patient['suggestedDays'] ?? patient['requestedDays'];
@@ -836,202 +960,235 @@ class PatientInfo extends StatelessWidget {
         return 1;
       })();
 
+      final resolvedCnic = LocalStorageService.resolveFirstValidCnic([
+        patient['patientCnic'],
+        patient['cnic'],
+        patient['guardianCnic'],
+        mrNo.contains('_child_') ? mrNo.split('_child_').first : mrNo,
+      ]);
+
+      final demoParts = <String>[
+        if (ageStr.isNotEmpty) '$ageStr y',
+        if (genderStr.isNotEmpty) genderStr,
+        if (resolvedCnic.isNotEmpty)
+          resolvedCnic
+        else if (mrNo.isNotEmpty && mrNo != rawSerial && !mrNo.toLowerCase().startsWith('unknown'))
+          mrNo,
+        if (visitCount is int && visitCount > 0)
+          '$visitCount${visitCount == 1 ? 'st' : (visitCount == 2 ? 'nd' : (visitCount == 3 ? 'rd' : 'th'))} visit',
+      ];
+
+      final labList = (patient['labResults'] is List) ? patient['labResults'] as List : const [];
+      final labSummaryText = (patient['labResultSummary'] ?? '').toString().trim().isNotEmpty
+          ? patient['labResultSummary'].toString().trim()
+          : (labList.isNotEmpty
+              ? labList.map((e) => e is Map ? (e['name'] ?? '').toString() : e.toString()).where((s) => s.isNotEmpty).join(', ')
+              : '');
+
+      final brand = Theme.of(context).colorScheme.primary;
       return Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: isNarrow ? 10 : 14,
-          vertical: 8,
-        ),
+        padding: EdgeInsets.all(isNarrow ? 10 : 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
             // ── Top Identity & Actions Row ─────────────────────────────────
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Avatar
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.teal700 : SoftPalette.teal100,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: isDark ? SoftPalette.teal300 : _teal,
-                      width: 1.5,
+                // Token Number Badge (solid branded anchor)
+                Tooltip(
+                  message: 'Full Serial: $rawSerial',
+                  child: Container(
+                    constraints: const BoxConstraints(minWidth: 50, minHeight: 46),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: brand,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      displayToken,
+                      maxLines: 1,
+                      softWrap: false,
+                      style: const TextStyle(
+                        color: SoftPalette.gray50,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
-                  child: Icon(
-                    Icons.person_rounded,
-                    color: isDark ? SoftPalette.teal300 : _teal,
-                    size: 18,
-                  ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 12),
 
-                // Patient Name & Demographics
+                // Patient Name, Demographics & Badges
                 Expanded(
-                  child: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 6,
-                    runSpacing: 4,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        patientName,
-                        style: TextStyle(
-                          fontSize: isNarrow ? 15 : 17,
-                          fontWeight: FontWeight.w900,
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                          letterSpacing: -0.2,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              patientName,
+                              style: TextStyle(
+                                fontSize: isNarrow ? 15 : 17,
+                                fontWeight: FontWeight.w800,
+                                color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                                letterSpacing: -0.2,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: isDark
+                                  ? SoftPalette.emerald700.withValues(alpha: 0.45)
+                                  : SoftPalette.emerald100,
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Text(
+                              queueBadgeLabel,
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.4,
+                                color: isDark ? SoftPalette.emerald300 : SoftPalette.emerald600,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      if (genderStr.isNotEmpty || ageStr.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.slate800 : SoftPalette.slate150,
-                            borderRadius: BorderRadius.circular(6),
+                      if (demoParts.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          demoParts.join(' · '),
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
                           ),
-                          child: Text(
-                            [
-                              if (genderStr.isNotEmpty) genderStr,
-                              if (ageStr.isNotEmpty) '$ageStr yrs',
-                            ].join(' • '),
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: isDark ? SoftPalette.slate200 : SoftPalette.slate600,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 6),
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          if (staffInfo != null)
+                            StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: isDark),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: isDark
+                                  ? SoftPalette.indigo600.withValues(alpha: 0.28)
+                                  : SoftPalette.blue50,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: isDark
+                                    ? SoftPalette.indigo400.withValues(alpha: 0.4)
+                                    : SoftPalette.blue200,
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.event_note_rounded,
+                                    size: 11,
+                                    color: isDark ? SoftPalette.sky350 : SoftPalette.blue600),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Asks for $prescDays ${prescDays == 1 ? 'day' : 'days'}',
+                                  style: TextStyle(
+                                    color: isDark ? SoftPalette.sky350 : SoftPalette.blue600,
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ),
-                      if (staffInfo != null)
-                        StaffPatientLinkService.buildStaffBadge(staffInfo, isDark: isDark),
-                      if (isChild && guardianName != null && guardianName.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.teal700 : SoftPalette.teal100m,
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: isDark ? SoftPalette.teal300 : SoftPalette.teal300),
-                          ),
-                          child: Text(
-                            'Guardian: $guardianName',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: isDark ? SoftPalette.teal200 : SoftPalette.teal700,
+                          if (isChild && guardianName != null && guardianName.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: isDark ? SoftPalette.teal700 : SoftPalette.teal100m,
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: SoftPalette.teal300),
+                              ),
+                              child: Text(
+                                'Guardian: $guardianName',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? SoftPalette.teal200 : SoftPalette.teal700,
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                      if (patient['isVitalsOnly'] == true || patient['vitalsOnly'] == true)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isDark ? SoftPalette.violet600 : SoftPalette.purple600,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: const Text(
-                            '🩺 VITALS ONLY',
-                            style: TextStyle(
-                              color: SoftPalette.gray50,
-                              fontSize: 9.5,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.3,
+                          if (patient['isVitalsOnly'] == true || patient['vitalsOnly'] == true)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: isDark ? SoftPalette.violet600 : SoftPalette.purple600,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.monitor_heart_rounded, size: 11, color: SoftPalette.gray50),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'VITALS ONLY',
+                                    style: TextStyle(
+                                      color: SoftPalette.gray50,
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 0.3,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                        ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 8),
 
-                // Serial Token Badge (Simplified Token Number + Tooltip)
-                Tooltip(
-                  message: 'Full Serial: $rawSerial',
+                // Edit Vitals Button
+                InkWell(
+                  onTap: () => _showEditVitalsDialog(context, patient),
+                  borderRadius: BorderRadius.circular(8),
                   child: Container(
-                    height: 28,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    alignment: Alignment.center,
+                    constraints: const BoxConstraints(minHeight: 32),
+                    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
                     decoration: BoxDecoration(
-                      color: isDark ? SoftPalette.orange800 : SoftPalette.yellow50m,
-                      borderRadius: BorderRadius.circular(14),
+                      color: brand.withValues(alpha: isDark ? 0.22 : 0.08),
+                      borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: isDark ? SoftPalette.amber300 : SoftPalette.amber200,
-                        width: 1.2,
+                        color: brand.withValues(alpha: isDark ? 0.5 : 0.3),
                       ),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          Icons.confirmation_number_rounded,
-                          color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
-                          size: 13,
-                        ),
-                        const SizedBox(width: 4),
+                        Icon(Icons.edit_outlined,
+                            color: isDark ? SoftPalette.gray50 : brand,
+                            size: 14),
+                        const SizedBox(width: 5),
                         Text(
-                          displayToken,
+                          'Vitals',
                           style: TextStyle(
-                            color: isDark ? SoftPalette.yellow150 : SoftPalette.orange500,
                             fontSize: 11.5,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-
-                // Requested Days Badge
-                Container(
-                  height: 28,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.emerald700.withValues(alpha: 0.35) : SoftPalette.emerald50,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: isDark ? SoftPalette.emerald500 : SoftPalette.emerald350, width: 1),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.schedule_rounded, size: 12, color: isDark ? SoftPalette.emerald300 : SoftPalette.emerald500),
-                      const SizedBox(width: 4),
-                      Text(
-                        '$prescDays day requested',
-                        style: TextStyle(
-                          color: isDark ? SoftPalette.emerald300 : SoftPalette.emerald500,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 6),
-
-                // Edit Vitals Button
-                InkWell(
-                  onTap: () => _showEditVitalsDialog(context, patient),
-                  borderRadius: BorderRadius.circular(14),
-                  child: Container(
-                    height: 28,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: isDark ? SoftPalette.teal550 : _teal,
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.edit_note_rounded, color: SoftPalette.gray50, size: 15),
-                        SizedBox(width: 4),
-                        Text(
-                          'Edit BP/Temp',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: SoftPalette.gray50,
+                            fontWeight: FontWeight.w600,
+                            color: isDark ? SoftPalette.gray50 : brand,
                           ),
                         ),
                       ],
@@ -1044,25 +1201,30 @@ class PatientInfo extends StatelessWidget {
                   const SizedBox(width: 6),
                   InkWell(
                     onTap: onSkipPatient,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(8),
                     child: Container(
-                      height: 28,
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      constraints: const BoxConstraints(minHeight: 32),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       decoration: BoxDecoration(
-                        color: isDark ? SoftPalette.orange700 : SoftPalette.orange400,
-                        borderRadius: BorderRadius.circular(14),
+                        color: SoftPalette.amber500.withValues(alpha: isDark ? 0.2 : 0.09),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: SoftPalette.amber500.withValues(alpha: isDark ? 0.45 : 0.28),
+                        ),
                       ),
-                      child: const Row(
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.skip_next_rounded, color: SoftPalette.gray50, size: 15),
-                          SizedBox(width: 3),
+                          Icon(Icons.skip_next_rounded,
+                              color: isDark ? SoftPalette.amber300 : SoftPalette.amber500,
+                              size: 15),
+                          const SizedBox(width: 3),
                           Text(
                             'Skip',
                             style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: SoftPalette.gray50,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: isDark ? SoftPalette.amber300 : SoftPalette.amber500,
                             ),
                           ),
                         ],
@@ -1073,58 +1235,89 @@ class PatientInfo extends StatelessWidget {
               ],
             ),
 
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
 
-            // ── Consolidated Clinical Vitals Strip with Vertical Dividers ───
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-              decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: isDark ? SoftPalette.slate800 : SoftPalette.slate150,
-                  width: 1.2,
-                ),
-              ),
-              child: isNarrow
-                  ? Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: clinicalVitals.map((v) {
-                        return SizedBox(
-                          width: (constraints.maxWidth - 48) / 3,
-                          child: _buildVitalCell(
-                            vital: v,
-                            isDark: isDark,
-                            compact: true,
-                          ),
-                        );
-                      }).toList(),
-                    )
-                  : IntrinsicHeight(
-                      child: Row(
-                        children: [
-                          for (int i = 0; i < clinicalVitals.length; i++) ...[
-                            if (i > 0)
-                              VerticalDivider(
-                                width: 1,
-                                thickness: 1,
-                                indent: 3,
-                                endIndent: 3,
-                                color: isDark ? SoftPalette.slate800 : SoftPalette.slate150,
-                              ),
-                            Expanded(
-                              child: _buildVitalCell(
-                                vital: clinicalVitals[i],
-                                isDark: isDark,
-                                compact: compact,
-                              ),
+            // ── 5 Individual Vitals Cards ─────────────────────────────────
+            isNarrow
+                ? Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: clinicalVitals.map((v) {
+                      return SizedBox(
+                        width: (constraints.maxWidth - 44) / 3,
+                        child: _buildVitalCell(
+                          vital: v,
+                          isDark: isDark,
+                          compact: true,
+                        ),
+                      );
+                    }).toList(),
+                  )
+                : IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (int i = 0; i < clinicalVitals.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 6),
+                          Expanded(
+                            flex: (clinicalVitals[i]['flex'] as int?) ?? 10,
+                            child: _buildVitalCell(
+                              vital: clinicalVitals[i],
+                              isDark: isDark,
+                              compact: compact,
                             ),
-                          ],
+                          ),
                         ],
+                      ],
+                    ),
+                  ),
+
+            // ── Lab Result Banner (when available) ────────────────────────
+            if (labSummaryText.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? SoftPalette.indigo600.withValues(alpha: 0.2)
+                      : SoftPalette.blue50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isDark
+                        ? SoftPalette.indigo400.withValues(alpha: 0.35)
+                        : SoftPalette.blue200,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.science_outlined,
+                        size: 15,
+                        color: isDark ? SoftPalette.sky350 : SoftPalette.blue600),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Lab result · $labSummaryText',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? SoftPalette.sky200 : SoftPalette.blue700,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-            ),
+                    Text(
+                      'View >',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: isDark ? SoftPalette.sky350 : SoftPalette.blue600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       );

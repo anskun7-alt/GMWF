@@ -37,14 +37,13 @@ class RoleThemeScope extends InheritedNotifier<ValueNotifier<bool>> {
         } catch (_) {}
       }
     }
-    RoleThemeData data = RoleThemeData.of(of(context), resolvedColor);
     final isDarkMode = UserThemeService.isDarkMode(explicitUserKey);
-    if (isDarkMode) {
-      data = data.toDarkMode();
-    } else {
-      data = data.toLightMode();
-    }
-    return data;
+    final visualTheme = UserThemeService.getVisualTheme(explicitUserKey);
+    return RoleThemeData.of(of(context)).withVisualTheme(
+      visualTheme,
+      customAccent: resolvedColor,
+      isDark: isDarkMode,
+    );
   }
 
   @override

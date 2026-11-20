@@ -1,4 +1,6 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
+import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
@@ -381,7 +383,7 @@ class _RamadanWelfareScreenState extends State<RamadanWelfareScreen>
     }
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(RamadanWelfareService.boxName).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(RamadanWelfareService.boxName)),
       builder: (context, box, _) {
         final allRegs = RamadanWelfareService.getRegistrations(branchId: widget.branchId);
         final rationsCount = allRegs.where((r) => r['campaign'] == 'rations' || r['campaign'] == 'both').length;
@@ -393,11 +395,14 @@ class _RamadanWelfareScreenState extends State<RamadanWelfareScreen>
           appBar: AppBar(
             backgroundColor: t.bgCard,
             elevation: 0,
-            leading: AppBackButton(color: t.textPrimary),
+            // Inside the executive shell: no second title; keep the counts and tabs.
+            automaticallyImplyLeading: false,
+            toolbarHeight: HomeModuleHost.isModuleRoot(context) ? 32 : null,
+            leading: HomeModuleHost.isModuleRoot(context) ? null : AppBackButton(color: t.textPrimary),
             title: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
+                if (!HomeModuleHost.isModuleRoot(context)) Row(
                   children: [
                     Image.asset('assets/logo/gmwf-1.webp', height: 26, width: 26),
                     const SizedBox(width: 8),

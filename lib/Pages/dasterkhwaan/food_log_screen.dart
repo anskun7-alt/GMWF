@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/components/app_toast.dart';
@@ -6,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/sync_service.dart';
+import '../home/home_module_host.dart';
 
 class DasterkhwaanFoodLogScreen extends StatefulWidget {
   final String branchId;
@@ -57,12 +59,15 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
     return Scaffold(
       backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
       appBar: AppBar(
+        automaticallyImplyLeading: !HomeModuleHost.isModuleRoot(context),
+        // Inside the executive shell: no second title, just the date and its picker.
+        toolbarHeight: HomeModuleHost.isModuleRoot(context) ? 44 : null,
         backgroundColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
         elevation: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            if (!HomeModuleHost.isModuleRoot(context)) Text(
               'Dasterkhwaan Food Log',
               style: TextStyle(
                 fontSize: 18,
@@ -102,7 +107,7 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
             child: !Hive.isBoxOpen(LocalStorageService.dasterkhwaanFoodLogsBox)
                 ? const Center(child: CircularProgressIndicator(color: SoftPalette.teal500))
                 : ValueListenableBuilder<Box>(
-                    valueListenable: Hive.box(LocalStorageService.dasterkhwaanFoodLogsBox).listenable(),
+                    valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.dasterkhwaanFoodLogsBox)),
                     builder: (context, box, _) {
                       final allItems = <Map<String, dynamic>>[];
                       for (final entry in box.toMap().entries) {

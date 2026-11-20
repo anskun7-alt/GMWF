@@ -634,12 +634,12 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
 
 #### Changes Implemented:
 1. **Removal of Redundant Back Buttons in Sidebar Views**:
-   - In [`server.dart`](file:///d:/GMWF/gmwf/lib/pages/server.dart#L1554), set `isEmbedded: true` and `onBack: null` for `BiometricDeviceManagerPage`, `PythonTerminalScreen`, and `ServerDataViewer`.
-   - In [`python_terminal_screen.dart`](file:///d:/GMWF/gmwf/lib/pages/settings/python_terminal_screen.dart#L40), omitted the inner `AppBar` when `isEmbedded == true`, eliminating duplicate header bars and back arrows.
-   - In [`server_data_viewer.dart`](file:///d:/GMWF/gmwf/lib/pages/server_data_viewer.dart#L196), omitted the inner `AppBar` when embedded in the dashboard.
+   - In [`server.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/pages/server.dart#L1554), set `isEmbedded: true` and `onBack: null` for `BiometricDeviceManagerPage`, `PythonTerminalScreen`, and `ServerDataViewer`.
+   - In [`python_terminal_screen.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/pages/settings/python_terminal_screen.dart#L40), omitted the inner `AppBar` when `isEmbedded == true`, eliminating duplicate header bars and back arrows.
+   - In [`server_data_viewer.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/pages/server_data_viewer.dart#L196), omitted the inner `AppBar` when embedded in the dashboard.
    - Users freely navigate between subsystems directly via the left sidebar without clumsy nested back buttons.
 2. **Prominent Windows Defender Firewall Alert Banner on Overview**:
-   - Added a high-contrast amber alert banner directly below the Heading in [`nexus_views.dart`](file:///d:/GMWF/gmwf/lib/widgets/nexus_server_dashboard/nexus_views.dart#L130) whenever port 53281 is blocked in Windows Firewall.
+   - Added a high-contrast amber alert banner directly below the Heading in [`nexus_views.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/widgets/nexus_server_dashboard/nexus_views.dart#L130) whenever port 53281 is blocked in Windows Firewall.
    - Provides a direct **`[ Fix Firewall (Open Port) ]`** action button that automatically executes `netsh advfirewall` to open ports 53281, 8088, and 4370.
 3. **One-Click Operational Diagnostics & Fixes Deck on Overview**:
    - **Force Cloud Sync**: Manually triggers an immediate cloud sync pass.
@@ -656,8 +656,8 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
 2. `lib/pages/server_data_viewer.dart:227`: `Expected an identifier, but got ']'` and premature `Scaffold` closure.
 
 #### Solutions Applied:
-- Linked `server.dart:1683` to the authoritative implementation `LocalStorageService.healNestedPrescriptions()`, and exposed `static Future<int> flattenNestedPrescriptions() => healNestedPrescriptions();` as an alias on [`LocalStorageService`](file:///d:/GMWF/gmwf/lib/services/local_storage_service.dart#L1575).
-- Removed stray `], );` in [`server_data_viewer.dart`](file:///d:/GMWF/gmwf/lib/Pages/server_data_viewer.dart#L225) that closed the `Scaffold` prematurely before `body: ValueListenableBuilder`.
+- Linked `server.dart:1683` to the authoritative implementation `LocalStorageService.healNestedPrescriptions()`, and exposed `static Future<int> flattenNestedPrescriptions() => healNestedPrescriptions();` as an alias on [`LocalStorageService`](file:///D:/Dev/Projects/GMWF/gmwf/lib/services/local_storage_service.dart#L1575).
+- Removed stray `], );` in [`server_data_viewer.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/Pages/server_data_viewer.dart#L225) that closed the `Scaffold` prematurely before `body: ValueListenableBuilder`.
 
 ---
 
@@ -671,7 +671,7 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
 
 #### Solutions Applied:
 1. **Firestore Batched Writes**:
-   - In [`scripts/zkteco_sync_service.py`](file:///d:/GMWF/gmwf/scripts/zkteco_sync_service.py#L200), `flush_offline_buffer(db)` now batches punches in chunks of up to 200 documents (`batch = db.batch()`, `batch.set(...)`, `batch.commit()`).
+   - In [`scripts/zkteco_sync_service.py`](file:///D:/Dev/Projects/GMWF/gmwf/scripts/zkteco_sync_service.py#L200), `flush_offline_buffer(db)` now batches punches in chunks of up to 200 documents (`batch = db.batch()`, `batch.set(...)`, `batch.commit()`).
    - All 76 punches commit in **a single HTTP round-trip** (< 2 seconds) instead of 76 sequential requests.
 2. **Immediate 429 Quota Cooldown & Local Preservation**:
    - If a 429 or `ResourceExhausted` error is caught, the loop **stops immediately**.
@@ -679,8 +679,8 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
    - Sets a 15-minute cooldown (`_quota_cooldown_until = time.time() + 900`).
    - `fetch_and_sync_device` checks this cooldown and saves new punches directly to `pending_punches.json` without attempting failing Firestore calls that would hang for 60 seconds.
 3. **Clean Process Termination & Restart**:
-   - In [`python_runner_service.dart`](file:///d:/GMWF/gmwf/lib/services/python_runner_service.dart#L385), `startScript` now accepts `forceRestart: true`, safely executing `taskkill /F /T /PID $pid` on Windows to clean up stale processes before launching.
-   - In [`python_terminal_screen.dart`](file:///d:/GMWF/gmwf/lib/Pages/settings/python_terminal_screen.dart#L311), running the selected script automatically force-restarts if a previous instance is alive.
+   - In [`python_runner_service.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/services/python_runner_service.dart#L385), `startScript` now accepts `forceRestart: true`, safely executing `taskkill /F /T /PID $pid` on Windows to clean up stale processes before launching.
+   - In [`python_terminal_screen.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/Pages/settings/python_terminal_screen.dart#L311), running the selected script automatically force-restarts if a previous instance is alive.
 
 ---
 
@@ -692,11 +692,11 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
 
 #### Root Causes & Solutions:
 1. **Never Gate Peer-to-Peer Routing on Persistence**:
-   - In [`lan_server.dart`](file:///d:/GMWF/gmwf/lib/realtime/lan_server.dart#L910), an early check `if (!persistenceReady) return;` was dropping `save_entry` and `save_prescription` frames before peer routing (`_routeMessage`), leaving them with the desk and sending no ACK.
+   - In [`lan_server.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/realtime/lan_server.dart#L910), an early check `if (!persistenceReady) return;` was dropping `save_entry` and `save_prescription` frames before peer routing (`_routeMessage`), leaving them with the desk and sending no ACK.
    - Removed this gate: peer-to-peer relaying between connected desks (Desk A -> Desk B) now happens **immediately (< 5ms)** regardless of whether the server's cloud coordinator is busy.
    - `_deliverAndAck` gently yields if persistence is warming up, ensuring local disk save occurs without delaying peer delivery.
 2. **Haji Camp UDP Discovery Branch Normalization**:
-   - In [`lan_discovery.dart`](file:///d:/GMWF/gmwf/lib/realtime/lan_discovery.dart#L112), `_tryUdp` rejected discovery beacons if `serverBranch != myBranch`.
+   - In [`lan_discovery.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/realtime/lan_discovery.dart#L112), `_tryUdp` rejected discovery beacons if `serverBranch != myBranch`.
    - At Haji Camp, workstations had `haji_camp` while the server had `karachi`. Because `'haji_camp' != 'karachi'`, the discovery beacon was ignored, leaving desks disconnected ("Connecting... 51 unsent") until slow fallback scans ran minutes later.
    - Replaced strict string comparison with `CampSessionService.areBranchesMatching(myBranch, serverBranch)`, connecting desks in **under 200 milliseconds**.
 
@@ -709,7 +709,7 @@ The server was sitting in `● STANDBY 34% Load` with `[ Launch Server ]` unclic
 - User requested: *"a 1000+ token number is really bad idea we will only have the 001 to 999 token numbers doesn't matter if it is online or offline"*.
 
 #### Solution Applied:
-1. In [`local_storage_service.dart`](file:///d:/GMWF/gmwf/lib/services/local_storage_service.dart#L12540):
+1. In [`local_storage_service.dart`](file:///D:/Dev/Projects/GMWF/gmwf/lib/services/local_storage_service.dart#L12540):
    - `offlineDeskSlot` strictly defaults to `0`.
    - Sequence generation is strictly clamped to `1..999` (`bandLow = 0`, `bandHigh = 999`).
 2. Display Normalization:

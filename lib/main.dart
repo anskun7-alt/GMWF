@@ -1,12 +1,12 @@
 // lib/main.dart
 import 'dart:async';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:gmwf/design/theme/gmwf_theme.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GThemeChoice;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -39,6 +39,7 @@ import 'services/python_runner_service.dart';
 import 'realtime/realtime_router.dart';
 import 'services/cloud_messaging_service.dart';
 import 'services/user_theme_service.dart';
+import 'theme/app_visual_theme.dart';
 import 'services/auth_service.dart';
 import 'widgets/gmwf_loading_view.dart';
 import 'widgets/custom_title_bar.dart';
@@ -311,7 +312,7 @@ Future<void> main() async {
         AuthService.onSignOutCallback = AuthHomeWrapper.clearSession;
 
         // Load dynamic version from pubspec via package_info (max 400ms)
-        await AutoUpdateService.getAppVersion().timeout(const Duration(milliseconds: 400), onTimeout: () => '1.6.4');
+        await AutoUpdateService.getAppVersion().timeout(const Duration(milliseconds: 400), onTimeout: () => '1.6.5');
         unawaited(CloudMessagingService().initialize().catchError((e) {
           debugPrint('[Init] CloudMessagingService init warning: $e');
         }));
@@ -385,6 +386,10 @@ Future<void> _runBackgroundCleanups() async {
       await Future.delayed(const Duration(milliseconds: 300));
 
       await LocalStorageService.healAndRestorePatientCnics();
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Once per PC: older CNICs saved as 13 digits are rewritten with dashes.
+      await LocalStorageService.migrateCnicsToDashedFormat();
       await Future.delayed(const Duration(milliseconds: 300));
     }
 
@@ -547,16 +552,22 @@ class _MyAppState extends State<MyApp> {
   }
 
   // The whole Material theme lives in the design system (GTheme); main only
-  // supplies the user's accent, card roundness and the blur-aware transitions.
+  // supplies the user's preset, accent, card roundness and blur-aware transitions.
   ThemeData _buildThemeData({
     required Color seedColor,
     required double cardRadius,
     required Brightness brightness,
+    AppVisualTheme? visualTheme,
+    Color? customAccent,
+    GThemeChoice? choice,
   }) {
     return GTheme.build(
       seedColor: seedColor,
       cardRadius: cardRadius,
       brightness: brightness,
+      visualTheme: visualTheme,
+      customAccent: customAccent,
+      choice: choice,
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
           TargetPlatform.android: BlurOnDialogPageTransitionsBuilder(CupertinoPageTransitionsBuilder()),
@@ -582,10 +593,13 @@ class _MyAppState extends State<MyApp> {
                   navigatorObservers: [DialogBlurManager.instance],
                   title: 'GMWF',
                   debugShowCheckedModeBanner: false,
+                  themeAnimationDuration: Duration.zero,
                   theme: _buildThemeData(
                     seedColor: AppColors.primary,
                     cardRadius: 16.0,
                     brightness: Brightness.light,
+                    visualTheme: AppVisualTheme.emeraldMeridianHybrid,
+                    choice: UserThemeService.defaultThemeChoice,
                   ),
                   routes: {
                     '/home': (context) => const AuthHomeWrapper(),
@@ -597,132 +611,153 @@ class _MyAppState extends State<MyApp> {
                   ),
                   home: const AuthHomeWrapper(),
                 )
-              : ValueListenableBuilder(
-                  valueListenable: Hive.box('app_settings').listenable(keys: [
-                    'custom_accent_color',
-                    'card_radius',
-                    'is_dark_mode',
-                    'language',
-                    'font_scale',
-                  ]),
-                  builder: (context, Box box, _) {
-                    final colorHex = box.get('custom_accent_color') as String?;
+              : ValueListenableBuilder<bool>(
+                  valueListenable: UserThemeService.currentThemeNotifier,
+                  builder: (context, _, _) {
+                    return ValueListenableBuilder(
+                      valueListenable: Hive.box('app_settings').listenable(keys: [
+                        'custom_accent_color',
+                        'card_radius',
+                        'is_dark_mode',
+                        'visual_theme',
+                        'theme_choice',
+                        UserThemeService.getStorageKey(),
+                        UserThemeService.getVisualThemeKey(),
+                        UserThemeService.getThemeChoiceKey(),
+                        'language',
+                        'font_scale',
+                      ]),
+                      builder: (context, Box box, _) {
+                        final colorHex = box.get('custom_accent_color') as String?;
 
-                    Color seedColor = AppColors.primary;
-                    if (colorHex != null && colorHex.isNotEmpty) {
-                      try {
-                        final hex = colorHex.replaceAll('#', '');
-                        seedColor = Color(int.parse('FF$hex', radix: 16));
-                      } catch (_) {}
-                    }
+                        Color? customColor;
+                        if (colorHex != null && colorHex.isNotEmpty) {
+                          try {
+                            final hex = colorHex.replaceAll('#', '');
+                            customColor = Color(int.parse('FF$hex', radix: 16));
+                          } catch (_) {}
+                        }
 
-                    final cardRadius = (box.get('card_radius', defaultValue: 16.0) as num).toDouble();
-                    final isDarkMode = UserThemeService.isDarkMode();
-                    final language = box.get('language', defaultValue: 'en') as String;
-                    final isUrdu = language == 'ur';
+                        final cardRadius = (box.get('card_radius', defaultValue: 16.0) as num).toDouble();
+                        final isDarkMode = UserThemeService.isDarkMode();
+                        final visualTheme = UserThemeService.getVisualTheme();
+                        final lightPreset = visualTheme.pairedForDarkMode(false);
+                        final darkPreset = visualTheme.pairedForDarkMode(true);
+                        final themeChoice = UserThemeService.getThemeChoice();
+                        final language = box.get('language', defaultValue: 'en') as String;
+                        final isUrdu = language == 'ur';
 
-                    return MaterialApp(
-                      navigatorKey: navigatorKey,
-                      navigatorObservers: [DialogBlurManager.instance],
-                      title: 'GMWF',
-                      debugShowCheckedModeBanner: false,
-                      themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
-                      locale: Locale(language),
-                      theme: _buildThemeData(
-                        seedColor: seedColor,
-                        cardRadius: cardRadius,
-                        brightness: Brightness.light,
-                      ),
-                      darkTheme: _buildThemeData(
-                        seedColor: seedColor,
-                        cardRadius: cardRadius,
-                        brightness: Brightness.dark,
-                      ),
-                      builder: (context, child) {
-                        final mediaQuery = MediaQuery.of(context);
-                        final scale = (box.get('font_scale', defaultValue: 1.0) as num).toDouble();
+                        return MaterialApp(
+                          navigatorKey: navigatorKey,
+                          navigatorObservers: [DialogBlurManager.instance],
+                          title: 'GMWF',
+                          debugShowCheckedModeBanner: false,
+                          themeAnimationDuration: Duration.zero,
+                          themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
+                          locale: Locale(language),
+                          theme: _buildThemeData(
+                            seedColor: customColor ?? lightPreset.tokens.primary,
+                            cardRadius: cardRadius,
+                            brightness: Brightness.light,
+                            visualTheme: lightPreset,
+                            customAccent: customColor,
+                            choice: themeChoice,
+                          ),
+                          darkTheme: _buildThemeData(
+                            seedColor: customColor ?? darkPreset.tokens.primary,
+                            cardRadius: cardRadius,
+                            brightness: Brightness.dark,
+                            visualTheme: darkPreset,
+                            customAccent: customColor,
+                            choice: themeChoice,
+                          ),
+                          builder: (context, child) {
+                            final mediaQuery = MediaQuery.of(context);
+                            final scale = (box.get('font_scale', defaultValue: 1.0) as num).toDouble();
 
-                        final appDirection = isUrdu ? TextDirection.rtl : TextDirection.ltr;
-                        final appMediaQuery = mediaQuery.copyWith(
-                          textScaler: TextScaler.linear(scale),
-                        );
+                            final appDirection = isUrdu ? TextDirection.rtl : TextDirection.ltr;
+                            final appMediaQuery = mediaQuery.copyWith(
+                              textScaler: TextScaler.linear(scale),
+                            );
 
-                        final adjustedChild = CallbackShortcuts(
-                          bindings: <ShortcutActivator, VoidCallback>{
-                            const SingleActivator(LogicalKeyboardKey.keyU, control: true, shift: true): () {
-                              QuotaService.resetState();
-                              HiddenForceUploader.instance.runSilentForceUpload();
-                            },
-                            const SingleActivator(LogicalKeyboardKey.keyR, control: true, shift: true): () {
-                              AppRestartController.refreshApp();
-                            },
-                            // Preview every notification style (works on any screen).
-                            const SingleActivator(LogicalKeyboardKey.keyT, control: true, shift: true): AppToast.demo,
-                            const SingleActivator(LogicalKeyboardKey.keyR, control: true): () {
-                              AppRestartController.refreshApp();
-                            },
-                            const SingleActivator(LogicalKeyboardKey.f5): () {
-                              AppRestartController.refreshApp();
-                            },
-                          },
-                          child: Focus(
-                            autofocus: true,
-                            child: MediaQuery(
-                              data: appMediaQuery,
-                              child: Directionality(
-                                textDirection: appDirection,
-                                // App-wide toasts sit above every route and dialog.
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    child ?? const SizedBox.shrink(),
-                                    // "What is the app doing" status, so busy moments are explained.
-                                    const BusyStatusHost(),
-                                    const AppToastHost(),
-                                  ],
+                            final adjustedChild = CallbackShortcuts(
+                              bindings: <ShortcutActivator, VoidCallback>{
+                                const SingleActivator(LogicalKeyboardKey.keyU, control: true, shift: true): () {
+                                  QuotaService.resetState();
+                                  HiddenForceUploader.instance.runSilentForceUpload();
+                                },
+                                const SingleActivator(LogicalKeyboardKey.keyR, control: true, shift: true): () {
+                                  AppRestartController.refreshApp();
+                                },
+                                // Preview every notification style (works on any screen).
+                                const SingleActivator(LogicalKeyboardKey.keyT, control: true, shift: true): AppToast.demo,
+                                const SingleActivator(LogicalKeyboardKey.keyR, control: true): () {
+                                  AppRestartController.refreshApp();
+                                },
+                                const SingleActivator(LogicalKeyboardKey.f5): () {
+                                  AppRestartController.refreshApp();
+                                },
+                              },
+                              child: Focus(
+                                autofocus: true,
+                                child: MediaQuery(
+                                  data: appMediaQuery,
+                                  child: Directionality(
+                                    textDirection: appDirection,
+                                    // App-wide toasts sit above every route and dialog.
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        child ?? const SizedBox.shrink(),
+                                        // "What is the app doing" status, so busy moments are explained.
+                                        const BusyStatusHost(),
+                                        const AppToastHost(),
+                                      ],
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                        );
+                            );
 
-                        if (!kIsWeb && Platform.isWindows && !Platform.environment.containsKey('FLUTTER_TEST')) {
-                          return Material(
-                            color: isDarkMode ? SoftPalette.slate900 : SoftPalette.slate100,
-                            child: Column(
-                              children: [
-                                const CustomTitleBar(),
-                                Expanded(child: ClipRect(child: adjustedChild)),
-                              ],
-                            ),
-                          );
-                        }
-                        return adjustedChild;
-                      },
-                      home: const AuthHomeWrapper(),
-                      onUnknownRoute: (settings) {
-                        return MaterialPageRoute(
-                          builder: (context) => const AuthHomeWrapper(),
+                            if (!kIsWeb && Platform.isWindows && !Platform.environment.containsKey('FLUTTER_TEST')) {
+                              return Material(
+                                color: Theme.of(context).scaffoldBackgroundColor,
+                                child: Column(
+                                  children: [
+                                    const CustomTitleBar(),
+                                    Expanded(child: ClipRect(child: adjustedChild)),
+                                  ],
+                                ),
+                              );
+                            }
+                            return adjustedChild;
+                          },
+                          home: const AuthHomeWrapper(),
+                          onUnknownRoute: (settings) {
+                            return MaterialPageRoute(
+                              builder: (context) => const AuthHomeWrapper(),
+                            );
+                          },
+                          routes: {
+                            '/home': (context) => const AuthHomeWrapper(),
+                            '/login': (context) => const LoginPage(),
+                            '/admin': (context) => const OverviewScreen(),
+                            '/chairman': (context) => const OverviewScreen(),
+                            '/donations': (context) => const DonationsScreen.embedded(),
+                            '/dispensar': (context) {
+                              final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+                              return DispensarScreen(
+                                branchId: args?['branchId'] ?? 'unknown',
+                                dispenserId: args?['dispenserId'] ?? args?['uid'],
+                                dispenserName: args?['dispenserName'] ?? args?['name'],
+                              );
+                            },
+                            '/inventory': (context) {
+                              final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+                              return InventoryPage(branchId: args?['branchId'] ?? 'unknown');
+                            },
+                          },
                         );
-                      },
-                      routes: {
-                        '/home': (context) => const AuthHomeWrapper(),
-                        '/login': (context) => const LoginPage(),
-                        '/admin': (context) => const OverviewScreen(),
-                        '/chairman': (context) => const OverviewScreen(),
-                        '/donations': (context) => const DonationsScreen.embedded(),
-                        '/dispensar': (context) {
-                          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-                          return DispensarScreen(
-                            branchId: args?['branchId'] ?? 'unknown',
-                            dispenserId: args?['dispenserId'] ?? args?['uid'],
-                            dispenserName: args?['dispenserName'] ?? args?['name'],
-                          );
-                        },
-                        '/inventory': (context) {
-                          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-                          return InventoryPage(branchId: args?['branchId'] ?? 'unknown');
-                        },
                       },
                     );
                   },

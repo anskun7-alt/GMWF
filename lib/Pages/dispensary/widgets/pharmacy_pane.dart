@@ -15,6 +15,7 @@ import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/utils/branch_labels.dart';
 import '../receptionist/token_tally.dart';
+import 'desk_theme.dart';
 
 // WhatsApp-style green from the eye-comfort palette (no hard-coded colours):
 // a light green on dark surfaces, a deep green on light ones.
@@ -79,19 +80,16 @@ class PharmacyPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.comfort;
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(kPharmacyRadius),
-        border: Border.all(color: c.border),
-      ),
-      clipBehavior: Clip.antiAlias,
+    return DeskCard(
+      radius: kPharmacyRadius,
+      accentTop: true,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
             height: 44,
             padding: const EdgeInsets.fromLTRB(14, 0, 8, 0),
+            color: c.brandSoft.withValues(alpha: 0.28),
             child: Row(
               children: [
                 Icon(icon, size: 18, color: c.brand),
@@ -135,27 +133,27 @@ class PaneSegment extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.comfort;
     return InkWell(
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(20),
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         decoration: BoxDecoration(
-          color: selected ? c.brandSoft : null,
-          borderRadius: BorderRadius.circular(10),
+          color: selected ? c.brandSoft : c.surface,
+          borderRadius: BorderRadius.circular(20),
           border: Border.all(color: selected ? c.brand : c.border),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 15, color: selected ? c.brand : c.textSecondary),
+            Icon(icon, size: 14, color: selected ? c.brand : c.textSecondary),
             const SizedBox(width: 6),
             Text(
               label,
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
-                color: selected ? c.brand : c.textSecondary,
+                color: selected ? c.brand : c.textPrimary,
               ),
             ),
           ],
@@ -204,79 +202,201 @@ class TodayCollectionStrip extends StatelessWidget {
     final c = context.comfort;
     final money = NumberFormat.decimalPattern();
 
-    // Each chip uses a designed foreground/background pair, readable in both themes.
-    Widget chip(String label, int count, String amount, Color fg, Color bg, {bool strong = false}) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: strong ? fg : bg),
-        ),
+    Widget metricCell({
+      IconData? icon,
+      String? imageAsset,
+      required Color iconColor,
+      required Color iconBg,
+      required String label,
+      required int count,
+      required String amount,
+      bool highlight = false,
+      bool useExpanded = true,
+    }) {
+      final inner = Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: useExpanded ? MainAxisSize.max : MainAxisSize.min,
           children: [
-            Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: fg)),
-            const SizedBox(width: 6),
-            Text('$count', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: fg)),
-            const SizedBox(width: 6),
-            Text(
-              amount,
-              style: TextStyle(fontSize: 11.5, fontWeight: strong ? FontWeight.w800 : FontWeight.w600, color: fg),
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: iconBg,
+                shape: BoxShape.circle,
+              ),
+              child: imageAsset != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(3),
+                      child: Image.asset(
+                        imageAsset,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => Icon(
+                          icon ?? Icons.groups_rounded,
+                          size: 16,
+                          color: iconColor,
+                        ),
+                      ),
+                    )
+                  : Icon(icon, size: 16, color: iconColor),
+            ),
+            const SizedBox(width: 10),
+            Flexible(
+              fit: useExpanded ? FlexFit.loose : FlexFit.loose,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: c.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(height: 1),
+                  RichText(
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    text: TextSpan(
+                      style: TextStyle(
+                        fontFamily: 'Roboto',
+                        color: c.textPrimary,
+                      ),
+                      children: [
+                        TextSpan(
+                          text: '$count',
+                          style: const TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        TextSpan(
+                          text: ' · $amount',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: highlight ? c.brand : c.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
       );
+      return useExpanded ? Expanded(child: inner) : inner;
     }
 
-    return Container(
-      height: 40,
-      padding: EdgeInsets.only(left: 12, right: onShare == null ? 12 : 4),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(kPharmacyRadius),
-        border: Border.all(color: c.border),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.payments_outlined, size: 18, color: c.brand),
-          const SizedBox(width: 8),
-          Text(
-            "Today's collection",
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: c.textPrimary),
+    Widget vDivider() => Container(width: 1, height: 28, color: c.border);
+
+    List<Widget> buildCells(bool useExpanded) => [
+          metricCell(
+            icon: Icons.volunteer_activism_rounded,
+            iconColor: c.success,
+            iconBg: c.successBg,
+            label: isKarachi ? BranchLabels.karachiZakatLabel : 'Zakat',
+            count: tally.zakat,
+            amount: 'PKR ${money.format(tally.zakatAmount)}',
+            useExpanded: useExpanded,
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              reverse: true,
+          vDivider(),
+          metricCell(
+            icon: Icons.group_rounded,
+            iconColor: c.info,
+            iconBg: c.infoBg,
+            label: isKarachi ? BranchLabels.karachiNonZakatLabel : 'Non-Zakat',
+            count: tally.nonZakat,
+            amount: isKarachi && tally.nonZakat == 0 ? 'Disabled' : 'PKR ${money.format(tally.nonZakatAmount)}',
+            useExpanded: useExpanded,
+          ),
+          vDivider(),
+          metricCell(
+            icon: Icons.groups_rounded,
+            imageAsset: 'assets/logo/gmwf-1.webp',
+            iconColor: c.warning,
+            iconBg: c.warningBg,
+            label: 'GMWF',
+            count: tally.gmwf,
+            amount: 'PKR 0',
+            useExpanded: useExpanded,
+          ),
+          vDivider(),
+          metricCell(
+            icon: Icons.check_circle_rounded,
+            iconColor: c.brand,
+            iconBg: c.brandSoft,
+            label: 'Issued by me',
+            count: tally.total,
+            amount: 'PKR ${money.format(tally.totalAmount)}',
+            highlight: true,
+            useExpanded: useExpanded,
+          ),
+        ];
+
+    return DeskCard(
+      radius: kPharmacyRadius,
+      accentTop: false,
+      child: SizedBox(
+        height: 56,
+        child: Row(
+          children: [
+            Container(
+              height: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: c.surfaceSunken.withValues(alpha: 0.65),
+                border: Border(right: BorderSide(color: c.border)),
+              ),
               child: Row(
                 children: [
-                  chip(isKarachi ? BranchLabels.karachiZakatLabel : 'Zakat', tally.zakat, 'PKR ${money.format(tally.zakatAmount)}',
-                      c.success, c.successBg),
-                  const SizedBox(width: 6),
-                  chip(
-                    isKarachi ? BranchLabels.karachiNonZakatLabel : 'Non-Zakat',
-                    tally.nonZakat,
-                    isKarachi && tally.nonZakat == 0 ? 'Disabled' : 'PKR ${money.format(tally.nonZakatAmount)}',
-                    c.info,
-                    c.infoBg,
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: c.brandSoft,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(Icons.calendar_today_rounded, size: 16, color: c.brand),
                   ),
-                  const SizedBox(width: 6),
-                  chip('GMWF', tally.gmwf, 'PKR 0', c.warning, c.warningBg),
-                  const SizedBox(width: 6),
-                  // Count = tokens issued by me today (same list as "Today's Tokens").
-                  chip('Issued by me', tally.total, 'PKR ${money.format(tally.totalAmount)}', c.brand, c.brandSoft,
-                      strong: true),
+                  const SizedBox(width: 10),
+                  Text(
+                    "Today's collection",
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: c.textPrimary,
+                    ),
+                  ),
                 ],
               ),
             ),
-          ),
-          if (onShare != null) ...[
-            const SizedBox(width: 4),
-            WhatsAppShareButton(onPressed: onShare!),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth >= 560) {
+                    return Row(children: buildCells(true));
+                  }
+                  return SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(children: buildCells(false)),
+                  );
+                },
+              ),
+            ),
+            if (onShare != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: WhatsAppShareButton(onPressed: onShare!),
+              ),
           ],
-        ],
+        ),
       ),
     );
   }

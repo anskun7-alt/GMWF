@@ -1,3 +1,4 @@
+import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
@@ -1202,7 +1203,7 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
     final textSecondary = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.biometricDevicesBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.biometricDevicesBox)),
       builder: (context, box, child) {
         final devices = ZkTecoNetworkService.getAllDevices();
 
@@ -1553,7 +1554,7 @@ class _BiometricDeviceManagerPageState extends State<BiometricDeviceManagerPage>
     final textSecondary = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
 
     return ValueListenableBuilder<Box>(
-      valueListenable: Hive.box(LocalStorageService.biometricCredentialsBox).listenable(),
+      valueListenable: DebouncedBoxListenable.shared(Hive.box(LocalStorageService.biometricCredentialsBox)),
       builder: (context, box, child) {
         // 1. Enrolled Credentials (filter by branch if branch is specific)
         final allCredentials = ZkTecoNetworkService.getAllCredentials();
