@@ -1225,8 +1225,23 @@ class ServerSyncManager {
       if (serial.isEmpty) continue;
 
       final entryCopy = Map<String, dynamic>.from(entry);
-      final presc = LocalStorageService.getLocalPrescription(serial) ??
-          entry['prescription'] as Map<String, dynamic>?;
+      final found = LocalStorageService.getLocalPrescription(
+            serial,
+            cnic: (entry['patientCnic'] ?? entry['cnic'])?.toString(),
+            patientName: (entry['patientName'] ?? entry['name'])?.toString(),
+            patientId: entry['patientId']?.toString(),
+          ) ??
+          (entry['prescription'] is Map ? Map<String, dynamic>.from(entry['prescription'] as Map) : null);
+      // Only this token's own prescription (not one stored under the same number earlier).
+      final presc = (entry['dispenseStatus'] ?? '') == 'dispensed' ||
+              LocalStorageService.prescriptionFitsToken(found, entry)
+          ? found
+          : null;
+      if (presc == null && found != null) {
+        entryCopy.remove('prescription');
+        entryCopy.remove('medicines');
+        entryCopy.remove('prescriptions');
+      }
       if (presc != null && presc.isNotEmpty) {
         entryCopy['status'] = 'completed';
         entryCopy['prescription'] = presc;

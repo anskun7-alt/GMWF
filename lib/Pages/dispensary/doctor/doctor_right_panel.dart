@@ -5195,9 +5195,13 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       );
 
       final resolvedPatientId = LocalStorageService.resolveIndividualPatientId(patientData);
+      // Which token this prescription is for (its issue time): lets every desk tell it apart
+      // from a prescription stored earlier under the same token number.
+      final tokenIssuedAtMs = patientData['issuedAtMs'] ?? existingHiveEntry?['issuedAtMs'];
       final medicalData = <String, dynamic>{
         'id':              serialClean,
         'serial':          serialClean,
+        if (tokenIssuedAtMs is num) 'tokenIssuedAtMs': tokenIssuedAtMs,
         'patientId':       resolvedPatientId,
         'patientCnic':     patientCnic,
         'cnic':            patientCnic,
@@ -5231,6 +5235,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       final fullPrescriptionData = <String, dynamic>{
         'id':              serialClean,
         'serial':          serialClean,
+        if (tokenIssuedAtMs is num) 'tokenIssuedAtMs': tokenIssuedAtMs,
         'patientCnic':     patientCnic,
         'cnic':            patientCnic,
         'patientId':       resolvedPatientId,

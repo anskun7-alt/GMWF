@@ -1115,8 +1115,8 @@ class MasterProformaService {
       'rollNo': '401',
       'itemCode': 'MED-AMC-SYR',
       'code': 'MED-AMC-SYR',
-      'name': 'Amonium Chloride (Cough Syrup)',
-      'formula': 'Amonium Chloride (Cough Syrup)',
+      'name': 'Ammonium Chloride (Cough Syrup)',
+      'formula': 'Ammonium Chloride (Cough Syrup)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 75.00,
@@ -3146,8 +3146,8 @@ class MasterProformaService {
     if (lower.contains('antacid') || lower.contains('mucaine') || lower.contains('digas') || lower.contains('simeco') || lower.contains('aluminium') || lower.contains('magnesium hydroxide')) {
       return 'Antacid (Trisil)';
     }
-    if (lower.contains('ammonium chloride') || lower.contains('amonimum chloride') || lower.contains('hydryllin') || lower.contains('hydrin') || lower.contains('cough syrup')) {
-      return 'Amonium Chloride (Cough Syrup)';
+    if (lower.contains('ammonium chloride') || lower.contains('amonium chloride') || lower.contains('amonimum chloride') || lower.contains('hydryllin') || lower.contains('hydrin') || lower.contains('cough syrup')) {
+      return 'Ammonium Chloride (Cough Syrup)';
     }
     if (lower.contains('carminative') || lower.contains('gripe water') || lower.contains('grape water') || lower.contains('cholic') || lower.contains('colic')) {
       return 'Carminative Mixture (Colic Syrup)';

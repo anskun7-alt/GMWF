@@ -274,6 +274,8 @@ class _PatientFormState extends State<PatientForm> {
       // When prescription arrives from doctor for this active patient, apply immediately!
       if (type == RealtimeEvents.savePrescription || type == 'prescription_created') {
         if (LocalStorageService.isOlderPrescription(data, _data)) return;
+        // Not this token's prescription (same number, earlier token or another patient).
+        if (!_isDispensed && !LocalStorageService.prescriptionFitsToken(data, widget.queueEntry)) return;
         final embedded = LocalStorageService.prescriptionForEmbedding(data);
         if (!LocalStorageService.mayReplacePrescription(embedded, _data)) return;
         final rxList = embedded['prescriptions'] ?? embedded['medicines'];
@@ -385,11 +387,20 @@ class _PatientFormState extends State<PatientForm> {
     // A refresh keeps what is on screen; the spinner is only for the first load.
     if (_data.isEmpty) setState(() => _isLoadingPrescription = true);
     final beforeFingerprint = _data.isNotEmpty ? _rxFingerprint(_getPrescriptionsList()) : null;
+    // Only a prescription the doctor wrote for THIS token is shown. One stored under the same
+    // token number (an earlier token, or another patient) showed medicines before the doctor
+    // had prescribed anything.
+    final token = widget.queueEntry;
+    final alreadyDispensed = _isDispensed ||
+        (token['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+    bool fits(Object? rx) => rx is Map && rx.isNotEmpty &&
+        (alreadyDispensed || LocalStorageService.prescriptionFitsToken(rx, token));
     try {
       // 1. Check embedded prescription from widget.queueEntry, but DO NOT return early before
       // checking Hive: when a doctor edits a prescription (e.g. removes an injection or changes
       // timing), Hive is updated immediately while widget.queueEntry may still hold the older map.
-      final directEmbedded = widget.queueEntry['prescription'];
+      final rawDirect = widget.queueEntry['prescription'];
+      final directEmbedded = fits(rawDirect) ? rawDirect : null;
       final directRxList = directEmbedded is Map
           ? (directEmbedded['prescriptions'] ?? directEmbedded['medicines'] ?? directEmbedded['items'])
           : null;
@@ -419,6 +430,7 @@ class _PatientFormState extends State<PatientForm> {
       final pId = widget.queueEntry['patientId']?.toString() ?? _data['patientId']?.toString();
       final pDateKey = widget.queueEntry['dateKey']?.toString() ?? _data['dateKey']?.toString();
       found = _searchHive(cleanS, cnic, patientId: pId, dateKey: pDateKey);
+      if (!fits(found)) found = {};
       if (cleanS.isNotEmpty) {
         final presc = LocalStorageService.getLocalPrescription(
           cleanS,
@@ -428,7 +440,7 @@ class _PatientFormState extends State<PatientForm> {
           branchId: widget.branchId,
           dateKey: pDateKey,
         );
-        if (presc != null && presc.isNotEmpty) {
+        if (presc != null && presc.isNotEmpty && fits(presc)) {
           if (found.isEmpty || LocalStorageService.mayReplacePrescription(presc, found)) {
             found = presc;
           }
@@ -443,7 +455,7 @@ class _PatientFormState extends State<PatientForm> {
             eBox.get('$normB-$normSUpper') ??
             eBox.get(normS) ??
             eBox.get(normSUpper);
-        if (direct is Map && direct['prescription'] is Map && (direct['prescription'] as Map).isNotEmpty) {
+        if (direct is Map && direct['prescription'] is Map && fits(direct['prescription'])) {
           final entryRx = Map<String, dynamic>.from(direct['prescription'] as Map);
           if (found.isEmpty || LocalStorageService.mayReplacePrescription(entryRx, found)) {
             found = entryRx;
@@ -477,10 +489,12 @@ class _PatientFormState extends State<PatientForm> {
 
       if (found.isEmpty && serial.isNotEmpty && cnic.isNotEmpty && canAttemptCloud) {
         found = await _fetchFromPrescriptionsByCnic(serial, cnic);
+        if (!fits(found)) found = {};
         if (found.isNotEmpty) await LocalStorageService.saveLocalPrescription(found);
       }
       if (found.isEmpty && serial.isNotEmpty && canAttemptCloud) {
         found = await _fetchFromSerialsEmbedded(serial);
+        if (!fits(found)) found = {};
         if (found.isNotEmpty) await LocalStorageService.saveLocalPrescription(found);
       }
       if (found.isEmpty &&
@@ -496,6 +510,7 @@ class _PatientFormState extends State<PatientForm> {
           'labResults': <Map<String, dynamic>>[],
           'isVitalsOnly': true,
         };
+        found.remove('prescription');
       }
       final rawVitals = widget.queueEntry['vitals'];
       final vitals = (rawVitals is Map) ? Map<String, dynamic>.from(rawVitals) : <String, dynamic>{};
@@ -504,6 +519,9 @@ class _PatientFormState extends State<PatientForm> {
         setState(() {
           // Nothing found on a refresh (or only an older copy): keep the prescription shown.
           // Nor a copy without medicines over one that has them (mayReplacePrescription).
+          // A list already on screen that is not this token's (shown before this check
+          // existed, or before the token's details arrived) goes.
+          if (_data.isNotEmpty && _hasMeds(_data) && !fits(_data)) _data = {};
           if (found.isNotEmpty && LocalStorageService.mayReplacePrescription(found, _data)) {
             _data = LocalStorageService.prescriptionForEmbedding(found);
           } else if (directEmbedded is Map && _data.isEmpty) {

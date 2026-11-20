@@ -6906,9 +6906,25 @@ class ServerSyncManager {
         // The token's own prescription unless the lookup has a newer one with medicines (the
         // lookup alone, without the branch, could pick an older or empty record).
         presc = LocalStorageService.preferredPrescription(
-          LocalStorageService.getLocalPrescription(serial, branchId: branchId),
+          LocalStorageService.getLocalPrescription(
+            serial,
+            branchId: branchId,
+            cnic: (entry['patientCnic'] ?? entry['cnic'])?.toString(),
+            patientName: (entry['patientName'] ?? entry['name'])?.toString(),
+            patientId: entry['patientId']?.toString(),
+          ),
           entry['prescription'],
         );
+        // Only this token's own prescription. One stored under the same number for an earlier
+        // token (or another patient) was sent to every desk as "completed": the dispenser
+        // showed medicines the doctor had not prescribed yet.
+        if ((entry['dispenseStatus'] ?? '') != 'dispensed' &&
+            !LocalStorageService.prescriptionFitsToken(presc, entry)) {
+          presc = null;
+          entryCopy.remove('prescription');
+          entryCopy.remove('medicines');
+          entryCopy.remove('prescriptions');
+        }
       } catch (_) {}
 
       if (presc != null && presc.isNotEmpty) {

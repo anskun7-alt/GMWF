@@ -1490,6 +1490,67 @@ class LocalStorageService {
     return true;
   }
 
+  /// Clock difference allowed between PCs when comparing a prescription's time with its
+  /// token's issue time (only used for prescriptions saved before [tokenIssuedAtMs] existed).
+  static const Duration _rxClockSkew = Duration(minutes: 30);
+
+  /// When the token was issued (server-corrected issue time, else its createdAt).
+  static DateTime? tokenIssuedAt(Map entry) {
+    final ms = entry['issuedAtMs'];
+    if (ms is num && ms > 0) return DateTime.fromMillisecondsSinceEpoch(ms.toInt());
+    final raw = entry['createdAt'] ?? entry['timestamp'];
+    if (raw is DateTime) return raw;
+    try {
+      final d = (raw as dynamic)?.toDate();
+      if (d is DateTime) return d;
+    } catch (_) {}
+    return DateTime.tryParse(raw?.toString() ?? '');
+  }
+
+  /// The latest time written on a prescription (completed / updated / created).
+  static DateTime? _prescriptionWrittenAt(Map rx) {
+    DateTime? best;
+    for (final k in const ['completedAt', 'updatedAt', 'createdAt', 'prescribedAt']) {
+      final raw = rx[k];
+      DateTime? d;
+      if (raw is DateTime) {
+        d = raw;
+      } else {
+        try {
+          final t = (raw as dynamic)?.toDate();
+          if (t is DateTime) d = t;
+        } catch (_) {}
+        d ??= DateTime.tryParse(raw?.toString() ?? '');
+      }
+      if (d != null && (best == null || d.isAfter(best))) best = d;
+    }
+    return best;
+  }
+
+  /// Whether prescription [rx] belongs to token [entry]: the same patient, and written for
+  /// this token, not for an earlier token that had the same number. A prescription stored
+  /// under a reused serial used to be put on a new token before the doctor had prescribed
+  /// anything, so the dispenser showed old medicines as "waiting to dispense".
+  static bool prescriptionFitsToken(Object? rx, Object? entry) {
+    if (rx is! Map || rx.isEmpty) return false;
+    if (entry is! Map || entry.isEmpty) return true;
+    final inner = prescriptionForEmbedding(rx);
+    if (!_isSamePrescriptionScope(inner, entry)) return false;
+    // Exact: the doctor's save records which token (by its issue time) it was written for.
+    final rxToken = inner['tokenIssuedAtMs'];
+    final entryToken = entry['issuedAtMs'];
+    if (rxToken is num && rxToken > 0 && entryToken is num && entryToken > 0) {
+      return rxToken.toInt() == entryToken.toInt();
+    }
+    // Older prescriptions: not written (well) before the token was issued.
+    final issued = tokenIssuedAt(entry);
+    final written = _prescriptionWrittenAt(inner);
+    if (issued != null && written != null && written.isBefore(issued.subtract(_rxClockSkew))) {
+      return false;
+    }
+    return true;
+  }
+
   /// Whether [incoming] may replace the stored prescription [existing] (see
   /// [preferredPrescription]).
   static bool mayReplacePrescription(Object? incoming, Object? existing) {
@@ -6817,7 +6878,9 @@ class LocalStorageService {
         low != 'n/a' &&
         low != '-' &&
         low != '0' &&
-        !low.startsWith('unknown_');
+        !low.startsWith('unknown_') &&
+        // The dispenser's stand-in for a token without a name, not a name.
+        !low.startsWith('token #');
   }
 
   /// Checks whether [val] is a genuine, non-synthetic CNIC (not empty, not `-`, not `0000000000000`,
@@ -9203,7 +9266,11 @@ class LocalStorageService {
     for (final k in matchingKeys) {
       final existing = entriesBoxRef.get(k);
       if (existing is Map && existing.isNotEmpty) {
-        if (!_isSamePrescriptionScope(embedded, existing)) {
+        // Same patient AND written for this token (not an earlier token with this number).
+        final alreadyDispensed = (existing['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed';
+        if (alreadyDispensed
+            ? !_isSamePrescriptionScope(embedded, existing)
+            : !prescriptionFitsToken(embedded, existing)) {
           continue;
         }
       }

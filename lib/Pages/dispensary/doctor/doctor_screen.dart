@@ -715,6 +715,12 @@ class _DoctorScreenState extends State<DoctorScreen>
           prescription = PatientHistoryPanel.unwrapPrescriptionData(localP);
         }
       }
+      // Not this token's prescription (stored earlier under the same token number): start empty.
+      if (prescription != null &&
+          (rawEntry['dispenseStatus'] ?? '').toString().toLowerCase() != 'dispensed' &&
+          !LocalStorageService.prescriptionFitsToken(prescription, rawEntry)) {
+        prescription = null;
+      }
 
       // Track consultation status locally and broadcast so other doctors see it
       if (serial != null && serial.isNotEmpty) {

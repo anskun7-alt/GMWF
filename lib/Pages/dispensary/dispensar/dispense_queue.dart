@@ -103,12 +103,22 @@ class DispenseQueue {
     if (branchesToQuery.isEmpty) branchesToQuery.add('all');
 
     final List<Map<String, dynamic>> allList = [];
-    final seenIds = <String>{};
+    final seenAt = <String, int>{};
+    bool issued(Map m) => m['issuedAtMs'] is num || m['createdBy'] != null;
     for (final b in branchesToQuery) {
       for (final e in LocalStorageService.getLocalEntries(b)) {
         final id = (e['serial'] ?? e['id'] ?? '').toString();
-        if (id.isEmpty || seenIds.add(id)) {
+        if (id.isEmpty) {
           allList.add(e);
+          continue;
+        }
+        final at = seenAt[id];
+        if (at == null) {
+          seenAt[id] = allList.length;
+          allList.add(e);
+        } else if (issued(e) && !issued(allList[at])) {
+          // Keep the receptionist's token over a copy that holds only a prescription.
+          allList[at] = e;
         }
       }
     }
@@ -122,8 +132,27 @@ class DispenseQueue {
     final overrides = Map<Map, Map<String, dynamic>>.identity();
     Map<String, dynamic> ov(Map e) => overrides.putIfAbsent(e, () => <String, dynamic>{});
 
+    // The receptionist's token for each number. A record holding only a prescription under
+    // that number (saved apart because it did not match the token) must not stand in for it.
+    String normSerial(Map e) {
+      var s = (e['serial'] ?? e['id'] ?? '').toString().trim().toUpperCase();
+      final prefix = '${branchId.trim().toUpperCase()}-';
+      if (s.startsWith(prefix)) s = s.substring(prefix.length);
+      return s;
+    }
+    bool isIssuedToken(Map m) => m['issuedAtMs'] is num || m['createdBy'] != null;
+    final issuedBySerial = <String, Map<String, dynamic>>{};
+    for (final e in allList) {
+      if (isIssuedToken(e)) issuedBySerial.putIfAbsent(normSerial(e), () => e);
+    }
+
     var all = allList.where((e) {
       final serial = (e['serial'] ?? e['id'] ?? '').toString().trim();
+      if (!isIssuedToken(e) && !isDispensed(e)) {
+        final token = issuedBySerial[normSerial(e)];
+        final rx = e['prescription'] is Map ? e['prescription'] : e;
+        if (token != null && !LocalStorageService.prescriptionFitsToken(rx, token)) return false;
+      }
 
       final matchesBranch = branchesToQuery.any((b) => CampSessionService.isSerialMatchingBranch(serial, b)) ||
           CampSessionService.isSerialMatchingBranch(serial, branchId) ||
@@ -137,17 +166,31 @@ class DispenseQueue {
           (queryBranch != branchId && isEffectivelyToday(e, todayKey, todayIso, branchId));
       if (!isToday) return false;
 
-      final presc = (e['prescription'] is Map && (e['prescription'] as Map).isNotEmpty)
+      final ownRx = (e['prescription'] is Map && (e['prescription'] as Map).isNotEmpty)
           ? (e['prescription'] as Map)
-          : (serial.isNotEmpty && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)
-              ? (() {
-                  final pBox = Hive.box(LocalStorageService.prescriptionsBox);
-                  final raw = pBox.get(serial) ?? pBox.get(serial.toLowerCase()) ?? pBox.get(serial.toUpperCase());
-                  return raw is Map ? raw : null;
-                })()
-              : null);
+          : null;
+      final boxRx = ownRx != null || serial.isEmpty || !Hive.isBoxOpen(LocalStorageService.prescriptionsBox)
+          ? null
+          : (() {
+              final pBox = Hive.box(LocalStorageService.prescriptionsBox);
+              final raw = pBox.get(serial) ?? pBox.get(serial.toLowerCase()) ?? pBox.get(serial.toUpperCase());
+              return raw is Map ? raw : null;
+            })();
       final status = (e['status'] ?? '').toString().toLowerCase();
       final isDisp = (e['dispenseStatus'] ?? '').toString().toLowerCase() == 'dispensed' || status == 'dispensed';
+      // Only a prescription written for THIS token counts. One stored under the same token
+      // number for an earlier token (or another patient) put a patient the doctor had not
+      // seen yet on the dispenser as "waiting", with someone else's / an old visit's medicines.
+      final ownRxFits = ownRx != null && (isDisp || LocalStorageService.prescriptionFitsToken(ownRx, e));
+      final staleRx = ownRx != null && !ownRxFits;
+      final Map? presc = ownRxFits
+          ? ownRx
+          : (boxRx != null && LocalStorageService.prescriptionFitsToken(boxRx, e) ? boxRx : null);
+      if (staleRx) {
+        ov(e)['prescription'] = null;
+        ov(e)['medicines'] = null;
+        ov(e)['prescriptions'] = null;
+      }
       final hasPresc = presc != null && (
         (presc['prescriptions'] is List && (presc['prescriptions'] as List).isNotEmpty) ||
         (presc['medicines'] is List && (presc['medicines'] as List).isNotEmpty) ||
@@ -264,8 +307,15 @@ class DispenseQueue {
         if (!matches) return false;
       }
 
-      return (status == 'completed' || status == 'dispensed' || status == 'prescribed' || isDisp || hasPresc);
+      if (isDisp || hasPresc) return true;
+      // "Completed" only because a stale prescription was attached (LAN catch-up did this):
+      // the doctor has not prescribed yet.
+      if (staleRx) return false;
+      return status == 'completed' || status == 'dispensed' || status == 'prescribed';
     }).toList();
+    // The receptionist's token first, so a stray copy holding only a prescription under the
+    // same number never becomes the record shown.
+    all.sort((a, b) => (isIssuedToken(a) ? 0 : 1).compareTo(isIssuedToken(b) ? 0 : 1));
 
     // Deduplicate by normalized serial (stripping branch prefix so 'branch-001' and '001' never appear as two patients)
     final Map<String, Map<String, dynamic>> uniqueBySerial = {};
@@ -282,6 +332,13 @@ class DispenseQueue {
         uniqueBySerial[s] = Map<String, dynamic>.from(e);
       } else {
         final target = uniqueBySerial[s]!;
+        // Another copy under this number whose prescription is not this token's (another
+        // patient, or an earlier token with the same number): take nothing from it.
+        final inRxCheck = e['prescription'];
+        if (inRxCheck is Map && inRxCheck.isNotEmpty && !DispenseQueue.isDispensed(target) &&
+            !LocalStorageService.prescriptionFitsToken(inRxCheck, target)) {
+          continue;
+        }
         e.forEach((k, v) {
           if (v != null && v != '' && v != 'unknown') {
             final old = target[k];
