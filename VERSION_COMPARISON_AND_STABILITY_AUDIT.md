@@ -1,6 +1,6 @@
 # GMWF ERP — Simple Version Comparison & Status Guide
-**Date:** October 5, 2026  
-**Current Version:** 1.6.4 (Hybrid Stability Release)  
+**Date:** November 2026  
+**Current Version:** 1.6.6 (Inventory & Stability Release)  
 **Status:** All issues resolved. Code is frozen and ready.
 
 ---

@@ -359,7 +359,7 @@ function generateDispensaryInventoryPdfEN() {
     </div>
     <div class="meta-badge">
       <div>Document Ref: <strong>GMWF-SOP-MED-01</strong></div>
-      <div>Effective: November 2026 | Version 2.4</div>
+      <div>Effective: November 2026 | Version 1.6.6</div>
       <div class="meta-tag">OFFICIAL OPERATIONAL GUIDE</div>
     </div>
   </div>
@@ -560,7 +560,7 @@ function generateDispensaryInventoryPdfUR() {
     </div>
     <div class="meta-badge">
       <div>دستاویز نمبر: <strong>GMWF-SOP-MED-01-UR</strong></div>
-      <div>تاریخِ نفاذ: نومبر 2026ء | ورژن 2.4</div>
+      <div>تاریخِ نفاذ: نومبر 2026ء | ورژن 1.6.6</div>
       <div class="meta-tag">سرکاری آپریشنل دستاویز</div>
     </div>
   </div>

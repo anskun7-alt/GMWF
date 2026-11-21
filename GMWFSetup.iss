@@ -1,5 +1,5 @@
 ; ══════════════════════════════════════════════════════════════
-; GMWF Installer — Premium Edition v1.6.4 (x64)
+; GMWF Installer — Premium Edition v1.6.6 (x64)
 ; ──────────────────────────────────────────────────────────────
 ; Features:
 ;   • Premium dark-themed modern UI with GMWF emerald/gold branding
@@ -12,7 +12,7 @@
 ;   • Professional finish page with launch option
 ; ══════════════════════════════════════════════════════════════
 
-#define MyAppVersion "1.6.5"
+#define MyAppVersion "1.6.6"
 
 [Setup]
 AppId={{A1B2C3D4-9F23-4C11-8ABC-1234567890AB}

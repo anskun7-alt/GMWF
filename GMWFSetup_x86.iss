@@ -1,5 +1,5 @@
 ; ══════════════════════════════════════════════════════════════
-; GMWF Installer — Premium Edition v1.6.4 (x86 / 32-bit)
+; GMWF Installer — Premium Edition v1.6.6 (x86 / 32-bit)
 ; ──────────────────────────────────────────────────────────────
 ; Features:
 ;   • Premium dark-themed modern UI with GMWF emerald/gold branding
@@ -12,7 +12,7 @@
 ;   • Professional finish page with launch option
 ; ══════════════════════════════════════════════════════════════
 
-#define MyAppVersion "1.6.5"
+#define MyAppVersion "1.6.6"
 
 [Setup]
 AppId={{B7E4D2A1-5C38-4F6E-9A10-2D8F6C3B9E47}
@@ -269,7 +269,7 @@ begin
     S := S + MemoTasksInfo + NewLine + NewLine;
 
   S := S + 'COMPONENTS' + NewLine;
-  S := S + Space + 'GMWF Management System v1.6.4 (32-bit)' + NewLine;
+  S := S + Space + 'GMWF Management System v{#MyAppVersion} (32-bit)' + NewLine;
   S := S + Space + 'Python 3.12 Embedded Runtime (x86)' + NewLine;
   S := S + Space + 'Background Sync Scripts' + NewLine;
   S := S + Space + 'Visual C++ Runtime' + NewLine;
