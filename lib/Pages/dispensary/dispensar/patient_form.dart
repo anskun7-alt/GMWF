@@ -9,7 +9,6 @@ import 'package:printing/printing.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:gmwf/design/components/flushbar_compat.dart';
 import 'package:intl/intl.dart';
 import 'dart:ui' as ui;
 import 'package:gmwf/services/local_storage_service.dart';
@@ -838,12 +837,6 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   // ─── Inventory deduction ──────────────────────────────────────────────────
-  static bool _isInjectableType(String? type, [String? name]) {
-    final t = (type ?? '').toLowerCase().trim();
-    if (t.contains('syringe') || t.contains('nebulization')) return true;
-    return PatientFormHelper.isInjectablePrescription(t, name ?? '');
-  }
-
   static bool _isSyrupType(String? type, String? name) {
     final t = (type ?? '').toLowerCase();
     final n = (name ?? '').toLowerCase();
@@ -855,21 +848,13 @@ class _PatientFormState extends State<PatientForm> {
   /// - Injections: prescribed quantity
   /// - Oral/other medicines with a timing string (e.g. "1+0+0", "1+0+1", "1+1+1"):
   ///   always equals the sum of timing slots so 1-time is strictly 1/day and 2-time is 2/day.
-  static int _resolvePerDayQty(Map item, {required bool isInj, required bool isSyrup}) {
-    if (isSyrup) return 1;
-    final rawQty = item['quantity'] ?? item['qty'] ?? 1;
-    final storedQty = rawQty is num
-        ? rawQty.toInt()
-        : (int.tryParse(rawQty.toString()) ?? 1);
-    if (isInj) return storedQty > 0 ? storedQty : 1;
+  // [isInj] / [isSyrup] are kept for the callers; the rule itself is StockMath.perDay, the
+  // same one the doctor's screen uses (one-time items = their quantity, syrup 1 bottle a day).
+  static int _resolvePerDayQty(Map item, {required bool isInj, required bool isSyrup}) =>
+      StockMath.perDay(item);
 
-    final timing = (item['timing'] ?? '').toString().trim();
-    if (timing.isNotEmpty) {
-      final fromTiming = PatientFormHelper.totalPerDay(timing);
-      if (fromTiming > 0) return fromTiming;
-    }
-    return storedQty > 0 ? storedQty : 1;
-  }
+  /// One-time quantity item (injection, drip, swab, plaster, dressing…): no timing, not × days.
+  static bool _isQtyOnly(Map item) => PatientFormHelper.isQuantityOnly(item);
 
   static RegExp get _ivWord => PatientFormHelper.ivWord;
   static bool isInjectablePrescription(String type, String name) =>
@@ -930,16 +915,9 @@ class _PatientFormState extends State<PatientForm> {
         fallbackCamp: CampSessionService.getActiveCamp(widget.branchId),
       );
 
-  /// Units one prescription line takes from the shelf (syrup 1 bottle, injection the
-  /// prescribed count, others per day x days). Same rule as before the stock rebuild.
-  double _lineUnits(Map<String, dynamic> medMap, int days) {
-    final isSyrup = _isSyrupType(medMap['type']?.toString(), medMap['name']?.toString());
-    final isInj = _isInjectableType(medMap['type']?.toString(), medMap['name']?.toString());
-    final perDay = _resolvePerDayQty(medMap, isInj: isInj, isSyrup: isSyrup).toDouble();
-    if (perDay <= 0) return 0;
-    if (isSyrup) return 1.0;
-    return isInj ? perDay : perDay * days;
-  }
+  /// Units one prescription line takes from the shelf. The ONE shared rule (StockMath), so
+  /// the dispensar takes exactly what the doctor's screen held back for this line.
+  double _lineUnits(Map<String, dynamic> medMap, int days) => StockMath.lineUnits(medMap, days);
 
   /// Movements made by the last dispense on this PC (sent with dispense_completed).
   final List<StockMovement> _lastStockMoves = [];
@@ -1293,77 +1271,9 @@ class _PatientFormState extends State<PatientForm> {
       }
     }
 
-    if (insufficientMeds.isNotEmpty) {
-      final action = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Row(
-            children: const [
-              Icon(Icons.warning_amber_rounded, color: SoftPalette.amber300, size: 28),
-              SizedBox(width: 8),
-              Text('Insufficient Stock'),
-            ],
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('The following items do not have enough stock in local inventory:'),
-                const SizedBox(height: 12),
-                ...insufficientMeds.map((med) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text('• $med', style: const TextStyle(fontWeight: FontWeight.bold, color: SoftPalette.red400)),
-                )),
-                const SizedBox(height: 16),
-                Text(
-                  'Choose how to handle this patient:\n'
-                  '• Put On Hold: Moves patient to On-Hold section so queue can continue.\n'
-                  '• Dispense Available: Dispenses remaining stock and proceeds.',
-                  style: TextStyle(fontSize: 13, color: ctx.adapt(SoftPalette.gray350)),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'cancel'),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(ctx, 'hold'),
-              icon: const Icon(Icons.pause_circle_outline, color: SoftPalette.gray50, size: 18),
-              label: const Text('Put On Hold'),
-              style: ElevatedButton.styleFrom(backgroundColor: SoftPalette.orange400),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(ctx, 'dispense_available'),
-              icon: const Icon(Icons.check_circle_outline, color: SoftPalette.gray50, size: 18),
-              label: const Text('Dispense Available'),
-              style: ElevatedButton.styleFrom(backgroundColor: SoftPalette.teal600),
-            ),
-          ],
-        ),
-      );
-
-      if (action == 'hold') {
-        final serial = _resolvedSerial;
-        if (serial.isNotEmpty) {
-          await LocalStorageService.updateDispenseStatus(widget.branchId, serial, 'on_hold');
-          if (mounted) {
-            Flushbar(
-              message: 'Patient #$serial moved to On-Hold list',
-              backgroundColor: SoftPalette.orange400,
-              duration: const Duration(seconds: 3),
-            ).show(context);
-          }
-        }
-        widget.onDispensed?.call();
-        return;
-      } else if (action != 'dispense_available') {
-        return;
-      }
-    }
+    // No "Put On Hold" / "Dispense Available" choice any more (user, 2026-11-21): the doctor
+    // can only prescribe what this pool has, so a shortfall here is rare. The dispense always
+    // goes ahead, takes what is on the shelf, and the confirm dialog lists any shortfall.
 
     // Fallback/standard RoleTheme read to display dialogue matching exact color palette
     var t = RoleThemeScope.dataOf(context);
@@ -1375,10 +1285,17 @@ class _PatientFormState extends State<PatientForm> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Confirm Dispense'),
-        content: Text(days > 1
-            ? 'Give $days days\' supply of each medicine (tablets/capsules/syrups ×$days). '
-              'Injections and drips are given once only.\n\nThis cannot be undone.'
-            : 'Mark this prescription as dispensed? This cannot be undone.'),
+        content: Text([
+          if (days > 1)
+            'Give $days days\' supply of each oral medicine (tablets/capsules ×$days, syrups 1 bottle a day). '
+                'Injections, drips, swabs, plasters and other items are given once only.'
+          else
+            'Mark this prescription as dispensed?',
+          if (insufficientMeds.isNotEmpty)
+            '\nNot enough on the shelf (only what is there will be taken):\n'
+                '${insufficientMeds.map((m) => '• $m').join('\n')}',
+          '\nThis cannot be undone.',
+        ].join('\n')),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           ElevatedButton(
@@ -1920,11 +1837,11 @@ class _PatientFormState extends State<PatientForm> {
         ],
       ],
       if (isInj)
-        'Quantity: $perDayQty'
+        'Quantity: $perDayQty (one time)'
       else if (!isSyrup)
         '$perDayQty/day × $days days = $totalQty total'
       else
-        'Total: $qtyLabel',
+        '1 bottle/day × $days days = $qtyLabel',
     ];
   }
 
@@ -1982,11 +1899,11 @@ class _PatientFormState extends State<PatientForm> {
             : (medAbbrev.isNotEmpty ? '$medAbbrev $displayBarcode' : displayBarcode);
         final urduLine = PatientFormHelper.buildUrduDosageLine(item);
         final mealUrdu = PatientFormHelper.getMealUrdu(item['meal']?.toString() ?? '');
-        final isInj = _isInjectableType(item['type']?.toString(), item['name']?.toString());
-        final isSyrup = _isSyrupType(item['type']?.toString(), item['name']?.toString());
-        final isUnclassified = PatientFormHelper.isUnclassifiedMedicine(item);
+        final isInj = _isQtyOnly(item is Map ? item : const {});
+        final isSyrup = !isInj && _isSyrupType(item['type']?.toString(), item['name']?.toString());
+        final isUnclassified = !isInj && PatientFormHelper.isUnclassifiedMedicine(item);
         final perDayQty = _resolvePerDayQty(item, isInj: isInj, isSyrup: isSyrup);
-        final totalQty = isSyrup ? 1 : (isInj ? perDayQty : perDayQty * days);
+        final totalQty = StockMath.lineUnits(item is Map ? item : const {}, days).round();
         final isDark = _isDark;
         final fullUrdu = [
           if (urduLine.isNotEmpty) urduLine,
@@ -2001,9 +1918,9 @@ class _PatientFormState extends State<PatientForm> {
         ].join(' ').trim();
 
         final qtyLabel = isSyrup
-            ? '1 Bottle'
+            ? '$totalQty ${totalQty == 1 ? 'Bottle' : 'Bottles'}'
             : (isInj
-                ? 'Single Dose · qty $perDayQty'
+                ? 'Qty $perDayQty'
                 : (isUnclassified ? 'Unclassified · qty $totalQty' : '$perDayQty/day · qty $totalQty'));
 
         final tooltipLines = _buildMedTooltipLines(
@@ -4417,11 +4334,10 @@ class _PatientFormState extends State<PatientForm> {
             final displayLabel = (isCustomMed && hasNoBarcode)
                 ? displayName  // e.g. "Tab Panadol Extra"
                 : (medAbbrev.isNotEmpty ? '$medAbbrev $displayBarcode' : displayBarcode);
-            final isInj = _isInjectableType(item['type']?.toString());
-            final isSyrup = _isSyrupType(item['type']?.toString(), item['name']?.toString());
-            final qRaw = item['quantity'] ?? item['qty'] ?? 1;
-            final perDayQty = (qRaw is num) ? qRaw.toInt() : (int.tryParse(qRaw.toString()) ?? 1);
-            final totalQty = isSyrup ? 1 : (isInj ? perDayQty : perDayQty * days);
+            final isInj = _isQtyOnly(item is Map ? item : const {});
+            final isSyrup = !isInj && _isSyrupType(item['type']?.toString(), item['name']?.toString());
+            final perDayQty = StockMath.perDay(item is Map ? item : const {});
+            final totalQty = StockMath.lineUnits(item is Map ? item : const {}, days).round();
 
             // ── Dosage Timing Construction ──
             final timing = item['timing']?.toString() ?? '';
@@ -4464,7 +4380,7 @@ class _PatientFormState extends State<PatientForm> {
             // 1. Urdu text format
             String timingUrdu = '';
             if (isInj) {
-              timingUrdu = 'ایک خوراک';
+              timingUrdu = 'مقدار $perDayQty';
             } else if (parts[0] > 0 || parts[1] > 0 || parts[2] > 0 || (parts.length > 3 && parts[3] > 0)) {
               final labels = PatientFormHelper.urduSlotLabels(parts.length);
               timingUrdu = [
@@ -4483,7 +4399,7 @@ class _PatientFormState extends State<PatientForm> {
             // 2. Compact 1+1+1 English format
             String numericTiming = '';
             if (isInj) {
-              numericTiming = 'Single Dose';
+              numericTiming = 'Qty $perDayQty';
             } else if (parts[0] > 0 || parts[1] > 0 || parts[2] > 0 || (parts.length > 3 && parts[3] > 0)) {
               final activeParts = parts.length > 3 && parts[3] > 0 ? parts.sublist(0, 4) : parts.sublist(0, 3);
               numericTiming = activeParts.join('+');
@@ -4513,13 +4429,13 @@ class _PatientFormState extends State<PatientForm> {
             if (parts[2] > 0) engTimes.add('${parts[2]} Night');
             if (parts.length > 3 && parts[3] > 0) engTimes.add('${parts[3]} Bedtime');
             final fullEnglish = isInj
-                ? 'Single Dose'
+                ? 'Qty $perDayQty (one time)'
                 : [
                     if (engTimes.isNotEmpty) engTimes.join(', ') else numericTiming,
                     if (mealEnglish.isNotEmpty) '($mealEnglish)',
                   ].join(' ');
 
-            final qtyLabel = isSyrup ? '1 Btl' : (isInj ? 'QTY $perDayQty' : 'QTY $totalQty');
+            final qtyLabel = isSyrup ? '$totalQty Btl' : 'QTY $totalQty';
 
             final tooltipLines = _buildMedTooltipLines(
               displayName: displayName,

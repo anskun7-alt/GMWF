@@ -35,15 +35,23 @@ class StockMath {
     return PatientFormHelper.isInjectablePrescription(t, name ?? '');
   }
 
-  /// Units per day: syrups 1 bottle (whole course), injections the prescribed count, other
-  /// medicines the sum of the timing slots ("1+0+1" = 2) or the stored per-day quantity.
+  /// One-time quantity items: injections, drips, consumables ("Others" such as alcohol
+  /// swabs), first aid (plasters), dressings, topicals. Never multiplied by the days.
+  static bool isQuantityOnly(String? type, String? name) => PatientFormHelper.isQuantityOnlyItem(type, name);
+
+  /// Units per day (oral) or for the whole line (one-time items):
+  ///  • one-time items: the prescribed quantity;
+  ///  • syrups: 1 bottle per day of the course (user rule 2026-11-21: 2 days = 2 bottles —
+  ///    it used to be "1 bottle whatever the days", which the dispense screen contradicted);
+  ///  • other oral medicines: the sum of the timing slots ("1+0+1" = 2) or the stored
+  ///    per-day quantity.
   static int perDay(Map line) {
     final type = line['type']?.toString();
     final name = (line['name'] ?? line['formula'])?.toString();
-    if (isSyrup(type, name)) return 1;
     final raw = line['quantity'] ?? line['qty'] ?? 1;
     final stored = raw is num ? raw.toInt() : (int.tryParse(raw.toString()) ?? 1);
-    if (isInjectable(type, name)) return stored > 0 ? stored : 1;
+    if (isQuantityOnly(type, name)) return stored > 0 ? stored : 1;
+    if (isSyrup(type, name)) return 1;
     final timing = (line['timing'] ?? '').toString().trim();
     if (timing.isNotEmpty) {
       final t = PatientFormHelper.totalPerDay(timing);
@@ -52,13 +60,13 @@ class StockMath {
     return stored > 0 ? stored : 1;
   }
 
-  /// Units for the whole prescription line.
+  /// Units for the whole prescription line. THE one rule: the doctor's reservation and
+  /// stock check, the dispensar's stock check, labels and the dispense all call this.
   static double lineUnits(Map line, int days) {
     final type = line['type']?.toString();
     final name = (line['name'] ?? line['formula'])?.toString();
-    if (isSyrup(type, name)) return 1;
     final p = perDay(line).toDouble();
-    if (isInjectable(type, name)) return p;
+    if (isQuantityOnly(type, name)) return p;
     return p * (days < 1 ? 1 : days);
   }
 }
@@ -257,10 +265,15 @@ class StockReader {
       if (cur == null || stamp(raw) > stamp(cur)) newestBySerial[serial] = raw;
     }
 
+    // Tokens whose stock was already taken (their dispense movement is in the stock book).
+    final takenSerials = {
+      for (final s in StockLedger.dispensedSerials(pool.key)) _canonSerial(s, pool.branch),
+    };
+
     for (final e in newestBySerial.entries) {
       final serial = e.key;
       final raw = e.value;
-      if (_isFinished(raw) || finished.contains(serial)) continue;
+      if (_isFinished(raw) || finished.contains(serial) || takenSerials.contains(serial)) continue;
       if (!_isToday(raw, serial, today)) continue;
       // Stored under this number for an earlier token or another patient: not held back.
       final token = tokenBySerial[serial];

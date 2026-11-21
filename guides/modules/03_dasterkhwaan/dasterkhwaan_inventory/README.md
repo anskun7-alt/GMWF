@@ -1,196 +1,93 @@
-# Dasterkhwaan Food & Kitchen Pantry Inventory — Operational Guide
-# دسترخوان فوڈ و کچن پینٹری انوینٹری — آپریشنل و صارف رہنما
+# Dasterkhwaan Kitchen Pantry Guide
+# دسترخوان کچن پینٹری رہنما
+
+| Document Ref | Version & Date | Department | Official Status |
+| :--- | :--- | :--- | :--- |
+| **GMWF-SOP-FOOD-01** | Version 3.0 (1.6.6) · Nov 2026 | Dasterkhwaan & Community Kitchen Logistics | **COMMUNITY KITCHEN MANUAL** |
+
+> **Official PDF Edition:** [GMWF_Dasterkhwaan_Kitchen_Guide.pdf](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dasterkhwaan_Kitchen_Guide.pdf)
+
+Write down what goes **into the pot** and what **comes into the store**. That is all. The app does the rest.
+
+> دیگ میں جو ڈالا جائے اور اسٹور میں جو آئے — بس یہی درج کریں۔ باقی سب ایپ خود کرتی ہے۔
 
 ---
 
-## 📑 Table of Contents / فہرست مضامین
-1. [Overview & Humanitarian Mission / مشن اور نظام کا تعارف](#1-overview--humanitarian-mission)
-2. [Core Kitchen Inventory Rules / کچن انوینٹری کے بنیادی قوانین](#2-core-kitchen-inventory-rules)
-3. [Dasterkhwaan Stock Screen Anatomy / دسترخوان اسٹاک اسکرین کا جائزہ](#3-dasterkhwaan-stock-screen-anatomy)
-4. [Step-by-Step Operational Workflows / روزمرہ آپریشنل طریقہ کار](#4-step-by-step-operational-workflows)
-   - 4.1 [Adding New Charity Stock Items / نیا اشیائے خورونوش شامل کرنا](#41-adding-new-charity-stock-items)
-   - 4.2 [Receiving Stock & Donations / امدادی راشن و اسٹاک وصولی](#42-receiving-stock--donations)
-   - 4.3 [Cooking Meals & Ingredient Deductions / کھانا پکانا اور کچن کا اخراج](#43-cooking-meals--ingredient-deductions)
-   - 4.4 [Logging Spoilage, Wastage & Leftovers / ضیاع اور بچے ہوئے کھانے کا اندراج](#44-logging-spoilage-wastage--leftovers)
-5. [Role Responsibilities & Access Permissions / کردار اور اختیارات](#5-role-responsibilities--access-permissions)
-6. [Jalalpur Jattan Dasterkhwaan Demonstration Scenarios / جلال پور جٹاں دسترخوان کے عملی منظرنامے](#6-jalalpur-jattan-dasterkhwaan-demonstration-scenarios)
-7. [مکمل اردو رہنما (Urdu Complete Guide)](#7-مکمل-اردو-رہنما-urdu-complete-guide)
+## 👥 Counting People is Automatic / لوگوں کی خودکار گنتی
+The reception token scanner counts everyone who eats. Kitchen staff only record **raw ingredients** put into the pots (deghs). You do **not** enter the number of people.
+
+> کھانا کھانے والوں کی تعداد ریسیپشن کے ٹوکن اسکینر سے خود جمع ہوتی ہے۔ کچن عملہ صرف کچا سامان درج کرے۔
 
 ---
 
-## 1. Overview & Humanitarian Mission
+## 📜 The 4 Kitchen Rules / کچن کے 4 اصول
 
-The **GMWF Dasterkhwaan Subsystem** manages the food supply chain, kitchen pantries, daily cooking batches, and beneficiary meal distribution across the foundation's charitable dining facilities.
-
-Every grain of wheat, rice, lentil, and litre of oil donated by generous patrons is tracked with financial-grade precision to ensure zero food waste, total transparency, and reliable nutrition for underprivileged community members.
-
----
-
-## 2. Core Kitchen Inventory Rules
-
-> [!IMPORTANT]
-> All kitchen supervisors and storekeepers must enforce these foundational principles:
-
-### Rule 1: Zero-Negative Floor (اسٹاک منفی نہیں ہو سکتا)
-- Stock balances cannot drop below zero.
-- If the system indicates `40 kg` of Basmati Rice, the kitchen cannot record a cooking batch requiring `50 kg` until a restock receipt is confirmed.
-
-### Rule 2: Automatic Token-Driven Serving Count
-- Kitchen staff log the **ingredients consumed** and the **pots (Deghs) prepared**.
-- The number of **meals served** is automatically synced from the beneficiary token scanning desk, preventing fabricated headcounts.
-
-### Rule 3: Ingredient Deduplication
-- Within a single cooking batch, the same raw ingredient cannot be selected twice.
-
-### Rule 4: Clear Reason Categorization for Deductions
-Every deduction from the pantry must be tagged with an audited reason:
-- `consumed`: Used in kitchen meal preparation.
-- `wasted`: Spoiled, contaminated, or damaged in transit.
-- `expired`: Perishable goods that crossed safe consumption dates.
-- `audit`: Physical weighing discrepancy corrections.
-
-### Rule 5: Cloud Commit Resiliency (`commitKitchenBatch`)
-- Kitchen updates use atomic batching via `CloudDb`.
-- If an internet disconnect or Firestore quota constraint occurs, the system informs the user clearly and retains the uncommitted draft locally without freezing the user interface.
+| Rule | English Requirement | اردو رہنمائی |
+| :--- | :--- | :--- |
+| **RULE 1** | **Store can never go below zero:** The app blocks you if you try to take out more than the store has. *(Store has 35 kg rice. You try to take 50 kg $\rightarrow$ blocked).* | *اسٹور میں جتنا ہے اس سے زیادہ نکالنا ممکن نہیں۔* |
+| **RULE 2** | **Always give a reason:** Every time you take something out, pick one valid reason from the table below. | *ہر بار سامان نکالتے وقت وجہ منتخب کریں۔* |
+| **RULE 3** | **Each ingredient only once per batch:** In one cooking batch you cannot pick the same ingredient twice. Add the weights together first. *(Rice 50 kg + 30 kg $\rightarrow$ enter one line: 80 kg).* | *ایک پکوان میں ایک چیز ایک ہی بار چنیں۔ وزن جمع کر کے لکھیں۔* |
+| **RULE 4** | **Use the standard units:** Only use standard units: `kg`, `gram`, `liter`, `piece`, `packet`, `handi`. | *صرف یہی اکائیاں استعمال کریں۔* |
 
 ---
 
-## 3. Dasterkhwaan Stock Screen Anatomy
+## 🏷️ Pick the Right Reason / درست وجہ منتخب کریں
 
-The main interface is located at `lib/pages/dasterkhwaan/stock.dart`.
-
-### View Modes:
-1. **Stock Items View (Tab 0):**
-   - Displays all registered food pantry items.
-   - Shows current balance, unit of measurement, and quick increment/decrement action buttons.
-   - Search bar for quick filtering of ingredients (e.g. *"Daal"*, *"Chawal"*, *"Ghee"*).
-2. **Audit & Deductions Log View (Tab 1):**
-   - Chronological ledger of every single receipt, kitchen consumption, and spoilage adjustment.
-   - Displays timestamp, operator name, quantity changed, previous balance, and new balance.
+| Reason Code | Use It When... | اردو مفہوم |
+| :--- | :--- | :--- |
+| `consumed` | Food was cooked and served as meals. | *کھانا پکا کر پیش کیا گیا* |
+| `wasted` | Food was spoiled or burnt *(needs Branch Manager approval)*. | *کھانا خراب یا جل گیا (برانچ مینیجر کی منظوری ضروری)* |
+| `expired` | Item passed its safe-to-eat date. | *سامان کی تاریخ ختم ہو گئی* |
+| `audit` | You corrected the count after checking the physical store. | *گنتی درست کی گئی* |
 
 ---
 
-## 4. Step-by-Step Operational Workflows
+## 🛠️ How To Do It / طریقہ کار
 
-### 4.1 Adding New Charity Stock Items
-When introducing a new raw food item into the branch pantry:
-1. Click `[+ Add Item]` in the header.
-2. Enter the **Item Name** (e.g., `Daal Chana Premium`, `Basmati Rice Kainat`, `Cooking Oil Dalda`).
-3. Select the standard **Unit of Measure**:
-   - `kg` (Kilograms - default for grains, pulses, meat, sugar)
-   - `gram` (Grams - for high-value spices, saffron, cardamom)
-   - `liter` (Liters - for cooking oil, milk)
-   - `piece` (Individual units - eggs, pumpkins)
-   - `packet` (Pre-packaged items)
-   - `bundle` / `bunch` (Fresh vegetables)
-   - `handi` / `plate` (Cooked units)
-4. Click `[Add Item]`. The item is initialized with `0.0` balance and an immutable creation audit entry.
+### A · Cooking a Deg (دیگ پکانا)
+1. **Press the orange `[-]` button** (or open `[Meal Cook]`).  
+   *(نارنجی `[-]` بٹن دبائیں یا `Meal Cook` کھولیں)*
+2. **Pick each ingredient and type its weight:** Rice, cooking oil/ghee, meat, lentils (daal), spices.  
+   *(ہر چیز چنیں اور اس کا وزن لکھیں)*
+3. **Reason: `consumed`. Save.**  
+   *(وجہ: `consumed` — محفوظ کریں)*
 
-### 4.2 Receiving Stock & Donations
-When a delivery truck arrives or a donor drops off in-kind food sacks:
-1. Locate the item in the pantry list.
-2. Tap the green **`[+]`** button.
-3. Enter the received quantity (e.g., `250 kg`).
-4. Select Reason:
-   - `Stock Received / Purchased / Donated`
-   - `Audit Adjustment (Count Correction)`
-5. Enter vendor/donor notes (e.g., *"Donation by Haji Muhammad Akram - 5 sacks of 50kg"*).
-6. Click `[Update Stock]`.
+### B · New Ration or Donation Arrives (نیا راشن یا امداد)
+1. **Press the green `[+]` button straight away.**  
+   *(فوراً سبز `[+]` بٹن دبائیں)*
+2. **Pick the item and type the quantity that came in.**  
+   *(چیز چنیں اور آنے والی مقدار لکھیں)*
+3. **Save. The store count goes up.**  
+   *(محفوظ کریں۔ اسٹور کی تعداد بڑھ جائے گی)*
 
-### 4.3 Cooking Meals & Ingredient Deductions (`CookDialog`)
-When the kitchen staff begins preparing meals for the day:
-1. Tap the `[Cook Meal]` or orange **`[-]`** button.
-2. Select or verify the cooking menu:
-   - Menu Title (e.g., *Chicken Biryani*, *Daal Chawal*, *Aloo Gosht*).
-   - Expected Beneficiary Portions.
-3. Add raw ingredients consumed:
-   - Select Ingredient $\rightarrow$ Enter Quantity consumed.
-4. The system validates that each ingredient does not exceed available stock.
-5. Click `[Confirm & Deduct Ingredients]`.
-6. Stock balances are deducted atomically, and an audit record tagged `consumed` is posted.
-
-### 4.4 Logging Spoilage, Wastage & Leftovers
-If perishable produce rots or cooked food is spoiled:
-1. Tap the orange **`[-]`** button on that item.
-2. Enter the spoiled quantity.
-3. Select Reason: `Spoiled / Wasted / Damaged Food`.
-4. In **Audit Notes**, explain the incident (e.g., *"Power outage caused freezer thaw overnight"*).
-5. Click `[Confirm Deduction]`. This requires Supervisor co-signature.
+> [!WARNING]
+> **Food burnt or spoiled?**  
+> Choose `wasted` / `Spoiled`. The **Branch Manager must approve** before it is permanently deducted.  
+> *(کھانا جل گیا یا خراب ہو گیا؟ `wasted / Spoiled` منتخب کریں۔ برانچ مینیجر کی منظوری ضروری ہے)*
 
 ---
 
-## 5. Role Responsibilities & Access Permissions
+## 🍲 Example: Jalalpur Jattan Lunch Service / مثال: جلال پور جٹاں لنچ
 
-| Role | View Stock | Receive Stock | Deduct Cooking | Log Spoilage | Create Items |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Kitchen Cook / Chef** | ✅ | ✅ | ✅ | ❌ (Needs BM) | ❌ |
-| **Kitchen Storekeeper** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Branch Manager** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Dasterkhwaan Supervisor** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Global Admin / HQ** | ✅ | ✅ | ✅ | ✅ | ✅ |
+- **Target:** 650 beneficiaries
+- **Menu:** Chicken Pulao & Daal Mash
 
----
+| Raw Ingredient | Before Cooking | Used in Deghs | After Cooking | Left in Store |
+| :--- | :---: | :---: | :---: | :---: |
+| **Basmati Rice** | 400 kg | **-80 kg** | 320 kg | 🟢 Enough |
+| **Chicken Broiler** | 120 kg | **-45 kg** | 75 kg | 🟢 Enough |
+| **Cooking Oil** | 85 L | **-18 L** | 67 L | 🟢 Enough |
+| **Daal Mash** | 60 kg | **-15 kg** | 45 kg | 🟢 Enough |
+| **Spices & Salt** | 25 kg | **-4 kg** | 21 kg | 🟢 Enough |
 
-## 6. Jalalpur Jattan Dasterkhwaan Demonstration Scenarios
-
-### Scenario A: Empty Kitchen Pantry
-- Newly inaugurated Jalalpur Jattan Community Kitchen before initial food drive.
-- Screen displays empty state illustration with message: *"No Charity Stock Items Found"*.
-- Action: Storekeeper clicks `[+ Add Item]` to register baseline supplies.
-
-### Scenario B: Active Cooking Session (Jalalpur Jattan Lunch Service)
-- **Target Audience:** 650 local beneficiaries.
-- **Menu:** Chicken Pulao + Daal Mash.
-- **Pantry Level Before Cooking:**
-  - `Basmati Rice`: 400 kg
-  - `Chicken Broiler`: 120 kg
-  - `Cooking Oil`: 85 liters
-  - `Daal Mash`: 60 kg
-  - `Onions & Tomatoes`: 50 kg
-- **Chef Action in `CookDialog`:**
-  - Deducts `80 kg` Rice, `45 kg` Chicken, `18 liters` Oil, `12 kg` Onions.
-- **Immediate Outcome:**
-  - System updates balances instantaneously.
-  - Remaining Rice: `320 kg`.
-  - Token desk registers 650 served meals without manual double-entry.
-
-### Scenario C: Weekly Reconciled Stock Audit
-- Friday evening inspection conducted by Supervisor.
-- Physical weighing of rice sacks matches recorded 320 kg within 0.5% margin.
-- Audit status badge displays: `Verified & Balanced`.
+$$\text{Pantry Closing Balance} = \text{Opening Balance} - \text{Used in Deghs}$$
+$$\text{Example (Basmati Rice)}: 400\text{ kg} - 80\text{ kg} = 320\text{ kg remaining}$$
 
 ---
 
-## 7. مکمل اردو رہنما (Urdu Complete Guide)
+## 💡 Remember / یاد رکھیں
 
-### 7.1 تعارف اور فلاحی مقصد
-گلزار مدینہ ویلفیئر فاؤنڈیشن (GMWF) کے دسترخوان کا نظام مستحق اور غریب افراد کو عزت کے ساتھ معیاری کھانا فراہم کرنے کے لیے بنایا گیا ہے۔ اس انوینٹری سسٹم کا مقصد اشیائے خورونوش (چاول، آٹا، گھی، دالیں، گوشت، مصالحہ جات) کے ایک ایک دانے کا مکمل حساب کتاب رکھنا اور خوراک کے ضیاع کو روکنا ہے۔
-
-### 7.2 دسترخوان انوینٹری کے بنیادی قوانین
-1. **اسٹاک کبھی منفی (Negative) نہیں ہو سکتا:** اگر کچن کے اسٹاک میں 30 کلو چاول ہیں تو سسٹم 40 کلو کی کٹوتی ہرگز قبول نہیں کرے گا۔
-2. **کھانے والوں کی خودکار گنتی:** کچن کا عملہ صرف استعمال ہونے والے راشن کا اندراج کرتا ہے؛ کھانا کھانے والے افراد کی گنتی ریسیپشن پر اسکین ہونے والے ٹوکنز سے خودکار طور پر مطابقت پذیر ہوتی ہے۔
-3. **کٹوتی کی واضح وجوہات:** راشن کے اخراج کے وقت درست وجہ منتخب کرنا لازمی ہے:
-   - `consumed`: کچن میں دیگیں پکانے کے لیے استعمال ہوا۔
-   - `wasted`: خراب ہو گیا، ضائع ہوا یا گِر گیا۔
-   - `expired`: میعاد ختم ہو جانے کے باعث ناقابلِ استعمال۔
-   - `audit`: فزیکل وزن کے بعد ہونے والی تصحیح۔
-
-### 7.3 روزمرہ کام کے مراحل
-
-#### نیا سامان شامل کرنا (`[+ Add Item]`):
-- اگر گودام میں نئی چیز آئی ہے (مثلاً سرخ لوبیا یا سفید چنے) تو `[+ Add Item]` پر کلک کریں۔
-- نام لکھیں اور یونٹ منتخب کریں (`kg`, `liter`, `piece`, `packet` وغیرہ)۔
-
-#### راشن وصول کرنا (سبز `[+]` بٹن):
-- جب مخیر حضرات راشن دیں یا فاؤنڈیشن خریداری کرے تو متعلقہ جنس کے سامنے سبز رنگ کا `[+]` بٹن دبائیں۔
-- مقدار درج کریں اور نوٹ میں مخیر کا نام یا بل نمبر لکھ کر `[Update Stock]` دبائیں۔
-
-#### کھانا پکانا اور کچن کٹوتی (`CookDialog` / نارنجی `[-]` بٹن):
-- روزانہ دیگ پکاتے وقت نارنجی رنگ کا `[-]` بٹن دبائیں۔
-- دیگ میں ڈالے گئے اجزاء (چاول، گھی، مصالحہ، چکن) کی مقدار درج کر کے `[Confirm & Deduct]` دبائیں۔
-- سسٹم فوری طور پر اسٹاک سے سامان کم کر دے گا اور باقاعدہ لیجر اندراج بن جائے گا۔
-
-#### جلال پور جٹاں دسترخوان کی مثال:
-- 600 افراد کے لیے پلاؤ تیار کیا گیا۔
-- گودام سے 80 کلو باسمتی چاول، 18 لیٹر کوکنگ آئل اور 45 کلو مرغی کٹوتی کے خانے میں درج کی گئی۔
-- اسٹاک فوراً اپڈیٹ ہو گیا اور ریسیپشن پر ٹوکن جاری ہونے کے ساتھ ہی کھانا باحفاظت تقسیم ہو گیا۔
+| 🍲 Pot (دیگ) | 📦 Store (اسٹور) | 👥 People (افراد) |
+| :--- | :--- | :--- |
+| Use **`[-]`** when raw ingredients go into the pot. | Use **`[+]`** when new rations or donations arrive. | **Do nothing.** The token scanner counts them automatically. |
+| *دیگ میں ڈالیں تو `[-]`* | *نیا راشن آئے تو `[+]`* | *گنتی ٹوکن سے خود ہو گی* |

@@ -8,10 +8,12 @@ The **Branch Manager (BM)** is the chief administrative and operational authorit
 
 - **Assigned Desk:** Executive Office / Branch Management Dashboard
 - **Direct Reporting Line:** Headquarter Operations Manager (HQ) & CEO
-- **Primary Modules:**
-  - [Dispensary Inventory Module](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/02_dispensary/inventory/README.md)
-  - [Jalalpur Jattan Sample Data](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/02_dispensary/inventory/JALALPUR_JATTAN_SAMPLE_DATA.md)
-  - [Dasterkhwaan Food Inventory Module](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/03_dasterkhwaan/dasterkhwaan_inventory/README.md)
+- **Primary Modules & Official PDF Manuals:**
+  - [Dispensary Inventory System Guide (GMWF-SOP-MED-01)](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/02_dispensary/inventory/README.md) · [PDF (EN)](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dispensary_Inventory_Guide_EN.pdf) · [PDF (UR)](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dispensary_Inventory_Guide_UR.pdf)
+  - [Jalalpur Jattan Demonstration Dataset (GMWF-DATA-JJ-01)](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/02_dispensary/inventory/JALALPUR_JATTAN_SAMPLE_DATA.md) · [PDF](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Jalalpur_Jattan_Demo_Data.pdf)
+  - [Dasterkhwaan Kitchen Pantry Guide (GMWF-SOP-FOOD-01)](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/03_dasterkhwaan/dasterkhwaan_inventory/README.md) · [PDF](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dasterkhwaan_Kitchen_Guide.pdf)
+  - [Pharmacy Dispenser Daily Checklist (GMWF-SOP-ROLE-10)](file:///d:/Dev/Projects/GMWF/gmwf/guides/users/10_dispenser/README.md) · [PDF](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dispenser_Daily_Checklist.pdf)
+  - [PDF Design Guide & Standards (GMWF-GUIDE-DESIGN-01)](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_PDF_Design_Guide.pdf)
   - Branches Management & Staff Permissions
 
 ---

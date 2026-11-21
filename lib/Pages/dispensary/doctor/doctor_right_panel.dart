@@ -294,10 +294,12 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     // save happens on the LAN, so stock counts stay accurate across patients.
     if (type == 'dispense_completed' || type == RealtimeEvents.savePrescription) {
       // Debounced: it scans the whole entries + prescriptions boxes, and a catch-up burst
-      // or a busy dispenser sends these back to back.
+      // or a busy dispenser sends these back to back. A full reload, so the shelf figure and
+      // the reserved figure are always taken from the same moment (a reload of one without
+      // the other showed a dispensed token as both taken and still held back).
       _reservedDebounce?.cancel();
       _reservedDebounce = Timer(const Duration(milliseconds: 500), () {
-        if (mounted) _buildReservedQuantities();
+        if (mounted) _loadInventory();
       });
     }
 
@@ -823,6 +825,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     if (t.contains('cream') || t.contains('oint') || n.contains('ointment')) return FontAwesomeIcons.handHoldingMedical;
     return FontAwesomeIcons.pills;
   }
+
+  /// One-time quantity item (injection, drip, swab, plaster, dressing, topical…).
+  static bool _isQtyItem(Map<String, dynamic> med) => PatientFormHelper.isQuantityOnly(med);
 
   bool _isInjectionOrDrip(Map<String, dynamic> med) {
     final t = (med['type'] ?? '').toString().trim().toLowerCase();
@@ -2313,19 +2318,21 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
     void updateFields() {
       final inv = effectiveInv;
       final existing = existingPrescriptionMed;
+      // "isInjection" here means a one-time QUANTITY item (no timing / meal, not × days):
+      // injections and drips, but also swabs, plasters, dressings and other non-oral items.
       if (inv != null) {
         final type  = (inv['type'] ?? '').toString().toLowerCase();
         final name  = (inv['name'] ?? '').toString().toLowerCase();
-        isInjection = _isInjectionOrDrip(inv);
+        isInjection = _isQtyItem(inv);
         isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else if (isEditing && existing != null) {
         final type  = (existing['type'] ?? '').toString().toLowerCase();
         final name  = (existing['name'] ?? '').toString().toLowerCase();
-        isInjection = _isInjectionOrDrip(existing);
+        isInjection = _isQtyItem(existing);
         isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else {
         final text  = nameCtrl.text.toLowerCase();
-        isInjection = PatientFormHelper.isInjectablePrescription('', text);
+        isInjection = PatientFormHelper.isQuantityOnlyItem('', text);
         isSyrup     = !isInjection && (text.contains('syp.') || text.contains('syrup'));
       }
     }
@@ -2377,7 +2384,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               final matched = _allInventory.firstWhere(
                 (m) =>
                     (m['name'] ?? '').toString().trim().toLowerCase() == name.toLowerCase() &&
-                    _isInjectionOrDrip(m) == isInjection,
+                    _isQtyItem(m) == isInjection,
                 orElse: () => {},
               );
               if (matched.isNotEmpty) {
@@ -2478,8 +2485,9 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                 mealTiming: mealTiming,
               );
               final timingStr = resolvedTiming.timing;
+              // Syrup: 1 bottle a day of the course (the same rule the dispense uses).
               final qty = isSyrup ? 1 : resolvedTiming.dailyQty;
-              final totalRequired = isSyrup ? 1 : qty * _daysOfMedicine;
+              final totalRequired = qty * _daysOfMedicine;
               totalNeeded = totalRequired;
               exceedsStock = inv != null && totalRequired > avail;
               if (exceedsStock) {
@@ -2906,7 +2914,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                           mealTiming: mealTiming,
                         );
                         final dailyCount = resolvedTiming.dailyQty;
-                        final totalUnits = isSyrup ? 1 : (dailyCount * _daysOfMedicine);
+                        final totalUnits = isSyrup ? _daysOfMedicine : (dailyCount * _daysOfMedicine);
 
                         return Container(
                           margin: const EdgeInsets.only(top: 10),
@@ -2927,7 +2935,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
                               Expanded(
                                 child: Text(
                                   isSyrup
-                                      ? 'Quantity: 1 bottle • Dose: $dosage ($mealTiming)'
+                                      ? 'Quantity: $totalUnits bottle${totalUnits > 1 ? "s" : ""} (1/day × $_daysOfMedicine day${_daysOfMedicine > 1 ? "s" : ""}) • Dose: $dosage ($mealTiming)'
                                       : 'Total Dispense: $totalUnits unit(s) ($dailyCount/day × $_daysOfMedicine day${_daysOfMedicine > 1 ? "s" : ""})',
                                   style: TextStyle(
                                     fontSize: 12,
@@ -3723,7 +3731,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         rawTiming,
         mealTiming: mealInstruction,
       );
-      final isInj = _isInjectionOrDrip({'type': medType, 'name': medName});
+      final isInj = _isQtyItem({'type': medType, 'name': medName});
       final isSyrup = !isInj &&
           (medType.toLowerCase().contains('syrup') ||
               medType.toLowerCase().contains('syp') ||
@@ -3735,7 +3743,7 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
               ? ((tplMed['quantity'] is num) ? (tplMed['quantity'] as num).toInt() : 1)
               : resolvedTiming.dailyQty);
 
-      final totalNeeded = isInj ? perDayQty : (isSyrup ? 1 : perDayQty * (template['defaultDays'] as int? ?? 1));
+      final totalNeeded = isInj ? perDayQty : perDayQty * (template['defaultDays'] as int? ?? 1);
 
       final medBarcode = (invMatch?['barcode'] ?? invMatch?['rollNo'] ?? '').toString().trim();
       final medItemCode = (invMatch?['code'] ?? invMatch?['itemCode'] ?? '').toString().trim();

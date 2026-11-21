@@ -89,13 +89,56 @@ class PatientFormHelper {
     return false;
   }
 
+  // ── Oral (timed) vs one-time quantity items — user rule, 2026-11-21 ─────────────
+  // Only oral medicines have a timing (1+0+1) and a meal time, and they are given for every
+  // day of the course. Everything else is a one-time quantity, like an injection: drips /
+  // infusions, consumables ("Others" such as alcohol swabs), first aid (plasters such as
+  // Sunny Plast), dressings, cannulas, syringes, creams and other topicals.
+
+  static final RegExp _oralTypeWords = RegExp(
+    r'(tablet|\btab\b|tab\.|capsule|\bcap\b|cap\.|syrup|\bsyp\b|syp\.|suspension|susp|sachet|powder|oral|lozenge|chewable|elixir)',
+  );
+  static final RegExp _qtyTypeWords = RegExp(
+    r'(consumable|other|dressing|first\s*aid|firstaid|cannula|needle|syringe|drip\s*set|set\b|nebuli|cream|oint|gel|lotion|inhaler|spray|swab|plast|bandage|gauze|cotton|glove|tape|catheter|mask|strip|kit|device|surgical|disposable|eye|ear|nasal|topical|external)',
+  );
+  static final RegExp _qtyNameWords = RegExp(
+    r'(swab|plast|bandage|gauze|cotton|glove|tape|catheter|cannula|needle|syringe|drip\s*set|i\.?v\.?\s*set|dressing|crepe|mask|strip|lancet|spirit|pyodine|savlon|dettol|first\s*aid)',
+  );
+
+  /// True when an item is given as a one-time quantity (no timing, no meal, not × days).
+  static bool isQuantityOnlyItem(String? type, String? name) {
+    final t = (type ?? '').toLowerCase().trim();
+    final n = (name ?? '').toLowerCase().trim();
+    if (t.contains('syringe') || t.contains('nebuli')) return true;
+    if (isInjectablePrescription(t, n)) return true;
+    // An explicit oral form wins over everything below ("Powder for Injection" is caught above).
+    if (t.isNotEmpty && _oralTypeWords.hasMatch(t)) return false;
+    if (t.contains('drop')) {
+      // Eye / ear / nose drops are a bottle; oral (paediatric) drops follow a timing.
+      return RegExp(r'(eye|ear|nasal|nose|e/d|ophth|otic)').hasMatch('$t $n');
+    }
+    if (t.isNotEmpty && _qtyTypeWords.hasMatch(t)) return true;
+    // No usable type: decide by the name.
+    if (_qtyNameWords.hasMatch(n)) return true;
+    return false;
+  }
+
+  /// [isQuantityOnlyItem] for a prescription line / stock record.
+  static bool isQuantityOnly(Map m) => isQuantityOnlyItem(
+        (m['type'] ?? m['dosageForm'] ?? m['form'] ?? m['category'] ?? '').toString(),
+        (m['name'] ?? m['formula'] ?? '').toString(),
+      );
+
+  /// Oral medicine with a timing and meal time, given for every day of the course.
+  static bool isOralTimed(Map m) => !isQuantityOnly(m);
+
   /// True when a prescribed medicine has neither an explicit injectable marker nor a
   /// recognizable oral/topical form, so the UI can show a visible "Unclassified" badge
   /// instead of silently guessing.
   static bool isUnclassifiedMedicine(Map m) {
     final type = (m['type'] ?? m['dosageForm'] ?? '').toString().toLowerCase().trim();
     final name = (m['name'] ?? '').toString().toLowerCase().trim();
-    if (isInjectable(m)) return false;
+    if (isInjectable(m) || isQuantityOnly(m)) return false;
     if (isOralOrTopicalForm(type) || _isSyrup(type, name)) return false;
     if (oralOrTopicalNamePattern.hasMatch(name)) return false;
     return true;
@@ -276,13 +319,14 @@ class PatientFormHelper {
       }
       return 'ٹیقہ';
     }
+    if (isQuantityOnly(med)) return 'عدد';
     return 'گولی';
   }
 
   static String buildUrduDosageLine(Map med) {
     final timing = med['timing']?.toString() ?? '';
     final quantity = med['quantity'] ?? 1;
-    if (isInjectable(med)) return 'مقدار $quantity';
+    if (isQuantityOnly(med)) return 'مقدار $quantity';
 
     final unitUrdu = getUnitUrdu(med);
     final parts = parseTiming(timing);
@@ -344,7 +388,7 @@ class PatientFormHelper {
     final timing = med['timing']?.toString() ?? '';
     final quantity = med['quantity'] ?? 1;
 
-    if (isInjectable(med)) {
+    if (isQuantityOnly(med)) {
       return 'Qty: $quantity';
     }
 
@@ -368,7 +412,7 @@ class PatientFormHelper {
   /// Compact numeric timing used when the user prefers the "1+1+1" format
   /// (e.g. "1+0+1", "Single Dose", "2/day").
   static String buildCompactEnglishTiming(Map med) {
-    if (isInjectable(med)) return 'Single Dose';
+    if (isQuantityOnly(med)) return 'Qty ${med['quantity'] ?? med['qty'] ?? 1}';
     final timing = med['timing']?.toString() ?? '';
     final parts = parseTiming(timing);
     final hasParts = parts.any((p) => p > 0);

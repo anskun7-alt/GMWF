@@ -353,9 +353,12 @@ class _InventoryPageState extends State<InventoryPage>
     final hasCamps = !_isAllBranchesMode &&
         (CampSessionService.hasCampsForBranch(initBranch) || initBranch.contains('karachi')) &&
         branchCamps.isNotEmpty;
+    // Doctor and dispensar desks always look at their own pool (this PC's active camp), the
+    // same pool the doctor's panel and the dispense use — never "all camps" added together,
+    // even when the logged-in user is an admin running a desk.
     _selectedCampFilter = !hasCamps
         ? 'all'
-        : (isHqOrAdmin
+        : (isHqOrAdmin && !_isDeskView
             ? 'all'
             : ((active != null && active.isNotEmpty)
                 ? active
@@ -431,8 +434,11 @@ class _InventoryPageState extends State<InventoryPage>
     _initSync();
   }
 
+  /// A doctor or dispensar desk: shows exactly one pool, the desk's own.
+  bool get _isDeskView => widget.isDoctor || widget.isDispenser;
+
   void _onActiveCampChanged() {
-    if (!mounted || _isHigherAuthority || _isAllBranchesMode) return;
+    if (!mounted || (_isHigherAuthority && !_isDeskView) || _isAllBranchesMode) return;
     final active = CampSessionService.getActiveCamp(_effectiveBranchId);
     if (active != null && active.isNotEmpty && active != _selectedCampFilter) {
       setState(() {
@@ -486,6 +492,13 @@ class _InventoryPageState extends State<InventoryPage>
     }
     final branch = _effectiveBranchId;
     final sel = (_selectedCampFilter ?? '').trim();
+    if (widget.isDoctor && (sel.isEmpty || sel.toLowerCase() == 'all')) {
+      // The doctor has no camp bar: always the desk's own pool (StockPool.current), the same
+      // one the doctor's panel prescribes from. (A dispensar picking "All camps" on its camp
+      // bar is a deliberate choice and is left alone.)
+      final own = StockPool.current(branch);
+      return own == null ? StockPool.allFor(branch).take(1).toList() : [own];
+    }
     if (sel.isEmpty || sel.toLowerCase() == 'all') return StockPool.allFor(branch);
     final p = StockPool.of(branch, sel, fallbackCamp: CampSessionService.getActiveCamp(branch));
     return p == null ? const [] : [p];
@@ -752,7 +765,7 @@ class _InventoryPageState extends State<InventoryPage>
     for (final pool in _viewPools()) {
       // Higher Authority sees ALL non-deleted records (including blank/unnamed junk rows so
       // they can inspect and delete them); regular desks use StockReader.batches(pool).
-      final records = _isHigherAuthority
+      final records = _isHigherAuthority && !_isDeskView
           ? StockLedger.items(pool: pool.key)
           : StockReader.batches(pool);
       for (final rec in records) {

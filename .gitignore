@@ -74,6 +74,7 @@ scripts/pending_punches.json
 !guides/**/*.pdf
 !guides/**/*.png
 !guides/**/*.jpg
+!guides/pdf_kit/**
 scratch/
 build_output.txt
 debug_branches.txt

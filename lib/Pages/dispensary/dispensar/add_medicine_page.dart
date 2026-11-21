@@ -158,6 +158,9 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
   bool _expressShowDone = false;
   List<_SessionAddedRecord> _expressLastResults = [];
   DateTime? _expressBulkExpiry;
+  // Same quantity for every item on the list (e.g. 20 or 200), like the bulk expiry.
+  int? _expressBulkQty;
+  final TextEditingController _expressBulkQtyCtrl = TextEditingController();
 
   // ── Session History & Saving Flag ─────────────────────────────────────────
   final List<_SessionAddedRecord> _sessionAdded = [];
@@ -288,6 +291,7 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
   void dispose() {
     _realtimeSub?.cancel();
     _stockDebounce?.cancel();
+    _expressBulkQtyCtrl.dispose();
     try {
       _stockListenable?.removeListener(_debouncedReload);
       _stockListenable = null;
@@ -756,6 +760,7 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
           keyCode: key,
           initialExpiry: _expressBulkExpiry,
         );
+        if (_expressBulkQty != null) draft.qtyController.text = '$_expressBulkQty';
         draft.qtyController.addListener(_onExpressDraftChanged);
         _expressList.add(draft);
       }
@@ -782,6 +787,21 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
       }
       _expressList.clear();
       _expressBulkExpiry = null;
+      _expressBulkQty = null;
+      _expressBulkQtyCtrl.clear();
+    });
+  }
+
+  /// Puts [qty] in every item's quantity box (null clears them). Each box can still be
+  /// changed afterwards for an item that came in a different amount.
+  void _applyBulkQtyToExpressList(int? qty) {
+    setState(() {
+      _expressBulkQty = (qty != null && qty > 0) ? qty : null;
+      final text = _expressBulkQty == null ? '' : '$_expressBulkQty';
+      if (_expressBulkQtyCtrl.text != text) _expressBulkQtyCtrl.text = text;
+      for (final d in _expressList) {
+        d.qtyController.text = text;
+      }
     });
   }
 
@@ -822,6 +842,8 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
       }
       _expressList.clear();
       _expressBulkExpiry = null;
+      _expressBulkQty = null;
+      _expressBulkQtyCtrl.clear();
       _expressLastResults = results;
       _expressShowDone = true;
     });
@@ -2927,6 +2949,54 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
                         ),
                     ],
                   ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Same quantity for everything on the list?',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: c.textPrimary),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      for (final q in const [10, 20, 50, 100, 200, 500])
+                        _qtyQuickChip(c, q),
+                      SizedBox(
+                        width: 120,
+                        height: 44,
+                        child: TextField(
+                          controller: _expressBulkQtyCtrl,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: c.textPrimary),
+                          decoration: InputDecoration(
+                            hintText: 'Other qty',
+                            isDense: true,
+                            filled: true,
+                            fillColor: c.surface,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          onSubmitted: (v) => _applyBulkQtyToExpressList(int.tryParse(v.trim())),
+                        ),
+                      ),
+                      _actionChipButton(
+                        c,
+                        label: 'Apply to all',
+                        onTap: _isSaving
+                            ? null
+                            : () => _applyBulkQtyToExpressList(int.tryParse(_expressBulkQtyCtrl.text.trim())),
+                      ),
+                      if (_expressBulkQty != null)
+                        _actionChipButton(
+                          c,
+                          label: 'Clear all quantities',
+                          isMuted: true,
+                          onTap: () => _applyBulkQtyToExpressList(null),
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -3996,6 +4066,22 @@ class _AddMedicinePageState extends State<AddMedicinePage> {
       ),
       onPressed: onTap,
       child: Text(label, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700)),
+    );
+  }
+
+  Widget _qtyQuickChip(GComfortColors c, int qty) {
+    final isMatch = _expressBulkQty == qty;
+    return OutlinedButton(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(44, 44),
+        backgroundColor: isMatch ? c.brand : c.surface,
+        foregroundColor: isMatch ? c.onBrand : c.textPrimary,
+        side: BorderSide(color: isMatch ? c.brand : c.borderStrong),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+      ),
+      onPressed: _isSaving ? null : () => _applyBulkQtyToExpressList(qty),
+      child: Text('$qty', style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700)),
     );
   }
 

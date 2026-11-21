@@ -1,301 +1,86 @@
-# Jalalpur Jattan Dispensary Inventory — Demonstration Dataset & State Walkthrough
-# جلال پور جٹاں ڈسپنسری انوینٹری — سیمپل ڈیٹا سیٹ اور کیفیت نامہ
+# Jalalpur Jattan Dispensary — What Each Screen Looks Like
+# جلال پور جٹاں ڈسپنسری — مختلف حالتوں میں اسکرین پر کیسا نظر آتا ہے
 
-This document provides complete, concrete sample data for the **Jalalpur Jattan Branch** (`jalalpur_jattan`) across all three operational lifecycle states. It can be used by QA testers, software developers, and branch managers during training and audits.
+| Document Ref | Branch & Pool | Version | Category |
+| :--- | :--- | :--- | :--- |
+| **GMWF-DATA-JJ-01** | `jalalpur_jattan` | Version 2.0 (1.6.6) | **SAMPLE DATA & STATE GUIDE** |
 
----
+> **Official PDF Edition:** [GMWF_Jalalpur_Jattan_Demo_Data.pdf](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Jalalpur_Jattan_Demo_Data.pdf)
 
-## 1. Branch Metadata / برانچ کی بنیادی معلومات
-- **Branch ID (`branchId`):** `jalalpur_jattan`
-- **Branch Name:** GMWF Medical Center & Maternity Clinic, Jalalpur Jattan
-- **Primary Stock Pool:** `jalalpur_jattan`
-- **Sub-Camp Stock Pool:** `jalalpur_jattan/flood_relief_camp_2026`
-- **Primary Medical Officer:** Dr. Hamza Rafique (UID: `doc_hamza_jj`)
-- **Senior Pharmacy Dispenser:** Tariq Mehmood (UID: `disp_tariq_jj`)
-- **Branch Manager:** Asif Javed (UID: `bm_asif_jj`)
+Pool: `jalalpur_jattan` — Use this sample to **learn the app** and to **test it**. It shows the same clinic in **3 situations**:
+
+> یہ نمونہ بتاتا ہے کہ ایک ہی کلینک تین مختلف حالتوں میں اسکرین پر کیسا نظر آتا ہے۔
 
 ---
 
-## 2. State 1: Empty State (خالی کیفیت - نئی تنصیب)
+## 📊 The 3 Situations / تین بنیادی حالتیں
 
-### Context:
-Newly configured clinic or newly created emergency medical camp before any stock has arrived.
-
-### UI Representation:
-- **Banner / Graphic:** `GEmptyIllustration(kind: GEmptyIllustrationKind.box)`
-- **Header:** `No Medicines in Stock`
-- **Subtext:** `There are currently no pharmaceutical products registered in pool: jalalpur_jattan. Begin by adding stock or importing the regional formulary.`
-- **Action Buttons:**
-  - `[+ Add First Medicine]`
-  - `[Import Regional Catalog]`
-
-### State JSON Representation:
-```json
-{
-  "pool": "jalalpur_jattan",
-  "generatedAt": "2026-11-21T08:00:00Z",
-  "totalStockUnits": 0,
-  "activeCatalogCount": 0,
-  "nearExpiryCount": 0,
-  "expiredCount": 0,
-  "pendingRequests": [],
-  "items": []
-}
+```
+┌───────────────────────────┐      ┌───────────────────────────┐      ┌───────────────────────────┐
+│     1 · EMPTY (خالی)      │  ──> │    2 · WORKING (جاری)     │  ──> │   3 · COMPLETED (مکمل)    │
+│          0 UNITS          │      │         562 UNITS         │      │         762 UNITS         │
+│  New setup, no stock yet  │      │ Patients being served     │      │ Friday audit, 0 diffs     │
+└───────────────────────────┘      └───────────────────────────┘      └───────────────────────────┘
 ```
 
----
-
-## 3. State 2: Working / In-Progress State (روزمرہ کام کی حالت)
-
-### Context:
-Mid-day clinical session. Outpatient department (OPD) is active, multiple batches are being dispensed, reservations are active, one drug is running low, one is near expiry, and an edit request is in the approval pipeline.
-
-### Active Catalog & Batch Inventory:
-
-```json
-[
-  {
-    "id": "med_panadol_500",
-    "name": "Panadol 500mg",
-    "formula": "Paracetamol",
-    "category": "Tablet",
-    "barcode": "8964000100125",
-    "minSafetyStock": 100,
-    "totalAvailable": 420,
-    "reservedUnits": 20,
-    "batches": [
-      {
-        "batchNumber": "BAT-P1-2025",
-        "mfgDate": "2025-05-01",
-        "expiryDate": "2027-04-01",
-        "quantity": 120,
-        "isExpired": false,
-        "isNearExpiry": false
-      },
-      {
-        "batchNumber": "BAT-P2-2026",
-        "mfgDate": "2026-01-01",
-        "expiryDate": "2028-01-01",
-        "quantity": 300,
-        "isExpired": false,
-        "isNearExpiry": false
-      }
-    ]
-  },
-  {
-    "id": "med_amoxil_250",
-    "name": "Amoxil 250mg",
-    "formula": "Amoxicillin",
-    "category": "Capsule",
-    "barcode": "8964000200451",
-    "minSafetyStock": 50,
-    "totalAvailable": 85,
-    "reservedUnits": 0,
-    "batches": [
-      {
-        "batchNumber": "AMX-88-K",
-        "mfgDate": "2025-08-01",
-        "expiryDate": "2027-08-01",
-        "quantity": 85,
-        "isExpired": false,
-        "isNearExpiry": false
-      }
-    ]
-  },
-  {
-    "id": "med_brufen_400",
-    "name": "Brufen 400mg",
-    "formula": "Ibuprofen",
-    "category": "Tablet",
-    "barcode": "8964000300789",
-    "minSafetyStock": 60,
-    "totalAvailable": 12,
-    "reservedUnits": 0,
-    "isLowStock": true,
-    "batches": [
-      {
-        "batchNumber": "BRF-04-A",
-        "mfgDate": "2024-11-01",
-        "expiryDate": "2026-12-01",
-        "quantity": 12,
-        "isExpired": false,
-        "isNearExpiry": false
-      }
-    ]
-  },
-  {
-    "id": "med_septran_ds",
-    "name": "Septran DS",
-    "formula": "Co-trimoxazole",
-    "category": "Tablet",
-    "barcode": "8964000400112",
-    "minSafetyStock": 30,
-    "totalAvailable": 45,
-    "reservedUnits": 0,
-    "isNearExpiry": true,
-    "daysToExpiry": 40,
-    "batches": [
-      {
-        "batchNumber": "SEP-01-99",
-        "mfgDate": "2024-01-01",
-        "expiryDate": "2027-01-01",
-        "quantity": 45,
-        "isExpired": false,
-        "isNearExpiry": true
-      }
-    ]
-  },
-  {
-    "id": "med_calpol_syr",
-    "name": "Calpol 120mg/5ml",
-    "formula": "Paracetamol",
-    "category": "Syrup",
-    "barcode": "8964000500223",
-    "minSafetyStock": 20,
-    "totalAvailable": 0,
-    "reservedUnits": 0,
-    "isExpired": true,
-    "batches": [
-      {
-        "batchNumber": "CLP-09-OLD",
-        "mfgDate": "2023-01-01",
-        "expiryDate": "2026-10-01",
-        "quantity": 8,
-        "isExpired": true,
-        "isQuarantined": true
-      }
-    ]
-  }
-]
-```
-
-### In-Flight Pending Request (Two-Man Approval):
-```json
-{
-  "requestId": "req_jj_20261121_001",
-  "branchId": "jalalpur_jattan",
-  "medicineId": "med_amoxil_250",
-  "requestedBy": {
-    "uid": "disp_tariq_jj",
-    "name": "Tariq Mehmood",
-    "role": "dispenser"
-  },
-  "requestedAt": "2026-11-21T10:15:30Z",
-  "changes": {
-    "category": {
-      "old": "Tablet",
-      "proposed": "Capsule"
-    }
-  },
-  "reason": "Manufacturer carton indicates blister capsules, not compressed tablets.",
-  "status": "PENDING"
-}
-```
+| Metric | 1 · EMPTY (خالی) | 2 · WORKING (جاری) | 3 · COMPLETED (مکمل) |
+| :--- | :---: | :---: | :---: |
+| **Units in Stock** | **0** | **562** | **762** |
+| **Medicines in Catalog** | 0 | 5 | 5 |
+| **Reserved Units** | 0 | **20 (Token #14)** | 0 (dispensed) |
+| **Low Stock Warnings** | 0 | **1 (Brufen 400mg: 12 left)** | 0 (restocked 200 units) |
+| **Near Expiry Warnings** | 0 | **1 (Septran DS: 40 days)** | 1 (prioritized in OPD) |
+| **Expired & Quarantined** | 0 | **1 (Calpol Syrup: 8 bottles)** | 0 (incinerated & written off) |
+| **Pending Dispenser Requests** | 0 | **1 (Amoxil Capsule edit)** | 0 (approved & applied) |
+| **Physical Audit Status** | N/A | In progress / Due | **Confirmed · 0 discrepancy** |
+| **Action / Screen Shows** | `+ Add First Medicine`<br>`Import Regional Catalog` | Active OPD session with warnings & reservations | Green badge:<br>`Confirmed Stock - Audited Today` |
 
 ---
 
-## 4. State 3: Worked / Completed State (مکمل تصدیق شدہ کیفیت)
+## 🎨 Colour Meaning — Same on Every Screen / رنگوں کا مطلب
 
-### Context:
-End of audit cycle. The Branch Manager approved Tariq's edit request, the expired Calpol syrup was formally written off and neutralized, Brufen was restocked from the central warehouse, and a full physical shelf count was audited.
-
-### Final Reconciliation Report:
-```json
-{
-  "auditId": "audit_jj_20261121_reconciled",
-  "branchId": "jalalpur_jattan",
-  "timestamp": "2026-11-21T16:30:00Z",
-  "auditors": [
-    {"name": "Dr. Hamza Rafique", "role": "Medical Officer"},
-    {"name": "Asif Javed", "role": "Branch Manager"}
-  ],
-  "summary": {
-    "itemsAudited": 5,
-    "perfectMatches": 5,
-    "discrepancies": 0,
-    "expiredDisposedUnits": 8,
-    "restockedUnits": 200,
-    "totalShelfUnits": 762,
-    "status": "AUDITED_AND_CERTIFIED"
-  },
-  "movementsLogged": [
-    {
-      "opId": "op_jj_disp_0991",
-      "type": "dispense",
-      "medicine": "Panadol 500mg",
-      "qty": 20,
-      "token": "TK-14",
-      "patient": "Rashid Minhas"
-    },
-    {
-      "opId": "op_jj_restock_0412",
-      "type": "restock",
-      "medicine": "Brufen 400mg",
-      "qty": 200,
-      "batch": "BRF-05-B",
-      "supplier": "GMWF Central Warehouse Lahore"
-    },
-    {
-      "opId": "op_jj_writeoff_0019",
-      "type": "adjust",
-      "medicine": "Calpol 120mg/5ml",
-      "qty": -8,
-      "reason": "Expired stock disposed via pharmaceutical incineration",
-      "approvedBy": "Dr. Hamza Rafique"
-    }
-  ]
-}
-```
+| Colour Badge | System Meaning | Urdu Translation |
+| :--- | :--- | :--- |
+| 🟢 **Green** | All good. Safe to use. | *سبز: ٹھیک ہے۔* |
+| 🟡 **Amber / Yellow** | Be careful. Low stock, or running out of date soon. | *پیلا: احتیاط کریں۔ کم ہے یا جلد ختم ہونے والی ہے۔* |
+| 🔴 **Red** | Stop. Expired, blocked, or zero stock. | *سرخ: رک جائیں۔ ایکسپائر یا بند ہے۔* |
 
 ---
 
-## 5. Automated Seeding Snippet (Dart / Hive Mock)
+## 💊 Real Medicine Batches (Working State) / جاری حالت: اصل بیچ ریکارڈ
 
-This Dart code snippet can be placed in development scratch scripts or automated integration tests to instantly populate the Jalalpur Jattan state in local storage:
+This table represents the live inventory database at Jalalpur Jattan during active clinic hours:
 
-```dart
-import 'package:hive/hive.dart';
+| Medicine Name | Generic Compound | Batch No. | Expiry Date | Stock | What The Screen Shows |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| **Panadol 500mg** | Paracetamol | `BAT-P1-2025` | 2027-04-01 | 120 tabs | <span style="color:#1E8E4E;font-weight:bold">Active · FEFO #1</span> *(پہلے دیا جائے گا)* |
+| **Panadol 500mg** | Paracetamol | `BAT-P2-2026` | 2028-01-01 | 300 tabs | <span style="color:#1565C0;font-weight:bold">Locked · FEFO #2</span> *(بیچ 1 ختم ہونے تک بند)* |
+| **Amoxil 250mg** | Amoxicillin | `AMX-88-K` | 2027-08-01 | 85 caps | <span style="color:#1E8E4E;font-weight:bold">Active · Edit Pending</span> *(تبدیلی زیرِ التواء)* |
+| **Brufen 400mg** | Ibuprofen | `BRF-04-A` | 2026-12-01 | 12 tabs | <span style="color:#A85F00;font-weight:bold">Low Stock Alert</span> *(کم اسٹاک وارننگ)* |
+| **Septran DS** | Co-trimoxazole | `SEP-01-99` | 2027-01-01 | 45 tabs | <span style="color:#A85F00;font-weight:bold">Near Expiry · 40 days</span> *(جلد ایکسپائر)* |
+| **Calpol Syrup** | Paracetamol | `CLP-09-OLD` | 2026-10-01 | 8 bottles | <span style="color:#C0272D;font-weight:bold">Expired · Quarantined</span> *(الگ شدہ — بند)* |
 
-Future<void> seedJalalpurJattanDemoState() async {
-  final box = await Hive.openBox('stock_pool_jalalpur_jattan');
-  await box.clear();
+---
 
-  final demoData = {
-    'med_panadol_500': {
-      'name': 'Panadol 500mg',
-      'formula': 'Paracetamol',
-      'category': 'Tablet',
-      'barcode': '8964000100125',
-      'minSafetyStock': 100,
-      'batches': [
-        {'batchNumber': 'BAT-P1-2025', 'qty': 120, 'expiry': '2027-04-01'},
-        {'batchNumber': 'BAT-P2-2026', 'qty': 300, 'expiry': '2028-01-01'},
-      ],
-    },
-    'med_amoxil_250': {
-      'name': 'Amoxil 250mg',
-      'formula': 'Amoxicillin',
-      'category': 'Capsule',
-      'barcode': '8964000200451',
-      'minSafetyStock': 50,
-      'batches': [
-        {'batchNumber': 'AMX-88-K', 'qty': 85, 'expiry': '2027-08-01'},
-      ],
-    },
-    'med_brufen_400': {
-      'name': 'Brufen 400mg',
-      'formula': 'Ibuprofen',
-      'category': 'Tablet',
-      'barcode': '8964000300789',
-      'minSafetyStock': 60,
-      'batches': [
-        {'batchNumber': 'BRF-04-A', 'qty': 12, 'expiry': '2026-12-01'},
-      ],
-    },
-  };
+## 👥 Who Did What In This Demo / اس مثال میں کس نے کیا کیا
 
-  for (final entry in demoData.entries) {
-    await box.put(entry.key, entry.value);
-  }
-}
+1. **Doctor reserves 20 Panadol for Token #14:**  
+   Nobody else can dispense those 20 physical tablets while the consultation is open.  
+   *(ڈاکٹر نے ٹوکن 14 کے لیے پیناڈول کی 20 گولیاں ریزرو کر دیں۔ کوئی اور نہیں دے سکتا)*
+2. **Dispenser Tariq asks to correct Amoxil from Tablet to Capsule:**  
+   The change sits safely in `[Pending Requests]` awaiting Branch Manager review.  
+   *(ڈسپنسر طارق نے ایموکسل کو ٹیبلٹ سے کیپسول کرنے کی درخواست دی — مینیجر کی منظوری کا انتظار)*
+3. **Friday evening: Dr. Hamza and Branch Manager Asif count shelves:**  
+   Every physical pill matches the software count. **Result: 0 differences**.  
+   *(جمعہ کی شام ڈاکٹر حمزہ اور برانچ مینیجر آصف نے شیلف گنے — نتیجہ: کوئی فرق نہیں)*
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ ✔️ COMPLETED = EVERYTHING MATCHES                                       │
+│ All audited medicines display a green tick:                            │
+│ [Confirmed Stock - Audited Today]                                      │
+│ The tablet, phone, and Nexus Server have the exact same numbers.       │
+│                                                                        │
+│ مکمل حالت میں سب ادویات پر سبز نشان ہوتا ہے اور لوکل سرور کے ساتھ ہم آہنگی ہو چکی ہوتی ہے۔ │
+└────────────────────────────────────────────────────────────────────────┘
 ```

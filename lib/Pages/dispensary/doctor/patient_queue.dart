@@ -1167,16 +1167,17 @@ class _PatientQueueState extends State<PatientQueue> {
       if (isInventory && inventoryMed != null) {
         final type  = (inventoryMed['type'] ?? '').toString().toLowerCase();
         final name  = (inventoryMed['name'] ?? '').toString().toLowerCase();
-        isInjection = _isInjectionOrDrip(inventoryMed);
+        // One-time quantity item (injection, drip, swab, plaster…): no timing, not × days.
+        isInjection = PatientFormHelper.isQuantityOnly(inventoryMed);
         isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else if (isEditing) {
         final type  = (existingMed['type'] ?? '').toString().toLowerCase();
         final name  = (existingMed['name'] ?? '').toString().toLowerCase();
-        isInjection = _isInjectionOrDrip(existingMed);
+        isInjection = PatientFormHelper.isQuantityOnly(existingMed);
         isSyrup     = !isInjection && (type.contains('syrup') || type.contains('syp') || name.contains('syp') || name.contains('syrup'));
       } else {
         final text  = nameCtrl.text.toLowerCase().trim();
-        isInjection = PatientFormHelper.isInjectablePrescription('', text);
+        isInjection = PatientFormHelper.isQuantityOnlyItem('', text);
         isSyrup     = !isInjection && (text.contains('syp.') || text.contains('syrup'));
       }
     }
@@ -1507,7 +1508,7 @@ class _PatientQueueState extends State<PatientQueue> {
                     );
                     final timingStr = resolvedTiming.timing;
                     final qty = isSyrup ? 1 : resolvedTiming.dailyQty;
-                    final totalRequired = isSyrup ? 1 : qty * daysOfMedicine;
+                    final totalRequired = qty * daysOfMedicine; // syrup: 1 bottle a day
                     final medType = isSyrup
                         ? 'Syrup'
                         : (inventoryMed != null

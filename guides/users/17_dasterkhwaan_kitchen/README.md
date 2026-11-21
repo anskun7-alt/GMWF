@@ -9,7 +9,8 @@ The **Dasterkhwaan Kitchen Keeper / Head Chef** oversees food preparation, raw i
 - **Assigned Desk:** Community Kitchen / Dasterkhwaan Pantry
 - **Direct Supervisor:** Dasterkhwaan Supervisor & Branch Manager
 - **Primary Modules:**
-  - [Dasterkhwaan Food Inventory Module](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/03_dasterkhwaan/dasterkhwaan_inventory/README.md)
+  - [Dasterkhwaan Kitchen Pantry Guide (Markdown)](file:///d:/Dev/Projects/GMWF/gmwf/guides/modules/03_dasterkhwaan/dasterkhwaan_inventory/README.md)
+  - [Official Printable PDF Guide (GMWF-SOP-FOOD-01)](file:///d:/Dev/Projects/GMWF/gmwf/guides/pdf/GMWF_Dasterkhwaan_Kitchen_Guide.pdf)
   - Daily Meal Distribution Desk
 
 ---

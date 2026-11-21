@@ -486,9 +486,14 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               final perDay = perDayRaw is num ? perDayRaw.toDouble() : double.tryParse(perDayRaw.toString()) ?? 0.0;
               final rxTypeLower = (rx['type'] ?? '').toString().toLowerCase();
               final rxNameLower = rxName.toString().toLowerCase();
-              final isInj = rxTypeLower.contains('injection') || rxTypeLower.contains('drip');
+              // Same rule as the dispense (StockMath). Syrups dispensed before 2026-11-21 took
+              // 1 bottle whatever the days, so those keep showing 1.
               final isSyrup = rxTypeLower.contains('syrup') || rxNameLower.contains('syp') || rxNameLower.contains('syrup');
-              final qty = isSyrup ? 1.0 : (isInj ? perDay : (perDay * days));
+              final at = DateTime.tryParse((d['dispensedAt'] ?? d['createdAt'] ?? '').toString());
+              final oldSyrupRule = isSyrup && at != null && at.isBefore(DateTime(2026, 11, 21));
+              final qty = oldSyrupRule
+                  ? 1.0
+                  : (perDay <= 0 ? 0.0 : StockMath.lineUnits(rx, days.round()));
               dayTotalRemoved += qty;
 
               final patientName = d['patientName'] ?? d['name'] ?? 'Unknown Patient';

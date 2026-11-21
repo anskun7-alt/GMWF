@@ -68,7 +68,10 @@ class StockLedger {
   static Box get _moves => Hive.box(movesBoxName);
 
   /// Drops the in-memory index (tests, or after the boxes were reopened).
-  static void resetCache() => _index = null;
+  static void resetCache() {
+    _index = null;
+    _dispCacheLen = -1;
+  }
 
   // ── Wipe epoch & hard purge ──────────────────────────────────────────────────
 
@@ -398,6 +401,32 @@ class StockLedger {
   }
 
   static StockMovement? movement(String opId) => StockMovement.fromMap(_moves.get(opId));
+
+  // Cache for [dispensedSerials]: rebuilt only when the moves box changed size.
+  static int _dispCacheLen = -1;
+  static Map<String, Set<String>> _dispCache = const {};
+
+  /// Token serials (lower case, as written in the movement ref "<serial>|L<n>") that already
+  /// have dispense movements in [pool]. The doctor's "reserved" figure drops a token as soon
+  /// as its stock movement is here, even if the dispense status message is late or lost —
+  /// otherwise the doctor saw the same units both taken off the shelf AND still held back.
+  static Set<String> dispensedSerials(String pool) {
+    if (!isOpen) return const <String>{};
+    if (_dispCacheLen != _moves.length) {
+      final out = <String, Set<String>>{};
+      for (final v in _moves.values) {
+        if (v is! Map || v['kind'] != StockMoveKind.dispense.name) continue;
+        final ref = (v['ref'] ?? '').toString().trim().toLowerCase();
+        if (ref.isEmpty) continue;
+        final serial = ref.split('|').first.trim();
+        if (serial.isEmpty) continue;
+        out.putIfAbsent((v['pool'] ?? '').toString().toLowerCase(), () => <String>{}).add(serial);
+      }
+      _dispCache = out;
+      _dispCacheLen = _moves.length;
+    }
+    return _dispCache[pool.toLowerCase()] ?? const <String>{};
+  }
 
   static bool hasMovement(String opId) => isOpen && _moves.containsKey(opId);
 
