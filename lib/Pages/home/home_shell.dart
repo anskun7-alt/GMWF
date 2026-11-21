@@ -20,7 +20,9 @@ import 'package:gmwf_ui/gmwf_ui.dart';
 import '../../models/module_registry.dart';
 import '../../services/image_upload_service.dart';
 import '../../services/user_theme_service.dart';
+import '../../widgets/notification_bell_popover.dart';
 import '../notification_screen.dart';
+import '../request.dart';
 import '../settings_page.dart';
 import 'home_dashboard.dart';
 import 'home_module_host.dart';
@@ -96,6 +98,7 @@ class _HomeShellState extends State<HomeShell> {
   String _selected = HomeDest.home;
   bool? _collapsedOverride;
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _bellKey = GlobalKey();
   final _searchCtrl = TextEditingController();
   String _query = '';
 
@@ -104,19 +107,78 @@ class _HomeShellState extends State<HomeShell> {
   String? _section;
   String _back = HomeDest.home;
 
+  String get _effectiveBranchId {
+    final sel = (widget.selectedBranchId ?? '').trim();
+    if (sel.isNotEmpty) return sel;
+    final ub = (widget.userData['branchId'] ?? widget.userData['branch'] ?? '').toString().trim();
+    return ub.isNotEmpty ? ub : 'all';
+  }
+
+  String get _effectiveUserId =>
+      (widget.userData['uid'] ?? widget.userData['id'] ?? 'user').toString();
+
+  @override
+  void initState() {
+    super.initState();
+    NotificationBellHelper.ensureInitialized(branchId: _effectiveBranchId);
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedBranchId != widget.selectedBranchId ||
+        oldWidget.userData['branchId'] != widget.userData['branchId']) {
+      NotificationBellHelper.ensureInitialized(branchId: _effectiveBranchId);
+    }
+  }
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
   }
 
-  // Sidebar tree, rebuilt only when the shell widget (modules / role) changes.
+  void _openRequestsModule({String? focusRequestId, String? requestBranchId}) {
+    RequestPage.focusRequest(focusRequestId);
+    if (requestBranchId != null &&
+        requestBranchId.trim().isNotEmpty &&
+        requestBranchId.toLowerCase() != 'all' &&
+        widget.onBranchChanged != null &&
+        widget.selectedBranchId != null &&
+        widget.selectedBranchId!.toLowerCase() != 'all' &&
+        !NotificationBellHelper.matchesBranch(widget.selectedBranchId!, requestBranchId)) {
+      widget.onBranchChanged!(requestBranchId.trim().toLowerCase());
+    }
+    final pendingMod = widget.modules.where((m) => m.id == 'pending_requests').firstOrNull ??
+        ModuleRegistry.allModules.where((m) => m.id == 'pending_requests').firstOrNull;
+    if (pendingMod != null) {
+      _openModule(pendingMod);
+    } else {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RequestPage(
+            branchId: requestBranchId?.isNotEmpty == true ? requestBranchId! : _effectiveBranchId,
+            isSupervisor: true,
+            initialRequestId: focusRequestId,
+          ),
+        ),
+      );
+    }
+  }
+
+  // Sidebar tree, rebuilt only when the shell widget (modules / role / badge) changes.
   List<GNavItem>? _navCache;
   HomeShell? _navFor;
-  List<GNavItem> get _nav {
-    if (_navCache == null || !identical(_navFor, widget)) {
+  int _navBadgeFor = -1;
+  List<GNavItem> _buildNavWithBadge(int badgeCount) {
+    if (_navCache == null || !identical(_navFor, widget) || _navBadgeFor != badgeCount) {
       _navFor = widget;
-      _navCache = buildHomeNav(modules: widget.modules, showNotifications: widget.showNotifications);
+      _navBadgeFor = badgeCount;
+      _navCache = buildHomeNav(
+        modules: widget.modules,
+        showNotifications: widget.showNotifications,
+        notificationCount: badgeCount,
+      );
     }
     return _navCache!;
   }
@@ -286,10 +348,15 @@ class _HomeShellState extends State<HomeShell> {
         return Theme(
           data: widget.legacyTheme,
           child: NotificationScreen(
-            branchId: (widget.userData['branchId'] ?? 'all').toString(),
-            userId: (widget.userData['uid'] ?? widget.userData['id'] ?? 'user').toString(),
+            branchId: _effectiveBranchId,
+            userId: _effectiveUserId,
             role: (widget.userData['role'] ?? widget.role).toString(),
             embedded: true,
+            onOpenRequest: (req) => _openRequestsModule(
+              focusRequestId: (req['requestId'] ?? req['id'])?.toString(),
+              requestBranchId: req['branchId']?.toString(),
+            ),
+            onViewAllRequests: () => _openRequestsModule(),
           ),
         );
       case HomeDest.settings:
@@ -316,29 +383,45 @@ class _HomeShellState extends State<HomeShell> {
     final drawerMode = w < GBreakpoint.mobile;
     final collapsed = _collapsedOverride ?? w < GBreakpoint.desktop;
 
-    Widget sidebar({required bool inDrawer}) => AppSidebar(
-          items: _nav,
-          selectedId: _selected == HomeDest.search ? null : _selected,
-          expandedWidth: 268,
-          header: AppSidebarHeader(brand: GBrand.gmwf, title: 'GMWF', subtitle: 'Gulzar Madina Welfare'),
-          footer: _SidebarUserCard(
-            name: widget.userName,
-            role: widget.role,
-            branch: widget.branchLabel,
-            photoUrl: widget.photoUrl,
-            selected: _selected == HomeDest.settings,
-            collapsed: inDrawer ? false : collapsed,
-            onToggleCollapse: inDrawer ? null : () => setState(() => _collapsedOverride = !collapsed),
-            onOpen: () {
-              if (inDrawer) Navigator.of(context).maybePop();
-              _select(HomeDest.settings);
-            },
-          ),
-          collapsed: inDrawer ? false : collapsed,
-          // Collapse lives in the top bar (leading button), not the sidebar foot.
-          onSelect: (id) {
-            if (inDrawer) Navigator.of(context).maybePop();
-            _select(id);
+    Widget sidebar({required bool inDrawer}) => ListenableBuilder(
+          listenable: NotificationBellHelper.buildCombinedListenable(),
+          builder: (context, _) {
+            final badgeCount = widget.showNotifications
+                ? NotificationBellHelper.getPendingRequests(
+                      branchId: _effectiveBranchId,
+                      role: widget.role,
+                    ).length +
+                    NotificationBellHelper.getUnreadNotifications(
+                      branchId: _effectiveBranchId,
+                      userId: _effectiveUserId,
+                      role: widget.role,
+                    ).length
+                : 0;
+            return AppSidebar(
+              items: _buildNavWithBadge(badgeCount),
+              selectedId: _selected == HomeDest.search ? null : _selected,
+              expandedWidth: 268,
+              header: AppSidebarHeader(brand: GBrand.gmwf, title: 'GMWF', subtitle: 'Gulzar Madina Welfare'),
+              footer: _SidebarUserCard(
+                name: widget.userName,
+                role: widget.role,
+                branch: widget.branchLabel,
+                photoUrl: widget.photoUrl,
+                selected: _selected == HomeDest.settings,
+                collapsed: inDrawer ? false : collapsed,
+                onToggleCollapse: inDrawer ? null : () => setState(() => _collapsedOverride = !collapsed),
+                onOpen: () {
+                  if (inDrawer) Navigator.of(context).maybePop();
+                  _select(HomeDest.settings);
+                },
+              ),
+              collapsed: inDrawer ? false : collapsed,
+              // Collapse lives in the top bar (leading button), not the sidebar foot.
+              onSelect: (id) {
+                if (inDrawer) Navigator.of(context).maybePop();
+                _select(id);
+              },
+            );
           },
         );
 
@@ -409,10 +492,58 @@ class _HomeShellState extends State<HomeShell> {
         icon: Icon(dark ? GIcons.lightMode : GIcons.darkMode, color: c.textSecondary),
       ),
       if (widget.showNotifications)
-        IconButton(
-          tooltip: 'Notifications',
-          onPressed: () => _select(HomeDest.notifications),
-          icon: Icon(GIcons.notifications, color: _selected == HomeDest.notifications ? c.brand : c.textSecondary),
+        ListenableBuilder(
+          listenable: NotificationBellHelper.buildCombinedListenable(),
+          builder: (context, _) {
+            final pendingReqs = NotificationBellHelper.getPendingRequests(
+              branchId: _effectiveBranchId,
+              role: widget.role,
+            );
+            final unreadMsgs = NotificationBellHelper.getUnreadNotifications(
+              branchId: _effectiveBranchId,
+              userId: _effectiveUserId,
+              role: widget.role,
+            );
+            final totalBadge = pendingReqs.length + unreadMsgs.length;
+            return IconButton(
+              key: _bellKey,
+              tooltip: totalBadge > 0
+                  ? 'Notifications & Requests ($totalBadge pending)'
+                  : 'Notifications & Requests',
+              onPressed: () => NotificationBellHelper.showBellPopover(
+                context: context,
+                bellKey: _bellKey,
+                branchId: _effectiveBranchId,
+                userId: _effectiveUserId,
+                role: widget.role,
+                onSelectRequest: (req) => _openRequestsModule(
+                  focusRequestId: (req['requestId'] ?? req['id'])?.toString(),
+                  requestBranchId: req['branchId']?.toString(),
+                ),
+                onViewAllRequests: () => _openRequestsModule(),
+                onViewAllNotifications: () => _select(HomeDest.notifications),
+              ),
+              icon: Badge(
+                isLabelVisible: totalBadge > 0,
+                backgroundColor: const Color(0xFFEA580C),
+                textColor: Colors.white,
+                label: Text(
+                  totalBadge > 99 ? '99+' : '$totalBadge',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
+                child: Icon(
+                  totalBadge > 0 ? Icons.notifications_active_rounded : GIcons.notifications,
+                  color: (_selected == HomeDest.notifications || totalBadge > 0)
+                      ? c.brand
+                      : c.textSecondary,
+                ),
+              ),
+            );
+          },
         ),
       const SizedBox(width: Gsp.sp1),
       _ProfileMenu(

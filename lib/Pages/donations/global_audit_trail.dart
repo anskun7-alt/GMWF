@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
@@ -285,9 +286,13 @@ class _GlobalAuditTrailScreenState extends State<GlobalAuditTrailScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.assignment_turned_in_rounded, size: 64, color: context.adapt(SoftPalette.gray150)),
+          const GEmptyIllustration(
+            GEmptyIllustrationKind.activity,
+            size: 156,
+            fallbackIcon: Icons.assignment_turned_in_rounded,
+          ),
           const SizedBox(height: 16),
-          Text('No activity logs found', style: TextStyle(color: context.adapt(SoftPalette.slate350), fontWeight: FontWeight.w600)),
+          Text('No activity logs found', style: TextStyle(color: context.adapt(SoftPalette.slate350), fontWeight: FontWeight.w600, fontSize: 15)),
         ],
       ),
     );

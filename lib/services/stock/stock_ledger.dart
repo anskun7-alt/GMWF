@@ -70,6 +70,292 @@ class StockLedger {
   /// Drops the in-memory index (tests, or after the boxes were reopened).
   static void resetCache() => _index = null;
 
+  // ── Wipe epoch & hard purge ──────────────────────────────────────────────────
+
+  static String wipeFlagKey(String pool) => 'stock_wipe_epoch|${pool.trim().toLowerCase()}';
+
+  /// Current wipe generation id for [pool], or null if this pool has never been wiped.
+  static String? poolWipeId(String pool) {
+    try {
+      if (!Hive.isBoxOpen('app_flags')) return null;
+      final v = Hive.box('app_flags').get(wipeFlagKey(pool));
+      final s = v?.toString().trim() ?? '';
+      return s.isEmpty ? null : s;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Persists the wipe generation id for [pool] in `app_flags`.
+  static Future<void> setPoolWipeId(String pool, String wipeId) async {
+    final id = wipeId.trim();
+    if (id.isEmpty) return;
+    try {
+      final flags = await LocalStorageService.ensureBoxOpen('app_flags');
+      await flags.put(wipeFlagKey(pool), id);
+    } catch (e) {
+      debugPrint('[StockLedger] setPoolWipeId failed: $e');
+    }
+  }
+
+  /// Hard-deletes EVERY local record, legacy key, movement, and quarantine entry for [poolKey]
+  /// from Hive (nothing left behind as `deleted: true`). If [wipeId] is provided, records the
+  /// new wipe epoch so pre-wipe messages from stale desks are rejected automatically.
+  static Future<({int itemsRemoved, int movesRemoved})> purgePool(
+    String poolKey, {
+    String? wipeId,
+  }) async {
+    await ensureOpen();
+    final p = poolKey.trim().toLowerCase();
+    final parsedPool = StockPool.fromKey(p);
+
+    // 1. Delete EVERY matching key from local_stock_items (ledger keys, pool-tagged maps,
+    //    and legacy non-ledger keys belonging to this pool).
+    final itemKeysToDelete = <dynamic>[];
+    final prefix = '$p|';
+    for (final k in _items.keys.toList()) {
+      final kStr = k is String ? k.trim().toLowerCase() : '';
+      if (kStr.startsWith(prefix)) {
+        itemKeysToDelete.add(k);
+        continue;
+      }
+      final v = _items.get(k);
+      if (v is! Map) continue;
+      final vPool = (v['pool'] ?? '').toString().trim().toLowerCase();
+      if (vPool == p) {
+        itemKeysToDelete.add(k);
+        continue;
+      }
+      if (!isLedgerKey(k) && parsedPool != null) {
+        final legacyPool = StockPool.ofLegacyRecord(v, branchFallback: parsedPool.branch);
+        if (legacyPool != null && legacyPool.key == p) {
+          itemKeysToDelete.add(k);
+        }
+      }
+    }
+    if (itemKeysToDelete.isNotEmpty) {
+      await _items.deleteAll(itemKeysToDelete);
+    }
+
+    // 2. Delete EVERY movement for this pool from stock_moves_v1.
+    final moveKeysToDelete = <dynamic>[];
+    for (final k in _moves.keys.toList()) {
+      final v = _moves.get(k);
+      if (v is Map && (v['pool'] ?? '').toString().trim().toLowerCase() == p) {
+        moveKeysToDelete.add(k);
+      }
+    }
+    if (moveKeysToDelete.isNotEmpty) {
+      await _moves.deleteAll(moveKeysToDelete);
+    }
+
+    // 3. Remove matching entries from stock_quarantine if open.
+    try {
+      if (Hive.isBoxOpen('stock_quarantine')) {
+        final qBox = Hive.box('stock_quarantine');
+        final qDrop = <dynamic>[];
+        for (final k in qBox.keys.toList()) {
+          final v = qBox.get(k);
+          if (v is! Map) continue;
+          final qp = parsedPool == null
+              ? null
+              : StockPool.ofLegacyRecord(v, branchFallback: parsedPool.branch);
+          if (qp != null && qp.key == p) qDrop.add(k);
+        }
+        if (qDrop.isNotEmpty) await qBox.deleteAll(qDrop);
+      }
+    } catch (_) {}
+
+    resetCache();
+    if (wipeId != null && wipeId.trim().isNotEmpty) {
+      await setPoolWipeId(p, wipeId.trim());
+    }
+    try {
+      await LocalStorageService.setLastSyncedServerTimestamp('stock_v2_${p.replaceAll('/', '_')}', '');
+    } catch (_) {}
+    try {
+      if (Hive.isBoxOpen('app_flags')) {
+        final flags = Hive.box('app_flags');
+        final flagKeys = flags.keys.where((k) => k.toString().startsWith('stock_disp|$p|')).toList();
+        if (flagKeys.isNotEmpty) await flags.deleteAll(flagKeys);
+      }
+    } catch (_) {}
+    try {
+      if (Hive.isBoxOpen('stock_drift_log')) {
+        final drift = Hive.box('stock_drift_log');
+        final driftKeys = <dynamic>[];
+        for (final k in drift.keys) {
+          final v = drift.get(k);
+          if ((v is Map && v['pool']?.toString() == p) || k.toString().startsWith('$p|')) {
+            driftKeys.add(k);
+          }
+        }
+        if (driftKeys.isNotEmpty) await drift.deleteAll(driftKeys);
+      }
+    } catch (_) {}
+
+    return (itemsRemoved: itemKeysToDelete.length, movesRemoved: moveKeysToDelete.length);
+  }
+
+  /// Removes a single local batch record (e.g. when Firestore reports `DocumentChangeType.removed`),
+  /// skipping only if this PC still holds an unuploaded positive restock for that batch.
+  static Future<bool> removeItemLocally(String poolKey, String medicineId) async {
+    if (!isOpen) return false;
+    final key = itemKey(poolKey, medicineId);
+    if (!_items.containsKey(key)) return false;
+    final ids = _idx()[key];
+    if (ids != null) {
+      for (final id in ids) {
+        final m = StockMovement.fromMap(_moves.get(id));
+        if (m != null && !m.inCloud && m.delta > 0) return false;
+      }
+    }
+    await _items.delete(key);
+    return true;
+  }
+
+  /// Permanently deletes a single batch record and all its local ledger movements from Hive
+  /// (used for Higher Authority permanent deletions and unbarcoded medicine cleanup).
+  static Future<bool> hardDeleteItem(String poolKey, String medicineId) async {
+    await ensureOpen();
+    final p = poolKey.trim().toLowerCase();
+    final id = medicineId.trim();
+    if (p.isEmpty || id.isEmpty) return false;
+    final key = itemKey(p, id);
+    var removed = false;
+
+    if (_items.containsKey(key)) {
+      await _items.delete(key);
+      removed = true;
+    }
+    // Also clean any matching legacy key for this exact pool/id if present.
+    for (final alt in ['stock:$id', id]) {
+      final v = _items.get(alt);
+      if (v is Map) {
+        final parsed = StockPool.fromKey(p);
+        final lp = parsed == null ? null : StockPool.ofLegacyRecord(v, branchFallback: parsed.branch);
+        if (lp != null && lp.key == p) {
+          await _items.delete(alt);
+          removed = true;
+        }
+      }
+    }
+
+    final moveIds = _idx().remove(key);
+    if (moveIds != null && moveIds.isNotEmpty) {
+      await _moves.deleteAll(moveIds.toList());
+    } else {
+      final drop = <dynamic>[];
+      for (final k in _moves.keys.toList()) {
+        final v = _moves.get(k);
+        if (v is Map &&
+            (v['pool'] ?? '').toString().trim().toLowerCase() == p &&
+            (v['medicineId'] ?? '').toString().trim() == id) {
+          drop.add(k);
+        }
+      }
+      if (drop.isNotEmpty) await _moves.deleteAll(drop);
+    }
+    return removed;
+  }
+
+  /// Purges all pending stock/inventory entries for [pool] from cloud sync queues and LAN
+  /// outboxes so old queued mutations cannot resurrect wiped medicines locally or in Firestore.
+  static Future<int> purgeStockQueues(StockPool pool) async {
+    const inventoryTypes = {
+      'update_inventory',
+      'add_inventory_stock',
+      'delete_inventory',
+      'delete_inventory_item',
+      'stock_moves',
+      'stock_snapshot',
+      'stock_details',
+      'inventory_stock_sync',
+      'save_stock_item',
+      'delete_stock_item',
+      'medicine_registered',
+      'register_medicine',
+      'add_stock',
+      'add_proforma_stock',
+    };
+    final targetColPrefix = 'branches/${pool.cloudBranch}/${pool.collection}/'.toLowerCase();
+    var purged = 0;
+
+    const queueBoxes = [
+      LocalStorageService.syncBox,
+      'server_sync_queue',
+      'realtime_outbox',
+      'realtime_failed_outbox',
+    ];
+
+    for (final boxName in queueBoxes) {
+      try {
+        if (!Hive.isBoxOpen(boxName)) continue;
+        final box = Hive.box(boxName);
+        final toDelete = <dynamic>[];
+        for (final k in box.keys.toList()) {
+          final v = box.get(k);
+          if (v is! Map) continue;
+          final type = (v['type'] ?? v['action'] ?? v['event_type'] ?? '').toString().trim().toLowerCase();
+          final data = v['data'] is Map ? v['data'] as Map : const {};
+
+          // Check relayed direct cloud writes targeting this pool's Firestore collection.
+          if (type == 'relay_cloud_write') {
+            final path = (data['path'] ?? v['path'] ?? '').toString().trim().toLowerCase();
+            if (path.startsWith(targetColPrefix)) toDelete.add(k);
+            continue;
+          }
+          if (!inventoryTypes.contains(type)) continue;
+
+          // 1. Explicit pool key on envelope or data
+          final explicitPool = (v['pool'] ?? data['pool'] ?? '').toString().trim().toLowerCase();
+          if (explicitPool.isNotEmpty) {
+            if (explicitPool == pool.key) toDelete.add(k);
+            continue;
+          }
+
+          // 2. stock_moves payload with per-move pool keys
+          if (type == 'stock_moves' && data['moves'] is List) {
+            final moves = (data['moves'] as List).whereType<Map>().toList();
+            if (moves.isNotEmpty &&
+                moves.every((m) => (m['pool'] ?? '').toString().trim().toLowerCase() == pool.key)) {
+              toDelete.add(k);
+            }
+            continue;
+          }
+
+          // 3. Legacy/sync_queue item: check branch & camp carefully so other camps stay untouched.
+          final rawBranch = (v['branchId'] ?? v['branch'] ?? data['branchId'] ?? data['branch'] ?? '').toString();
+          final normBranch = StockPool.normalizeBranch(rawBranch);
+          if (normBranch.isNotEmpty && normBranch != pool.branch && normBranch != pool.cloudBranch) {
+            continue;
+          }
+          if (!pool.hasCamp) {
+            if (normBranch == pool.branch || normBranch == pool.cloudBranch) toDelete.add(k);
+            continue;
+          }
+          final medId = (v['medicineId'] ?? v['inventoryId'] ?? v['id'] ?? data['medicineId'] ?? data['id'] ?? '').toString();
+          final resolved = StockPool.ofLegacyRecord({
+            'id': medId,
+            'branchId': normBranch.isEmpty ? pool.branch : normBranch,
+            'campId': v['campId'] ?? data['campId'] ?? v['dispensaryId'] ?? data['dispensaryId'],
+            'dispensaryTag': v['dispensaryTag'] ?? data['dispensaryTag'],
+          }, branchFallback: pool.branch);
+          if (resolved != null && resolved.key == pool.key) {
+            toDelete.add(k);
+          }
+        }
+        if (toDelete.isNotEmpty) {
+          await box.deleteAll(toDelete);
+          purged += toDelete.length;
+        }
+      } catch (e) {
+        debugPrint('[StockLedger] purgeStockQueues($boxName) note: $e');
+      }
+    }
+    return purged;
+  }
+
   static Map<String, Set<String>> _idx() {
     final cached = _index;
     if (cached != null) return cached;
@@ -91,7 +377,7 @@ class StockLedger {
   }
 
   /// All ledger records, optionally of one pool. Old-format records are ignored.
-  static List<Map<String, dynamic>> items({String? pool}) {
+  static List<Map<String, dynamic>> items({String? pool, bool includeDeleted = false}) {
     if (!isOpen) return const [];
     final p = pool?.toLowerCase();
     final out = <Map<String, dynamic>>[];
@@ -99,7 +385,7 @@ class StockLedger {
       if (!isLedgerKey(k)) continue;
       final v = _items.get(k);
       if (v is! Map) continue;
-      if (v['deleted'] == true) continue;
+      if (v['deleted'] == true && !includeDeleted) continue;
       if (p != null && (v['pool'] ?? '').toString() != p) continue;
       out.add(Map<String, dynamic>.from(v));
     }
@@ -194,6 +480,10 @@ class StockLedger {
       if (cloudRev > 0 && rev >= cloudRev) continue;
       out.add(m);
     }
+    out.sort((a, b) {
+      final c = a.at.compareTo(b.at);
+      return c != 0 ? c : a.opId.compareTo(b.opId);
+    });
     return out;
   }
 
@@ -297,14 +587,52 @@ class StockLedger {
     final curRev = it.containsKey('rev') ? _int(it['rev']) : -1;
     final hasBase = it.containsKey('base');
     if (!hasBase || rev >= curRev) {
-      it['base'] = base;
+      it['base'] = math.max(0.0, base);
       it['rev'] = rev;
       it['baseOps'] = baseOps.length > baseOpsCap ? baseOps.sublist(baseOps.length - baseOpsCap) : baseOps;
+      if (baseOps.length >= baseOpsCap) await _coverOlderThanList(key, it['baseOps'] as List<String>, rev);
     }
     await _items.put(key, it);
     final after = await _recompute(key);
     _changes.add({key});
     return (after - before).abs() > 1e-9;
+  }
+
+  /// Whether this PC uploads stock to the cloud (the LAN server, or a PC with no LAN link).
+  /// Set by StockSync; a desk (false) never holds unsent movements for long, it forwards them.
+  static bool Function()? thisPcUploads;
+
+  /// A base whose id list is full (the cloud keeps the last [baseOpsCap]) no longer names its
+  /// oldest movements. Only the uploading PC had `cloudRev` to recognise them, so on every
+  /// other PC they were counted again on top of the base (a busy medicine past 600 moves
+  /// showed too little stock, and prune never removed them). Movements older than the oldest
+  /// one the list still names are inside the base. On the uploading PC only those the cloud
+  /// confirmed (its own unsent ones are not in the cloud yet); on a desk, all of them — a desk
+  /// passes its movements to the server at once, so none waits unsent while 600 newer ones
+  /// reach the cloud.
+  static Future<void> _coverOlderThanList(String key, List<String> listed, int rev) async {
+    final ids = _idx()[key];
+    if (ids == null || ids.isEmpty) return;
+    final inList = listed.toSet();
+    DateTime? oldestListed;
+    for (final id in ids) {
+      if (!inList.contains(id)) continue;
+      final m = StockMovement.fromMap(_moves.get(id));
+      if (m != null && (oldestListed == null || m.at.isBefore(oldestListed))) oldestListed = m.at;
+    }
+    if (oldestListed == null) return;
+    final uploader = thisPcUploads?.call() ?? false;
+    for (final id in ids) {
+      if (inList.contains(id)) continue;
+      final raw = _moves.get(id);
+      if (raw is! Map || _int(raw['cloudRev']) > 0) continue;
+      final m = StockMovement.fromMap(raw);
+      if (m == null || !m.at.isBefore(oldestListed)) continue;
+      final confirmed = raw['inCloud'] == true;
+      if (confirmed || !uploader) {
+        await _moves.put(id, {...Map<String, dynamic>.from(raw), 'cloudRev': rev});
+      }
+    }
   }
 
   /// Marks movements as being in the cloud. [cloudRev] is the revision at which the cloud
@@ -324,12 +652,55 @@ class StockLedger {
 
   /// Hides a batch (medicine removed). Its movements stay, so history and totals stay right
   /// if it is ever brought back.
+  static bool _sanitizedNegativesOnce = false;
+
+  /// One-time per session cleanup of any legacy negative balances in Hive.
+  static Future<void> sanitizeNegativesOnce() async {
+    if (_sanitizedNegativesOnce) return;
+    _sanitizedNegativesOnce = true;
+    await sanitizeNegatives();
+  }
+
+  /// Clamps any stored negative balances (`base`, `quantityRaw`, `quantity`)
+  /// in `local_stock_items` back to `0.0` and notifies listeners.
+  static Future<int> sanitizeNegatives() async {
+    await ensureOpen();
+    var healed = 0;
+    final changed = <String>{};
+    for (final k in _items.keys.toList()) {
+      final raw = _items.get(k);
+      if (raw is! Map) continue;
+      final base = _num(raw['base']);
+      final qRaw = _num(raw['quantityRaw']);
+      final q = _num(raw['quantity']);
+      if (base < 0 || qRaw < 0 || q < 0) {
+        final ks = k.toString();
+        if (base < 0) {
+          final updated = Map<String, dynamic>.from(raw);
+          updated['base'] = 0.0;
+          await _items.put(ks, updated);
+        }
+        await _recompute(ks);
+        changed.add(ks);
+        healed++;
+      }
+    }
+    if (changed.isNotEmpty) _changes.add(changed);
+    return healed;
+  }
+
   static Future<void> markDeleted(String pool, String medicineId) async {
     await ensureOpen();
     final key = itemKey(pool, medicineId);
     final cur = _items.get(key);
     if (cur is! Map) return;
-    await _items.put(key, {...Map<String, dynamic>.from(cur), 'deleted': true});
+    await _items.put(key, {
+      ...Map<String, dynamic>.from(cur),
+      'deleted': true,
+      'base': 0.0,
+      'quantityRaw': 0.0,
+      'quantity': 0.0,
+    });
     _changes.add({key});
   }
 
@@ -361,20 +732,52 @@ class StockLedger {
   /// Everything another PC needs to reach this PC's figures for [pools] (null = all).
   static Map<String, dynamic> snapshot({Set<String>? pools}) {
     final items = <Map<String, dynamic>>[];
-    for (final it in StockLedger.items()) {
-      if (pools != null && !pools.contains(it['pool'])) continue;
+    final seenPools = <String>{if (pools != null) ...pools};
+    for (final it in StockLedger.items(includeDeleted: true)) {
+      final p = (it['pool'] ?? '').toString();
+      if (pools != null && !pools.contains(p)) continue;
+      if (p.isNotEmpty) seenPools.add(p);
+      // Removed batches go too, as a marker only: a desk that was off when a batch was
+      // deleted (or a pool wiped) kept showing it, and every check found a difference.
+      if (it['deleted'] == true) {
+        items.add({'pool': p, 'medicineId': it['medicineId'] ?? it['id'], 'deleted': true});
+        continue;
+      }
       items.add(it);
     }
     final moves = openMoves()
         .where((m) => pools == null || pools.contains(m.pool))
         .map((m) => m.toMap())
         .toList();
-    return {'items': items, 'moves': moves};
+    final wipeEpochs = <String, String>{};
+    for (final p in seenPools) {
+      final wid = poolWipeId(p);
+      if (wid != null && wid.isNotEmpty) wipeEpochs[p] = wid;
+    }
+    return {
+      'items': items,
+      'moves': moves,
+      if (wipeEpochs.isNotEmpty) 'wipeEpochs': wipeEpochs,
+    };
   }
 
   /// Applies a snapshot from the LAN server. Returns how many items changed.
   static Future<int> applySnapshot(Map snap) async {
     var changed = 0;
+    // Apply any newer pool wipe epochs FIRST (chunk-safe: once recorded, later chunks match
+    // poolWipeId and will not re-purge).
+    final wipeEpochs = snap['wipeEpochs'];
+    if (wipeEpochs is Map) {
+      for (final e in wipeEpochs.entries) {
+        final pool = e.key.toString().trim().toLowerCase();
+        final wid = (e.value ?? '').toString().trim();
+        if (pool.isEmpty || wid.isEmpty) continue;
+        if (poolWipeId(pool) != wid) {
+          final res = await purgePool(pool, wipeId: wid);
+          changed += res.itemsRemoved;
+        }
+      }
+    }
     final moves = <StockMovement>[];
     for (final raw in (snap['moves'] is List ? snap['moves'] as List : const [])) {
       final m = StockMovement.fromMap(raw);
@@ -388,7 +791,11 @@ class StockLedger {
       if (pool.isEmpty || id.isEmpty) continue;
       final details = Map<String, dynamic>.from(raw);
       if (raw['deleted'] == true) {
-        await markDeleted(pool, id);
+        if (raw['hardDelete'] == true) {
+          if (await hardDeleteItem(pool, id)) changed++;
+        } else {
+          await markDeleted(pool, id);
+        }
         continue;
       }
       if (!raw.containsKey('base')) {
@@ -454,14 +861,25 @@ class StockLedger {
     final key = m.itemKey;
     final cur = _items.get(key);
     if (cur is Map && details == null && cur['deleted'] != true) return;
+    // Never create a phantom Qty-0 / no-expiry ghost row from a negative dispense movement
+    // arriving for a wiped or unknown batch (the movement stays in _moves, so if real details
+    // arrive later _recompute still subtracts it). Similarly never touch a deleted batch on
+    // a late negative movement.
+    if (details == null && m.delta <= 0) {
+      if (cur == null) return;
+      if (cur is Map && cur['deleted'] == true) return;
+    }
     final it = cur is Map ? Map<String, dynamic>.from(cur) : _newItem(m.pool, m.medicineId);
     if (details != null) {
       final clean = Map<String, dynamic>.from(details)..removeWhere((k, _) => _ledgerFields.contains(k));
       it.addAll(clean);
     }
     if ((it['name'] ?? '').toString().trim().isEmpty && m.name.isNotEmpty) it['name'] = m.name;
-    // A restock brings a hidden batch back.
-    if (m.delta > 0) it.remove('deleted');
+    // A restock brings a hidden batch back, never preserving a prior negative base.
+    if (m.delta > 0) {
+      it.remove('deleted');
+      if (_num(it['base']) < 0) it['base'] = 0.0;
+    }
     _stampIdentity(it, m.pool, m.medicineId);
     await _items.put(key, it);
   }
@@ -470,13 +888,15 @@ class StockLedger {
     final cur = _items.get(key);
     if (cur is! Map) return 0;
     final it = Map<String, dynamic>.from(cur);
-    var q = _num(it['base']);
+    final rawBase = _num(it['base']);
+    var q = math.max(0.0, rawBase);
+    if (rawBase < 0) it['base'] = 0.0;
     for (final m in _openFor(key, it)) {
-      q += m.delta;
+      q = math.max(0.0, q + m.delta);
     }
-    q = double.parse(q.toStringAsFixed(4));
+    q = double.parse(math.max(0.0, q).toStringAsFixed(4));
     it['quantityRaw'] = q;
-    it['quantity'] = math.max(0.0, q);
+    it['quantity'] = q;
     it['updatedAt'] = DateTime.now().toIso8601String();
     await _items.put(key, it);
     return q;

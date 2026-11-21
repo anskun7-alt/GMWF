@@ -2111,12 +2111,14 @@ class ServerSyncManager {
 
       case 'save_inventory_log':
         final logData = Map<String, dynamic>.from(op['data'] ?? op['logData'] ?? {});
-        await _db
-            .collection('branches').doc(branchId)
-            .collection('inventory_log').add({
-          ...logData,
-          'timestamp': FieldValue.serverTimestamp(),
-        });
+        final logCol = _db.collection('branches').doc(branchId).collection('inventory_log');
+        final logId = (logData['id'] ?? op['docId'] ?? '').toString();
+        final logDoc = {...logData, 'timestamp': FieldValue.serverTimestamp()};
+        if (logId.isNotEmpty) {
+          await logCol.doc(logId).set(logDoc, SetOptions(merge: true));
+        } else {
+          await logCol.add(logDoc);
+        }
         break;
 
       case 'save_attendance':

@@ -55,6 +55,7 @@ import '../services/auth_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/stock/stock_ledger.dart';
 import '../services/stock/stock_pool.dart';
+import '../services/stock/stock_log.dart';
 import '../services/stock/stock_sync.dart';
 import '../services/master_proforma_service.dart';
 import '../services/camp_session_service.dart';
@@ -5751,6 +5752,12 @@ class ServerSyncManager {
       return;
     }
 
+    // ── Inventory activity log: kept here, uploaded once by id (StockLog) ──
+    if (eventType == StockLog.evLog) {
+      await StockLog.handleIncoming(message);
+      return;
+    }
+
         // ── Handle catch-up / ACK events (do NOT queue for Firestore) ────────────
     if (eventType == 'ack_serials') {
       _handleClientAck(message);
@@ -5802,9 +5809,10 @@ class ServerSyncManager {
           'username': message['_senderUsername'] ?? message['username'] ?? '',
         };
         debugPrint('[SSM] Catch-up requested by $socketId');
-        // 1. Immediately push local tokens and unseen inventory over LAN (0ms delay)
+        // 1. Immediately push local tokens, unseen inventory, and pending requests over LAN (0ms delay)
         _pushCatchUpToSocket(socketId, clientInfo, forceAll: fullResync);
         _pushInventoryCatchUpToSocket(socketId, clientInfo);
+        unawaited(_pushPendingRequestsCatchUpToSocket(socketId, clientInfo));
 
         // 2. Refresh today's tokens from the cloud (rate-limited to every 10 min) without blocking
         _downloadTodayTokens().then((_) {
@@ -5890,6 +5898,12 @@ class ServerSyncManager {
         case 'save_entry':
         case 'token_created':
           final serial = data['serial']?.toString().trim();
+          // A reversed token re-sent late (desk outbox, reconnect push): ignored, not stored,
+          // not uploaded and not forwarded, so it cannot come back as "waiting".
+          if (serial != null && LocalStorageService.isSerialReversed(msgBranch, serial)) {
+            debugPrint('[SSM] Reversed token $serial re-sent; ignored');
+            break;
+          }
           if (serial != null && serial.isNotEmpty) {
             // [A4] Cross-socket write lock queue for this specific serial
             final lockKey = '$msgBranch-$serial';
@@ -5933,7 +5947,9 @@ class ServerSyncManager {
                     if (lastReq != null && now.difference(lastReq).inSeconds < 15) {
                       continue; // Recently requested
                     }
-                    if (LocalStorageService.getLocalEntry(msgBranch, checkSerial) == null) {
+                    if (LocalStorageService.getLocalEntry(msgBranch, checkSerial) == null &&
+                        // A reversed token is gone on purpose, not missing.
+                        !LocalStorageService.isSerialReversed(msgBranch, checkSerial)) {
                       missingSerials.add(checkSerial);
                       _lastGapRequestedAt[checkSerial] = now;
                     }
@@ -6247,6 +6263,16 @@ class ServerSyncManager {
 
         case 'save_patient':
           try {
+            // The registration screen sends {branchId, patientId, data: {…patient…}}. Saved
+            // as is, the server kept the old details (plus a nested "data"), stamped them on
+            // today's token and pushed them to the desks over the receptionist's correction.
+            if (data['data'] is Map) {
+              final inner = Map<String, dynamic>.from(data['data'] as Map);
+              inner['patientId'] ??= data['patientId'];
+              data
+                ..remove('data')
+                ..addAll(inner);
+            }
             await LocalStorageService.saveLocalPatient(
                 {...data, 'branchId': msgBranch},
                 isFromSync: true);
@@ -6293,9 +6319,14 @@ class ServerSyncManager {
           try {
             final oldId = (data['oldPatientId'] ?? message['oldPatientId'])?.toString().trim();
             final newId = (data['newPatientId'] ?? message['newPatientId'])?.toString().trim();
-            final patientMap = data['patient'] is Map
+            var patientMap = data['patient'] is Map
                 ? Map<String, dynamic>.from(data['patient'] as Map)
                 : Map<String, dynamic>.from(data);
+            // Only the edited fields arrive: keep the rest of the stored record.
+            if (oldId != null && oldId.isNotEmpty) {
+              final old = LocalStorageService.getLocalPatient(oldId);
+              if (old != null) patientMap = {...old, ...patientMap};
+            }
             patientMap['branchId'] ??= msgBranch;
             if (newId != null && newId.isNotEmpty) {
               patientMap['patientId'] = newId;
@@ -6461,11 +6492,113 @@ class ServerSyncManager {
           }
           break;
 
+        // A supervisor-approved patient edit from a LAN desk: applied here, pushed to today's
+        // token on every desk, and uploaded (it reached only the receptionist screen before).
+        case 'patient_edit_approved':
+          try {
+            final pid = data['patientId']?.toString().trim() ?? '';
+            final raw = data['changes'] ?? data['patient'];
+            if (pid.isNotEmpty && raw is Map) {
+              final changes = Map<String, dynamic>.from(raw);
+              final migratedPid = await LocalStorageService.updatePatientWithCnicMigration(
+                oldPatientId: pid,
+                updatedPatient: {
+                  ...changes,
+                  'branchId': msgBranch,
+                },
+                isFromSync: true,
+              );
+              final merged = LocalStorageService.getLocalPatient(migratedPid) ??
+                  {...changes, 'patientId': migratedPid, 'branchId': msgBranch};
+              for (final e in LocalStorageService.getLocalEntries(msgBranch)) {
+                final ePid = (e['patientId'] ?? '').toString().trim();
+                final s = (e['serial'] ?? '').toString().trim();
+                if (s.isNotEmpty && (ePid == pid || ePid == migratedPid)) {
+                  _markSerialChanged(s, senderSocketId: message['_socketId']?.toString());
+                }
+              }
+              final sBox = await _syncQueueBox();
+              await sBox.put('sync_patient_${msgBranch}_$migratedPid', {
+                'type': 'save_patient',
+                'entityId': migratedPid,
+                'branchId': msgBranch,
+                'patientId': migratedPid,
+                'oldPatientId': pid,
+                'data': merged,
+                'status': 'pending',
+                'attempts': 0,
+                'createdAt': DateTime.now().toIso8601String(),
+              });
+              _scheduleSyncDebounced();
+            }
+          } catch (e) {
+            debugPrint('[SSM] patient_edit_approved error: $e');
+          }
+          break;
+
+        // A doctor's restock alert from a LAN desk: the desk does not upload it, so the server
+        // keeps it (for catch-up) and uploads it to restock_requests. It used to land in
+        // sync_records and vanish from the dispenser once the cloud list refreshed.
+        case 'restock_request':
+          try {
+            final id = (data['id'] ?? data['requestId'])?.toString().trim() ?? '';
+            if (id.isNotEmpty && !LocalStorageService.isLocalRequestDecided(id)) {
+              await LocalStorageService.saveRestockRequest(msgBranch, {...data, 'id': id});
+              await LocalStorageService.enqueueSync({
+                'type': 'save_restock_request',
+                'branchId': msgBranch,
+                'id': id,
+                'data': {...data, 'id': id, 'branchId': msgBranch},
+              });
+            }
+          } catch (e) {
+            debugPrint('[SSM] restock_request save error: $e');
+          }
+          break;
+
+        case LocalStorageService.restockAcknowledgedEvent:
+          try {
+            final id = (data['id'] ?? data['requestId'])?.toString().trim() ?? '';
+            if (id.isNotEmpty) {
+              final at = (data['acknowledgedAt'] ?? DateTime.now().toIso8601String()).toString();
+              // Kept even if the alert never reached this PC, so a late alert is not re-shown.
+              await LocalStorageService.saveRestockRequest(msgBranch, {'id': id, 'status': 'acknowledged', 'acknowledgedAt': at});
+              await LocalStorageService.enqueueRestockAcknowledged(msgBranch, id, at);
+            }
+          } catch (e) {
+            debugPrint('[SSM] restock_acknowledged error: $e');
+          }
+          break;
+
         case 'token_reversal_approved':
         case 'token_reversal':
         case 'delete_entry':
           try {
             final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'] ?? message['serial'] ?? message['tokenSerial'] ?? message['tokenId'])?.toString().trim();
+            if (serial != null && serial.isNotEmpty && eventType != 'delete_entry') {
+              // Never bring it back (late save_entry, desk outbox, cloud re-download), drop the
+              // token's pending upload (it would rewrite the token to the cloud), and delete
+              // the cloud copy from here: the server is the PC that uploads.
+              await LocalStorageService.markSerialReversed(msgBranch, serial);
+              try {
+                final qBox = await _syncQueueBox();
+                final cloudBranch = LocalStorageService.sanitizeBranchId(msgBranch);
+                await qBox.delete(_tokenQueueKey(cloudBranch, serial.toUpperCase()));
+              } catch (_) {}
+              await LocalStorageService.enqueueSync({
+                'type': 'token_reversal',
+                'branchId': LocalStorageService.sanitizeBranchId(msgBranch),
+                'serial': serial.toUpperCase(),
+                'data': {
+                  'serial': serial.toUpperCase(),
+                  'tokenSerial': serial.toUpperCase(),
+                  'queueType': (data['queueType'] ?? 'zakat').toString(),
+                  if (data['campDocKey'] != null) 'campDocKey': data['campDocKey'],
+                  if (data['campId'] != null) 'campId': data['campId'],
+                  if (data['dispensaryTag'] != null) 'dispensaryTag': data['dispensaryTag'],
+                },
+              });
+            }
             if (serial != null && serial.isNotEmpty) {
               LocalStorageService.deleteLocalEntry(msgBranch, serial);
               LocalStorageService.deleteLocalPrescription(serial);
@@ -6540,6 +6673,18 @@ class ServerSyncManager {
             final reqMap = Map<String, dynamic>.from(data);
             reqMap['status'] ??= 'pending';
             await LocalStorageService.saveLocalEditRequest(reqMap);
+            final reqId = (reqMap['requestId'] ?? reqMap['id'] ?? '').toString().trim();
+            final bId = (reqMap['branchId']?.toString() ?? msgBranch).toLowerCase().trim();
+            if (reqId.isNotEmpty) {
+              await LocalStorageService.enqueueSync({
+                'type': 'save_edit_request',
+                'branchId': bId.isNotEmpty ? bId : branchId,
+                'requestId': reqId,
+                'collection': (reqMap['collection'] ?? 'edit_requests').toString(),
+                'data': reqMap,
+              });
+              _scheduleSyncDebounced();
+            }
             debugPrint('[SSM] ✅ Edit request saved locally on server: ${reqMap['id'] ?? reqMap['requestId']}');
           } catch (e) {
             debugPrint('[SSM] edit request save local error: $e');
@@ -6656,7 +6801,10 @@ class ServerSyncManager {
                 'status': resolvedStatus,
                 'collection': col,
                 'branchId': bId.isNotEmpty ? bId : branchId,
-                'data': data,
+                // The decision only: LAN transport fields (_socketId, event_type, _messageId…)
+                // were merged into the cloud request document.
+                'data': Map<String, dynamic>.from(data)
+                  ..removeWhere((k, _) => k.startsWith('_') || k == 'event_type' || k == 'isCatchUp'),
               });
             }
           } catch (e) {
@@ -7044,7 +7192,10 @@ class ServerSyncManager {
         final val = stockBox.get(k);
         if (val is! Map) continue;
         final item = Map<String, dynamic>.from(val);
-        if (item['status'] == 'deleted') continue;
+        // The stock book marks a removed batch with deleted: true. Pushed as a live record, the
+        // desk's saveDetails cleared that flag and the deleted batch came back on every
+        // reconnect and every 5-minute catch-up.
+        if (item['status'] == 'deleted' || item['deleted'] == true || item['isDeleted'] == true) continue;
 
         final itemBranch = (item['branchId'] ?? '').toString().trim().toLowerCase();
         if (itemBranch.isNotEmpty && itemBranch != targetBranch && itemBranch != 'all') {
@@ -7116,9 +7267,21 @@ class ServerSyncManager {
           final status = (reqMap['status'] ?? 'pending').toString().toLowerCase().trim();
           final reqType = (reqMap['requestType'] ?? reqMap['type'] ?? '').toString().toLowerCase().trim();
           final isTokenExc = reqType == 'token_exception' || reqMap['event_type'] == 'token_exception_request';
-          final eventType = status == 'approved'
-              ? (isTokenExc ? 'token_exception_approved' : 'request_approved')
-              : (status == 'rejected' ? 'request_rejected' : (isTokenExc ? 'token_exception_request' : 'request_created'));
+          // An approved token exception only matters on the day it is for: an old approval
+          // re-sent on every reconnect became a fresh exception for today.
+          if (isTokenExc && status == 'approved') {
+            final at = DateTime.tryParse((reqMap['reviewedAt'] ?? reqMap['approvedAt'] ?? reqMap['createdAt'] ?? '').toString());
+            final forDay = (reqMap['dateKey']?.toString().trim().isNotEmpty == true)
+                ? reqMap['dateKey'].toString().trim()
+                : (at == null ? '' : CampSessionService.resolveShiftAndDateKey(at, branchId).dateKey);
+            if (forDay.isNotEmpty && forDay != _todayKey()) continue;
+          }
+          final isRestock = boxName == LocalStorageService.restockRequestsBox;
+          final eventType = isRestock
+              ? (status == 'pending' ? 'restock_request' : LocalStorageService.restockAcknowledgedEvent)
+              : status == 'approved'
+                  ? (isTokenExc ? 'token_exception_approved' : 'request_approved')
+                  : (status == 'rejected' ? 'request_rejected' : (isTokenExc ? 'token_exception_request' : 'request_created'));
           final sent = _sendToSocket(socketId, {
             'event_type': eventType,
             'branchId': branchId,
@@ -7369,6 +7532,13 @@ class ServerSyncManager {
         'token_exception_request',
         'token_exception_approved',
         'restriction_removed',
+        // Queued under their real upload types in _saveToLocalHive (generic copies went to
+        // sync_records).
+        'restock_request',
+        LocalStorageService.restockAcknowledgedEvent,
+        'patient_edit_approved',
+        'token_reversal',
+        'token_reversal_approved',
         'save_madrassa_student',
         'save_madrassa_admission',
         'delete_madrassa_student',

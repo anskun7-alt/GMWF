@@ -70,6 +70,10 @@ scripts/pending_punches.json
 *.pdf
 *.patch
 *.png
+# Allow guides documentation PDFs and screenshots
+!guides/**/*.pdf
+!guides/**/*.png
+!guides/**/*.jpg
 scratch/
 build_output.txt
 debug_branches.txt

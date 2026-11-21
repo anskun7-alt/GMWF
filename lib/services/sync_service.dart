@@ -1698,6 +1698,7 @@ class SyncService {
           'entityId': 'mlog_${bId}_$dateKey',
           'branchId': bId,
           'dateKey': dateKey,
+          'backlog': true,
           'data': Map<String, dynamic>.from(raw)
             ..remove('syncStatus')
             ..remove('pendingSync')
@@ -3386,10 +3387,15 @@ class SyncService {
           else if (type == 'save_inventory_log') {
             final logData = Map<String, dynamic>.from(action['data'] ?? action['logData'] ?? {});
             final targetBranch = action['branchId']?.toString() ?? branchId;
-            await _db.collection('branches').doc(targetBranch).collection('inventory_log').add({
-              ...logData,
-              'timestamp': FieldValue.serverTimestamp(),
-            });
+            final logCol = _db.collection('branches').doc(targetBranch).collection('inventory_log');
+            final logId = (logData['id'] ?? action['docId'] ?? '').toString();
+            final logDoc = {...logData, 'timestamp': FieldValue.serverTimestamp()};
+            // Same id = same document: a retry or a second uploader never duplicates a log.
+            if (logId.isNotEmpty) {
+              await logCol.doc(logId).set(logDoc, SetOptions(merge: true));
+            } else {
+              await logCol.add(logDoc);
+            }
           }
           else if (type == 'save_token_exception_request' || type == 'token_exception_request') {
             // token_exception_request: forwarded by the LAN server for a client receptionist.
@@ -4720,7 +4726,8 @@ class SyncService {
                 await mBox.put(lKey, Map<String, dynamic>.from(local)
                   ..['syncStatus'] = 'synced'
                   ..['synced'] = true
-                  ..['pendingSync'] = false);
+                  ..['pendingSync'] = false
+                  ..['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String());
               }
             }
           }
@@ -5194,12 +5201,29 @@ class SyncService {
             // screen deletes directly; this makes sure it happens even if that failed).
             final bId = _cleanBranch(action['branchId']);
             final data = Map<String, dynamic>.from(action['data'] ?? {});
-            final serial = (action['serial'] ?? data['tokenSerial'])?.toString().trim() ?? '';
-            final dateKey = (action['dateKey'] ?? data['dateKey'])?.toString().trim() ?? '';
+            final serial = (action['serial'] ?? data['serial'] ?? data['tokenSerial'])?.toString().trim() ?? '';
             final queueCol = data['queueType']?.toString().trim() ?? '';
-            if (serial.isNotEmpty && dateKey.isNotEmpty && queueCol.isNotEmpty) {
-              await _db.collection('branches').doc(bId).collection('serials').doc(dateKey)
+            // The token's own document: serials/{day}_{camp} in camp branches, and the day
+            // without the session letter. The old path (serials/201126M) matched nothing.
+            final dayKey = CampSessionService.getDateKeyFromSerial(serial);
+            var docKey = data['campDocKey']?.toString().trim() ?? '';
+            if (docKey.isEmpty && dayKey.isNotEmpty) {
+              docKey = CampSessionService.getCampDateDocId(
+                branchId: bId,
+                dateKey: dayKey,
+                campId: (data['campId'] ?? data['dispensaryId'])?.toString(),
+                dispensaryTag: data['dispensaryTag']?.toString(),
+                serial: serial,
+              );
+            }
+            if (serial.isNotEmpty && docKey.isNotEmpty && queueCol.isNotEmpty) {
+              await _db.collection('branches').doc(bId).collection('serials').doc(docKey)
                   .collection(queueCol).doc(serial).delete();
+              // Older copies were also written under the plain day key.
+              if (dayKey.isNotEmpty && dayKey != docKey) {
+                await _db.collection('branches').doc(bId).collection('serials').doc(dayKey)
+                    .collection(queueCol).doc(serial).delete();
+              }
             }
           }
           else if (type == 'save_medicine_restriction') {
@@ -5247,8 +5271,29 @@ class SyncService {
             await _db.collection('branches').doc(bId).collection('approval_requests').doc(id)
                 .set(LocalStorageService.sanitizeForCloudUpload(data), SetOptions(merge: true));
           }
+          else if (type == 'save_user_preference') {
+            final data = Map<String, dynamic>.from(action['data'] ?? {});
+            final uid = (action['uid'] ?? data['uid'] ?? '').toString().trim();
+            if (uid.isNotEmpty) {
+              final prefs = Map<String, dynamic>.from(data)
+                ..remove('uid')
+                ..remove('id');
+              if (prefs.isNotEmpty) {
+                final payload = {
+                  ...LocalStorageService.sanitizeForCloudUpload(prefs),
+                  'updatedAt': FieldValue.serverTimestamp(),
+                };
+                if (LanFirestoreGate.isLanDesk) {
+                  LanFirestoreGate.relayWrite('users/$uid', payload, merge: true, branchId: branchId);
+                } else {
+                  await _db.collection('users').doc(uid).set(payload, SetOptions(merge: true));
+                }
+              }
+            }
+          }
           else if (type == 'edit_proforma_medicine') {
-            // The master proforma catalogue is local (shared over LAN, no cloud copy):
+            // Legacy 'proforma' sync type kept for compatibility.
+            // The master medicine catalog is local (shared over LAN, no cloud copy):
             // nothing to upload.
           }
           else {

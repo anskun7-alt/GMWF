@@ -4,7 +4,9 @@
 // applied here at once and sent on by StockSync. No screen writes the stock box directly.
 
 import '../local_storage_service.dart';
+import 'expiry_rules.dart';
 import 'stock_ledger.dart';
+import 'stock_log.dart';
 import 'stock_movement.dart';
 import 'stock_pool.dart';
 import 'stock_reader.dart';
@@ -29,6 +31,7 @@ class StockActions {
     String? opKey,
   }) async {
     if (qty <= 0 || medicineId.trim().isEmpty) return null;
+    await StockLedger.sanitizeNegativesOnce();
     if (details != null) await StockSync.saveDetails(pool, medicineId, details);
     final m = StockMovement(
       opId: opKey == null
@@ -57,12 +60,16 @@ class StockActions {
     String reason = 'stock count',
   }) async {
     if (counted < 0) counted = 0;
+    await StockLedger.sanitizeNegativesOnce();
     final it = StockLedger.item(pool.key, medicineId);
     final shown = it == null ? 0.0 : StockReader.qty(it);
     final delta = double.parse((counted - shown).toStringAsFixed(4));
     if (delta == 0) return null;
+    // Once-only per (figure shown, figure counted, day): the same count made on two PCs, or
+    // the same request approved on two PCs, is one movement instead of two.
+    final day = DateTime.now().toIso8601String().substring(0, 10);
     final m = StockMovement(
-      opId: StockMovement.newId('cnt'),
+      opId: StockMovement.deterministicId('cnt', [pool.key, medicineId.trim(), '$shown', '$counted', day, reason]),
       pool: pool.key,
       medicineId: medicineId.trim(),
       delta: delta,
@@ -78,11 +85,16 @@ class StockActions {
 
   /// Records a counted correction of exactly [delta] (used when the record is below 0, where
   /// [setCounted] would start from the displayed 0 instead of the true figure).
+  /// [opKey] makes it once-only (e.g. an approved request id): approving the same request on
+  /// two PCs then moves stock once, not twice.
   static Future<StockMovement?> countDifference(StockPool pool, String medicineId, double delta,
-      {String name = '', String reason = 'stock count'}) async {
+      {String name = '', String reason = 'stock count', String? opKey}) async {
     if (delta == 0 || medicineId.trim().isEmpty) return null;
+    await StockLedger.sanitizeNegativesOnce();
     final m = StockMovement(
-      opId: StockMovement.newId('cnt'),
+      opId: opKey == null
+          ? StockMovement.newId('cnt')
+          : StockMovement.deterministicId('cnt', [pool.key, medicineId, opKey]),
       pool: pool.key,
       medicineId: medicineId.trim(),
       delta: double.parse(delta.toStringAsFixed(4)),
@@ -139,6 +151,7 @@ class StockActions {
       return (moves: const <StockMovement>[], short: const <int, double>{});
     }
     await flags.put(claimKey, DateTime.now().toIso8601String());
+    await StockLedger.sanitizeNegativesOnce();
 
     final groups = StockReader.groups(pool, excludeSerial: serial);
     final moves = <StockMovement>[];
@@ -157,6 +170,7 @@ class StockActions {
       var left = units;
       for (final b in g.batches) {
         if (left <= 0) break;
+        if (isBatchExpired(b)) continue; // expired stock is never dispensed
         final id = (b['medicineId'] ?? b['id']).toString();
         final have = StockReader.qty(b) - (takenHere[id] ?? 0);
         if (have <= 0) continue;
@@ -177,7 +191,28 @@ class StockActions {
       }
       if (left > 1e-9) short[i] = left;
     }
-    if (moves.isNotEmpty) await StockLedger.recordAll(moves);
+    if (moves.isNotEmpty) {
+      await StockLedger.recordAll(moves);
+      // One log entry per token (LAN only, `cloud: false`: the movements themselves already
+      // reach the cloud, so this does not cost Firebase writes per patient).
+      final perMedicine = <String, double>{};
+      for (final m in moves) {
+        perMedicine[m.name] = (perMedicine[m.name] ?? 0) - m.delta;
+      }
+      await StockLog.record({
+        'id': 'log_disp_${pool.key.replaceAll('/', '_')}_${serial.trim()}_${entryUid.trim()}',
+        'action': 'dispensed',
+        'serial': serial,
+        'medicineName': perMedicine.keys.join(', '),
+        'items': [
+          for (final e in perMedicine.entries) {'name': e.key, 'quantity': e.value},
+        ],
+        'quantityRemoved': perMedicine.values.fold<double>(0, (a, b) => a + b),
+        'pool': pool.key,
+        'branchId': pool.branch,
+        'cloud': false,
+      });
+    }
     return (moves: moves, short: short);
   }
 }

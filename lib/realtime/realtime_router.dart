@@ -41,7 +41,9 @@ import '../models/donation_box_models.dart';
 import '../services/zkteco_network_service.dart';
 import '../services/stock/stock_ledger.dart';
 import '../services/stock/stock_pool.dart';
+import '../services/stock/stock_log.dart';
 import '../services/stock/stock_sync.dart';
+import '../services/stock/stock_wipe_service.dart';
 import '../pages/madrassa/utils/madrassa_local_storage.dart';
 import 'realtime_events.dart';
 import 'realtime_manager.dart';
@@ -126,9 +128,10 @@ class RealtimeRouter {
     'prescription_created': {LocalStorageService.prescriptionsBox, LocalStorageService.entriesBox, LocalStorageService.medicineRestrictionsBox},
     RealtimeEvents.savePrescription: {LocalStorageService.prescriptionsBox, LocalStorageService.entriesBox, LocalStorageService.medicineRestrictionsBox},
     RealtimeEvents.deletePrescription: {LocalStorageService.prescriptionsBox},
-    RealtimeEvents.savePatient: {LocalStorageService.patientsBox},
+    RealtimeEvents.savePatient: {LocalStorageService.patientsBox, LocalStorageService.entriesBox},
     RealtimeEvents.deletePatient: {LocalStorageService.patientsBox},
     'migrate_patient_key': {LocalStorageService.patientsBox, LocalStorageService.entriesBox},
+    'patient_edit_approved': {LocalStorageService.patientsBox, LocalStorageService.entriesBox},
     'dispense_completed': {LocalStorageService.entriesBox},
     'inventory_stock_sync': {LocalStorageService.stockBox},
     RealtimeEvents.saveStockItem: {LocalStorageService.stockBox},
@@ -366,14 +369,26 @@ Serial: ${data['serial'] ?? 'N/A'}
       case 'migrate_patient_key':
         final oldId = data['oldPatientId']?.toString();
         final newId = data['newPatientId']?.toString();
-        final pData = (data['patient'] ?? data['data']) as Map<String, dynamic>?;
-        if (oldId != null && oldId.isNotEmpty) {
-          await LocalStorageService.deleteLocalPatient(oldId);
+        final rawP = data['patient'] ?? data['data'];
+        Map<String, dynamic>? pData = rawP is Map ? Map<String, dynamic>.from(rawP) : null;
+        // The edit carries only the edited fields: keep the rest of the record (createdAt,
+        // DOB, address, guardian, last weight…), which every PC used to lose.
+        if (pData != null && oldId != null && oldId.isNotEmpty) {
+          final old = LocalStorageService.getLocalPatient(oldId);
+          if (old != null) pData = {...old, ...pData};
+        }
+        if (oldId != null && oldId.isNotEmpty && oldId != newId) {
+          // A key move, not a deletion: only the local copy goes. deleteLocalPatient also
+          // logged a DELETE and queued a cloud delete of the patient's real cloud record.
+          await LocalStorageService.removeLocalPatientKey(oldId);
         }
         if (pData != null) {
           await LocalStorageService.saveLocalPatient(pData, isFromSync: true);
           final bId = (pData['branchId'] ?? '').toString();
-          if (bId.isNotEmpty && newId != null && newId.isNotEmpty) {
+          if (oldId != null && oldId.isNotEmpty) {
+            await LocalStorageService.updateActiveEntriesForPatient(bId, oldId, pData);
+          }
+          if (newId != null && newId.isNotEmpty && newId != oldId) {
             await LocalStorageService.updateActiveEntriesForPatient(bId, newId, pData);
           }
         }
@@ -389,32 +404,20 @@ Serial: ${data['serial'] ?? 'N/A'}
         break;
 
       case 'stock_wipe':
-        // Server broadcast: wipe this pool from local Hive and reset the cache.
+        // Server broadcast: completely wipe this pool from local Hive, queues, and cache.
         try {
-          final data = (message['data'] ?? const {}) as Map;
-          final poolKey = data['pool']?.toString() ?? '';
+          final target = (message['_targetClientId'] ?? '').toString();
+          if (target.isNotEmpty && target != (RealtimeManager().clientId ?? '')) break;
+          final payload = (message['data'] is Map ? message['data'] as Map : const {});
+          final poolKey = (payload['pool'] ?? message['pool'] ?? '').toString().trim().toLowerCase();
+          final wipeId = (payload['wipeId'] ?? message['wipeId'] ?? '').toString().trim();
           if (poolKey.isNotEmpty) {
-            await StockLedger.ensureOpen();
-            // Mark every local item in this pool as deleted
-            final items = StockLedger.items(pool: poolKey);
-            for (final item in items) {
-              final id = (item['medicineId'] ?? item['id'] ?? '').toString();
-              if (id.isNotEmpty) {
-                try { await StockLedger.markDeleted(poolKey, id); } catch (_) {}
-              }
-            }
-            // Clear movements for this pool
-            if (Hive.isBoxOpen(StockLedger.movesBoxName)) {
-              final movesBox = Hive.box(StockLedger.movesBoxName);
-              final toDelete = <dynamic>[];
-              for (final k in movesBox.keys) {
-                final v = movesBox.get(k);
-                if (v is Map && (v['pool'] ?? '').toString() == poolKey) toDelete.add(k);
-              }
-              await movesBox.deleteAll(toDelete);
-            }
-            StockLedger.resetCache();
-            debugPrint('[RealtimeRouter] stock_wipe applied for pool $poolKey');
+            final res = await StockWipeService.applyRemoteWipe(
+              poolKey,
+              wipeId: wipeId.isEmpty ? null : wipeId,
+            );
+            debugPrint('[RealtimeRouter] stock_wipe applied for pool $poolKey '
+                '(removed ${res.itemsRemoved} items, ${res.movesRemoved} moves, ${res.queuePurged} queued, wipeId=$wipeId)');
           }
         } catch (e) {
           debugPrint('[RealtimeRouter] stock_wipe handler error: $e');
@@ -427,6 +430,10 @@ Serial: ${data['serial'] ?? 'N/A'}
       case StockSync.evChecksum:
       case StockSync.evDriftReport:
         await StockSync.handle(type, message);
+        break;
+
+      case StockLog.evLog:
+        await StockLog.handleIncoming(message);
         break;
 
       case RealtimeEvents.saveEmployee:
@@ -627,6 +634,54 @@ Serial: ${data['serial'] ?? 'N/A'}
         await _handleTokenExceptionApproved(data, message);
         break;
 
+      // A doctor's restock alert: kept on this PC so it survives the cloud list refresh and
+      // a restart (it lived in screen memory only). Not re-opened once dismissed here.
+      case RealtimeEvents.restockRequest:
+        {
+          final id = (data['id'] ?? data['requestId'])?.toString().trim() ?? '';
+          if (id.isNotEmpty && !LocalStorageService.isLocalRequestDecided(id)) {
+            final b = (message['branchId'] ?? data['branchId'] ?? '').toString();
+            await LocalStorageService.saveRestockRequest(b, {...data, 'id': id});
+          }
+        }
+        break;
+
+      // Another dispenser dismissed a restock alert.
+      case LocalStorageService.restockAcknowledgedEvent:
+        {
+          final id = (data['id'] ?? data['requestId'])?.toString().trim() ?? '';
+          if (id.isNotEmpty) {
+            final b = (message['branchId'] ?? data['branchId'] ?? '').toString();
+            await LocalStorageService.saveRestockRequest(b, {
+              'id': id,
+              'status': 'acknowledged',
+              'acknowledgedAt': data['acknowledgedAt'] ?? DateTime.now().toIso8601String(),
+            });
+          }
+        }
+        break;
+
+      // A supervisor approved a patient edit: every desk applies it (only the receptionist
+      // screen did, and only while open).
+      case 'patient_edit_approved':
+        {
+          final pid = data['patientId']?.toString().trim() ?? '';
+          final raw = data['changes'] ?? data['data'] ?? data['patient'];
+          if (pid.isNotEmpty && raw is Map) {
+            final changes = Map<String, dynamic>.from(raw);
+            final b = (data['branchId'] ?? message['branchId'] ?? '').toString();
+            await LocalStorageService.updatePatientWithCnicMigration(
+              oldPatientId: pid,
+              updatedPatient: {
+                ...changes,
+                if (b.isNotEmpty) 'branchId': b,
+              },
+              isFromSync: true,
+            );
+          }
+        }
+        break;
+
       // ── GENERIC WORKFLOW EVENTS (separate tracking box from edit-requests) ──
       case RealtimeEvents.workflowRequest:
       case RealtimeEvents.workflowDecision:
@@ -754,7 +809,8 @@ Serial: ${data['serial'] ?? 'N/A'}
           final from = (seq - 20) > 1 ? seq - 20 : 1;
           for (int i = from; i < seq; i++) {
             final checkSerial = '$prefix-${i.toString().padLeft(padWidth, '0')}';
-            if (LocalStorageService.getLocalEntry(branchId, checkSerial) == null) {
+            if (LocalStorageService.getLocalEntry(branchId, checkSerial) == null &&
+                !LocalStorageService.isSerialReversed(branchId, checkSerial)) {
               hasGap = true;
               break;
             }
@@ -1181,6 +1237,7 @@ Serial: ${data['serial'] ?? 'N/A'}
       final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString().trim();
       if (serial == null || serial.isEmpty) return;
 
+      await LocalStorageService.markSerialReversed(branchId, serial);
       await LocalStorageService.deleteLocalEntry(branchId, serial);
       await LocalStorageService.deleteLocalPrescription(serial);
 
@@ -1679,12 +1736,25 @@ Serial: ${data['serial'] ?? 'N/A'}
     final patientId = (data['patientId'] ?? data['id'])?.toString();
     final reason = data['reason']?.toString() ?? 'Approved by Doctor';
     final approvedBy = (data['approvedBy'] ?? data['doctorName'])?.toString() ?? 'Doctor';
-    final requestId = data['requestId']?.toString();
+    final requestId = (data['requestId'] ?? data['docId'])?.toString();
 
-    if (branchId.isNotEmpty && patientId != null && patientId.isNotEmpty) {
+    // The day the exception is for. Catch-ups re-send old approvals; yesterday's approval
+    // must not become an exception for today.
+    String? forDay = data['dateKey']?.toString().trim();
+    if (forDay == null || forDay.isEmpty) {
+      final at = DateTime.tryParse(
+          (data['approvedAt'] ?? data['reviewedAt'] ?? data['createdAt'] ?? '').toString());
+      if (at != null) forDay = CampSessionService.resolveShiftAndDateKey(at, branchId).dateKey;
+    }
+    // The shift's date, as the token desk looks exceptions up (a night shift after midnight).
+    final today = CampSessionService.resolveShiftAndDateKey(null, branchId).dateKey;
+    final isForToday = forDay == null || forDay.isEmpty || forDay == today;
+
+    if (isForToday && branchId.isNotEmpty && patientId != null && patientId.isNotEmpty) {
       await LocalStorageService.grantTokenException(
         branchId,
         patientId,
+        dateKey: today,
         reason: reason,
         approvedBy: approvedBy,
         requestId: requestId,

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import '../../../constants/colors.dart';
 import '../../../theme/role_theme_provider.dart';
 import '../donations_shared.dart';
@@ -37,27 +38,20 @@ class DashboardEmptyState extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 120,
-              height: 120,
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.03),
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.05),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Icons.receipt_long_rounded,
-                      size: 40, color: AppColors.primary.withValues(alpha: 0.2)),
-                ),
-              ),
+            GEmptyIllustration(
+              (selectedCategory != DonationCategory.all ||
+                      selectedSubtype != null ||
+                      selectedGmwfSub != null ||
+                      isSearchActive ||
+                      paymentMethodFilter != 'All' ||
+                      minAmount != null ||
+                      maxAmount != null)
+                  ? GEmptyIllustrationKind.search
+                  : GEmptyIllustrationKind.finance,
+              size: 160,
+              fallbackIcon: Icons.receipt_long_rounded,
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 24),
             Text('No Transactions Found',
                 style: TextStyle(
                     fontSize: 20,

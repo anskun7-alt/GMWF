@@ -254,9 +254,10 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
             });
           } else {
             totalAdded += qty;
+            // Legacy 'proforma' action names mapped at display time so old logs remain readable.
             final isProforma = action == 'add_proforma_stock' || action == 'add_from_proforma' || action == 'proforma_add' || action == 'proforma_import';
             final isReg = action == 'medicine_registered_directly' || action == 'medicine_registered';
-            final actionLabel = isProforma ? 'Universal Proforma Import' : (isReg ? 'Initial Registration' : 'Restock');
+            final actionLabel = isProforma ? 'Add Medicine' : (isReg ? 'Initial Registration' : 'Restock');
             final performer = d['performedByName'] ?? d['performedBy'] ?? 'Unknown';
             final performerRole = d['performedByRole'] != null ? ' (${d['performedByRole']})' : '';
 
@@ -267,7 +268,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
               'user': '$performer$performerRole',
               'msg': '$actionLabel ($medName)',
               'medicineName': medName,
-              'details': d['details'] ?? '',
+              'details': (d['details'] ?? '').toString().replaceAll('Universal Proforma Catalog', 'Add Medicine'),
               'isProforma': isProforma,
               'campTag': campTag,
             });
@@ -298,10 +299,11 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
           final medName = d['medicineName'] ?? d['name'] ?? 'Unknown Medicine';
 
           if (ts.year == selectedYear && ts.month == selectedMonthVal) {
+            // Legacy 'proforma' action names mapped at display time so old logs remain readable.
             final isProforma = action == 'add_proforma_stock' || action == 'add_from_proforma' || action == 'proforma_add' || action == 'proforma_import';
             final isReg = action == 'medicine_registered_directly' || action == 'medicine_registered';
             final isEdit = action == 'edit_stock' || action == 'medicine_edited';
-            final actionLabel = isProforma ? 'Universal Proforma Import' : (isReg ? 'Initial Registration' : 'Restock');
+            final actionLabel = isProforma ? 'Add Medicine' : (isReg ? 'Initial Registration' : 'Restock');
             final performer = d['performedByName'] ?? d['performedBy'] ?? 'Unknown';
             final performerRole = d['performedByRole'] != null ? ' (${d['performedByRole']})' : '';
             final campTag = (d['dispensaryTag'] ?? d['dispensaryId'] ?? d['campId'] ?? '').toString();
@@ -339,7 +341,7 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
                   'user': '$performer$performerRole',
                   'msg': '$actionLabel ($medName)',
                   'medicineName': medName,
-                  'details': d['details'] ?? '',
+                  'details': (d['details'] ?? '').toString().replaceAll('Universal Proforma Catalog', 'Add Medicine'),
                   'isProforma': isProforma,
                   'campTag': campTag,
                 });
@@ -1538,9 +1540,13 @@ class _MedicineLedgerPageState extends State<MedicineLedgerPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.query_stats_rounded, size: 64, color: c.textMuted),
-          const SizedBox(height: 12),
-          Text(msg, style: TextStyle(color: c.textSecondary, fontSize: 14)),
+          const GEmptyIllustration(
+            GEmptyIllustrationKind.activity,
+            size: 152,
+            fallbackIcon: Icons.query_stats_rounded,
+          ),
+          const SizedBox(height: 14),
+          Text(msg, style: TextStyle(color: c.textSecondary, fontSize: 15, fontWeight: FontWeight.w600)),
         ],
       ),
     );

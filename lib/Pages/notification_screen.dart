@@ -3,6 +3,7 @@
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -13,12 +14,16 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/local_storage_service.dart';
 import '../services/cloud_messaging_service.dart';
 import '../services/auto_update_service.dart';
+import '../widgets/notification_bell_popover.dart';
+import 'request.dart';
 
 class NotificationScreen extends StatefulWidget {
   final String branchId;
   final String userId;
   final String role; // admin, supervisor, doctor, receptionist, dispenser, cashier, guardian, etc.
   final bool embedded;
+  final void Function(Map<String, dynamic> requestData)? onOpenRequest;
+  final VoidCallback? onViewAllRequests;
 
   const NotificationScreen({
     super.key,
@@ -26,6 +31,8 @@ class NotificationScreen extends StatefulWidget {
     required this.userId,
     required this.role,
     this.embedded = false,
+    this.onOpenRequest,
+    this.onViewAllRequests,
   });
 
   @override
@@ -33,7 +40,7 @@ class NotificationScreen extends StatefulWidget {
 }
 
 class _NotificationScreenState extends State<NotificationScreen> {
-  late final Future<void> _notificationsBoxReady = LocalStorageService.openBoxSafe(LocalStorageService.notificationsBox);
+  late final Future<void> _notificationsBoxReady = _initBoxes();
   final TextEditingController _messageController = TextEditingController();
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
@@ -42,6 +49,30 @@ class _NotificationScreenState extends State<NotificationScreen> {
   String? _selectedReceiverRole;
   String _filterStatus = 'all'; // 'all' | 'unread'
   String _searchQuery = '';
+
+  Future<void> _initBoxes() async {
+    await LocalStorageService.openBoxSafe(LocalStorageService.notificationsBox);
+    await NotificationBellHelper.ensureInitialized(branchId: widget.branchId);
+  }
+
+  void _navigateToRequest(Map<String, dynamic> reqData) {
+    final reqId = (reqData['requestId'] ?? reqData['id'])?.toString();
+    RequestPage.focusRequest(reqId);
+    if (widget.onOpenRequest != null) {
+      widget.onOpenRequest!(reqData);
+      return;
+    }
+    final reqBranch = (reqData['branchId'] ?? widget.branchId).toString();
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RequestPage(
+          branchId: reqBranch.isNotEmpty ? reqBranch : widget.branchId,
+          isSupervisor: true,
+          initialRequestId: reqId,
+        ),
+      ),
+    );
+  }
 
   @override
   void dispose() {
@@ -507,50 +538,74 @@ class _NotificationScreenState extends State<NotificationScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.comfort;
 
     return Scaffold(
+      backgroundColor: c.background,
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
-        title: Row(
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              padding: const EdgeInsets.all(2),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: SoftPalette.gray50.withAlpha(20),
+        backgroundColor: c.surface,
+        foregroundColor: c.textPrimary,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        toolbarHeight: widget.embedded ? 48 : 56,
+        title: widget.embedded
+            ? Text(
+                'Activity & Request Feed',
+                style: TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w700,
+                  color: c.textSecondary,
+                ),
+              )
+            : Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: c.brandSoft,
+                    ),
+                    child: Image.asset(
+                      kAppLogoAsset,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) =>
+                          Icon(Icons.notifications, size: 18, color: c.brand),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Notifications',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: c.textPrimary,
+                    ),
+                  ),
+                ],
               ),
-              child: Image.asset(
-                kAppLogoAsset,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) => const Icon(Icons.notifications, size: 20),
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Text('Notifications'),
-          ],
-        ),
         actions: [
           IconButton(
             tooltip: 'Test Notification System',
-            icon: const Icon(Icons.notifications_active_outlined, color: SoftPalette.amber200),
+            icon: Icon(Icons.notifications_active_outlined, color: c.warning),
             onPressed: _showTestNotificationPicker,
           ),
           if (widget.role == 'admin' || widget.role == 'supervisor' || widget.role == 'chairman')
             IconButton(
               tooltip: 'Broadcast Holiday Announcement',
-              icon: const Icon(Icons.campaign_outlined, color: SoftPalette.emerald200),
+              icon: Icon(Icons.campaign_outlined, color: c.brand),
               onPressed: _showHolidayBroadcastDialog,
             ),
           IconButton(
             tooltip: 'Mark all as read',
-            icon: const Icon(Icons.done_all),
+            icon: Icon(Icons.done_all_rounded, color: c.textSecondary),
             onPressed: _markAllAsSeen,
           ),
           IconButton(
             tooltip: 'Clear history',
-            icon: const Icon(Icons.delete_sweep_outlined),
+            icon: Icon(Icons.delete_sweep_outlined, color: c.textSecondary),
             onPressed: _clearAllNotifications,
           ),
         ],
@@ -574,9 +629,9 @@ class _NotificationScreenState extends State<NotificationScreen> {
 
           final box = Hive.box(LocalStorageService.notificationsBox);
 
-          return ValueListenableBuilder<Box>(
-            valueListenable: DebouncedBoxListenable.shared(box),
-            builder: (context, box, _) {
+          return ListenableBuilder(
+            listenable: NotificationBellHelper.buildCombinedListenable(),
+            builder: (context, _) {
               final rawItems = <Map<String, dynamic>>[];
               for (final key in box.keys) {
                 final raw = box.get(key);
@@ -594,6 +649,21 @@ class _NotificationScreenState extends State<NotificationScreen> {
                 for (final m in rawItems) m: DateTime.tryParse(m['timestamp']?.toString() ?? '') ?? DateTime(1970),
               };
               rawItems.sort((a, b) => stamps[b]!.compareTo(stamps[a]!));
+
+              // Also fetch pending requests (Medicine Stock, Token Reversal, Patient Edit, etc.)
+              final pendingRequests = NotificationBellHelper.getPendingRequests(
+                branchId: widget.branchId,
+                role: widget.role,
+              ).where((req) {
+                if (_searchQuery.isNotEmpty) {
+                  final t = NotificationBellHelper.getRequestTitle(req).toLowerCase();
+                  final s = NotificationBellHelper.getRequestSubtitle(req).toLowerCase();
+                  if (!t.contains(_searchQuery) && !s.contains(_searchQuery)) {
+                    return false;
+                  }
+                }
+                return true;
+              }).toList();
 
               // Filter by status & search
               final items = rawItems.where((item) {
@@ -660,41 +730,126 @@ class _NotificationScreenState extends State<NotificationScreen> {
                     ),
                   ),
 
-                  // Notifications List
+                  // Notifications & Pending Requests List
                   Expanded(
-                    child: items.isEmpty
+                    child: (items.isEmpty && pendingRequests.isEmpty)
                         ? Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(Icons.notifications_none_outlined, size: 64, color: SoftPalette.gray300),
-                                const SizedBox(height: 12),
-                                Text(
-                                  _filterStatus == 'unread'
-                                      ? 'No unread notifications'
-                                      : 'No notifications yet',
-                                  style: TextStyle(color: context.adapt(SoftPalette.gray500), fontSize: 16),
-                                ),
-                              ],
+                            child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const GEmptyIllustration(
+                                    GEmptyIllustrationKind.notifications,
+                                    size: 156,
+                                    fallbackIcon: Icons.notifications_none_outlined,
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Text(
+                                    _filterStatus == 'unread'
+                                        ? 'No unread notifications or pending requests'
+                                        : 'No notifications yet',
+                                    style: TextStyle(
+                                      color: context.adapt(SoftPalette.gray500),
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _filterStatus == 'unread'
+                                        ? 'You are all caught up on alerts and updates.'
+                                        : 'New alerts, approvals, and announcements will appear here.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: context.adapt(SoftPalette.gray400),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           )
-                        : ListView.separated(
+                        : ListView(
                             padding: const EdgeInsets.all(12),
-                            itemCount: items.length,
-                            separatorBuilder: (_, index) => const SizedBox(height: 8),
-                            itemBuilder: (context, index) {
-                              final item = items[index];
-                              final id = item['_key'] ?? item['id']?.toString() ?? '$index';
-                              final seen = item['seen'] == true;
-                              final isUrdu = item['body_ur'] != null && item['body_ur'].toString().isNotEmpty;
+                            children: [
+                              if (pendingRequests.isNotEmpty) ...[
+                                Container(
+                                  margin: const EdgeInsets.only(bottom: 10),
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? SoftPalette.teal700.withValues(alpha: 0.35)
+                                        : SoftPalette.teal100m,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: isDark ? SoftPalette.teal500 : SoftPalette.teal300,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.pending_actions_rounded,
+                                        size: 20,
+                                        color: isDark ? SoftPalette.amber200 : SoftPalette.teal700,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          'Pending Requests & Approvals (${pendingRequests.length})',
+                                          style: TextStyle(
+                                            fontSize: 13.5,
+                                            fontWeight: FontWeight.w800,
+                                            color: isDark ? SoftPalette.gray50 : SoftPalette.teal700,
+                                          ),
+                                        ),
+                                      ),
+                                      TextButton.icon(
+                                        onPressed: () {
+                                          RequestPage.focusRequest(null);
+                                          if (widget.onViewAllRequests != null) {
+                                            widget.onViewAllRequests!();
+                                          } else {
+                                            Navigator.of(context).push(
+                                              MaterialPageRoute(
+                                                builder: (_) => RequestPage(
+                                                  branchId: widget.branchId,
+                                                  isSupervisor: true,
+                                                ),
+                                              ),
+                                            );
+                                          }
+                                        },
+                                        icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                                        label: const Text(
+                                          'View All',
+                                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                for (final req in pendingRequests)
+                                  _buildPendingRequestNotificationCard(context, req, isDark),
+                                if (items.isNotEmpty) const SizedBox(height: 12),
+                              ],
+                              for (int index = 0; index < items.length; index++)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: Builder(
+                                    builder: (context) {
+                                      final item = items[index];
+                                      final id = item['_key'] ?? item['id']?.toString() ?? '$index';
+                                      final seen = item['seen'] == true;
+                                      final isUrdu = item['body_ur'] != null && item['body_ur'].toString().isNotEmpty;
 
-                              final title = (isUrdu ? item['title_ur'] : item['title_en']) ?? item['title'] ?? 'Notification';
-                              final body = (isUrdu ? item['body_ur'] : item['body_en']) ?? item['message'] ?? '';
-                              final category = (item['category'] ?? item['type'] ?? 'Notification').toString().toUpperCase();
-                              final tsStr = item['timestamp']?.toString();
-                              final dt = tsStr != null ? DateTime.tryParse(tsStr) : null;
-                              final timeDisplay = dt != null ? DateFormat('dd MMM yyyy, hh:mm a').format(dt.toLocal()) : '';
-                              final targetScreen = item['targetScreen'] ?? item['target_screen'] ?? '';
+                                      final title = (isUrdu ? item['title_ur'] : item['title_en']) ?? item['title'] ?? 'Notification';
+                                      final body = (isUrdu ? item['body_ur'] : item['body_en']) ?? item['message'] ?? '';
+                                      final category = (item['category'] ?? item['type'] ?? 'Notification').toString().toUpperCase();
+                                      final tsStr = item['timestamp']?.toString();
+                                      final dt = tsStr != null ? DateTime.tryParse(tsStr) : null;
+                                      final timeDisplay = dt != null ? DateFormat('dd MMM yyyy, hh:mm a').format(dt.toLocal()) : '';
+                                      final targetScreen = item['targetScreen'] ?? item['target_screen'] ?? '';
 
                               return Dismissible(
                                 key: Key(id),
@@ -917,7 +1072,10 @@ class _NotificationScreenState extends State<NotificationScreen> {
                                   ),
                                 ),
                               );
-                            },
+                                    },
+                                  ),
+                                ),
+                            ],
                           ),
                   ),
                 ],
@@ -925,6 +1083,151 @@ class _NotificationScreenState extends State<NotificationScreen> {
             },
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildPendingRequestNotificationCard(
+    BuildContext context,
+    Map<String, dynamic> data,
+    bool isDark,
+  ) {
+    final type = (data['requestType'] ?? data['type'] ?? 'request').toString().toLowerCase().trim();
+    final title = NotificationBellHelper.getRequestTitle(data);
+    final subtitle = NotificationBellHelper.getRequestSubtitle(data);
+    final requester = (data['requesterName'] ??
+            data['requestedByName'] ??
+            data['requestedBy'] ??
+            'Staff')
+        .toString()
+        .trim();
+    final campLabel = RequestUtils.resolveRequestCampName(data, widget.branchId);
+    final timeStr = NotificationBellHelper.formatRelativeOrShortTime(
+      data['requestedAt'] ?? data['createdAt'],
+    );
+    final badgeBg = RequestUtils.getBadgeColor(type, isDark: isDark);
+    final badgeFg = RequestUtils.getTextColor(type, isDark: isDark);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: isDark ? SoftPalette.teal500.withAlpha(140) : SoftPalette.teal300,
+          width: 1.4,
+        ),
+      ),
+      color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _navigateToRequest(data),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: badgeBg,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  NotificationBellHelper.getRequestIcon(type),
+                  size: 20,
+                  color: badgeFg,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: badgeBg,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            NotificationBellHelper.getRequestTypeLabel(type),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              color: badgeFg,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          campLabel,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: isDark ? SoftPalette.sky350 : SoftPalette.teal600,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (timeStr.isNotEmpty)
+                          Text(
+                            timeStr,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: SoftPalette.gray350,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14.5,
+                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: isDark ? SoftPalette.slate200 : SoftPalette.slate700,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Text(
+                          'Requested by $requester',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: isDark ? SoftPalette.slate400 : SoftPalette.slate550,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          'Open Request →',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: isDark ? SoftPalette.teal300 : SoftPalette.teal600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

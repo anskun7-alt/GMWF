@@ -996,6 +996,11 @@ class _HybridDispensaryScreenState extends State<HybridDispensaryScreen>
           alerts.add(d);
           LocalStorageService.saveRestockRequest(widget.branchId, d);
         }
+        // Plus alerts that came over the LAN and are not in the cloud yet.
+        final ids = alerts.map((a) => a['id']).toSet();
+        for (final local in LocalStorageService.getPendingRestockRequests(widget.branchId)) {
+          if (!ids.contains(local['id'])) alerts.add(local);
+        }
         setState(() {
           _pendingRestockAlerts = alerts;
         });

@@ -18,6 +18,11 @@ import 'package:gmwf/widgets/app_skeleton.dart';
 import 'package:gmwf/utils/formatters.dart';
 import 'package:gmwf/utils/branch_labels.dart';
 import 'package:gmwf/services/staff_patient_link_service.dart';
+import 'package:gmwf/services/cloud/cloud_db.dart';
+import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
+import 'package:gmwf/services/sync_service.dart';
+import 'package:gmwf/realtime/realtime_manager.dart';
+import 'package:gmwf/realtime/realtime_events.dart';
 
 class PatientDetailScreen extends StatefulWidget {
   final String patientId;
@@ -53,6 +58,8 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   final TextEditingController _phoneController      = TextEditingController();
   final TextEditingController _dobController        = TextEditingController();
   final TextEditingController _ageController        = TextEditingController();
+  final TextEditingController _reasonController     = TextEditingController();
+  StreamSubscription<Map<String, dynamic>>? _realtimeSub;
 
   String? _selectedGender;
   String? _selectedBloodGroup;
@@ -80,6 +87,18 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
     _fadeAnim = CurvedAnimation(parent: _animController, curve: Curves.easeOut);
     _animController.forward();
     _fetchBranchName();
+    _realtimeSub = RealtimeManager().messageStream.listen((event) {
+      final type = event['event_type']?.toString();
+      if (type == 'patient_edit_approved' ||
+          type == RealtimeEvents.savePatient ||
+          type == 'save_patient' ||
+          type == 'migrate_patient_key') {
+        if (!mounted) return;
+        setState(() {
+          _loadLocalPatientData();
+        });
+      }
+    });
   }
 
   void _loadLocalPatientData() {
@@ -92,10 +111,11 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
 
   @override
   void dispose() {
+    _realtimeSub?.cancel();
     _animController.dispose();
     _noteController.dispose(); _medicineController.dispose(); _nameController.dispose();
     _cnicController.dispose(); _guardianCnicController.dispose(); _phoneController.dispose();
-    _dobController.dispose(); _ageController.dispose();
+    _dobController.dispose(); _ageController.dispose(); _reasonController.dispose();
     super.dispose();
   }
 
@@ -214,25 +234,23 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   }
 
   void _showEditDialog(Map<String, dynamic> data, RoleThemeData t) async {
-    final ok = await _checkPassword(t);
-    if (!ok || !mounted) return;
+    if (!mounted) return;
     final editKey = GlobalKey<FormState>();
-    final isAdult = data['isAdult'] == true;
-    _nameController.text = data['name'] ?? '';
+    final isAdult = !LocalStorageService.isChildPatientRecord(data);
+    _nameController.text = LocalStorageService.resolveCanonicalPatientName(data);
     _cnicController.text = data['cnic'] ?? '';
     _guardianCnicController.text = data['guardianCnic'] ?? '';
     _phoneController.text = data['phone'] ?? '';
     _ageController.text = data['age']?.toString() ?? '';
     _selectedGender = data['gender'];
-    _selectedBloodGroup = data['bloodGroup'] ?? 'N/A';
+    const validBgs = ['N/A', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+    final rawBg = (data['bloodGroup']?.toString() ?? 'N/A').trim().toUpperCase();
+    _selectedBloodGroup = validBgs.contains(rawBg) ? rawBg : 'N/A';
     _selectedStatus = data['status'] ?? 'Zakat';
-    final rawDob = data['dob'];
-    final DateTime? dobDt = rawDob is Timestamp
-        ? rawDob.toDate()
-        : (rawDob is DateTime
-            ? rawDob
-            : (rawDob != null ? parseDobDateTime(rawDob.toString()) ?? DateTime.tryParse(rawDob.toString()) : null));
+    final rawDob = data['dob'] ?? data['dateOfBirth'];
+    final DateTime? dobDt = LocalStorageService.tryParseDob(rawDob);
     _dobController.text = dobDt != null ? DateFormat('dd-MM-yyyy').format(dobDt) : '';
+    _reasonController.clear();
 
     showDialog(
       context: context,
@@ -246,9 +264,9 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
               padding: const EdgeInsets.fromLTRB(20, 18, 16, 18),
               decoration: BoxDecoration(color: t.accent, borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
               child: Row(children: [
-                const Icon(Icons.edit_rounded, color: SoftPalette.gray50, size: 20),
+                const Icon(Icons.edit_note_rounded, color: SoftPalette.gray50, size: 22),
                 const SizedBox(width: 10),
-                const Expanded(child: Text('Edit Patient', style: TextStyle(color: SoftPalette.gray50, fontSize: 17, fontWeight: FontWeight.w800))),
+                const Expanded(child: Text('Request Patient Details Edit', style: TextStyle(color: SoftPalette.gray50, fontSize: 17, fontWeight: FontWeight.w800))),
                 IconButton(onPressed: () => Navigator.pop(ctx),
                     icon: const Icon(Icons.close_rounded, color: SoftPalette.gray50A70, size: 20), padding: EdgeInsets.zero),
               ]),
@@ -284,19 +302,24 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                   _editField(t, _dobController, 'Date of Birth (dd-MM-yyyy)', Icons.cake_outlined,
                       type: TextInputType.datetime,
                       formatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
-                        LengthLimitingTextInputFormatter(10), _DobFormatter()],
+                        LengthLimitingTextInputFormatter(10), DobInputFormatter()],
                       onChanged: (v) {
-                        final parsed = parseDobDateTime(v);
+                        final parsed = LocalStorageService.tryParseDob(v) ?? parseDobDateTime(v);
                         if (parsed != null) {
                           final today = DateTime.now();
                           int age = today.year - parsed.year;
                           if (today.month < parsed.month || (today.month == parsed.month && today.day < parsed.day)) age--;
-                          _ageController.text = age.toString();
+                          if (age >= 0) _ageController.text = age.toString();
                         }
                       },
                       validator: (v) {
-                        if (v!.isEmpty) return 'Required';
-                        if (!RegExp(r'^\d{2}-\d{2}-\d{4}$').hasMatch(v)) return 'Use dd-MM-yyyy';
+                        final trimmed = (v ?? '').trim();
+                        if (trimmed.isEmpty) {
+                          return int.tryParse(_ageController.text.trim()) != null ? null : 'Enter DOB or Age';
+                        }
+                        if ((LocalStorageService.tryParseDob(trimmed) ?? parseDobDateTime(trimmed)) == null) {
+                          return 'Use dd-MM-yyyy';
+                        }
                         return null;
                       }),
                   _editField(t, _ageController, 'Age', Icons.calendar_today_outlined,
@@ -311,6 +334,8 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                   _editDropdown(t: t, value: _selectedStatus, label: 'Status', icon: Icons.mosque_rounded,
                       items: const ['Zakat', 'Non-Zakat', 'GMWF'], onChanged: (v) => setS(() => _selectedStatus = v),
                       labelOf: (s) => BranchLabels.text(s, widget.branchId)),
+                  _editField(t, _reasonController, 'Reason for Edit Request (Required)', Icons.notes_rounded,
+                      validator: (v) => (v == null || v.trim().isEmpty) ? 'Please enter reason for edit request' : null),
                 ])),
               ),
             ),
@@ -330,8 +355,8 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
                 )),
                 const SizedBox(width: 10),
                 Expanded(flex: 2, child: ElevatedButton.icon(
-                  icon: const Icon(Icons.save_rounded, size: 17),
-                  label: const Text('Save Changes', style: TextStyle(fontWeight: FontWeight.w700)),
+                  icon: const Icon(Icons.send_rounded, size: 17),
+                  label: const Text('Submit Edit Request', style: TextStyle(fontWeight: FontWeight.w700)),
                   onPressed: () async => _savePatient(ctx, editKey, isAdult),
                   style: ElevatedButton.styleFrom(backgroundColor: t.accent, foregroundColor: SoftPalette.gray50,
                       padding: const EdgeInsets.symmetric(vertical: 13),
@@ -347,19 +372,51 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
 
   Future<void> _savePatient(BuildContext ctx, GlobalKey<FormState> key, bool isAdult) async {
     if (!key.currentState!.validate()) return;
-    final updates = <String, dynamic>{
-      'name': _nameController.text.trim(),
-      'patientName': _nameController.text.trim(),
-      'phone': _phoneController.text.trim(),
-      'gender': _selectedGender,
-      'bloodGroup': _selectedBloodGroup ?? 'N/A',
-      'status': _selectedStatus ?? 'Zakat',
-      'age': int.tryParse(_ageController.text) ?? 0,
-      'isAdult': (int.tryParse(_ageController.text) ?? 0) >= 18,
-    };
     final newCnic = _cnicController.text.trim();
     final newGuardianCnic = _guardianCnicController.text.trim();
-    if (updates['isAdult'] == true) {
+
+    // Rule: 1 adult per CNIC — prevent migrating an adult onto another adult's CNIC.
+    if (isAdult) {
+      final newDigits = newCnic.replaceAll(RegExp(r'\D'), '');
+      final oldDigits = (_currentPatientData?['cnic'] ?? _currentPatientData?['patientCnic'] ?? _currentPatientId)
+          .toString()
+          .replaceAll(RegExp(r'\D'), '');
+      if (newDigits.length == 13 && newDigits != oldDigits) {
+        final conflictingAdult = LocalStorageService.getLocalAdultByCnic(newCnic);
+        if (conflictingAdult != null) {
+          final conflictPid = (conflictingAdult['patientId'] ?? conflictingAdult['id'] ?? '')
+              .toString()
+              .replaceAll('-', '')
+              .toLowerCase();
+          if (conflictPid != _currentPatientId.replaceAll('-', '').toLowerCase()) {
+            final conflictName = LocalStorageService.resolveCanonicalPatientName(conflictingAdult);
+            _snack(
+              'Only 1 adult is allowed per CNIC. This CNIC already belongs to '
+              '${conflictName.isNotEmpty ? conflictName : 'another adult'}.',
+              error: true,
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    final trimmedName = _nameController.text.trim();
+    final parsedAge = int.tryParse(_ageController.text.trim()) ?? 0;
+    final updates = <String, dynamic>{
+      'name': trimmedName,
+      'patientName': trimmedName,
+      'fullName': trimmedName,
+      'phone': _phoneController.text.trim(),
+      'gender': _selectedGender,
+      'patientGender': _selectedGender,
+      'bloodGroup': _selectedBloodGroup ?? 'N/A',
+      'status': _selectedStatus ?? 'Zakat',
+      'age': parsedAge,
+      'patientAge': parsedAge,
+      'isAdult': isAdult,
+    };
+    if (isAdult) {
       updates['cnic'] = newCnic;
       updates['patientCnic'] = newCnic;
       updates['guardianCnic'] = null;
@@ -367,34 +424,97 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
       updates['guardianCnic'] = newGuardianCnic;
       updates['cnic'] = null;
     }
-    if (_dobController.text.isNotEmpty) {
-      final parsedDob = parseDobDateTime(_dobController.text);
+    if (_dobController.text.trim().isNotEmpty) {
+      final parsedDob = LocalStorageService.tryParseDob(_dobController.text.trim()) ??
+          parseDobDateTime(_dobController.text.trim());
       if (parsedDob != null) {
-        updates['dob'] = parsedDob.toIso8601String();
+        final isoDob = parsedDob.toIso8601String();
+        updates['dob'] = isoDob;
+        updates['dateOfBirth'] = isoDob;
+        final calcAge = LocalStorageService.calculateAgeFromDob(isoDob);
+        if (calcAge >= 0) {
+          updates['age'] = calcAge;
+          updates['patientAge'] = calcAge;
+        }
       }
     }
     updates['branchId'] = widget.branchId.toLowerCase();
+    final reasonText = _reasonController.text.trim();
+    updates['reason'] = reasonText;
 
-    // 1. Save & migrate CNIC atomically across local storage and active entries
-    String updatedKey = _currentPatientId;
-    try {
-      updatedKey = await LocalStorageService.updatePatientWithCnicMigration(
-        oldPatientId: _currentPatientId,
-        updatedPatient: updates,
-        oldCnic: _currentPatientData?['cnic']?.toString() ?? _currentPatientData?['guardianCnic']?.toString(),
-      );
-    } catch (e) {
-      debugPrint('[PatientDetail] Local save error: $e');
-    }
+    final origData = Map<String, dynamic>.from(
+      _currentPatientData ?? LocalStorageService.getLocalPatient(_currentPatientId) ?? <String, dynamic>{},
+    );
+    final currentDisplayName = LocalStorageService.resolveCanonicalPatientName(origData);
+    final activeUser = LocalStorageService.getActiveUsername();
+    final requesterId = widget.doctorId.isNotEmpty ? widget.doctorId : activeUser;
+    final effBranch = (widget.branchId.isNotEmpty && widget.branchId.toLowerCase() != 'all')
+        ? widget.branchId.toLowerCase()
+        : ((origData['branchId'] ?? LocalStorageService.getActiveBranchId() ?? 'karachi').toString().toLowerCase());
+    final reqId = 'req_patient_edit_${requesterId.replaceAll(RegExp(r'\s+'), '_')}_${DateTime.now().millisecondsSinceEpoch}';
 
-    if (mounted) {
-      setState(() {
-        _currentPatientId = updatedKey;
-        _currentPatientData = updates;
+    final reqPayload = <String, dynamic>{
+      'id': reqId,
+      'requestId': reqId,
+      'type': 'patient_edit',
+      'requestType': 'patient_edit',
+      'collection': 'edit_requests',
+      'status': 'pending',
+      'branchId': effBranch,
+      'patientId': _currentPatientId,
+      'patientName': currentDisplayName.isNotEmpty ? currentDisplayName : trimmedName,
+      'cnic': origData['cnic'] ?? (isAdult ? newCnic : null),
+      'guardianCnic': origData['guardianCnic'] ?? (!isAdult ? newGuardianCnic : null),
+      'originalData': LocalStorageService.sanitize(origData),
+      'proposedData': LocalStorageService.sanitize(updates),
+      'reason': reasonText,
+      'requestedBy': requesterId,
+      'requestedByName': activeUser.isNotEmpty ? activeUser : 'Staff',
+      'requesterName': activeUser.isNotEmpty ? activeUser : 'Staff',
+      'requestedAt': DateTime.now().toIso8601String(),
+      'targetRole': 'supervisor',
+    };
+
+    // 1. Save locally to local_edit_requests so the Bell badge & Requests screen update immediately
+    await LocalStorageService.saveLocalEditRequest(reqPayload);
+
+    // 2. Cloud upload & durable sync queue
+    final uploadsHere = !LanFirestoreGate.isLanDesk;
+    if (uploadsHere) {
+      unawaited(CloudDb.instance
+          .collection('branches')
+          .doc(effBranch)
+          .collection('edit_requests')
+          .doc(reqId)
+          .set({
+        ...reqPayload,
+        'requestedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true)).then<void>((_) {}, onError: (Object e) {
+        debugPrint('[PatientDetail] Firestore offline — queued patient_edit: $reqId ($e)');
+      }));
+
+      await LocalStorageService.enqueueSync({
+        'type': 'save_edit_request',
+        'branchId': effBranch,
+        'requestId': reqId,
+        'collection': 'edit_requests',
+        'data': reqPayload,
       });
+      unawaited(SyncService().triggerUpload(urgent: true).catchError((_) {}));
     }
 
-    _snack('Patient details & CNIC updated instantly!', success: true);
+    // 3. Broadcast over LAN
+    try {
+      RealtimeManager().sendMessage({
+        ...RealtimeEvents.payload(
+          type: RealtimeEvents.requestCreated,
+          branchId: effBranch,
+          data: reqPayload,
+        ),
+      });
+    } catch (_) {}
+
+    _snack('Patient edit request submitted for approval!', success: true);
     if (ctx.mounted) Navigator.pop(ctx);
   }
 
@@ -620,9 +740,10 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   }
 
   PreferredSizeWidget _buildTopBar(Map<String, dynamic> data, RoleThemeData t) {
-    final name = data['name'] ?? 'Patient';
-    final age = data['age']?.toString() ?? '?';
-    final gender = data['gender'] ?? 'N/A';
+    final resolvedName = LocalStorageService.resolveCanonicalPatientName(data);
+    final name = resolvedName.isNotEmpty ? resolvedName : (data['name'] ?? data['patientName'] ?? 'Patient').toString();
+    final age = (data['age'] ?? data['patientAge'])?.toString() ?? '?';
+    final gender = data['gender'] ?? data['patientGender'] ?? 'N/A';
     final status = data['status'] as String? ?? 'Zakat';
     final statusColor = _statusColors[status] != null ? context.adapt(_statusColors[status]!) : t.accent;
 
@@ -908,13 +1029,9 @@ class _PatientDetailScreenState extends State<PatientDetailScreen>
   }
 
   List<Widget> _buildInfoWidgets(Map<String, dynamic> data, RoleThemeData t) {
-    final isAdult = data['isAdult'] == true;
-    final rawDob = data['dob'];
-    final DateTime? dobDt = rawDob is Timestamp
-        ? rawDob.toDate()
-        : (rawDob is DateTime
-            ? rawDob
-            : (rawDob != null ? parseDobDateTime(rawDob.toString()) ?? DateTime.tryParse(rawDob.toString()) : null));
+    final isAdult = !LocalStorageService.isChildPatientRecord(data);
+    final rawDob = data['dob'] ?? data['dateOfBirth'];
+    final DateTime? dobDt = LocalStorageService.tryParseDob(rawDob);
     final dobString = dobDt != null
         ? DateFormat('dd MMM yyyy').format(dobDt)
         : 'N/A';
@@ -1267,16 +1384,5 @@ class CNICInputFormatter extends TextInputFormatter {
       if ((i == 4 || i == 11) && i != digits.length - 1) buffer.write('-');
     }
     return TextEditingValue(text: buffer.toString(), selection: TextSelection.collapsed(offset: buffer.length));
-  }
-}
-
-class _DobFormatter extends TextInputFormatter {
-  @override
-  TextEditingValue formatEditUpdate(TextEditingValue old, TextEditingValue newVal) {
-    var t = newVal.text.replaceAll(RegExp(r'\D'), '');
-    if (t.length > 8) t = t.substring(0, 8);
-    final b = StringBuffer();
-    for (int i = 0; i < t.length; i++) { if (i == 2 || i == 4) b.write('-'); b.write(t[i]); }
-    return TextEditingValue(text: b.toString(), selection: TextSelection.collapsed(offset: b.length));
   }
 }

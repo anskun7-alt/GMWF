@@ -530,7 +530,20 @@ class _LoansTabState extends State<LoansTab> {
           const SizedBox(height: 12),
           Expanded(
             child: activePayments.isEmpty
-                ? Center(child: Text('No transactions recorded yet.', style: TextStyle(color: context.adapt(_kTextTertiary))))
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const GEmptyIllustration(
+                          GEmptyIllustrationKind.finance,
+                          size: 132,
+                          fallbackIcon: Icons.receipt_long_rounded,
+                        ),
+                        const SizedBox(height: 12),
+                        Text('No transactions recorded yet.', style: TextStyle(color: context.adapt(_kTextTertiary), fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  )
                 : ListView.separated(
                     itemCount: activePayments.length,
                     separatorBuilder: (_, __) => Divider(height: 1, color: context.adapt(_kBorder)),

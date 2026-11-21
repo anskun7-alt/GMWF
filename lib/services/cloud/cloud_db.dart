@@ -57,6 +57,155 @@ class CloudDb {
 
   CloudBatch batch() => CloudBatch._(this);
 
+  /// Lists every document path (relative to `documents/`, e.g. `branches/karachi/inventory_saddar/doc1`)
+  /// inside [collectionPath] straight from Firestore's server. Uses lightweight keys-only REST
+  /// pagination (`mask.fieldPaths=__name__`) on desktop so a stuck C++ SDK cache/stream cannot
+  /// hide or hang collection wipes, and `Source.server` on web/mobile.
+  Future<List<String>> listCollectionDocPaths(String collectionPath, {int pageSize = 300}) async {
+    final cleanCol = collectionPath.replaceAll(RegExp(r'^/+|/+$'), '');
+    if (cleanCol.isEmpty) return const [];
+
+    if (!_useRest) {
+      return _listCollectionDocPathsViaSdk(cleanCol);
+    }
+
+    try {
+      return await _listCollectionDocPathsViaRest(cleanCol, pageSize: pageSize);
+    } on _UseSdkInstead {
+      return _listCollectionDocPathsViaSdk(cleanCol);
+    } on FirebaseException catch (fe) {
+      if (fe.code == 'invalid-argument' || fe.code == 'unauthenticated' || fe.code == 'permission-denied') {
+        return _listCollectionDocPathsViaSdk(cleanCol);
+      }
+      rethrow;
+    } catch (e) {
+      if (kIsWeb || e is UnsupportedError || e.toString().contains('Unsupported') || e.toString().contains('HttpClient')) {
+        _restDisabledReason = 'REST not supported on this platform';
+        return _listCollectionDocPathsViaSdk(cleanCol);
+      }
+      rethrow;
+    }
+  }
+
+  Future<List<String>> _listCollectionDocPathsViaRest(String cleanCol, {int pageSize = 300}) async {
+    final paths = <String>[];
+    final seen = <String>{};
+    String? pageToken;
+    var pages = 0;
+
+    while (pages < 200) {
+      pages++;
+      String? nextToken;
+      var pageDone = false;
+
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final headers = await _authHeaders(forceRefresh: attempt > 0);
+        final query = <String, String>{
+          'pageSize': '$pageSize',
+          'mask.fieldPaths': '__name__',
+          if (pageToken != null && pageToken.isNotEmpty) 'pageToken': pageToken,
+          if (headers.isEmpty) 'key': sdk.app.options.apiKey,
+        };
+        final uri = Uri.parse('https://firestore.googleapis.com/v1/$_documentsRoot/$cleanCol')
+            .replace(queryParameters: query);
+
+        final req = await _http.getUrl(uri).timeout(const Duration(seconds: 20));
+        headers.forEach(req.headers.set);
+        final resp = await req.close().timeout(const Duration(seconds: 30));
+        final body = await resp.transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
+        final status = resp.statusCode;
+
+        if (status == 404) {
+          return paths;
+        }
+        if (status == 401 && attempt == 0 && headers.isNotEmpty) {
+          continue; // refresh token once
+        }
+        if (status != 200) {
+          final err = _RestError.parse(status, body);
+          if (err.isApiBlocked) {
+            _restDisabledReason = err.message;
+            throw const _UseSdkInstead();
+          }
+          throw FirebaseException(plugin: 'cloud_firestore', code: err.code, message: err.message);
+        }
+
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final docs = decoded['documents'];
+          if (docs is List) {
+            const marker = '/documents/';
+            for (final doc in docs) {
+              if (doc is! Map) continue;
+              final fullName = (doc['name'] ?? '').toString();
+              final idx = fullName.indexOf(marker);
+              if (idx < 0) continue;
+              final rel = fullName.substring(idx + marker.length);
+              if (rel.isNotEmpty && seen.add(rel)) paths.add(rel);
+            }
+          }
+          final nt = decoded['nextPageToken']?.toString();
+          nextToken = (nt != null && nt.isNotEmpty) ? nt : null;
+        }
+        pageDone = true;
+        break;
+      }
+
+      if (!pageDone || nextToken == null || nextToken == pageToken) break;
+      pageToken = nextToken;
+    }
+
+    return paths;
+  }
+
+  Future<List<String>> _listCollectionDocPathsViaSdk(String cleanCol) async {
+    if (FirebaseAuth.instance.currentUser == null) {
+      try {
+        await FirebaseSessionGuard.ensureSession(reason: 'cloud_db_auth').timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
+    final snap = await sdk
+        .collection(cleanCol)
+        .get(const GetOptions(source: Source.server))
+        .timeout(const Duration(seconds: 30));
+    return [for (final d in snap.docs) d.reference.path];
+  }
+
+  /// Permanently deletes EVERY document in [collectionPath] directly on Firestore's server,
+  /// using atomic batches of [batchSize] (REST `:commit` on desktop, SDK on web/mobile),
+  /// followed by a server verification round until 0 documents remain.
+  Future<int> deleteCollection(
+    String collectionPath, {
+    int batchSize = 400,
+    void Function(int deletedSoFar, int roundTotal)? onProgress,
+  }) async {
+    return CloudDb.runWith(const CloudWriteContext(force: true), () async {
+      final cleanCol = collectionPath.replaceAll(RegExp(r'^/+|/+$'), '');
+      if (cleanCol.isEmpty) return 0;
+
+      var totalDeleted = 0;
+      for (var round = 0; round < 10; round++) {
+        final paths = await listCollectionDocPaths(cleanCol);
+        if (paths.isEmpty) break;
+        var roundDeleted = 0;
+        for (var i = 0; i < paths.length; i += batchSize) {
+          final end = (i + batchSize > paths.length) ? paths.length : i + batchSize;
+          final chunk = paths.sublist(i, end);
+          final b = batch();
+          for (final p in chunk) {
+            b.delete(doc(p));
+          }
+          await b.commit();
+          totalDeleted += chunk.length;
+          roundDeleted += chunk.length;
+          onProgress?.call(totalDeleted, paths.length);
+        }
+        if (roundDeleted == 0) break;
+      }
+      return totalDeleted;
+    });
+  }
+
   /// Runs [handler], then commits its writes atomically. Reads inside it go to the server
   /// but are not isolated (the upload code only reads before writing its own records).
   Future<T> runTransaction<T>(Future<T> Function(CloudTransaction transaction) handler,

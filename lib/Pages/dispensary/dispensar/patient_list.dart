@@ -23,6 +23,7 @@ class PatientList extends StatefulWidget {
   final String? dispenserName;
   final Map<String, dynamic>? selectedPatient;
   final Function(Map<String, dynamic>) onPatientSelected;
+  final bool isDispenseBusy;
 
   const PatientList({
     super.key,
@@ -31,6 +32,7 @@ class PatientList extends StatefulWidget {
     this.dispenserName,
     this.selectedPatient,
     required this.onPatientSelected,
+    this.isDispenseBusy = false,
   });
 
   @override
@@ -247,6 +249,11 @@ class _PatientListState extends State<PatientList> {
           }
         }
         _debouncedRebuild();
+      } else if (type == RealtimeEvents.savePatient ||
+          type == 'save_patient' ||
+          type == 'migrate_patient_key' ||
+          type == 'patient_edit_approved') {
+        _debouncedRebuild();
       }
     });
 
@@ -269,6 +276,7 @@ class _PatientListState extends State<PatientList> {
 
   List<Map<String, dynamic>> _cachedAllPatients = [];
   bool _isQueueInitialized = false;
+  String? _manuallySelectedSerial;
 
   void _refreshQueueCache() {
     try {
@@ -494,13 +502,14 @@ class _PatientListState extends State<PatientList> {
       );
 
   void _tryAutoSelectSmallestPending() {
-    if (!mounted) return;
+    if (!mounted || widget.isDispenseBusy) return;
     if (!_isQueueInitialized) {
       _refreshQueueCache();
     }
     final activePending = DispenseQueue.pendingInTokenOrder(_cachedAllPatients);
 
     if (activePending.isEmpty) {
+      _manuallySelectedSerial = null;
       if (widget.selectedPatient != null &&
           (widget.selectedPatient?['serial']?.toString() ?? '').isNotEmpty) {
         widget.onPatientSelected({});
@@ -511,9 +520,18 @@ class _PatientListState extends State<PatientList> {
     final currentSerial = widget.selectedPatient?['serial']?.toString() ?? '';
     final currentIsStillActive = activePending
         .any((p) => DispenseQueue.sameSerial(p['serial'], currentSerial));
+    final smallest = activePending.first;
+    final isManualSelection = _manuallySelectedSerial != null &&
+        _manuallySelectedSerial!.isNotEmpty &&
+        DispenseQueue.sameSerial(_manuallySelectedSerial, currentSerial);
 
     if (currentSerial.isEmpty || !currentIsStillActive) {
-      final smallest = activePending.first;
+      _manuallySelectedSerial = null;
+      widget.onPatientSelected(smallest);
+    } else if (!isManualSelection &&
+        !DispenseQueue.sameSerial(smallest['serial'], currentSerial)) {
+      // Auto-selected patient is no longer the smallest waiting token (e.g. a smaller
+      // token finished at the doctor or arrived from LAN catch-up): move to the smallest.
       widget.onPatientSelected(smallest);
     }
   }
@@ -799,14 +817,10 @@ class _PatientListState extends State<PatientList> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(14),
-                              child: Image.asset(
-                                'assets/images/doctor_empty_queue.jpg',
-                                width: 112,
-                                height: 112,
-                                fit: BoxFit.cover,
-                              ),
+                            const GEmptyIllustration(
+                              GEmptyIllustrationKind.people,
+                              size: 124,
+                              fallbackIcon: Icons.people_outline_rounded,
                             ),
                             const SizedBox(height: 12),
                             Text(
@@ -979,6 +993,7 @@ class _PatientListState extends State<PatientList> {
       color: Colors.transparent,
       child: InkWell(
         onTap: () {
+          _manuallySelectedSerial = (e['serial'] ?? e['id'])?.toString();
           widget.onPatientSelected(e);
         },
         borderRadius: BorderRadius.circular(10),

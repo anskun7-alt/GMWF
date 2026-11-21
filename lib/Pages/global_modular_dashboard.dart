@@ -19,7 +19,9 @@ import '../services/user_theme_service.dart';
 import 'settings_page.dart';
 import 'support_page.dart';
 import 'notification_screen.dart';
+import 'request.dart';
 import '../widgets/global_module_wrapper.dart';
+import '../widgets/notification_bell_popover.dart';
 import '../widgets/home_snapshot_widgets.dart';
 import '../services/sync_service.dart';
 import '../design/design_system.dart';
@@ -27,6 +29,7 @@ import 'admin/data_cleanup_screen.dart';
 import '../services/role_simulator_service.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
+import 'package:gmwf/services/branch_directory.dart';
 import '../services/local_storage_service.dart';
 import '../services/auth_service.dart';
 import '../constants/navigator_key.dart';
@@ -269,9 +272,10 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final saved = Hive.box('app_settings').get('selected_branch')?.toString().trim().toLowerCase();
-        if (saved != null && saved.isNotEmpty) {
-          _selectedExecutiveBranch = saved;
-        }
+        // "All Branches" is no longer a branch: an old saved 'all' / 'global' / alias is
+        // turned into a real branch (or left unset so the default below applies).
+        final real = BranchDirectory.canonical(saved);
+        if (real != null) _selectedExecutiveBranch = real;
       }
     } catch (_) {}
     _updateCachedUserData();
@@ -609,9 +613,22 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
       'supervisor', 'branch manager',
     ];
     final isWrapped = wrappedRoles.contains(_role);
+    final isExec = _isFullExecutive || _isGlobalExecutive;
+    final selectedBranch = isExec ? _execBranch : null;
+    final moduleUserData = isExec
+        ? {
+            ...widget.userData,
+            'branchId': selectedBranch,
+            'branch': selectedBranch,
+          }
+        : widget.userData;
     return (isWrapped && module.supportsGlobalWrapper)
-        ? GlobalModuleWrapper(module: module, userData: widget.userData)
-        : module.builder(context, widget.userData);
+        ? GlobalModuleWrapper(
+            module: module,
+            userData: moduleUserData,
+            selectedBranchId: selectedBranch,
+          )
+        : module.builder(context, moduleUserData);
   }
 
   void _openModule(AppModule module) {
@@ -734,55 +751,45 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
 
   String? _selectedExecutiveBranch;
 
+  /// Real branches only (user rule 2026-11-21): "All Branches" is a filter/tab inside a
+  /// screen, never a branch in this picker; no 'global' / 'main' / duplicates / camps.
   List<Map<String, String>> get _availableBranchesForExecutive {
     if (!(_isFullExecutive || _isGlobalExecutive)) return const [];
-    final list = <Map<String, String>>[
-      {'id': 'all', 'name': 'All Branches'},
-    ];
-    try {
-      if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
-        final bBox = Hive.box(LocalStorageService.branchesBox);
-        for (final val in bBox.values) {
-          if (val is Map) {
-            final id = (val['id'] ?? '').toString().trim().toLowerCase();
-            final name = (val['name'] ?? val['branchName'] ?? id).toString().trim();
-            final isOff = val['isOffboarded'] == true || val['status'] == 'offboarded';
-            if (id.isNotEmpty && id != 'all' && id != 'global' && !isOff) {
-              list.add({'id': id, 'name': name.isNotEmpty ? name : id.toUpperCase()});
-            }
-          }
-        }
-      }
-    } catch (_) {}
-    return list;
+    return BranchDirectory.list();
+  }
+
+  /// The branch an executive is looking at: their pick, else their own branch, else the
+  /// first real branch. Never 'all'.
+  String get _execBranch {
+    final picked = BranchDirectory.canonical(_selectedExecutiveBranch);
+    if (picked != null) return picked;
+    final own = BranchDirectory.canonical(widget.userData['branchId']?.toString()) ??
+        BranchDirectory.canonical(_branchId);
+    if (own != null) return own;
+    final list = BranchDirectory.list();
+    return list.isNotEmpty ? list.first['id']! : 'karachi';
   }
 
   void _onExecutiveBranchChanged(String newBranchId) async {
+    final effective = BranchDirectory.canonical(newBranchId) ?? _execBranch;
     setState(() {
-      _selectedExecutiveBranch = newBranchId;
-      if (newBranchId != 'all') {
-        widget.userData['branchId'] = newBranchId;
-        widget.userData['branch'] = newBranchId;
-      }
+      _selectedExecutiveBranch = effective;
+      widget.userData['branchId'] = effective;
+      widget.userData['branch'] = effective;
     });
     try {
       if (Hive.isBoxOpen('app_settings')) {
         final box = Hive.box('app_settings');
-        await box.put('selected_branch', newBranchId);
-        await box.put('current_branch', newBranchId);
+        await box.put('selected_branch', effective);
+        await box.put('current_branch', effective);
       }
-      if (newBranchId != 'all') {
-        SyncService().start(newBranchId);
-      }
+      SyncService().start(effective);
     } catch (_) {}
   }
 
   String get _branchLabel {
     if (_isFullExecutive || _isGlobalExecutive) {
-      if (_selectedExecutiveBranch != null && _selectedExecutiveBranch!.isNotEmpty && _selectedExecutiveBranch != 'all') {
-        return RecentActivityService.resolveBranchName(_selectedExecutiveBranch!);
-      }
-      return 'All branches';
+      return RecentActivityService.resolveBranchName(_execBranch);
     }
     return RecentActivityService.resolveBranchName(_branchId);
   }
@@ -808,7 +815,9 @@ class _GlobalModularDashboardState extends State<GlobalModularDashboard>
         showNotifications: _showNotifications,
         moduleBuilder: _moduleDestination,
         availableBranches: (_isFullExecutive || _isGlobalExecutive) ? _availableBranchesForExecutive : null,
-        selectedBranchId: _selectedExecutiveBranch ?? (_branchId.isNotEmpty && _branchId != 'all' ? _branchId : 'all'),
+        selectedBranchId: (_isFullExecutive || _isGlobalExecutive)
+            ? _execBranch
+            : (_branchId.isNotEmpty && _branchId != 'all' ? _branchId : 'all'),
         onBranchChanged: _onExecutiveBranchChanged,
         onLogout: _logout,
         onEditPhoto: () => _showEnlargedAvatarDialog(context, this, t),
@@ -845,6 +854,14 @@ class _SupervisorScaffold extends StatefulWidget {
 }
 
 class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
+  final GlobalKey _supervisorBellKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    NotificationBellHelper.ensureInitialized(branchId: widget.state._branchId);
+  }
+
   AppModule _getModule(String id) {
     return widget.state._availableModules.firstWhere(
       (m) => m.id == id,
@@ -962,6 +979,66 @@ class _SupervisorScaffoldState extends State<_SupervisorScaffold> {
           ],
         ),
         actions: [
+          ListenableBuilder(
+            listenable: NotificationBellHelper.buildCombinedListenable(),
+            builder: (context, _) {
+              final bId = widget.state._branchId;
+              final uId = (widget.state.widget.userData['uid'] ??
+                      widget.state.widget.userData['id'] ??
+                      'supervisor')
+                  .toString();
+              final pendingReqs = NotificationBellHelper.getPendingRequests(
+                branchId: bId,
+                role: 'supervisor',
+              );
+              final unreadMsgs = NotificationBellHelper.getUnreadNotifications(
+                branchId: bId,
+                userId: uId,
+                role: 'supervisor',
+              );
+              final totalBadge = pendingReqs.length + unreadMsgs.length;
+              return IconButton(
+                key: _supervisorBellKey,
+                tooltip: totalBadge > 0
+                    ? 'Notifications & Requests ($totalBadge pending)'
+                    : 'Notifications & Requests',
+                onPressed: () => NotificationBellHelper.showBellPopover(
+                  context: context,
+                  bellKey: _supervisorBellKey,
+                  branchId: bId,
+                  userId: uId,
+                  role: 'supervisor',
+                  onSelectRequest: (req) {
+                    RequestPage.focusRequest((req['requestId'] ?? req['id'])?.toString());
+                    widget.state.setSupervisorTab(3);
+                  },
+                  onViewAllRequests: () {
+                    RequestPage.focusRequest(null);
+                    widget.state.setSupervisorTab(3);
+                  },
+                ),
+                icon: Badge(
+                  isLabelVisible: totalBadge > 0,
+                  backgroundColor: SoftPalette.orange400,
+                  label: Text(
+                    totalBadge > 99 ? '99+' : '$totalBadge',
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      color: SoftPalette.gray50,
+                    ),
+                  ),
+                  child: Icon(
+                    totalBadge > 0
+                        ? Icons.notifications_active_rounded
+                        : Icons.notifications_outlined,
+                    color: totalBadge > 0 ? t.accent : t.textSecondary,
+                    size: 21,
+                  ),
+                ),
+              );
+            },
+          ),
           // Toggle Dark & Light Mode Button
           IconButton(
             tooltip: isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode',
@@ -4844,17 +4921,10 @@ class _EmptySearch extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: t.bgCardAlt,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.school_outlined,
-                    size: 36,
-                    color: _dark ? SoftPalette.brightCobalt : SoftPalette.cobaltBlue,
-                  ),
+                const GEmptyIllustration(
+                  GEmptyIllustrationKind.education,
+                  size: 148,
+                  fallbackIcon: Icons.school_outlined,
                 ),
                 const SizedBox(height: 18),
                 Text(
@@ -4895,16 +4965,10 @@ class _EmptySearch extends StatelessWidget {
                 offset: Offset(0, 14 * (1 - v)), child: ch),
           ),
           child: Column(children: [
-            Container(
-              padding: const EdgeInsets.all(22),
-              decoration: BoxDecoration(
-                color: _dark ? t.bgCardAlt : t.accentMuted.withValues(alpha: 0.45),
-                shape: BoxShape.circle,
-                border: Border.all(color: t.bgRule),
-              ),
-              child: Icon(Icons.search_off_rounded,
-                  size: 32,
-                  color: t.textTertiary),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.search,
+              size: 148,
+              fallbackIcon: Icons.search_off_rounded,
             ),
             const SizedBox(height: 16),
             Text('No modules found',

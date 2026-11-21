@@ -160,6 +160,7 @@ class MadrassaOverviewView extends ConsumerWidget {
     final isDark = theme.brightness == Brightness.dark;
 
     int present = 0;
+    int lateCount = 0;
     int absent = 0;
     int leave = 0;
     int totalLinesToday = 0;
@@ -181,6 +182,9 @@ class MadrassaOverviewView extends ConsumerWidget {
         final att = entry['attendance']?.toString() ?? 'absent';
         if (att == 'present') {
           present++;
+          if (entry['isLate'] == true || entry['timing'] == 'late') {
+            lateCount++;
+          }
           if (isNaz) nazraPresent++;
           final currentLines = entry['currentLines'] as int? ?? 0;
           if (currentLines > 0) {
@@ -206,6 +210,11 @@ class MadrassaOverviewView extends ConsumerWidget {
         absent++;
       }
     }
+
+    final c = context.comfort;
+    final presentLabel = lateCount > 0
+        ? (context.isUrdu ? 'حاضر: $present ($lateCount تاخیر)' : 'Present: $present ($lateCount Late)')
+        : (context.isUrdu ? 'حاضر: $present' : 'Present: $present');
 
     return Container(
       width: double.infinity,
@@ -333,15 +342,15 @@ class MadrassaOverviewView extends ConsumerWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              _pillIndicator(context, context.isUrdu ? 'حاضر: $present' : 'Present: $present', context.adapt(SoftPalette.emerald350), context.adapt(SoftPalette.emerald100), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
-              _pillIndicator(context, context.isUrdu ? 'غیر حاضر: $absent' : 'Absent: $absent', context.adapt(SoftPalette.red400), context.adapt(SoftPalette.red150m), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
-              _pillIndicator(context, context.isUrdu ? 'رخصت: $leave' : 'Leave: $leave', context.adapt(SoftPalette.amber300), context.adapt(SoftPalette.yellow100), onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              _pillIndicator(context, presentLabel, c.success, c.successBg, onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              _pillIndicator(context, context.isUrdu ? 'غیر حاضر: $absent' : 'Absent: $absent', c.danger, c.dangerBg, onTap: () => onAction?.call(isAdmin ? 1 : 0)),
+              _pillIndicator(context, context.isUrdu ? 'رخصت: $leave' : 'Leave: $leave', c.warning, c.warningBg, onTap: () => onAction?.call(isAdmin ? 1 : 0)),
               if (nazraStudentsCount > 0)
                 _pillIndicator(
                   context,
                   context.isUrdu ? 'ناظرہ حاضر: $nazraPresent / $nazraStudentsCount' : 'Nazra Present: $nazraPresent / $nazraStudentsCount',
-                  context.adapt(SoftPalette.sky500),
-                  context.adapt(SoftPalette.slate100),
+                  c.info,
+                  c.infoBg,
                   onTap: () => onAction?.call(isAdmin ? 2 : 1),
                 ),
             ],

@@ -1,6 +1,7 @@
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
@@ -210,13 +211,10 @@ class _DasterkhwaanFoodLogScreenState extends State<DasterkhwaanFoodLogScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(Icons.restaurant_menu_rounded, size: 48, color: isDark ? SoftPalette.slate550 : SoftPalette.slate350),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.kitchen,
+              size: 152,
+              fallbackIcon: Icons.restaurant_menu_rounded,
             ),
             const SizedBox(height: 16),
             Text(

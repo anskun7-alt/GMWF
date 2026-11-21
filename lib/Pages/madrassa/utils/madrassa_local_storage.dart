@@ -1235,9 +1235,11 @@ class MadrassaLocalStorage {
         final cloudData = snap.data()!;
         final box = await LocalStorageService.ensureBoxOpen(logsBox);
         final key = _logKey(normBranch, dateKey);
-        final merged = _mergeRemoteLog(box.get(key), cloudData);
+        final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
+        final merged = _mergeRemoteLog(box.get(key), cloudData, toHeal: toHeal);
         await box.put(key, _sanitize(merged));
         await box.flush();
+        _healLeaveDecisions(normBranch, dateKey, toHeal);
       } catch (e) {
         debugPrint('[MadrassaLocalStorage] Error in realtime daily logs sync: $e');
       }
@@ -1769,10 +1771,30 @@ class MadrassaLocalStorage {
   /// every PC's backfill re-uploads the day on every sweep. The day is
   /// already in the cloud (or its originator uploads it), so it is marked
   /// synced here — unless this PC has its own unsynced edits for that day.
-  static Map<String, dynamic> _mergeRemoteLog(dynamic local, Map<String, dynamic> remote) {
+  static Map<String, dynamic> _mergeRemoteLog(
+    dynamic local,
+    Map<String, dynamic> remote, {
+    List<MapEntry<String, Map<String, dynamic>>>? toHeal,
+  }) {
     final localMap = local is Map ? Map<String, dynamic>.from(local) : <String, dynamic>{};
     final localPending = localMap['pendingSync'] == true || localMap['syncStatus'] == 'pending';
     final merged = <String, dynamic>{...localMap, ...remote};
+    // Per student, not whole entries blindly: a remote copy used to replace the student's
+    // entry even while this PC's own edit was unsent, and a guardian's copy of a leave
+    // request undid the teacher's decision (the request came back as "approve or deny").
+    for (final e in remote.entries) {
+      final l = localMap[e.key];
+      if (e.value is! Map || l is! Map) continue;
+      final kept = _mergeStudentEntry(
+        Map<String, dynamic>.from(l),
+        Map<String, dynamic>.from(e.value as Map),
+        localPending: localPending,
+      );
+      merged[e.key] = kept.entry;
+      if (kept.reupload) {
+        toHeal?.add(MapEntry(e.key, kept.entry));
+      }
+    }
     const flags = ['syncStatus', 'pendingSync', 'synced', 'lastSyncedAt'];
     if (localPending) {
       for (final f in flags) {
@@ -1783,21 +1805,221 @@ class MadrassaLocalStorage {
         }
       }
     } else {
+      // Keep lastSyncedAt at or past the newest peer edit timestamp so a PC with a
+      // slightly slower clock does not mistake downloaded peer edits for unsent local edits
+      // and re-upload the whole day on the next backfill sweep.
+      DateTime syncedAt = DateTime.now().toUtc();
+      for (final v in merged.values) {
+        if (v is Map) {
+          final t = _when(v['lastEditedAt']);
+          if (t != null && t.isAfter(syncedAt)) syncedAt = t;
+        }
+      }
       merged['syncStatus'] = 'synced';
       merged['pendingSync'] = false;
       merged['synced'] = true;
-      merged['lastSyncedAt'] = DateTime.now().toIso8601String();
+      merged['lastSyncedAt'] = syncedAt.toIso8601String();
     }
     return merged;
+  }
+
+  static const _decidedLeave = {'approved', 'denied', 'declined', 'cancelled'};
+  static const _leaveDecisionFields = [
+    'attendance', 'leaveStatus', 'isParentRequested', 'leaveDecidedAt', 'leaveDecidedBy',
+    'leaveDecidedFor', 'isLate', 'timing', 'arrivalTime', 'uniform',
+  ];
+
+  static DateTime? _when(dynamic v) {
+    if (v == null) return null;
+    if (v is DateTime) return v.toUtc();
+    if (v is num) return DateTime.fromMillisecondsSinceEpoch(v.toInt(), isUtc: true);
+    if (v is Map && v['_seconds'] is num) {
+      return DateTime.fromMillisecondsSinceEpoch((v['_seconds'] as num).toInt() * 1000, isUtc: true);
+    }
+    try {
+      final d = (v as dynamic).toDate();
+      if (d is DateTime) return d.toUtc();
+    } catch (_) {}
+    final parsed = DateTime.tryParse(v.toString());
+    return parsed?.toUtc();
+  }
+
+  static String _normLeaveStatus(dynamic v) => (v ?? '').toString().toLowerCase().trim();
+
+  /// A guardian's leave request still waiting (as the guardian's copy says).
+  static bool _isPendingRequest(Map m) {
+    final status = _normLeaveStatus(m['leaveStatus']);
+    if (_decidedLeave.contains(status)) return false;
+    return (m['isParentRequested'] == true || m['attendance'] == 'leave_requested') &&
+        (status.isEmpty || status == 'pending');
+  }
+
+  /// Whether the teacher's decision in [decided] answers the request in [request]:
+  /// 1. Exact/same-clock match against `leaveDecidedFor` (or `leaveRequestedAt`) — immune
+  ///    to clock skew between a guardian's phone and a teacher's PC.
+  /// 2. Legacy guardian copies without `leaveRequestedAt` (where Firestore `timestamp` may
+  ///    be a late serverTimestamp on reconnect): same non-empty `leaveReason`, or `timestamp <= decidedAt`.
+  /// 3. Fallback when `decided` lacks `leaveDecidedFor`: `requestedAt <= decidedAt`, or same
+  ///    non-empty `leaveReason` within a 30-minute clock-skew window.
+  static bool _decisionCoversRequest(Map decided, Map request) {
+    final reqAtRaw = request['leaveRequestedAt'];
+    final decidedForRaw = decided['leaveDecidedFor'] ?? decided['leaveRequestedAt'];
+    final reasonA = (decided['leaveReason'] ?? '').toString().trim();
+    final reasonB = (request['leaveReason'] ?? '').toString().trim();
+    final sameReason = reasonA.isNotEmpty && reasonA == reasonB;
+
+    if (reqAtRaw != null && decidedForRaw != null) {
+      final reqStr = reqAtRaw.toString().trim();
+      final decForStr = decidedForRaw.toString().trim();
+      if (reqStr.isNotEmpty && reqStr == decForStr) return true;
+      final reqDt = _when(reqAtRaw);
+      final decForDt = _when(decidedForRaw);
+      if (reqDt != null && decForDt != null) return !reqDt.isAfter(decForDt);
+    }
+
+    final decidedAt = _when(decided['leaveDecidedAt'] ?? decided['lastEditedAt']);
+    if (reqAtRaw == null) {
+      // Legacy guardian record (no leaveRequestedAt; Firestore timestamp may reflect late sync).
+      if (sameReason) return true;
+      final reqTs = _when(request['timestamp']);
+      if (decidedAt != null && reqTs != null) return !reqTs.isAfter(decidedAt);
+      return false;
+    }
+
+    final reqDt = _when(reqAtRaw);
+    if (decidedAt != null && reqDt != null) {
+      if (!reqDt.isAfter(decidedAt)) return true;
+      if (sameReason && reqDt.difference(decidedAt) <= const Duration(minutes: 30)) {
+        return true;
+      }
+      return false;
+    }
+    return sameReason;
+  }
+
+  /// One student's entry: this PC's copy [local] against an incoming copy [remote].
+  static ({Map<String, dynamic> entry, bool reupload}) _mergeStudentEntry(
+      Map<String, dynamic> local, Map<String, dynamic> remote,
+      {required bool localPending}) {
+    final localStatus = _normLeaveStatus(local['leaveStatus']);
+    final remoteStatus = _normLeaveStatus(remote['leaveStatus']);
+
+    // 1a. A decided leave (approved, denied, declined, or cancelled by marking present)
+    //     is never undone by a late guardian copy of the same pending request.
+    if (_decidedLeave.contains(localStatus) &&
+        _isPendingRequest(remote) &&
+        _decisionCoversRequest(local, remote)) {
+      final kept = <String, dynamic>{...local, ...remote};
+      for (final f in _leaveDecisionFields) {
+        if (local.containsKey(f)) {
+          kept[f] = local[f];
+        } else {
+          kept.remove(f);
+        }
+      }
+      // The cloud holds the stale request: send the decision again so it is fixed there
+      // (and on the guardian's phone).
+      return (entry: kept, reupload: true);
+    }
+
+    // 1b. Symmetric: a remote teacher decision (approve/deny/cancel) always wins over a
+    //     stale local pending request — even if the guardian's phone still has localPending
+    //     (e.g. from an unsent reply or offline leave write). Non-leave unsent local fields
+    //     (such as parentReplyText) are preserved.
+    if (_decidedLeave.contains(remoteStatus) &&
+        _isPendingRequest(local) &&
+        _decisionCoversRequest(remote, local)) {
+      final kept = localPending
+          ? <String, dynamic>{...remote, ...local}
+          : <String, dynamic>{...local, ...remote};
+      for (final f in _leaveDecisionFields) {
+        if (remote.containsKey(f)) {
+          kept[f] = remote[f];
+        } else {
+          kept.remove(f);
+        }
+      }
+      return (entry: kept, reupload: false);
+    }
+
+    // 2. This PC's unsent edit that is newer than the incoming copy wins on its fields,
+    //    while keeping any untouched fields from the remote copy.
+    if (localPending) {
+      final lt = _when(local['lastEditedAt']);
+      final rt = _when(remote['lastEditedAt']);
+      if (lt != null && (rt == null || lt.isAfter(rt))) {
+        return (entry: <String, dynamic>{...remote, ...local}, reupload: false);
+      }
+    }
+
+    // 3. Default: apply incoming fields over local so partial LAN deltas (e.g. a parent
+    //    reply only) never wipe unrelated local fields (attendance, sabakLines, etc.).
+    return (entry: <String, dynamic>{...local, ...remote}, reupload: false);
+  }
+
+  static final Map<String, DateTime> _healedAt = {};
+
+  @visibleForTesting
+  static void resetHealedForTests() => _healedAt.clear();
+
+  @visibleForTesting
+  static Map<String, dynamic> mergeRemoteLogForTest(
+    dynamic local,
+    Map<String, dynamic> remote, {
+    List<String>? healedStudents,
+  }) {
+    final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
+    final merged = _mergeRemoteLog(local, remote, toHeal: toHeal);
+    healedStudents?.addAll(toHeal.map((e) => e.key));
+    return merged;
+  }
+
+  /// Re-sends a teacher's leave decision that a late guardian copy overwrote in the cloud.
+  /// Called AFTER the merged log has been written to Hive so the re-send cannot race with
+  /// the caller's Hive put.
+  static void _healLeaveDecisions(
+    String branchId,
+    String dateKey,
+    List<MapEntry<String, Map<String, dynamic>>> toHeal,
+  ) {
+    if (toHeal.isEmpty) return;
+    final now = DateTime.now();
+    for (final item in toHeal) {
+      final studentId = item.key;
+      final entry = item.value;
+      final mark = '$branchId|$dateKey|$studentId|${entry['leaveStatus']}|${entry['attendance']}';
+      final prev = _healedAt[mark];
+      if (prev != null && now.difference(prev) < const Duration(seconds: 30)) continue;
+      _healedAt[mark] = now;
+      final payload = <String, dynamic>{
+        for (final f in _leaveDecisionFields)
+          if (entry.containsKey(f)) f: entry[f],
+      };
+      unawaited(Future<void>(() async {
+        try {
+          await saveLogRecordLocal(
+            branchId: branchId,
+            dateKey: dateKey,
+            logData: {studentId: payload},
+            editorName: (entry['leaveDecidedBy'] ?? entry['lastEditedBy'] ?? 'Teacher').toString(),
+            editorRole: 'teacher',
+          );
+        } catch (e) {
+          debugPrint('[MadrassaLocalStorage] leave decision re-send failed: $e');
+        }
+      }));
+    }
   }
 
   static Future<void> cacheDailyLog(String branchId, String dateKey, Map<String, dynamic> data) async {
     final normBranch = normalizeBranch(branchId);
     final key = _logKey(normBranch, dateKey);
     final box = await LocalStorageService.ensureBoxOpen(logsBox);
-    final merged = _mergeRemoteLog(box.get(key), data);
+    final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
+    final merged = _mergeRemoteLog(box.get(key), data, toHeal: toHeal);
     await box.put(key, _sanitize(merged));
     await box.flush();
+    _healLeaveDecisions(normBranch, dateKey, toHeal);
   }
 
   // This one watches Hive for changes. Emits whenever this date's logs change.
@@ -1837,16 +2059,35 @@ class MadrassaLocalStorage {
     final existing = box.get(key) ?? getLogCached(effectiveBranch, dateKey) ?? {};
     final updated = Map<String, dynamic>.from(existing);
 
-    // Merge changes
+    // Merge changes locally while building a field-level delta for LAN/cloud so an
+    // unrelated edit (e.g. a guardian sending a reply while offline/stale) never
+    // re-uploads stale cached leaveStatus/attendance fields and undoes a teacher's decision.
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final studentDeltas = <String, Map<String, dynamic>>{};
     final studentWrites = <Future<void>>[];
     logData.forEach((sId, data) {
       if (data is Map) {
         final existingStudentLog = updated[sId] is Map ? Map<String, dynamic>.from(updated[sId] as Map) : <String, dynamic>{};
+        final incoming = Map<String, dynamic>.from(data);
+        final incomingStatus = _normLeaveStatus(incoming['leaveStatus']);
+        if (_decidedLeave.contains(incomingStatus)) {
+          incoming['leaveDecidedAt'] ??= nowIso;
+          incoming['leaveDecidedBy'] ??= editorName;
+          final existingReqAt = existingStudentLog['leaveRequestedAt'] ?? existingStudentLog['timestamp'];
+          if (incoming['leaveDecidedFor'] == null && existingReqAt != null) {
+            incoming['leaveDecidedFor'] = existingReqAt;
+          }
+        } else if (incomingStatus == 'pending' &&
+            (incoming['isParentRequested'] == true || incoming['attendance'] == 'leave_requested')) {
+          incoming['leaveRequestedAt'] ??= nowIso;
+        }
+        incoming['lastEditedBy'] = editorName;
+        incoming['lastEditedAt'] = nowIso;
+
+        studentDeltas[sId] = _sanitize(incoming);
         updated[sId] = {
           ...existingStudentLog,
-          ...Map<String, dynamic>.from(data),
-          'lastEditedBy': editorName,
-          'lastEditedAt': DateTime.now().toIso8601String(),
+          ...incoming,
         };
 
         // Also update local cached student's currentLines if updated
@@ -1870,14 +2111,13 @@ class MadrassaLocalStorage {
     await box.put(key, sanitized);
     await box.flush();
 
-    // Only the students edited now (plus the day's top-level fields) go out. The
-    // whole day map carried this PC's possibly stale copy of everyone else, which
-    // reverted other desks' entries on peers and in the cloud. Same payload
-    // shape: receivers merge per student, the queue merges per student and the
-    // upload is set(merge: true).
+    // Only the fields edited now (plus the day's top-level scalar fields) go out.
+    // Sending the full cached student entry carried stale cached leaveStatus/attendance
+    // when a guardian sent a reply, reverting a teacher's approval/denial in Firestore.
     final delta = <String, dynamic>{
       for (final e in sanitized.entries)
-        if (e.value is! Map || logData.containsKey(e.key)) e.key: e.value,
+        if (e.value is! Map) e.key: e.value,
+      ...studentDeltas,
     };
 
     // Broadcast LAN event (Server and peers)
@@ -1978,9 +2218,39 @@ class MadrassaLocalStorage {
           sanitized['syncStatus'] = 'synced';
           sanitized['pendingSync'] = false;
           sanitized['synced'] = true;
-          sanitized['lastSyncedAt'] = DateTime.now().toIso8601String();
+          sanitized['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
           await box.put(key, sanitized);
           await box.flush();
+
+          // Remove the already-uploaded student deltas from syncBox so a stale pending
+          // leave request does not sit in the queue and overwrite a teacher's later
+          // approval or denial when SyncService next flushes.
+          try {
+            if (Hive.isBoxOpen(LocalStorageService.syncBox)) {
+              final sBox = Hive.box(LocalStorageService.syncBox);
+              final syncKey = 'sync_${effectiveBranch}_save_madrassa_log_$dateKey';
+              final queued = sBox.get(syncKey);
+              if (queued is Map && queued['data'] is Map) {
+                final qData = Map<String, dynamic>.from(queued['data'] as Map);
+                for (final entry in studentDeltas.entries) {
+                  final qStudent = qData[entry.key];
+                  if (qStudent is Map && qStudent['lastEditedAt'] == entry.value['lastEditedAt']) {
+                    qData.remove(entry.key);
+                  }
+                }
+                final hasRemainingStudents = qData.values.any((v) => v is Map);
+                if (!hasRemainingStudents) {
+                  await sBox.delete(syncKey);
+                } else {
+                  final updatedQueued = Map<String, dynamic>.from(queued);
+                  updatedQueued['data'] = qData;
+                  await sBox.put(syncKey, _sanitize(updatedQueued));
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('[MadrassaLocalStorage] syncBox prune after direct upload note: $e');
+          }
         }
       } catch (e) {
         debugPrint('[MadrassaLocalStorage] Direct daily log upload deferred to sync queue: $e');
@@ -2037,17 +2307,21 @@ class MadrassaLocalStorage {
 
       final box = await LocalStorageService.ensureBoxOpen(logsBox);
       final Map<String, dynamic> logUpdates = {};
+      final Map<String, List<MapEntry<String, Map<String, dynamic>>>> pendingHeals = {};
       for (final doc in snap.docs) {
         final key = _logKey(normBranch, doc.id);
-        
+
         // Merge cloud fields preserving local updates if local is newer (LWW conflict resolution)
         final existing = box.get(key) ?? logUpdates[key];
-        logUpdates[key] = _sanitize(_mergeRemoteLog(existing, doc.data()));
+        final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
+        logUpdates[key] = _sanitize(_mergeRemoteLog(existing, doc.data(), toHeal: toHeal));
+        if (toHeal.isNotEmpty) pendingHeals[doc.id] = toHeal;
       }
       if (logUpdates.isNotEmpty) {
         await box.putAll(logUpdates);
       }
       await box.flush();
+      pendingHeals.forEach((dateKey, items) => _healLeaveDecisions(normBranch, dateKey, items));
       debugPrint('[MadrassaLocalStorage] Downloaded ${snap.docs.length} daily log documents for $normBranch ($year-$month).');
     } catch (e) {
       debugPrint('[MadrassaLocalStorage] Error downloading daily logs: $e');

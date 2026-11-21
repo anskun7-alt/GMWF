@@ -18,6 +18,7 @@ import 'package:intl/intl.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/stock/stock_actions.dart';
+import 'package:gmwf/services/stock/stock_log.dart';
 import 'package:gmwf/services/stock/stock_ledger.dart';
 import 'package:gmwf/services/stock/stock_pool.dart';
 import 'package:gmwf/services/stock/stock_repair.dart';
@@ -481,7 +482,23 @@ class _StockReportPageState extends State<StockReportPage> {
     final delta = counted - shown.toDouble();
     if (delta == 0) return;
     // The difference is taken from the true (below 0) figure, not the displayed 0.
-    await StockActions.countDifference(pool, id, delta, name: (it['name'] ?? '').toString());
+    // Once-only: the same count entered on two PCs (both seeing the same figure) is one
+    // movement, not two (it was −5 → 20 twice = 45).
+    final day = DateTime.now().toIso8601String().substring(0, 10);
+    await StockActions.countDifference(pool, id, delta,
+        name: (it['name'] ?? '').toString(), opKey: 'count-$day-${shown.toDouble()}-$counted');
+    await StockLog.record({
+      // Same id as the movement's once-only key: one entry even if counted on two PCs.
+      'id': 'log_count_${pool.key.replaceAll('/', '_')}_${id}_${day}_${shown.toDouble()}_$counted',
+      'action': 'stock_counted',
+      'medicineName': (it['name'] ?? '').toString(),
+      'medicineId': id,
+      'pool': pool.key,
+      'branchId': pool.branch,
+      'quantityBefore': shown.toDouble(),
+      'quantityAfter': counted,
+      'quantityChange': delta,
+    });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Count saved: ${_fmtQty(counted)} ${(it['name'] ?? '').toString()}')),

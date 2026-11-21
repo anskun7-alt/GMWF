@@ -575,7 +575,11 @@ class _SupportPageState extends State<SupportPage> {
                     Center(
                       child: Column(
                         children: [
-                          Icon(Icons.search_off_rounded, size: 48, color: t.textTertiary),
+                          const GEmptyIllustration(
+                            GEmptyIllustrationKind.search,
+                            size: 140,
+                            fallbackIcon: Icons.search_off_rounded,
+                          ),
                           const SizedBox(height: 16),
                           Text(
                             "No results found",

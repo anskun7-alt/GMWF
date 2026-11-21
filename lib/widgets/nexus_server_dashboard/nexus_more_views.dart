@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:hive_flutter/hive_flutter.dart';
-import '../../services/local_storage_service.dart';
+import '../../services/stock/stock_authority.dart';
 import '../../services/stock/stock_pool.dart';
 import '../../services/stock/stock_wipe_service.dart';
 import 'nexus_colors.dart';
@@ -635,9 +634,7 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
   List<StockPool> _pools = [];
 
   final _pwCtrl = TextEditingController();
-  final _pwConfCtrl = TextEditingController();
-  bool _obscure1 = true;
-  bool _obscure2 = true;
+  bool _obscure = true;
   bool _pwVerified = false;
   String? _pwError;
 
@@ -651,6 +648,14 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
     _loadPools();
   }
 
+  @override
+  void didUpdateWidget(covariant _NexusInventoryWipePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.branchId != widget.branchId) {
+      _loadPools();
+    }
+  }
+
   void _loadPools() {
     final pools = StockPool.allFor(widget.branchId);
     setState(() {
@@ -662,42 +667,23 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
   @override
   void dispose() {
     _pwCtrl.dispose();
-    _pwConfCtrl.dispose();
     super.dispose();
   }
 
-  bool _verifyPassword(String pw) {
-    if (pw.trim().isEmpty) return false;
-    // Check against master admin credentials
-    if (LocalStorageService.isMasterAdminCredentials('admin', pw.trim())) return true;
-    // Check against current user or local users
-    try {
-      if (Hive.isBoxOpen('app_settings')) {
-        final userData = Hive.box('app_settings').get('user_data');
-        if (userData is Map) {
-          final stored = (userData['passwordHash'] ?? '').toString();
-          final input = LocalStorageService.hashPassword(pw.trim());
-          if (stored.isNotEmpty && stored == input) return true;
-          final plain = (userData['password'] ?? '').toString();
-          if (plain.isNotEmpty && plain == pw.trim()) return true;
-        }
-      }
-      if (Hive.isBoxOpen('local_users')) {
-        final box = Hive.box('local_users');
-        for (final k in box.keys) {
-          final u = box.get(k);
-          if (u is! Map) continue;
-          final role = (u['role'] ?? u['userRole'] ?? '').toString().toLowerCase();
-          if (!role.contains('manager') && !role.contains('admin') && !role.contains('chairman')) continue;
-          final stored = (u['passwordHash'] ?? '').toString();
-          final input = LocalStorageService.hashPassword(pw.trim());
-          if (stored.isNotEmpty && stored == input) return true;
-          final plain = (u['password'] ?? '').toString();
-          if (plain.isNotEmpty && plain == pw.trim()) return true;
-        }
-      }
-    } catch (_) {}
-    return false;
+  void _submitPassword() {
+    final pw = _pwCtrl.text.trim();
+    if (pw.isEmpty) {
+      setState(() => _pwError = 'Please enter the password.');
+      return;
+    }
+    if (!StockAuthority.verifyWipePassword(pw)) {
+      setState(() => _pwError = 'Incorrect password.');
+      return;
+    }
+    setState(() {
+      _pwVerified = true;
+      _pwError = null;
+    });
   }
 
   Future<void> _doWipe() async {
@@ -750,6 +736,9 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
       setState(() {
         _wiping = false;
         _result = result;
+        // Each wipe needs the password again.
+        _pwVerified = false;
+        _pwCtrl.clear();
       });
     }
   }
@@ -853,16 +842,20 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Step 2 — Admin Password Verification',
+                Text('Step 2 — Password Verification',
                     style: GoogleFonts.inter(fontSize: 13.5, fontWeight: FontWeight.w700, color: NexusColors.textMain)),
                 const SizedBox(height: 4),
-                Text('Enter your admin, manager, or chairman password twice to unlock the wipe action.',
+                Text('Enter the wipe password to unlock the wipe action.',
                     style: GoogleFonts.inter(fontSize: 11.5, color: NexusColors.textSecondary)),
                 const SizedBox(height: 12),
                 TextFormField(
                   controller: _pwCtrl,
-                  obscureText: _obscure1,
+                  obscureText: _obscure,
                   style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
+                  onChanged: (_) {
+                    if (_pwError != null) setState(() => _pwError = null);
+                  },
+                  onFieldSubmitted: (_) => _submitPassword(),
                   decoration: InputDecoration(
                     labelText: 'Password',
                     labelStyle: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary),
@@ -871,26 +864,8 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.primary)),
                     suffixIcon: IconButton(
-                      icon: Icon(_obscure1 ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18, color: NexusColors.textSecondary),
-                      onPressed: () => setState(() => _obscure1 = !_obscure1),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _pwConfCtrl,
-                  obscureText: _obscure2,
-                  style: GoogleFonts.inter(fontSize: 13, color: NexusColors.textMain),
-                  decoration: InputDecoration(
-                    labelText: 'Confirm Password',
-                    labelStyle: GoogleFonts.inter(fontSize: 12, color: NexusColors.textSecondary),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.cardBorder)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: NexusColors.primary)),
-                    suffixIcon: IconButton(
-                      icon: Icon(_obscure2 ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18, color: NexusColors.textSecondary),
-                      onPressed: () => setState(() => _obscure2 = !_obscure2),
+                      icon: Icon(_obscure ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18, color: NexusColors.textSecondary),
+                      onPressed: () => setState(() => _obscure = !_obscure),
                     ),
                   ),
                 ),
@@ -910,23 +885,7 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
                     ),
                     icon: const Icon(Icons.lock_open_rounded, size: 18),
                     label: Text('Verify & Unlock Wipe', style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13)),
-                    onPressed: () {
-                      final pw = _pwCtrl.text.trim();
-                      final pw2 = _pwConfCtrl.text.trim();
-                      if (pw.isEmpty) {
-                        setState(() => _pwError = 'Please enter a password.');
-                        return;
-                      }
-                      if (pw != pw2) {
-                        setState(() => _pwError = 'Passwords do not match.');
-                        return;
-                      }
-                      if (!_verifyPassword(pw)) {
-                        setState(() => _pwError = 'Incorrect password. Only HQ Manager, Chairman, or Admin can proceed.');
-                        return;
-                      }
-                      setState(() { _pwVerified = true; _pwError = null; });
-                    },
+                    onPressed: _submitPassword,
                   ),
                 ),
               ],
@@ -1027,7 +986,7 @@ class _NexusInventoryWipePanelState extends State<_NexusInventoryWipePanel> {
                           color: _result!.hasErrors ? Colors.orange.shade900.withValues(alpha: 0.2) : Colors.green.shade900.withValues(alpha: 0.2),
                           borderRadius: BorderRadius.circular(6),
                         ),
-                        child: Text(_result!.hasErrors ? 'COMPLETED WITH NOTES' : 'COMPLETED',
+                        child: Text(_result!.hasErrors ? 'COMPLETED WITH ERRORS' : 'COMPLETED',
                             style: GoogleFonts.inter(
                               fontSize: 10.5,
                               fontWeight: FontWeight.w800,

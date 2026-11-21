@@ -14,6 +14,7 @@ import '../../pages/dispensary/dispensar/patient_form_helper.dart';
 import '../camp_session_service.dart';
 import '../local_storage_service.dart';
 import '../master_proforma_service.dart';
+import 'expiry_rules.dart';
 import 'stock_ledger.dart';
 import 'stock_pool.dart';
 
@@ -67,8 +68,12 @@ class StockGroup {
   final String key; // name|type|dose
   final String pool;
   final List<Map<String, dynamic>> batches; // FEFO order
+  /// Usable units (expired batches left out).
   final double onShelf;
   final double reserved;
+
+  /// Units still in expired batches (not usable; shown so nobody thinks they vanished).
+  final double expiredOnShelf;
 
   StockGroup({
     required this.key,
@@ -76,6 +81,7 @@ class StockGroup {
     required this.batches,
     required this.onShelf,
     required this.reserved,
+    this.expiredOnShelf = 0,
   });
 
   double get available => (onShelf - reserved) < 0 ? 0 : onShelf - reserved;
@@ -84,8 +90,10 @@ class StockGroup {
 
   /// First batch that still has stock (else the first batch): its id is what a
   /// prescription line links to.
-  Map<String, dynamic> get primary =>
-      batches.firstWhere((b) => StockReader.qty(b) > 0, orElse: () => batches.first);
+  Map<String, dynamic> get primary => batches.firstWhere(
+        (b) => StockReader.qty(b) > 0 && !isBatchExpired(b),
+        orElse: () => batches.first,
+      );
 }
 
 class StockReader {
@@ -150,12 +158,19 @@ class StockReader {
     for (final e in byKey.entries) {
       final list = e.value;
       sortFefo(list);
-      var shelf = 0.0, res = 0.0;
+      var shelf = 0.0, res = 0.0, expired = 0.0;
       for (final b in list) {
+        // Expired batches are not usable stock: they do not count as on the shelf for the
+        // doctor or the dispense (they wait in Med Inventory › Expiry to be removed).
+        if (isBatchExpired(b)) {
+          expired += qty(b) > 0 ? qty(b) : 0;
+          continue;
+        }
         shelf += qty(b);
         res += reservedById[(b['medicineId'] ?? b['id']).toString()] ?? 0;
       }
-      out.add(StockGroup(key: e.key, pool: pool.key, batches: list, onShelf: shelf, reserved: res));
+      out.add(StockGroup(
+          key: e.key, pool: pool.key, batches: list, onShelf: shelf, reserved: res, expiredOnShelf: expired));
     }
     out.sort((a, b) => a.key.compareTo(b.key));
     return out;
@@ -189,6 +204,7 @@ class StockReader {
     var left = units;
     for (final b in g.batches) {
       if (left <= 0) break;
+      if (isBatchExpired(b)) continue; // never take from an expired batch
       final have = qty(b);
       if (have <= 0) continue;
       final take = left <= have ? left : have;
@@ -212,22 +228,43 @@ class StockReader {
     final skip = _canonSerial(excludeSerial, pool.branch);
 
     final finished = <String>{};
+    final tokenBySerial = <String, Map>{};
     if (entries != null) {
       for (final v in entries.values) {
         if (v is! Map) continue;
-        if (_isFinished(v)) {
-          final s = _canonSerial((v['serial'] ?? v['id'])?.toString(), pool.branch);
-          if (s.isNotEmpty) finished.add(s);
-        }
+        final s = _canonSerial((v['serial'] ?? v['id'])?.toString(), pool.branch);
+        if (s.isEmpty) continue;
+        if (_isFinished(v)) finished.add(s);
+        // The receptionist's token, to check a prescription really is this token's.
+        if (v['issuedAtMs'] is num || v['createdBy'] != null) tokenBySerial.putIfAbsent(s, () => v);
       }
     }
 
+    // The prescriptions box keeps each prescription under several keys: one copy per token,
+    // the newest (a doctor's edit replaces the first save).
+    final newestBySerial = <String, Map>{};
+    int stamp(Map m) {
+      final rev = m['revision'] ?? m['prescriptionRevision'];
+      final r = rev is num ? rev.toInt() : int.tryParse(rev?.toString() ?? '') ?? 0;
+      final t = DateTime.tryParse((m['updatedAt'] ?? m['completedAt'] ?? '').toString())?.millisecondsSinceEpoch ?? 0;
+      return r * 10000000000000 + t;
+    }
     for (final raw in prescBox.values) {
       if (raw is! Map) continue;
       final serial = _canonSerial((raw['serial'] ?? raw['id'])?.toString(), pool.branch);
       if (serial.isEmpty || serial == skip) continue;
+      final cur = newestBySerial[serial];
+      if (cur == null || stamp(raw) > stamp(cur)) newestBySerial[serial] = raw;
+    }
+
+    for (final e in newestBySerial.entries) {
+      final serial = e.key;
+      final raw = e.value;
       if (_isFinished(raw) || finished.contains(serial)) continue;
       if (!_isToday(raw, serial, today)) continue;
+      // Stored under this number for an earlier token or another patient: not held back.
+      final token = tokenBySerial[serial];
+      if (token != null && !LocalStorageService.prescriptionFitsToken(raw, token)) continue;
       // Only prescriptions of this pool.
       final rp = StockPool.of(
         (raw['branchId'] ?? pool.branch).toString(),
@@ -250,10 +287,15 @@ class StockReader {
     return out;
   }
 
+  /// Dispensed, cancelled or reversed. Not "completed": that is the doctor finishing the
+  /// prescription, which is exactly when it must be held back. Counting "completed" as
+  /// finished meant no prescription was ever reserved, so the doctor's "available" was the
+  /// whole shelf and two doctors could prescribe the same last units.
   static bool _isFinished(Map v) {
     final d = (v['dispenseStatus'] ?? '').toString().toLowerCase().trim();
     final s = (v['status'] ?? '').toString().toLowerCase().trim();
-    return d == 'dispensed' || d == 'cancelled' || s == 'completed' || s == 'cancelled' || s == 'dispensed' ||
+    const gone = {'cancelled', 'canceled', 'reversed', 'voided', 'void', 'deleted', 'refunded'};
+    return d == 'dispensed' || gone.contains(d) || s == 'dispensed' || gone.contains(s) ||
         v['dispensedAt'] != null;
   }
 

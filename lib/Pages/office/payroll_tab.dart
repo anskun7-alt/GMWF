@@ -442,7 +442,13 @@ class _PayrollTabState extends State<PayrollTab> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.people_outline_rounded, size: 48, color: t.textTertiary),
+                      GEmptyIllustration(
+                        query.isNotEmpty
+                            ? GEmptyIllustrationKind.search
+                            : GEmptyIllustrationKind.people,
+                        size: 140,
+                        fallbackIcon: Icons.people_outline_rounded,
+                      ),
                       const SizedBox(height: 12),
                       Text(
                         query.isNotEmpty ? 'No matching employees found.' : 'No active employees registered for this month.',

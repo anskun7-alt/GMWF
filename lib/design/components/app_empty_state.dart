@@ -17,6 +17,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'package:flutter/material.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import '../../theme/role_theme_provider.dart' show RoleThemeScope;
 import '../tokens/spacing.dart';
 import '../tokens/typography.dart';
@@ -30,6 +31,8 @@ class AppEmptyState extends StatelessWidget {
     this.subtitle,
     this.action,
     this.compact = false,
+    this.illustration,
+    this.showIllustration = true,
   });
 
   final IconData icon;
@@ -39,53 +42,76 @@ class AppEmptyState extends StatelessWidget {
   /// Optional action button (typically an AppButton with ghost or primary variant).
   final Widget? action;
 
-  /// If true, uses smaller padding and icon for use in constrained areas.
+  /// If true, uses smaller padding and illustration size for constrained areas.
   final bool compact;
+
+  /// Optional explicit illustration category. Auto-inferred when null.
+  final GEmptyIllustrationKind? illustration;
+
+  /// When false, falls back to the classic circular icon badge.
+  final bool showIllustration;
 
   @override
   Widget build(BuildContext context) {
     final t = RoleThemeScope.dataOf(context);
     final iconSize = compact ? Gsp.sp12 : GColor.iconXxl;
-    final vPad = compact ? Gsp.sp6 : Gsp.sp12;
+    final artSize = compact ? 96.0 : 148.0;
+    final vPad = compact ? Gsp.sp5 : Gsp.sp10;
+    final resolvedKind = illustration ??
+        GEmptyIllustrationKind.infer(
+          icon: icon,
+          title: title,
+          subtitle: subtitle,
+        );
 
     return Center(
       child: Padding(
         padding: EdgeInsets.symmetric(horizontal: Gsp.sp6, vertical: vPad),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: iconSize + Gsp.sp6,
-              height: iconSize + Gsp.sp6,
-              decoration: BoxDecoration(
-                color: t.accentMuted,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                icon,
-                size: iconSize,
-                color: t.accent.withValues(alpha: 0.6),
-              ),
-            ),
-            SizedBox(height: Gsp.sp4),
-            Text(
-              title,
-              style: GText.h3(t.textPrimary),
-              textAlign: TextAlign.center,
-            ),
-            if (subtitle != null) ...[
-              SizedBox(height: Gsp.sp2),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (showIllustration)
+                GEmptyIllustration(
+                  resolvedKind,
+                  size: artSize,
+                  fallbackIcon: icon,
+                )
+              else
+                Container(
+                  width: iconSize + Gsp.sp6,
+                  height: iconSize + Gsp.sp6,
+                  decoration: BoxDecoration(
+                    color: t.accentMuted,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    icon,
+                    size: iconSize,
+                    color: t.accent.withValues(alpha: 0.6),
+                  ),
+                ),
+              SizedBox(height: compact ? Gsp.sp3 : Gsp.sp4),
               Text(
-                subtitle!,
-                style: GText.body2(t.textSecondary),
+                title,
+                style: GText.h3(t.textPrimary),
                 textAlign: TextAlign.center,
               ),
+              if (subtitle != null) ...[
+                SizedBox(height: Gsp.sp2),
+                Text(
+                  subtitle!,
+                  style: GText.body2(t.textSecondary),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+              if (action != null) ...[
+                SizedBox(height: Gsp.sp5),
+                action!,
+              ],
             ],
-            if (action != null) ...[
-              SizedBox(height: Gsp.sp5),
-              action!,
-            ],
-          ],
+          ),
         ),
       ),
     );

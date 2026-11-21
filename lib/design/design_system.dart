@@ -57,6 +57,7 @@ export 'components/app_card.dart';
 export 'components/app_chip.dart';
 export 'components/app_divider.dart';
 export 'components/app_empty_state.dart';
+export 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 export 'components/app_feedback.dart';
 export 'components/app_toast.dart';
 export 'components/decorative_image.dart';

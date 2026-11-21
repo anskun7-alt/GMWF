@@ -41,6 +41,7 @@ class PatientForm extends StatefulWidget {
   final String branchId;
   final Map<String, dynamic> queueEntry;
   final VoidCallback? onDispensed;
+  final ValueChanged<bool>? onDispenseBusyChanged;
   final String? dispenserName;
   final bool isCompactPreview;
   const PatientForm({
@@ -48,6 +49,7 @@ class PatientForm extends StatefulWidget {
     required this.branchId,
     required this.queueEntry,
     this.onDispensed,
+    this.onDispenseBusyChanged,
     this.dispenserName,
     this.isCompactPreview = false,
   });
@@ -63,6 +65,7 @@ class _PatientFormState extends State<PatientForm> {
   bool _isDispensed = false;
   bool _isPrinting = false;
   bool _isDispensing = false;
+  bool _dispenseFlowActive = false;
   bool _loadingBranch = true;
   bool _isLoadingPrescription = true;
   StreamSubscription<Map<String, dynamic>>? _realtimeSub;
@@ -266,6 +269,15 @@ class _PatientFormState extends State<PatientForm> {
       final myBranch = widget.branchId.toLowerCase().trim();
       if (eventBranch != null && eventBranch.isNotEmpty && myBranch.isNotEmpty &&
           eventBranch != myBranch && !CampSessionService.areBranchesMatching(eventBranch, myBranch)) return;
+
+      if (type == RealtimeEvents.savePatient ||
+          type == 'save_patient' ||
+          type == 'migrate_patient_key' ||
+          type == 'patient_edit_approved') {
+        _loadPrescription();
+        return;
+      }
+
       // Only this patient's events. One without a serial used to pass this check, so another
       // patient's prescription was shown here (or the form reloaded and came up empty).
       if (eventSerial.isEmpty || mySerial.isEmpty ||
@@ -319,6 +331,10 @@ class _PatientFormState extends State<PatientForm> {
 
   @override
   void dispose() {
+    if (_dispenseFlowActive) {
+      _dispenseFlowActive = false;
+      widget.onDispenseBusyChanged?.call(false);
+    }
     _claimRenewal?.cancel();
     DispenseQueue.release(_resolvedSerial, widget.branchId);
     _realtimeSub?.cancel();
@@ -686,46 +702,110 @@ class _PatientFormState extends State<PatientForm> {
   /// so the dispenser patient form shows only the barcode instead of the name.
   String _resolveDisplayBarcode(dynamic item) {
     if (item is! Map) return '---';
-    final rawBar = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+    final itemMap = Map<String, dynamic>.from(item);
+
+    // 1. Direct valid 3-digit barcode on the prescribed line
+    final rawBar = (itemMap['barcode'] ?? itemMap['rollNo'] ?? '').toString().trim();
     final normDirect = MasterProformaService.normalizeProformaBarcode(rawBar);
     if (normDirect != null) return normDirect;
 
-    final invId = (item['inventoryId'] ?? item['id'] ?? item['medicineId'])?.toString().trim() ?? '';
+    // 2. Check StockLedger / StockReader pool batches (keyed by "<pool>|<medicineId>")
+    //    as well as legacy "stock:<id>" entries.
+    final invId = (itemMap['inventoryId'] ?? itemMap['id'] ?? itemMap['medicineId'])?.toString().trim() ?? '';
+    final pool = _patientPool();
+    if (pool != null) {
+      if (invId.isNotEmpty) {
+        final ledgerItem = StockLedger.item(pool.key, invId);
+        if (ledgerItem != null) {
+          final lBar = (ledgerItem['barcode'] ?? ledgerItem['rollNo'] ?? '').toString().trim();
+          final normLedger = MasterProformaService.normalizeProformaBarcode(lBar) ??
+              MasterProformaService.resolveOfficialBarcodeForStockItem(ledgerItem);
+          if (normLedger != null) return normLedger;
+        }
+      }
+      final group = StockReader.groupForLine(pool, itemMap);
+      if (group != null) {
+        for (final b in group.batches) {
+          final bBar = (b['barcode'] ?? b['rollNo'] ?? '').toString().trim();
+          final normBatch = MasterProformaService.normalizeProformaBarcode(bBar) ??
+              MasterProformaService.resolveOfficialBarcodeForStockItem(b);
+          if (normBatch != null) return normBatch;
+        }
+      }
+    }
+
     if (invId.isNotEmpty) {
       try {
         if (Hive.isBoxOpen(LocalStorageService.stockBox)) {
           final stockItem = LocalStorageService.getLocalInventoryItem(invId);
           if (stockItem != null) {
             final sBar = (stockItem['barcode'] ?? stockItem['rollNo'] ?? '').toString().trim();
-            final normStock = MasterProformaService.normalizeProformaBarcode(sBar);
+            final normStock = MasterProformaService.normalizeProformaBarcode(sBar) ??
+                MasterProformaService.resolveOfficialBarcodeForStockItem(stockItem);
             if (normStock != null) return normStock;
           }
         }
       } catch (_) {}
     }
 
-    final rawName = (item['formula'] ?? item['name'] ?? '').toString().trim();
-    final type = (item['type'] ?? '').toString().trim();
-    final dose = (item['dose'] ?? item['dosage'] ?? '').toString().trim();
-
-    final exactNtd = MasterProformaService.findExactNameDoseTypeMatch(rawName, type, dose) ??
-        MasterProformaService.findExactMatch(rawName, type);
-    if (exactNtd != null) {
-      final pBar = (exactNtd['barcode'] ?? exactNtd['rollNo'] ?? '').toString().trim();
-      final normProforma = MasterProformaService.normalizeProformaBarcode(pBar);
-      if (normProforma != null) return normProforma;
-      if (pBar.isNotEmpty) return pBar;
-    }
-
-    final rawCode = (item['code'] ?? item['itemCode'] ?? '').toString().trim();
+    // 3. Lookup by code / itemCode in Master Proforma catalog
+    final rawCode = (itemMap['code'] ?? itemMap['itemCode'] ?? '').toString().trim();
     if (rawCode.isNotEmpty) {
       final byCode = MasterProformaService.findExactBarcodeMatch(rawCode);
       if (byCode != null) {
         final pBar = (byCode['barcode'] ?? byCode['rollNo'] ?? '').toString().trim();
+        final normCode = MasterProformaService.normalizeProformaBarcode(pBar);
+        if (normCode != null) return normCode;
         if (pBar.isNotEmpty) return pBar;
       }
-      return rawCode;
     }
+    if (rawBar.isNotEmpty) {
+      final byRawBar = MasterProformaService.findExactBarcodeMatch(rawBar);
+      if (byRawBar != null) {
+        final pBar = (byRawBar['barcode'] ?? byRawBar['rollNo'] ?? '').toString().trim();
+        final normBar = MasterProformaService.normalizeProformaBarcode(pBar);
+        if (normBar != null) return normBar;
+      }
+    }
+
+    // 4. Match against Master Proforma catalog (handling brand names, spoon dosages, & type aliases)
+    final rawName = (itemMap['formula'] ?? itemMap['name'] ?? '').toString().trim();
+    final cleanedName = MasterProformaService.cleanBrandToFormula(rawName);
+    final type = (itemMap['type'] ?? '').toString().trim();
+    var dose = (itemMap['dose'] ?? itemMap['dosage'] ?? '').toString().trim();
+    // Ignore syrup spoon instructions or timing strings when matching catalog strength
+    if (dose.toLowerCase().contains('spoon') || dose.contains('+')) {
+      dose = '';
+    }
+
+    for (final candidateName in {rawName, cleanedName}) {
+      if (candidateName.isEmpty) continue;
+      final exactNtd = MasterProformaService.findExactNameDoseTypeMatch(candidateName, type, dose) ??
+          (dose.isNotEmpty ? MasterProformaService.findExactNameDoseTypeMatch(candidateName, type, '') : null) ??
+          MasterProformaService.findExactMatch(candidateName, type);
+      if (exactNtd != null) {
+        final pBar = (exactNtd['barcode'] ?? exactNtd['rollNo'] ?? '').toString().trim();
+        final normProforma = MasterProformaService.normalizeProformaBarcode(pBar);
+        if (normProforma != null) return normProforma;
+        if (pBar.isNotEmpty) return pBar;
+      }
+    }
+
+    // 5. Fuzzy / normalized alignment via MasterProformaService.alignStockItemWithProforma
+    final probe = <String, dynamic>{
+      ...itemMap,
+      'name': cleanedName.isNotEmpty ? cleanedName : rawName,
+      'formula': cleanedName.isNotEmpty ? cleanedName : rawName,
+      'type': type,
+      'dose': dose,
+    };
+    MasterProformaService.alignStockItemWithProforma(probe);
+    final alignedBar = MasterProformaService.normalizeProformaBarcode(
+      (probe['barcode'] ?? probe['rollNo'] ?? '').toString(),
+    );
+    if (alignedBar != null) return alignedBar;
+
+    if (rawCode.isNotEmpty) return rawCode;
     return rawBar.isNotEmpty ? rawBar : '---';
   }
 
@@ -1139,6 +1219,20 @@ class _PatientFormState extends State<PatientForm> {
 
   // ─── Dispense ─────────────────────────────────────────────────────────────
   Future<void> _dispenseOnly() async {
+    if (_isDispensed || _isDispensing || _dispenseFlowActive) return;
+    _dispenseFlowActive = true;
+    widget.onDispenseBusyChanged?.call(true);
+    try {
+      await _dispenseOnlyBody();
+    } finally {
+      if (_dispenseFlowActive) {
+        _dispenseFlowActive = false;
+        widget.onDispenseBusyChanged?.call(false);
+      }
+    }
+  }
+
+  Future<void> _dispenseOnlyBody() async {
     if (_isDispensed || _isDispensing) return;
     final days = _daysOfMedicine;
 
@@ -2676,7 +2770,17 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   String _getResolvedPatientName() {
+    final s = _resolvedSerial;
+    final latestEntry = s.isNotEmpty ? LocalStorageService.getLocalEntry(widget.branchId, s) : null;
+    final pId = (latestEntry?['patientId'] ?? _data['patientId'] ?? widget.queueEntry['patientId'] ?? '').toString().trim();
+    final latestPatient = pId.isNotEmpty ? LocalStorageService.getLocalPatient(pId) : null;
+    final canonicalFromPatient = latestPatient != null
+        ? LocalStorageService.resolveCanonicalPatientName(latestPatient)
+        : '';
     final candidates = [
+      if (canonicalFromPatient.isNotEmpty) canonicalFromPatient,
+      latestEntry?['patientName'],
+      latestEntry?['name'],
       _data['patientName'],
       _data['name'],
       _data['patient_name'],
@@ -2698,7 +2802,12 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   String _getResolvedCnic() {
+    final s = _resolvedSerial;
+    final latestEntry = s.isNotEmpty ? LocalStorageService.getLocalEntry(widget.branchId, s) : null;
     final candidates = [
+      latestEntry?['patientCnic'],
+      latestEntry?['cnic'],
+      latestEntry?['guardianCnic'],
       _data['patientCnic'],
       _data['cnic'],
       _data['guardianCnic'],
@@ -2766,8 +2875,15 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   String _resolveGender() {
+    final s = _resolvedSerial;
+    final latestEntry = s.isNotEmpty ? LocalStorageService.getLocalEntry(widget.branchId, s) : null;
+    final pId = (latestEntry?['patientId'] ?? _data['patientId'] ?? widget.queueEntry['patientId'] ?? '').toString().trim();
+    final latestPatient = pId.isNotEmpty ? LocalStorageService.getLocalPatient(pId) : null;
     final candidates = [
-      _gender,
+      latestPatient?['gender'],
+      latestEntry?['patientGender'],
+      latestEntry?['gender'],
+      (latestEntry?['vitals'] is Map) ? latestEntry!['vitals']['gender'] : null,
       _data['patientGender'],
       _data['gender'],
       _data['sex'],
@@ -2778,11 +2894,12 @@ class _PatientFormState extends State<PatientForm> {
       widget.queueEntry['patientSex'],
       (widget.queueEntry['vitals'] is Map) ? widget.queueEntry['vitals']['gender'] : null,
       (widget.queueEntry['vitals'] is Map) ? widget.queueEntry['vitals']['sex'] : null,
+      _gender,
     ];
     for (var val in candidates) {
       if (val != null) {
         final str = val.toString().trim();
-        if (str.isNotEmpty && str != 'N/A' && str != 'null') {
+        if (str.isNotEmpty && str != 'N/A' && str != 'null' && str.toLowerCase() != 'unknown') {
           if (str.toLowerCase() == 'm' || str.toLowerCase() == 'male') return 'Male';
           if (str.toLowerCase() == 'f' || str.toLowerCase() == 'female') return 'Female';
           return str[0].toUpperCase() + str.substring(1);
@@ -2793,14 +2910,23 @@ class _PatientFormState extends State<PatientForm> {
   }
 
   String _resolveAge() {
-    // 1. Check explicit age candidates
+    final s = _resolvedSerial;
+    final latestEntry = s.isNotEmpty ? LocalStorageService.getLocalEntry(widget.branchId, s) : null;
+    final pId = (latestEntry?['patientId'] ?? _data['patientId'] ?? widget.queueEntry['patientId'] ?? '').toString().trim();
+    final latestPatient = pId.isNotEmpty ? LocalStorageService.getLocalPatient(pId) : null;
+
+    // 1. Check explicit age candidates (latest patient & Hive token first so live edits show immediately)
     final ageCandidates = [
-      _age,
+      latestPatient?['age'],
+      latestEntry?['patientAge'],
+      latestEntry?['age'],
+      (latestEntry?['vitals'] is Map) ? latestEntry!['vitals']['age'] : null,
       _data['patientAge'],
       _data['age'],
       widget.queueEntry['patientAge'],
       widget.queueEntry['age'],
       (widget.queueEntry['vitals'] is Map) ? widget.queueEntry['vitals']['age'] : null,
+      _age,
     ];
     for (var val in ageCandidates) {
       if (val != null) {
@@ -2813,6 +2939,10 @@ class _PatientFormState extends State<PatientForm> {
 
     // 2. Check DOB candidates to calculate age
     final dobCandidates = [
+      latestPatient?['dob'],
+      latestPatient?['dateOfBirth'],
+      latestEntry?['dob'],
+      latestEntry?['dateOfBirth'],
       _data['patientDob'],
       _data['dob'],
       _data['dateOfBirth'],

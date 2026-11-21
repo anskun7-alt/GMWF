@@ -524,6 +524,7 @@ class _ParentReportCardState extends State<ParentReportCard> {
                           final batch = FirebaseFirestore.instance.batch();
                           int totalDays = 0;
 
+                          final requestedAt = DateTime.now().toUtc().toIso8601String();
                           DateTime curr = startDate;
                           while (!curr.isAfter(endDate)) {
                             totalDays++;
@@ -539,7 +540,13 @@ class _ParentReportCardState extends State<ParentReportCard> {
                                   'isParentRequested': true,
                                   'leaveReason': reasonText,
                                   'leaveStatus': 'pending',
-                                  'timestamp': DateTime.now().toIso8601String(),
+                                  'timestamp': requestedAt,
+                                  // When it was asked: a teacher's later decision is never
+                                  // undone by this copy arriving late, and a genuinely new
+                                  // request after a denial has a newer timestamp.
+                                  'leaveRequestedAt': requestedAt,
+                                  'leaveDecidedAt': null,
+                                  'leaveDecidedFor': null,
                                 }
                               },
                               editorName: 'Parent/Guardian',
@@ -561,6 +568,11 @@ class _ParentReportCardState extends State<ParentReportCard> {
                                   'leaveReason': reasonText,
                                   'leaveStatus': 'pending',
                                   'timestamp': FieldValue.serverTimestamp(),
+                                  'leaveRequestedAt': requestedAt,
+                                  'leaveDecidedAt': null,
+                                  'leaveDecidedFor': null,
+                                  'lastEditedBy': 'Parent/Guardian',
+                                  'lastEditedAt': requestedAt,
                                 }
                               },
                               SetOptions(merge: true),
@@ -1963,8 +1975,14 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required bool needsReply,
   }) {
     final selectedDateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final leaveStatus = selectedDateLog['leaveStatus'] ?? 'pending';
-    final hasRequestedLeave = selectedDateLog['attendance'] == 'leave_requested' || selectedDateLog['attendance'] == 'leave';
+    final selectedAtt = selectedDateLog['attendance']?.toString().toLowerCase().trim() ?? '';
+    final rawLeaveStatus = selectedDateLog['leaveStatus']?.toString().toLowerCase().trim();
+    final leaveStatus = rawLeaveStatus == 'declined'
+        ? 'denied'
+        : ((rawLeaveStatus == null || rawLeaveStatus.isEmpty)
+            ? (selectedAtt == 'leave' ? 'approved' : 'pending')
+            : rawLeaveStatus);
+    final hasRequestedLeave = selectedAtt == 'leave_requested' || selectedAtt == 'leave';
     final selectedDateReplied = selectedDateLog['parentReplied'] == true;
     final ptmRequestStatus = selectedDateLog['ptmRequestStatus'];
     final ptmJoined = selectedDateLog['ptm'] == true;
@@ -1997,12 +2015,20 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           },
         ),
       );
-    } else if (hasRequestedLeave && leaveStatus == 'pending') {
+    } else if (selectedAtt == 'leave_requested' && leaveStatus == 'pending') {
       primaryActions.add(
         _quickActionStatus(
           label: context.t('Leave Pending Approval'),
           icon: Icons.hourglass_empty_rounded,
           color: SoftPalette.orange350,
+        ),
+      );
+    } else if (selectedAtt == 'leave' && leaveStatus == 'approved') {
+      primaryActions.add(
+        _quickActionStatus(
+          label: context.isUrdu ? 'رخصت منظور شدہ' : 'Leave Approved',
+          icon: Icons.check_circle_rounded,
+          color: SoftPalette.green400,
         ),
       );
     }
@@ -3219,7 +3245,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           final att = statusData['attendance']?.toString() ?? 'absent';
 
           final leaveReason = statusData['leaveReason']?.toString() ?? '';
-          final leaveStatus = statusData['leaveStatus']?.toString() ?? 'pending';
+          final rawLeaveStatus = statusData['leaveStatus']?.toString().toLowerCase().trim();
+          final leaveStatus = rawLeaveStatus == 'declined'
+              ? 'denied'
+              : ((rawLeaveStatus == null || rawLeaveStatus.isEmpty)
+                  ? (att == 'leave' ? 'approved' : 'pending')
+                  : rawLeaveStatus);
           final currentLines = (statusData['currentLines'] as num?)?.toInt() ?? int.tryParse(statusData['currentLines']?.toString() ?? '') ?? 0;
           
           final linesRead = getLinesCompletedOnDate(_selectedDate, allLogs, widget.studentId);
@@ -3435,10 +3466,18 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     children: [
                       Row(
                         children: [
-                          Icon(Icons.event_busy_rounded, color: context.adapt(SoftPalette.amber300), size: 22),
+                          Icon(
+                            (att == 'leave_requested' && leaveStatus == 'pending')
+                                ? Icons.hourglass_empty_rounded
+                                : Icons.event_busy_rounded,
+                            color: context.adapt(SoftPalette.amber300),
+                            size: 22,
+                          ),
                           const SizedBox(width: 10),
                           Text(
-                            context.isUrdu ? 'طالب علم رخصت پر تھا' : 'Student was on Leave',
+                            (att == 'leave_requested' && leaveStatus == 'pending')
+                                ? (context.isUrdu ? 'رخصت کی درخواست زیر التوا ہے' : 'Leave Request Pending')
+                                : (context.isUrdu ? 'طالب علم رخصت پر تھا' : 'Student was on Leave'),
                             style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.orange400), fontFamily: context.isUrdu ? 'Noori' : null),
                           ),
                         ],
@@ -3532,7 +3571,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        context.isUrdu ? 'طالب علم اس تاریخ کو مدرسہ میں غیر حاضر تھا۔' : 'Child did not attend Madrassa on this date.',
+                        leaveStatus == 'denied'
+                            ? (context.isUrdu
+                                ? 'رخصت کی درخواست مسترد کر دی گئی تھی۔ طالب علم غیر حاضر شمار ہوگا۔'
+                                : 'Leave request was denied. Student is marked absent on this date.')
+                            : (context.isUrdu ? 'طالب علم اس تاریخ کو مدرسہ میں غیر حاضر تھا۔' : 'Child did not attend Madrassa on this date.'),
                         style: TextStyle(fontSize: 12, color: isDarkMode ? SoftPalette.red300 : SoftPalette.red550, fontFamily: context.isUrdu ? 'Noori' : null),
                       ),
                       const SizedBox(height: 12),
@@ -3623,6 +3666,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required bool isPtm,
     required bool needsReply,
     required String leaveStatus,
+    required String attendanceStatus,
     required List<Map<String, dynamic>> holidaysData,
     String? dateStr,
   }) {
@@ -3722,8 +3766,13 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       ));
     }
 
-    // Leave Denied
-    if (leaveStatus == 'denied') {
+    // Leave Denied — only warn "Marked absent" when the student really is absent
+    // (not if the teacher later marked them present or granted leave).
+    final normLeaveStatus = leaveStatus.toLowerCase().trim();
+    final normAttStatus = attendanceStatus.toLowerCase().trim();
+    if ((normLeaveStatus == 'denied' || normLeaveStatus == 'declined') &&
+        normAttStatus != 'present' &&
+        normAttStatus != 'leave') {
       reminders.add(_reminderCard(
         title: context.isUrdu ? 'درخواست رخصت مسترد' : 'Leave Request Denied',
         body: context.isUrdu
@@ -4618,9 +4667,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         attValue = context.t('Present');
         attColor = ParentReportCard.successColor;
       }
-    } else if (currentStatus == 'leave' || currentStatus == 'leave_requested') {
+    } else if (currentStatus == 'leave') {
       attValue = context.t('Leave');
       attColor = SoftPalette.amber300;
+    } else if (currentStatus == 'leave_requested') {
+      attValue = context.isUrdu ? 'رخصت زیر التوا' : 'Leave Pending';
+      attColor = SoftPalette.orange350;
     } else if (currentStatus == 'absent') {
       attValue = context.t('Absent');
       attColor = ParentReportCard.errorColor;
@@ -5466,7 +5518,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     final selectedDateStatus = selectedDateLog['attendance']?.toString() ?? 'unknown';
     final selectedDateIsLate = selectedDateLog['isLate'] == true || selectedDateLog['timing'] == 'late';
     final selectedDateArrivalTime = selectedDateLog['arrivalTime']?.toString();
-    final selectedDateLeaveStatus = selectedDateLog['leaveStatus'] ?? 'pending';
+    final rawSelectedLeaveStatus = selectedDateLog['leaveStatus']?.toString().toLowerCase().trim();
+    final selectedDateLeaveStatus = rawSelectedLeaveStatus == 'declined'
+        ? 'denied'
+        : ((rawSelectedLeaveStatus == null || rawSelectedLeaveStatus.isEmpty)
+            ? (selectedDateStatus == 'leave' ? 'approved' : 'pending')
+            : rawSelectedLeaveStatus);
     final selectedDateUniform = selectedDateLog['uniform'] == true;
     final selectedDateReplied = selectedDateLog['parentReplied'] == true;
     
@@ -5608,17 +5665,23 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final noticesList = config.auditLog.where((l) => l['type'] == 'ptm_reschedule' && l['month'] == config.month && l['year'] == config.year).toList();
 
+    final showDeniedReminder =
+        (selectedDateLeaveStatus == 'denied' || selectedDateLeaveStatus == 'declined') &&
+            selectedDateStatus != 'present' &&
+            selectedDateStatus != 'leave';
+
     final remindersWidget = _buildReminders(
       isPtm: isPtmForSelectedDate,
       needsReply: selectedDateNeedsReply && !selectedDateReplied,
       leaveStatus: selectedDateLeaveStatus,
+      attendanceStatus: selectedDateStatus,
       holidaysData: holidaysData,
       dateStr: selectedDateStr,
     );
 
     final bool hasActiveReminders = isPtmForSelectedDate ||
         (selectedDateNeedsReply && !selectedDateReplied) ||
-        selectedDateLeaveStatus == 'denied' ||
+        showDeniedReminder ||
         holidaysData.any((h) {
           final rawDate = h['date'];
           final hDate = rawDate is DateTime ? rawDate : _parseDateTime(rawDate);
@@ -8117,78 +8180,70 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   }
 
   Future<void> _approveLeaveRequest(String branchId, String dateStr, String targetStudentId) async {
+    final effBranch = _effectiveBranch;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final existingDay = MadrassaLocalStorage.getDailyLogCached(effBranch, dateStr);
+    final existingStudent = existingDay?[targetStudentId] is Map ? existingDay![targetStudentId] as Map : null;
+    final reqAt = existingStudent?['leaveRequestedAt'] ?? existingStudent?['timestamp'];
+    final decidedBy = FirebaseAuth.instance.currentUser?.displayName ??
+        FirebaseAuth.instance.currentUser?.email ??
+        'Teacher';
     await MadrassaLocalStorage.saveLogRecordLocal(
-      branchId: branchId,
+      branchId: effBranch,
       dateKey: dateStr,
       logData: {
         targetStudentId: {
           'attendance': 'leave',
           'leaveStatus': 'approved',
-          'leaveApprovedBy': studentData['guardianName'] ?? 'Teacher',
-          'leaveApprovalTime': DateTime.now().toIso8601String(),
+          'isParentRequested': false,
+          'leaveDecidedAt': nowIso,
+          'leaveDecidedBy': decidedBy,
+          if (reqAt != null) 'leaveDecidedFor': reqAt,
+          'leaveApprovedBy': decidedBy,
+          'leaveApprovalTime': nowIso,
+          'uniform': 'leave',
+          'isLate': false,
+          'timing': 'on_time',
+          'arrivalTime': null,
         }
       },
-      editorName: 'Teacher',
+      editorName: decidedBy,
       editorRole: 'teacher',
-    ).timeout(const Duration(seconds: 3), onTimeout: () {});
-
-    unawaited(
-      FirebaseFirestore.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('madrassa_daily_logs')
-          .doc(dateStr)
-          .set({
-        targetStudentId: {
-          'attendance': 'leave',
-          'leaveStatus': 'approved',
-          'leaveApprovedBy': studentData['guardianName'] ?? 'Teacher',
-          'leaveApprovalTime': FieldValue.serverTimestamp(),
-        }
-      }, SetOptions(merge: true))
-      .timeout(const Duration(seconds: 4))
-      .catchError((err) {
-        debugPrint('[ParentReportCard] Approve leave request note: $err');
-      })
-    );
+    ).timeout(const Duration(seconds: 6), onTimeout: () {});
     if (mounted) setState(() {});
   }
 
   Future<void> _denyLeaveRequest(String branchId, String dateStr, String targetStudentId) async {
+    final effBranch = _effectiveBranch;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final existingDay = MadrassaLocalStorage.getDailyLogCached(effBranch, dateStr);
+    final existingStudent = existingDay?[targetStudentId] is Map ? existingDay![targetStudentId] as Map : null;
+    final reqAt = existingStudent?['leaveRequestedAt'] ?? existingStudent?['timestamp'];
+    final decidedBy = FirebaseAuth.instance.currentUser?.displayName ??
+        FirebaseAuth.instance.currentUser?.email ??
+        'Teacher';
     await MadrassaLocalStorage.saveLogRecordLocal(
-      branchId: branchId,
+      branchId: effBranch,
       dateKey: dateStr,
       logData: {
         targetStudentId: {
           'attendance': 'absent',
           'leaveStatus': 'denied',
-          'leaveDeniedBy': studentData['guardianName'] ?? 'Teacher',
-          'leaveDenialTime': DateTime.now().toIso8601String(),
+          'isParentRequested': false,
+          'leaveDecidedAt': nowIso,
+          'leaveDecidedBy': decidedBy,
+          if (reqAt != null) 'leaveDecidedFor': reqAt,
+          'leaveDeniedBy': decidedBy,
+          'leaveDenialTime': nowIso,
+          'uniform': false,
+          'isLate': false,
+          'timing': 'on_time',
+          'arrivalTime': null,
         }
       },
-      editorName: 'Teacher',
+      editorName: decidedBy,
       editorRole: 'teacher',
-    ).timeout(const Duration(seconds: 3), onTimeout: () {});
-
-    unawaited(
-      FirebaseFirestore.instance
-          .collection('branches')
-          .doc(branchId)
-          .collection('madrassa_daily_logs')
-          .doc(dateStr)
-          .set({
-        targetStudentId: {
-          'attendance': 'absent',
-          'leaveStatus': 'denied',
-          'leaveDeniedBy': studentData['guardianName'] ?? 'Teacher',
-          'leaveDenialTime': FieldValue.serverTimestamp(),
-        }
-      }, SetOptions(merge: true))
-      .timeout(const Duration(seconds: 4))
-      .catchError((err) {
-        debugPrint('[ParentReportCard] Deny leave request note: $err');
-      })
-    );
+    ).timeout(const Duration(seconds: 6), onTimeout: () {});
     if (mounted) setState(() {});
   }
 
@@ -8208,8 +8263,20 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       rawData.forEach((stId, val) {
         if (val is Map) {
           final studentDataMap = Map<String, dynamic>.from(val);
-          final attendance = studentDataMap['attendance']?.toString();
-          final leaveStatus = studentDataMap['leaveStatus']?.toString() ?? (attendance == 'leave' ? 'approved' : 'pending');
+          final attendance = studentDataMap['attendance']?.toString().toLowerCase().trim();
+          final rawStatus = studentDataMap['leaveStatus']?.toString().toLowerCase().trim();
+          String leaveStatus;
+          if (rawStatus == 'declined') {
+            leaveStatus = 'denied';
+          } else if (rawStatus == null || rawStatus.isEmpty) {
+            leaveStatus = attendance == 'leave'
+                ? 'approved'
+                : (attendance == 'present' ? 'cancelled' : 'pending');
+          } else if (rawStatus == 'pending' && attendance == 'present') {
+            leaveStatus = 'cancelled';
+          } else {
+            leaveStatus = rawStatus;
+          }
           final hasLeaveRequest = attendance == 'leave_requested' || attendance == 'leave' || studentDataMap.containsKey('leaveReason');
           final parentReplied = studentDataMap['parentReplied'] == true || studentDataMap.containsKey('parentReplyText') || studentDataMap.containsKey('parentReplyMessage');
 
@@ -8220,13 +8287,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               : (studentDataMap['name'] ?? 'Student ($stId)');
 
           if (hasLeaveRequest) {
-            DateTime reqDate;
-            final ts = studentDataMap['timestamp'];
-            if (ts is Timestamp) {
-              reqDate = ts.toDate();
-            } else {
-              reqDate = DateTime.tryParse(dateStr) ?? DateTime.now();
-            }
+            final ts = studentDataMap['leaveRequestedAt'] ?? studentDataMap['timestamp'];
+            final reqDate = ts != null
+                ? _parseDateTime(ts, DateTime.tryParse(dateStr) ?? DateTime.now())
+                : (DateTime.tryParse(dateStr) ?? DateTime.now());
 
             requestsList.add({
               'id': '${dateStr}_leave_$stId',
@@ -8327,9 +8391,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               if (status == 'approved') {
                 statusColor = ParentReportCard.successColor;
                 statusLabel = context.isUrdu ? 'منظور شدہ' : 'Approved';
-              } else if (status == 'denied') {
+              } else if (status == 'denied' || status == 'declined') {
                 statusColor = ParentReportCard.errorColor;
                 statusLabel = context.isUrdu ? 'مسترد' : 'Denied';
+              } else if (status == 'cancelled') {
+                statusColor = SoftPalette.slate550;
+                statusLabel = context.isUrdu ? 'منسوخ (حاضر)' : 'Cancelled (Present)';
               } else {
                 statusColor = SoftPalette.amber300;
                 statusLabel = context.isUrdu ? 'زیر التوا' : 'Pending';
@@ -8569,7 +8636,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 final rejoinDate = studentData['rejoinRequestDate'] != null ? _parseDateTime(studentData['rejoinRequestDate']) : null;
 
                 final todayStr = DateFormat('yyyy-MM-dd').format(now);
-                final cachedToday = MadrassaLocalStorage.getDailyLogCached(widget.branchId, todayStr);
+                final cachedToday = MadrassaLocalStorage.getDailyLogCached(_effectiveBranch, todayStr);
                 final cachedTodayLog = (cachedToday != null && cachedToday[widget.studentId] is Map)
                     ? Map<String, dynamic>.from(cachedToday[widget.studentId] as Map)
                     : <String, dynamic>{};
@@ -8593,7 +8660,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 final isPtmToday = now.year == ptmDate.year && now.month == ptmDate.month && now.day == ptmDate.day;
 
                 final selectedDateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-                final cachedSelected = MadrassaLocalStorage.getDailyLogCached(widget.branchId, selectedDateStr);
+                final cachedSelected = MadrassaLocalStorage.getDailyLogCached(_effectiveBranch, selectedDateStr);
                 final cachedSelectedLog = (cachedSelected != null && cachedSelected[widget.studentId] is Map)
                     ? Map<String, dynamic>.from(cachedSelected[widget.studentId] as Map)
                     : <String, dynamic>{};
@@ -8617,7 +8684,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     _selectedDate.day == ptmDate.day;
                 final selectedDateParentReplied = selectedDateLog['parentReplied'] == true;
                 final needsReply = status == 'active' && !selectedDateParentReplied;
-                final leaveStatus = todaySLog['leaveStatus'] ?? 'pending';
+                final rawTodayLeaveStatus = todaySLog['leaveStatus']?.toString().toLowerCase().trim();
+                final leaveStatus = rawTodayLeaveStatus == 'declined'
+                    ? 'denied'
+                    : ((rawTodayLeaveStatus == null || rawTodayLeaveStatus.isEmpty)
+                        ? (currentStatus == 'leave' ? 'approved' : 'pending')
+                        : rawTodayLeaveStatus);
 
                 final holidaysData = (holidaySnap.data ?? []).map((d) {
                   final date = _parseDateTime(d['date']);
@@ -9196,8 +9268,12 @@ class _AttendanceCalendar extends StatelessWidget {
               final leaveStatus = statusData?['leaveStatus']?.toString().toLowerCase().trim();
               final isLeave = att == 'leave' ||
                   att == 'leave_requested' ||
-                  leaveStatus == 'approved' ||
-                  (statusData?['isParentRequested'] == true && leaveStatus != 'denied' && leaveStatus != 'declined');
+                  ((att == null || att.isEmpty) &&
+                      (leaveStatus == 'approved' ||
+                          (statusData?['isParentRequested'] == true &&
+                              leaveStatus != 'denied' &&
+                              leaveStatus != 'declined' &&
+                              leaveStatus != 'cancelled')));
 
               if (isHoliday) {
                 bg = isIslamicHoliday && holidayDoc == null

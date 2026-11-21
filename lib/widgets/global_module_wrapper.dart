@@ -31,11 +31,14 @@ const String _kGlobalBranchId = 'all';
 class GlobalModuleWrapper extends StatefulWidget {
   final AppModule module;
   final Map<String, dynamic> userData;
+  /// External branch selection (e.g. from HomeShell's top-bar branch pill).
+  final String? selectedBranchId;
 
   const GlobalModuleWrapper({
     super.key,
     required this.module,
     required this.userData,
+    this.selectedBranchId,
   });
 
   static bool isWrapped(BuildContext context) {
@@ -74,22 +77,41 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
   }
   // ───────────────────────────────────────────────────────────────────────────
 
+  String _resolveExternalBranchId() {
+    final explicit = (widget.selectedBranchId ?? '').trim().toLowerCase();
+    if (explicit.isNotEmpty) {
+      return explicit == 'global' ? 'all' : explicit;
+    }
+    final raw = (widget.userData['branchId'] as String? ?? '').trim().toLowerCase();
+    if (raw.isEmpty || raw == 'global' || raw == 'unknown') return 'all';
+    return raw;
+  }
+
+  String _resolveBranchDisplayName(String branchId) {
+    if (branchId == 'all') return 'All Branches (Consolidated)';
+    final lower = branchId.toLowerCase();
+    for (final b in _branches) {
+      if ((b['id'] ?? '').toString().toLowerCase() == lower) {
+        final n = (b['name'] ?? '').toString().trim();
+        if (n.isNotEmpty) return n;
+      }
+    }
+    return LocalStorageService.getBranchName(branchId);
+  }
+
   @override
   void initState() {
     super.initState();
-    final rawBranchId = (widget.userData['branchId'] as String? ?? '').trim();
-    final role = (widget.userData['role'] as String? ?? '').toLowerCase().trim();
-    final isExecutive = [
-      'ceo', 'chairman', 'global user', 'global admin', 'admin',
-      'administrator', 'super admin', 'hq manager', 'hqmanager',
-      'hq_manager', 'director', 'president', 'founder'
-    ].contains(role);
-    final normalizedBranchId = (isExecutive || rawBranchId == 'global' || rawBranchId.isEmpty) ? 'all' : rawBranchId;
-    if ((widget.module.id == 'finance' || isExecutive) && !_isBranchScoped) {
+    final externalBranch = _resolveExternalBranchId();
+    if (_isBranchScoped) {
+      _selectedBranchId = externalBranch;
+    } else if (externalBranch != 'all') {
+      // Honor the branch already chosen in HomeShell's top-bar branch selector.
+      _selectedBranchId = externalBranch;
+      _selectedBranchName = _resolveBranchDisplayName(externalBranch);
+    } else {
       _selectedBranchId = 'all';
       _selectedBranchName = 'All Branches (Consolidated)';
-    } else {
-      _selectedBranchId = normalizedBranchId;
     }
 
     _pillAnim = AnimationController(
@@ -98,7 +120,7 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
         CurvedAnimation(parent: _pillAnim, curve: Curves.easeOutCubic);
 
     // ── START SYNC SERVICE ──────────────────────────────────────────────────
-    final branchId = (widget.userData['branchId'] as String? ?? '').trim();
+    final branchId = externalBranch;
     if (branchId.isNotEmpty && branchId != _kGlobalBranchId) {
       SyncService().start(branchId);
     } else {
@@ -109,6 +131,31 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
     // ───────────────────────────────────────────────────────────────────────
 
     _loadBranches();
+  }
+
+  @override
+  void didUpdateWidget(covariant GlobalModuleWrapper oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_isBranchScoped) return;
+    final nextBranch = _resolveExternalBranchId();
+    final prevBranch = (oldWidget.selectedBranchId ?? oldWidget.userData['branchId'] as String? ?? '')
+        .trim()
+        .toLowerCase();
+    final normPrev = (prevBranch.isEmpty || prevBranch == 'global' || prevBranch == 'unknown')
+        ? 'all'
+        : prevBranch;
+    if (nextBranch != normPrev && nextBranch != (_selectedBranchId ?? '').toLowerCase()) {
+      setState(() {
+        _selectedBranchId = nextBranch;
+        _selectedBranchName = _resolveBranchDisplayName(nextBranch);
+      });
+      _pillAnim.forward(from: 0);
+      if (nextBranch != 'all') {
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (mounted) SyncService().start(nextBranch);
+        });
+      }
+    }
   }
 
   Future<void> _loadBranches() async {
@@ -262,13 +309,19 @@ class _GlobalModuleWrapperState extends State<GlobalModuleWrapper>
 
   void _updateSelectedBranchState() {
     if (_selectedBranchId != null) {
-      final exists = _branches.any((b) => b['id'] == _selectedBranchId);
-      if (!exists) {
-        _selectedBranchId = 'all';
-        _selectedBranchName = 'All Branches (Consolidated)';
+      final selLower = _selectedBranchId!.toLowerCase();
+      final match = _branches.where((b) => (b['id'] ?? '').toString().toLowerCase() == selLower).firstOrNull;
+      if (match == null) {
+        if (selLower == 'all') {
+          _selectedBranchId = 'all';
+          _selectedBranchName = 'All Branches (Consolidated)';
+        } else {
+          // Keep the explicitly selected branch even if not yet listed in local cache.
+          _selectedBranchName = LocalStorageService.getBranchName(_selectedBranchId!);
+        }
       } else {
-        final b = _branches.firstWhere((b) => b['id'] == _selectedBranchId);
-        _selectedBranchName = b['name'];
+        _selectedBranchId = match['id']?.toString();
+        _selectedBranchName = match['name']?.toString();
         _pillAnim.forward();
       }
     } else {

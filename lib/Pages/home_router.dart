@@ -1218,10 +1218,12 @@ class _HomeRouterState extends State<HomeRouter> {
           final liveName = (liveData['name'] ?? liveData['displayName'] ?? liveData['username'] ?? '').toString().trim();
           final livePhoto = (liveData['profileImage'] ?? liveData['profilePictureUrl'] ?? liveData['photoUrl'] ?? liveData['avatarUrl'])?.toString() ?? '';
           final liveRole = resolveRoleFromData(liveData);
+          final liveAddMode = (liveData['addMedicineMode'] ?? '').toString().trim().toLowerCase();
 
           final cachedName = (cached['name'] ?? cached['displayName'] ?? cached['username'] ?? '').toString().trim();
           final cachedPhoto = (cached['profileImage'] ?? cached['profilePictureUrl'] ?? cached['photoUrl'] ?? cached['avatarUrl'])?.toString() ?? '';
           final cachedRole = (cached['role'] ?? '').toString().trim().toLowerCase();
+          final cachedAddMode = (cached['addMedicineMode'] ?? '').toString().trim().toLowerCase();
 
           bool hasChanges = false;
           final isLiveNameInvalid = liveName.isEmpty ||
@@ -1231,6 +1233,7 @@ class _HomeRouterState extends State<HomeRouter> {
           if (!isLiveNameInvalid && liveName != cachedName) hasChanges = true;
           if (livePhoto.isNotEmpty && livePhoto != cachedPhoto) hasChanges = true;
           if (liveRole.isNotEmpty && liveRole != 'unknown' && liveRole != cachedRole) hasChanges = true;
+          if (liveAddMode.isNotEmpty && liveAddMode != cachedAddMode) hasChanges = true;
 
           if (hasChanges) {
             debugPrint('[HomeRouter] 🔄 Background profile refresh detected updates for $uid: name="$liveName", hasPhoto=${livePhoto.isNotEmpty}');

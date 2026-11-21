@@ -62,5 +62,49 @@ void main() {
         equals('Paracetamol (Panadol)'),
       );
     });
+
+    test('Catalog contains 200 mg Metronidazole (Flagyl) Tablet and preserves all Flagyl tablet strengths after seeding', () async {
+      await MasterProformaService.seedDefaultProformaIfEmpty();
+      final all = MasterProformaService.getAllProformaItems();
+
+      final flg100 = all.firstWhere((e) => e['code'] == 'MED-FLG-100', orElse: () => {});
+      final flg200 = all.firstWhere((e) => e['code'] == 'MED-FLG-200', orElse: () => {});
+      final flg400 = all.firstWhere((e) => e['code'] == 'MED-FLG-400', orElse: () => {});
+
+      expect(flg100['dose'], equals('100 mg'));
+      expect(flg100['barcode'], equals('052'));
+
+      expect(flg200.isNotEmpty, isTrue);
+      expect(flg200['barcode'], equals('079'));
+      expect(flg200['rollNo'], equals('079'));
+      expect(flg200['itemCode'], equals('MED-FLG-200'));
+      expect(flg200['name'], equals('Metronidazole (Flagyl)'));
+      expect(flg200['formula'], equals('Metronidazole (Flagyl)'));
+      expect(flg200['type'], equals('Tablet'));
+      expect(flg200['dose'], equals('200 mg'));
+
+      expect(flg400['dose'], equals('400 mg'));
+      expect(flg400['barcode'], equals('053'));
+
+      expect(MasterProformaService.findExactBarcodeMatch('079')?['code'], equals('MED-FLG-200'));
+      expect(MasterProformaService.findExactBarcodeMatch('MED-FLG-200')?['dose'], equals('200 mg'));
+      expect(
+        MasterProformaService.findExactNameDoseTypeMatch('Metronidazole (Flagyl)', 'Tablet', '200 mg')?['code'],
+        equals('MED-FLG-200'),
+      );
+
+      final stockRow = <String, dynamic>{
+        'name': 'Flagyl',
+        'type': 'Tablet',
+        'dose': '200mg',
+      };
+      MasterProformaService.alignStockItemWithProforma(stockRow);
+      expect(stockRow['code'], equals('MED-FLG-200'));
+      expect(stockRow['barcode'], equals('079'));
+      expect(stockRow['dose'], equals('200 mg'));
+
+      expect(all.where((e) => e['barcode'] == '079').length, equals(1));
+      expect(all.where((e) => e['code'] == 'MED-FLG-200').length, equals(1));
+    });
   });
 }

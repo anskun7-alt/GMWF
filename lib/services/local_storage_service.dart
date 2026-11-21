@@ -198,6 +198,20 @@ class LocalStorageService {
 
   static const String restockRequestsBox = 'local_restock_requests';
 
+  /// LAN event: a dispenser dismissed a restock alert.
+  static const String restockAcknowledgedEvent = 'restock_acknowledged';
+
+  /// Uploads a dismissed restock alert (used by the LAN server for its desks).
+  static Future<void> enqueueRestockAcknowledged(String branchId, String reqId, String atIso) => enqueueSync({
+        'type': 'update_request_status',
+        'branchId': branchId,
+        'collection': 'restock_requests',
+        'requestId': reqId,
+        'status': 'acknowledged',
+        'requestStatus': 'acknowledged',
+        'data': {'acknowledgedAt': atIso},
+      });
+
   static Future<void> saveRestockRequest(String branchId, Map<String, dynamic> requestData) async {
     try {
       final box = await openBoxSafe(restockRequestsBox);
@@ -267,6 +281,16 @@ class LocalStorageService {
       }
     } catch (_) {}
     await markLocalRequestDecided(reqId, 'acknowledged', fields: {'acknowledgedAt': nowIso});
+    // Tell the other desks (they kept showing the alert) and the LAN server, which uploads it.
+    try {
+      RealtimeManager().sendMessage(RealtimeEvents.payload(
+        type: restockAcknowledgedEvent,
+        branchId: branchId,
+        data: {'id': reqId, 'requestId': reqId, 'branchId': branchId, 'acknowledgedAt': nowIso},
+      ));
+    } catch (_) {}
+    // A desk linked to the LAN does not upload: the server does, from the message above.
+    if (LanFirestoreGate.isLanDesk) return;
     await enqueueSync({
       'type': 'update_request_status',
       'branchId': branchId,
@@ -1419,7 +1443,14 @@ class LocalStorageService {
     // DateKey isolation (serials like #5 reset daily; never match across different dates)
     String extractDateKey(Map m, String s) {
       final dk = (m['dateKey'] ?? '').toString().trim();
-      if (dk.isNotEmpty) return dk;
+      if (dk.isNotEmpty) {
+        // Normalize ISO yyyy-MM-dd (fallback used by some LAN handlers) to ddMMyy
+        if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(dk)) {
+          final dt = DateTime.tryParse(dk);
+          if (dt != null) return DateFormat('ddMMyy').format(dt);
+        }
+        return dk;
+      }
       return CampSessionService.getDateKeyFromSerial(s);
     }
     final inDate = extractDateKey(inc, inSerial);
@@ -1431,9 +1462,9 @@ class LocalStorageService {
     // QueueType isolation (serials reset per queue across zakat, non-zakat, and gmwf)
     String normQueue(Object? q, String s) {
       final qs = (q ?? '').toString().trim().toLowerCase();
-      if (qs == 'non-zakat' || qs == 'non_zakat' || qs == 'nz') return 'non-zakat';
+      if (qs == 'non-zakat' || qs == 'non_zakat' || qs == 'nz' || qs == '100' || qs == '100 pkr' || qs == 'pkr 100') return 'non-zakat';
       if (qs == 'gmwf' || qs == 'g' || qs == 'free') return 'gmwf';
-      if (qs == 'zakat' || qs == 'z') return 'zakat';
+      if (qs == 'zakat' || qs == 'z' || qs == '20' || qs == '20 pkr' || qs == 'pkr 20') return 'zakat';
       if (s.contains('-NZ-')) return 'non-zakat';
       if (s.contains('-G-')) return 'gmwf';
       if (s.contains('-Z-')) return 'zakat';
@@ -1447,8 +1478,22 @@ class LocalStorageService {
 
     // Patient ID check (child vs parent or two family members on one CNIC)
     // NOTE: Never fall back to `id` here because on a prescription map `id` is the token serial!
-    final inPid = (inc['patientId'] ?? '').toString().trim().toLowerCase();
-    final exPid = (ex['patientId'] ?? '').toString().trim().toLowerCase();
+    // Normalize dashes/spacing so '42301-0730163-2' (patient registry) and '4230107301632'
+    // (resolveIndividualPatientId) match as the same adult, and child keys match across
+    // dash/underscore variants, while adult vs child and sibling vs sibling stay strictly distinct.
+    String normPidForScope(String raw) {
+      final s = raw.trim().toLowerCase();
+      if (s.isEmpty || s.startsWith('unknown_')) return s;
+      if (s.contains('_child_')) {
+        final parts = s.split('_child_');
+        final g = parts[0].replaceAll(RegExp(r'\D'), '');
+        final childPart = parts.sublist(1).join('_child_').replaceAll(RegExp(r'[^a-z0-9]'), '');
+        return '${g}_child_$childPart';
+      }
+      return s.replaceAll(RegExp(r'[-\s]'), '');
+    }
+    final inPid = normPidForScope((inc['patientId'] ?? '').toString());
+    final exPid = normPidForScope((ex['patientId'] ?? '').toString());
     if (inPid.isNotEmpty && exPid.isNotEmpty && !inPid.startsWith('unknown_') && !exPid.startsWith('unknown_')) {
       if (inPid != exPid) return false;
     }
@@ -2047,6 +2092,9 @@ class LocalStorageService {
     patientsBox, entriesBox, prescriptionsBox, stockBox, dispensaryBox, medicineRestrictionsBox,
     masterProformaBox, tokenExceptionsBox, reportsCacheBox, 'doctor_prescription_templates',
     employeesBox,
+    // Inventory activity log (Log tab, Medicine Ledger): must be open on every desk at start,
+    // or the log looked empty after a restart.
+    auditLogsBox,
   };
   static const Set<String> _madrassaBoxes = {
     madrassaStudentsBox, madrassaLogsBox, madrassaHolidaysBox, madrassaFeesBox, auditLogsBox,
@@ -2615,9 +2663,76 @@ class LocalStorageService {
   }
 
 
+  /// Parses a Date of Birth from a [Timestamp], [DateTime], epoch millis, ISO-8601 string,
+  /// `dd-MM-yyyy`, `d-M-yyyy`, `dd/MM/yyyy`, `yyyy-MM-dd`, `dd MMM yyyy`, or 8-digit `ddMMyyyy`.
+  /// Returns `null` when [value] is blank or not a valid date (never falls back to `DateTime.now()`).
+  static DateTime? tryParseDob(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate().toLocal();
+    if (value is DateTime) return value.toLocal();
+    if (value is int && value > 0) {
+      try {
+        return DateTime.fromMillisecondsSinceEpoch(value).toLocal();
+      } catch (_) {}
+    }
+    if (value is String) {
+      final s = value.trim();
+      if (s.isEmpty) return null;
+      final low = s.toLowerCase();
+      if (low == 'null' || low == 'n/a' || low == 'none' || s == '-' || s == '—' || s == '0') {
+        return null;
+      }
+      final iso = DateTime.tryParse(s);
+      if (iso != null) return iso.toLocal();
+
+      final dmy = RegExp(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$').firstMatch(s);
+      if (dmy != null) {
+        final d = int.tryParse(dmy.group(1)!);
+        final m = int.tryParse(dmy.group(2)!);
+        final y = int.tryParse(dmy.group(3)!);
+        if (d != null && m != null && y != null && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2100) {
+          try {
+            return DateTime(y, m, d);
+          } catch (_) {}
+        }
+      }
+
+      final ymd = RegExp(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})').firstMatch(s);
+      if (ymd != null) {
+        final y = int.tryParse(ymd.group(1)!);
+        final m = int.tryParse(ymd.group(2)!);
+        final d = int.tryParse(ymd.group(3)!);
+        if (d != null && m != null && y != null && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2100) {
+          try {
+            return DateTime(y, m, d);
+          } catch (_) {}
+        }
+      }
+
+      final digits = s.replaceAll(RegExp(r'\D'), '');
+      if (digits.length == 8) {
+        final d = int.tryParse(digits.substring(0, 2));
+        final m = int.tryParse(digits.substring(2, 4));
+        final y = int.tryParse(digits.substring(4, 8));
+        if (d != null && m != null && y != null && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2100) {
+          try {
+            return DateTime(y, m, d);
+          } catch (_) {}
+        }
+      }
+
+      try {
+        return DateFormat('dd MMM yyyy').parse(s);
+      } catch (_) {}
+    }
+    return null;
+  }
+
   static DateTime _toDateTime(dynamic value) {
     if (value is Timestamp) return value.toDate().toLocal();
     if (value is DateTime)  return value.toLocal();
+    final parsed = tryParseDob(value);
+    if (parsed != null) return parsed;
     if (value is String) {
       try { return DateTime.parse(value).toLocal(); } catch (_) {}
     }
@@ -2625,9 +2740,9 @@ class LocalStorageService {
   }
 
   static int calculateAgeFromDob(dynamic dobValue) {
-    if (dobValue == null) return 0;
-    final DateTime birthDate = _toDateTime(dobValue);
-    final DateTime today     = DateTime.now();
+    final DateTime? birthDate = tryParseDob(dobValue);
+    if (birthDate == null) return 0;
+    final DateTime today = DateTime.now();
     int age = today.year - birthDate.year;
     if (today.month < birthDate.month ||
         (today.month == birthDate.month && today.day < birthDate.day)) {
@@ -2644,7 +2759,7 @@ class LocalStorageService {
       } else if (value is Timestamp || value is DateTime) {
         final dt = _toDateTime(value);
         result[key] = dt.toIso8601String();
-        if (key == 'dob') result['age'] = calculateAgeFromDob(dt);
+        if (key == 'dob' || key == 'dateOfBirth') result['age'] = calculateAgeFromDob(dt);
       } else if (value.runtimeType.toString().contains('FieldValue')) {
         debugPrint('[sanitize] Dropped FieldValue for key: $key');
       } else if (value is Map) {
@@ -2655,7 +2770,23 @@ class LocalStorageService {
         result[key] = value;
       }
     });
-    if (data['dob'] != null) result['age'] = calculateAgeFromDob(data['dob']);
+    final parsedDob = tryParseDob(data['dob'] ?? data['dateOfBirth']);
+    if (parsedDob != null) {
+      final isoDob = parsedDob.toIso8601String();
+      if (data.containsKey('dob') || !data.containsKey('dateOfBirth')) {
+        result['dob'] = isoDob;
+      }
+      if (data.containsKey('dateOfBirth')) {
+        result['dateOfBirth'] = isoDob;
+      }
+      final calcAge = calculateAgeFromDob(parsedDob);
+      final existingAge = result['age'] is num
+          ? (result['age'] as num).toInt()
+          : (int.tryParse(result['age']?.toString() ?? '') ?? 0);
+      if (calcAge > 0 || existingAge <= 0) {
+        result['age'] = calcAge;
+      }
+    }
     return result;
   }
 
@@ -3536,10 +3667,22 @@ class LocalStorageService {
       final isBothMadrassaLog = (type == 'save_madrassa_log' || type == 'save_madrassa_daily_log') &&
           (eType == 'save_madrassa_log' || eType == 'save_madrassa_daily_log');
       if (isBothMadrassaLog && existingMap['data'] is Map && actionCopy['data'] is Map) {
-        actionCopy['data'] = {
-          ...Map<String, dynamic>.from(existingMap['data'] as Map),
-          ...Map<String, dynamic>.from(actionCopy['data'] as Map),
-        };
+        // Deep-merge per student so field-level deltas (e.g. teacher attendance followed
+        // by a parent reply) coalesce without wiping each other's fields.
+        final mergedData = Map<String, dynamic>.from(existingMap['data'] as Map);
+        final incomingData = Map<String, dynamic>.from(actionCopy['data'] as Map);
+        for (final entry in incomingData.entries) {
+          final prev = mergedData[entry.key];
+          if (prev is Map && entry.value is Map) {
+            mergedData[entry.key] = {
+              ...Map<String, dynamic>.from(prev),
+              ...Map<String, dynamic>.from(entry.value as Map),
+            };
+          } else {
+            mergedData[entry.key] = entry.value;
+          }
+        }
+        actionCopy['data'] = mergedData;
         actionCopy['type'] = 'save_madrassa_log';
       }
     }
@@ -4174,36 +4317,272 @@ class LocalStorageService {
   static String _normalizeName(String name) =>
       name.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
 
-  static String getPatientKey(Map<String, dynamic> patient) {
-    final patientId = (patient['patientId'] ?? patient['id'])?.toString().trim();
-    if (patientId != null && patientId.isNotEmpty && !patientId.startsWith('unknown_')) {
-      final cleanPid = patientId.replaceAll(RegExp(r'\D'), '');
-      if (cleanPid.length == 13 && !RegExp(r'^0+$').hasMatch(cleanPid)) {
-        return '${cleanPid.substring(0, 5)}-${cleanPid.substring(5, 12)}-${cleanPid.substring(12, 13)}';
-      }
-      if (patientId.contains('_child_')) {
-        final parts = patientId.split('_child_');
-        final gDigits = parts[0].replaceAll(RegExp(r'\D'), '');
-        if (gDigits.length == 13 && !RegExp(r'^0+$').hasMatch(gDigits)) {
-          final gFormatted = '${gDigits.substring(0, 5)}-${gDigits.substring(5, 12)}-${gDigits.substring(12, 13)}';
-          return '${gFormatted}_child_${parts.sublist(1).join('_child_')}';
+  static bool _isBlankPatientField(dynamic v) {
+    if (v == null) return true;
+    final s = v.toString().trim();
+    if (s.isEmpty) return true;
+    final lower = s.toLowerCase();
+    return s == '0' ||
+        s == '-' ||
+        lower == 'null' ||
+        lower == 'n/a' ||
+        lower == 'none' ||
+        lower == 'unknown' ||
+        lower == 'unknown patient';
+  }
+
+  /// Authoritative adult-vs-child classification for a patient map.
+  /// - A `_child_` suffix in `patientId`/`id` always indicates a child.
+  /// - Otherwise an explicit boolean `isAdult` is trusted (so an adult polluted with
+  ///   a stray `guardianCnic` is never misclassified as a child).
+  /// - When `isAdult` is absent, having only a `guardianCnic` (without own CNIC) or
+  ///   an age under 18 indicates a child.
+  static bool isChildPatientRecord(Map<String, dynamic> p) {
+    final pid = (p['patientId'] ?? p['id'] ?? '').toString().trim();
+    if (pid.contains('_child_')) return true;
+
+    final guardDigits = (p['guardianCnic'] ?? p['guardian_cnic'] ?? '')
+        .toString()
+        .replaceAll(RegExp(r'\D'), '');
+    final ownDigits = (p['cnic'] ?? p['patientCnic'] ?? '')
+        .toString()
+        .replaceAll(RegExp(r'\D'), '');
+
+    // Self-guardian guard: a non-_child_ record whose own CNIC == guardianCnic AND
+    // own name == guardianName is an adult guardian record whose isAdult flag was
+    // corrupted by a prior child merge — nobody is their own guardian.
+    final rawName = (p['name'] ?? '').toString().trim();
+    final rawGuardianName = (p['guardianName'] ?? '').toString().trim();
+    if (ownDigits.length == 13 &&
+        ownDigits == guardDigits &&
+        rawName.isNotEmpty &&
+        rawGuardianName.isNotEmpty &&
+        _normalizeName(rawName) == _normalizeName(rawGuardianName)) {
+      return false;
+    }
+
+    final explicitAdult = p['isAdult'];
+    if (explicitAdult is bool) return !explicitAdult;
+    if (explicitAdult != null) {
+      final s = explicitAdult.toString().toLowerCase().trim();
+      if (s == 'false') return true;
+      if (s == 'true') return false;
+    }
+
+    if (guardDigits.isNotEmpty && ownDigits.isEmpty) return true;
+
+    final rawAge = p['age'];
+    final age = rawAge is num
+        ? rawAge.toInt()
+        : (int.tryParse(rawAge?.toString() ?? '') ?? 0);
+    if (age > 0 && age < 18 && guardDigits.isNotEmpty) return true;
+    return false;
+  }
+
+  /// Single source of truth for resolving a patient's own display name.
+  /// Never falls back to `guardianName`. When a corrupted record has conflicting
+  /// `name` and `patientName` values:
+  /// - For a child (`_child_<suffix>`), prefers the candidate matching `<suffix>`
+  ///   (or differing from `guardianName`), and falls back to the formatted `<suffix>`.
+  /// - For an adult, prefers `name` (authoritative registration field), then `patientName`,
+  ///   then `fullName`.
+  static String resolveCanonicalPatientName(Map<String, dynamic>? p) {
+    if (p == null || p.isEmpty) return '';
+    String clean(dynamic v) => _isBlankPatientField(v) ? '' : v.toString().trim();
+
+    final nameVal = clean(p['name']);
+    final patientNameVal = clean(p['patientName']);
+    final fullNameVal = clean(p['fullName']);
+    final guardianNameVal = clean(p['guardianName']);
+    final pid = (p['patientId'] ?? p['id'] ?? '').toString().trim();
+    final isChild = isChildPatientRecord(p);
+
+    if (isChild) {
+      final rawSuffix = pid.contains('_child_')
+          ? pid.split('_child_').sublist(1).join('_child_').trim()
+          : '';
+      final normSuffix = _normalizeName(rawSuffix);
+      final normGuardian = _normalizeName(guardianNameVal);
+
+      final candidates = [
+        if (nameVal.isNotEmpty) nameVal,
+        if (patientNameVal.isNotEmpty) patientNameVal,
+        if (fullNameVal.isNotEmpty) fullNameVal,
+      ];
+
+      // 0. Renamed on purpose (patient edit): the typed name wins over the old name that the
+      //    record key still carries — unless it is the guardian's name (a mix-up, not a rename).
+      if (p['nameEditedAt'] != null) {
+        for (final c in candidates) {
+          if (normGuardian.isEmpty || _normalizeName(c) != normGuardian) {
+            return c;
+          }
         }
       }
-      if (!_isDummyCnicValue(patientId)) {
-        return patientId;
+
+      // 1. Exact match with child key suffix (repairs records where `name` was overwritten with guardian's name)
+      if (normSuffix.isNotEmpty && normSuffix != 'child' && normSuffix != 'unnamed') {
+        for (final c in candidates) {
+          if (_normalizeName(c) == normSuffix) return c;
+        }
+      }
+
+      // 2. Any valid candidate distinct from guardianName
+      if (normGuardian.isNotEmpty) {
+        for (final c in candidates) {
+          if (_normalizeName(c) != normGuardian) return c;
+        }
+      }
+
+      // 3. First non-blank patient name candidate
+      if (candidates.isNotEmpty) return candidates.first;
+
+      // 4. Readable fallback from `_child_<suffix>` in patientId (never guardianName)
+      if (rawSuffix.isNotEmpty && normSuffix != 'child' && normSuffix != 'unnamed') {
+        return rawSuffix.replaceAll('_', ' ').trim();
+      }
+      return '';
+    }
+
+    // Adult: `name` is the authoritative registered name; fall back to `patientName`, then `fullName`.
+    if (nameVal.isNotEmpty) return nameVal;
+    if (patientNameVal.isNotEmpty) return patientNameVal;
+    if (fullNameVal.isNotEmpty) return fullNameVal;
+    return '';
+  }
+
+  /// Repairs cross-contaminated adult/child fields on a patient map in-place.
+  /// Returns `true` if any field was modified.
+  static bool normalizePatientRecordIdentity(Map<String, dynamic> p) {
+    bool changed = false;
+    final pid = (p['patientId'] ?? p['id'] ?? '').toString().trim();
+    final isChild = isChildPatientRecord(p);
+
+    // 1. Ensure `isAdult` matches authoritative adult/child classification
+    if (isChild && p['isAdult'] != false) {
+      p['isAdult'] = false;
+      changed = true;
+    } else if (!isChild && p['isAdult'] != true && !pid.contains('_child_')) {
+      p['isAdult'] = true;
+      changed = true;
+    }
+
+    // 2. Keep CNIC fields strictly segregated between adult and child
+    final ownDigits = (p['cnic'] ?? p['patientCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    final guardDigits = (p['guardianCnic'] ?? p['guardian_cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    if (isChild) {
+      if (guardDigits.isEmpty && ownDigits.length == 13 && !RegExp(r'^0+$').hasMatch(ownDigits)) {
+        p['guardianCnic'] =
+            '${ownDigits.substring(0, 5)}-${ownDigits.substring(5, 12)}-${ownDigits.substring(12, 13)}';
+        changed = true;
+      }
+      final effectiveGuard = (p['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+      if (effectiveGuard.isNotEmpty && ownDigits == effectiveGuard) {
+        if (p['cnic'] != null || p['patientCnic'] != null) {
+          p['cnic'] = null;
+          p.remove('patientCnic');
+          changed = true;
+        }
+      }
+    } else {
+      // Adult must never carry their own CNIC as guardianCnic or a stray guardianName
+      if (ownDigits.isNotEmpty && guardDigits == ownDigits) {
+        p.remove('guardianCnic');
+        p.remove('guardian_cnic');
+        p.remove('guardianName');
+        changed = true;
       }
     }
 
+    // 3. Synchronize `name`, `patientName`, and `fullName` to the canonical individual name
+    final canonicalName = resolveCanonicalPatientName(p);
+    if (canonicalName.isNotEmpty) {
+      if (p['name']?.toString().trim() != canonicalName) {
+        p['name'] = canonicalName;
+        changed = true;
+      }
+      if (p['patientName']?.toString().trim() != canonicalName) {
+        p['patientName'] = canonicalName;
+        changed = true;
+      }
+      if (p.containsKey('fullName') && p['fullName']?.toString().trim() != canonicalName) {
+        p['fullName'] = canonicalName;
+        changed = true;
+      }
+    }
+
+    // 4. Normalize `dob` / `dateOfBirth` and `bloodGroup` so all readers see canonical values
+    final rawDob = p['dob'] ?? p['dateOfBirth'];
+    if (rawDob != null) {
+      final parsedDob = tryParseDob(rawDob);
+      if (parsedDob != null) {
+        final isoDob = parsedDob.toIso8601String();
+        if (p['dob'] != isoDob) {
+          p['dob'] = isoDob;
+          changed = true;
+        }
+        if (p.containsKey('dateOfBirth') && p['dateOfBirth'] != isoDob) {
+          p['dateOfBirth'] = isoDob;
+          changed = true;
+        }
+      }
+    }
+    final rawBg = p['bloodGroup']?.toString().trim();
+    if (rawBg != null && rawBg.isNotEmpty) {
+      final upperBg = rawBg.toUpperCase();
+      const validBgs = {'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'N/A'};
+      if (validBgs.contains(upperBg) && p['bloodGroup'] != upperBg) {
+        p['bloodGroup'] = upperBg;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  static String getPatientKey(Map<String, dynamic> patient) {
+    final patientId = (patient['patientId'] ?? patient['id'])?.toString().trim();
     final rawAge = patient['age'];
     final age = (rawAge is num) ? rawAge.toInt() : (int.tryParse(rawAge?.toString() ?? '') ?? 0);
     final explicitAdult = patient['isAdult'] is bool ? patient['isAdult'] as bool : null;
     final cnicDigits = (patient['cnic'] ?? patient['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim();
     final guardianDigits = (patient['guardianCnic'] ?? patient['guardian_cnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim();
-    final name = (patient['name'] ?? patient['patientName'] ?? patient['fullName'])?.toString().trim() ?? '';
+    final name = resolveCanonicalPatientName(patient);
 
-    final bool isChild = (explicitAdult == false) ||
-        (explicitAdult == null && (guardianDigits != null && guardianDigits.isNotEmpty)) ||
+    final bool isChild = (patientId != null && patientId.contains('_child_')) ||
+        (explicitAdult == false) ||
+        (explicitAdult == null && (guardianDigits != null && guardianDigits.isNotEmpty) && (cnicDigits == null || cnicDigits.isEmpty)) ||
         (explicitAdult == null && age > 0 && age < 18);
+
+    if (patientId != null && patientId.isNotEmpty && !patientId.startsWith('unknown_')) {
+      // 1. Child keys ALWAYS preserve `_child_<name>` (NEVER strip letters into a 13-digit adult CNIC!)
+      if (patientId.contains('_child_')) {
+        final parts = patientId.split('_child_');
+        final gDigits = parts[0].replaceAll(RegExp(r'\D'), '');
+        final childSuffix = parts.sublist(1).join('_child_').trim();
+        if (gDigits.length == 13 && !RegExp(r'^0+$').hasMatch(gDigits)) {
+          final gFormatted = '${gDigits.substring(0, 5)}-${gDigits.substring(5, 12)}-${gDigits.substring(12, 13)}';
+          return '${gFormatted}_child_$childSuffix';
+        }
+        return patientId;
+      }
+
+      // 2. Pure CNIC patientId (digits/hyphens/spaces only) -> canonical dashed adult key, ONLY for adults
+      if (RegExp(r'^[\d\-\s]+$').hasMatch(patientId)) {
+        final cleanPid = patientId.replaceAll(RegExp(r'\D'), '');
+        if (cleanPid.length == 13 && !RegExp(r'^0+$').hasMatch(cleanPid)) {
+          if (!isChild) {
+            return '${cleanPid.substring(0, 5)}-${cleanPid.substring(5, 12)}-${cleanPid.substring(12, 13)}';
+          }
+          // Child record mistakenly carrying raw guardian CNIC as patientId -> fall through to child key builder
+        } else if (!_isDummyCnicValue(patientId) && !isChild) {
+          return patientId;
+        }
+      } else if (!_isDummyCnicValue(patientId)) {
+        // 3. Preserve non-CNIC IDs (UUIDs, custom legacy IDs like 'p_raw_cnic_01')
+        return patientId;
+      }
+    }
 
     if (isChild) {
       String effGuardian;
@@ -5820,28 +6199,101 @@ class LocalStorageService {
       sanitized['guardianCnic'] = '${rawGuard.substring(0, 5)}-${rawGuard.substring(5, 12)}-${rawGuard.substring(12, 13)}';
     }
 
+    final box = await ensureBoxOpen(patientsBox);
+    final preKey = (sanitized['patientId'] ?? sanitized['id'])?.toString().trim() ?? '';
+    final existingPre = preKey.isNotEmpty
+        ? (box.get(preKey) ?? box.get(preKey.replaceAll('-', '').trim()))
+        : null;
+
+    // Detect renames when callers pass `{...existing, 'name': 'New Name'}` where `patientName`
+    // or `fullName` still holds the old name; stamp all three name fields + `nameEditedAt`
+    // BEFORE `normalizePatientRecordIdentity` runs so Rule 1 never reverts a renamed child.
+    final oldCanonicalName = existingPre is Map
+        ? resolveCanonicalPatientName(Map<String, dynamic>.from(existingPre))
+        : '';
+    String? chosenName;
+    for (final cand in [patient['name'], patient['patientName'], patient['fullName']]) {
+      if (!_isBlankPatientField(cand)) {
+        final s = cand.toString().trim();
+        if (oldCanonicalName.isNotEmpty && _normalizeName(s) != _normalizeName(oldCanonicalName)) {
+          chosenName = s;
+          break;
+        }
+        chosenName ??= s;
+      }
+    }
+    if (chosenName != null && chosenName.isNotEmpty) {
+      sanitized['name'] = chosenName;
+      sanitized['patientName'] = chosenName;
+      sanitized['fullName'] = chosenName;
+      if (oldCanonicalName.isNotEmpty && _normalizeName(chosenName) != _normalizeName(oldCanonicalName)) {
+        sanitized['nameEditedAt'] = DateTime.now().toIso8601String();
+      } else if (isChildPatientRecord(sanitized) && preKey.contains('_child_')) {
+        final suffix = preKey.split('_child_').sublist(1).join('_child_').trim();
+        if (suffix.isNotEmpty && _normalizeName(chosenName) != _normalizeName(suffix)) {
+          sanitized['nameEditedAt'] ??= (existingPre is Map ? existingPre['nameEditedAt'] : null) ??
+              DateTime.now().toIso8601String();
+        }
+      }
+    }
+
+    // Normalize DOB & recalculate age when DOB is provided
+    final rawDob = sanitized['dob'] ?? sanitized['dateOfBirth'];
+    if (rawDob != null) {
+      final parsedDob = tryParseDob(rawDob);
+      if (parsedDob != null) {
+        final isoDob = parsedDob.toIso8601String();
+        sanitized['dob'] = isoDob;
+        sanitized['dateOfBirth'] = isoDob;
+        final curAge = (sanitized['age'] is num)
+            ? (sanitized['age'] as num).toInt()
+            : (int.tryParse(sanitized['age']?.toString() ?? '') ?? 0);
+        if (curAge <= 0 || !isFromSync) {
+          final calcAge = calculateAgeFromDob(isoDob);
+          if (calcAge >= 0) {
+            sanitized['age'] = calcAge;
+            sanitized['patientAge'] = calcAge;
+          }
+        }
+      }
+    }
+    if (sanitized['age'] != null && sanitized['patientAge'] == null) {
+      sanitized['patientAge'] = sanitized['age'];
+    }
+    if (sanitized['gender'] != null && sanitized['patientGender'] == null) {
+      sanitized['patientGender'] = sanitized['gender'];
+    }
+
+    // Repair adult/child CNIC segregation & keep `name` / `patientName` in lockstep
+    normalizePatientRecordIdentity(sanitized);
+
     final key          = getPatientKey(sanitized);
     sanitized['patientId'] = key;
-    final box = await ensureBoxOpen(patientsBox);
-    final existing = box.get(key);
+    final existing = box.get(key) ?? existingPre;
 
     // MERGE, never overwrite with blanks: partial records (token syncs, stubs carrying only an id)
     // used to replace the full patient and wipe the name, CNIC and phone.
+    // Never merge an adult record with a child record (or vice versa).
     if (existing is Map) {
-      bool blank(dynamic v) {
-        if (v == null) return true;
-        if (v is String) {
-          final t = v.trim();
-          return t.isEmpty || t == '0' || t.toLowerCase() == 'null';
-        }
-        return false;
+      final existingMap = Map<String, dynamic>.from(existing.map((k, v) => MapEntry(k.toString(), v)));
+      final incomingIsChild = isChildPatientRecord(sanitized);
+      final existingIsChild = isChildPatientRecord(existingMap);
+      if (incomingIsChild == existingIsChild) {
+        bool blank(dynamic v) => _isBlankPatientField(v);
+        final localHasPendingEdit = isFromSync && (existingMap['pendingSync'] == true ||
+            (existingMap['nameEditedAt'] != null && sanitized['nameEditedAt'] == null));
+        final merged = existingMap;
+        sanitized.forEach((k, v) {
+          if (localHasPendingEdit) {
+            if (blank(merged[k]) && !blank(v)) merged[k] = v;
+          } else {
+            if (!blank(v) || blank(merged[k])) merged[k] = v;
+          }
+        });
+        sanitized = merged;
+        normalizePatientRecordIdentity(sanitized);
+        sanitized['patientId'] = key;
       }
-      final merged = Map<String, dynamic>.from(existing.map((k, v) => MapEntry(k.toString(), v)));
-      sanitized.forEach((k, v) {
-        if (!blank(v) || blank(merged[k])) merged[k] = v;
-      });
-      sanitized = merged;
-      sanitized['patientId'] = key;
     }
 
     final List<Map<String, dynamic>> fieldChanges = [];
@@ -5904,85 +6356,192 @@ class LocalStorageService {
     bool isFromSync = false,
   }) async {
     final box = await ensureBoxOpen(patientsBox);
-    final isAdult = updatedPatient['isAdult'] as bool? ?? true;
-    final newCnic = (updatedPatient['cnic'] ?? updatedPatient['patientCnic'])?.toString().replaceAll('-', '').trim();
     final cleanOldCnic = (oldCnic ?? oldPatientId).replaceAll('-', '').trim();
+    final oldCnicDigits = cleanOldCnic.replaceAll(RegExp(r'\D'), '');
+    final oldCnicDashed = oldCnicDigits.length == 13
+        ? '${oldCnicDigits.substring(0, 5)}-${oldCnicDigits.substring(5, 12)}-${oldCnicDigits.substring(12, 13)}'
+        : '';
 
-    // Determine target key: for adults with CNIC, key is normalized CNIC; otherwise getPatientKey
-    String newKey = (newCnic != null && newCnic.isNotEmpty && isAdult)
-        ? newCnic
-        : getPatientKey(updatedPatient);
+    // Callers may pass only the edited fields: keep the rest of the stored record.
+    final oldRecord = (oldPatientId.isNotEmpty ? box.get(oldPatientId) : null) ??
+        (oldCnicDashed.isNotEmpty ? box.get(oldCnicDashed) : null) ??
+        (cleanOldCnic.isNotEmpty ? box.get(cleanOldCnic) : null);
+    final mergedInput = oldRecord is Map
+        ? <String, dynamic>{...Map<String, dynamic>.from(oldRecord), ...updatedPatient}
+        : Map<String, dynamic>.from(updatedPatient);
 
-    final rawCnic = (updatedPatient['cnic'] ?? updatedPatient['patientCnic'])?.toString().trim();
-    if (rawCnic != null && RegExp(r'^\d{13}$').hasMatch(rawCnic)) {
-      final formatted = '${rawCnic.substring(0, 5)}-${rawCnic.substring(5, 12)}-${rawCnic.substring(12, 13)}';
-      updatedPatient['cnic'] = formatted;
-      if (updatedPatient.containsKey('patientCnic')) {
-        updatedPatient['patientCnic'] = formatted;
+    final bool isChild = updatedPatient['isAdult'] is bool
+        ? !(updatedPatient['isAdult'] as bool)
+        : isChildPatientRecord(mergedInput);
+    final bool isAdult = !isChild;
+    mergedInput['isAdult'] = isAdult;
+
+    // A rename: every name field gets the new name, and `nameEditedAt` tells the identity
+    // repair that it was renamed on purpose (it used to put a child's old name back because
+    // the old name matched the record key, and screens reading `patientName` kept the old one).
+    final oldName = oldRecord is Map ? resolveCanonicalPatientName(Map<String, dynamic>.from(oldRecord)) : '';
+    String? typedName;
+    for (final cand in [updatedPatient['name'], updatedPatient['patientName'], updatedPatient['fullName']]) {
+      if (!_isBlankPatientField(cand)) {
+        final s = cand.toString().trim();
+        if (oldName.isNotEmpty && _normalizeName(s) != _normalizeName(oldName)) {
+          typedName = s;
+          break;
+        }
+        typedName ??= s;
       }
     }
-    final rawGuard = updatedPatient['guardianCnic']?.toString().trim();
-    if (rawGuard != null && RegExp(r'^\d{13}$').hasMatch(rawGuard)) {
-      updatedPatient['guardianCnic'] = '${rawGuard.substring(0, 5)}-${rawGuard.substring(5, 12)}-${rawGuard.substring(12, 13)}';
+    if (typedName != null && typedName.isNotEmpty) {
+      mergedInput['name'] = typedName;
+      mergedInput['patientName'] = typedName;
+      mergedInput['fullName'] = typedName;
+      final oldSuffix = oldPatientId.contains('_child_')
+          ? oldPatientId.split('_child_').sublist(1).join('_child_').trim()
+          : '';
+      if (_normalizeName(typedName) != _normalizeName(oldName) ||
+          (isChild && oldSuffix.isNotEmpty && _normalizeName(typedName) != _normalizeName(oldSuffix))) {
+        mergedInput['nameEditedAt'] = DateTime.now().toIso8601String();
+      }
     }
 
-    updatedPatient['patientId'] = newKey;
-    updatedPatient['id'] = newKey;
-    final sanitized = sanitize(updatedPatient);
+    // Parse & normalize DOB (`dob` / `dateOfBirth`) across all formats and sync calculated age
+    final rawInputDob = updatedPatient['dob'] ??
+        updatedPatient['dateOfBirth'] ??
+        mergedInput['dob'] ??
+        mergedInput['dateOfBirth'];
+    if (rawInputDob != null) {
+      final parsedDob = tryParseDob(rawInputDob);
+      if (parsedDob != null) {
+        final isoDob = parsedDob.toIso8601String();
+        mergedInput['dob'] = isoDob;
+        mergedInput['dateOfBirth'] = isoDob;
+        if (updatedPatient.containsKey('dob') ||
+            updatedPatient.containsKey('dateOfBirth') ||
+            mergedInput['age'] == null ||
+            mergedInput['age'] == 0) {
+          final calcAge = calculateAgeFromDob(isoDob);
+          if (calcAge >= 0) {
+            mergedInput['age'] = calcAge;
+            mergedInput['patientAge'] = calcAge;
+          }
+        }
+      }
+    }
+    if (mergedInput['age'] != null) {
+      mergedInput['patientAge'] = mergedInput['age'];
+    }
+    if (mergedInput['gender'] != null) {
+      mergedInput['patientGender'] = mergedInput['gender'];
+    }
+    if (mergedInput['vitals'] is Map) {
+      final vMap = Map<String, dynamic>.from(mergedInput['vitals'] as Map);
+      if (mergedInput['age'] != null) vMap['age'] = mergedInput['age'];
+      if (mergedInput['gender'] != null) vMap['gender'] = mergedInput['gender'];
+      if (mergedInput['bloodGroup'] != null) vMap['bloodGroup'] = mergedInput['bloodGroup'];
+      if (mergedInput['dob'] != null) vMap['dob'] = mergedInput['dob'];
+      mergedInput['vitals'] = vMap;
+    }
+
+    String format13(String? raw) {
+      if (raw == null) return '';
+      final d = raw.replaceAll(RegExp(r'\D'), '');
+      if (d.length == 13) {
+        return '${d.substring(0, 5)}-${d.substring(5, 12)}-${d.substring(12, 13)}';
+      }
+      return raw.trim();
+    }
+
+    if (isAdult) {
+      final rawCnic = (mergedInput['cnic'] ?? mergedInput['patientCnic'])?.toString().trim();
+      final formattedCnic = format13(rawCnic);
+      if (formattedCnic.isNotEmpty) {
+        mergedInput['cnic'] = formattedCnic;
+        mergedInput['patientCnic'] = formattedCnic;
+      }
+      mergedInput['guardianCnic'] = null;
+      mergedInput.remove('guardian_cnic');
+      mergedInput.remove('guardianName');
+    } else {
+      final rawGuard = (mergedInput['guardianCnic'] ?? mergedInput['guardian_cnic'])?.toString().trim();
+      final formattedGuard = format13(rawGuard);
+      if (formattedGuard.isNotEmpty) {
+        mergedInput['guardianCnic'] = formattedGuard;
+      }
+      mergedInput['cnic'] = null;
+      mergedInput.remove('patientCnic');
+    }
+
+    final newCnic = isAdult
+        ? (mergedInput['cnic'] ?? mergedInput['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim()
+        : (mergedInput['guardianCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim();
+
+    // Determine canonical target key (always dashed for 13-digit CNICs):
+    // - Adult with 13-digit CNIC -> XXXXX-XXXXXXX-X
+    // - Child whose guardian CNIC changed -> <newDashedGuard>_child_<normName>
+    String newKey;
+    if (isAdult && newCnic != null && newCnic.length == 13 && !RegExp(r'^0+$').hasMatch(newCnic)) {
+      newKey = '${newCnic.substring(0, 5)}-${newCnic.substring(5, 12)}-${newCnic.substring(12, 13)}';
+    } else if (isChild && newCnic != null && newCnic.length == 13 && !RegExp(r'^0+$').hasMatch(newCnic)) {
+      final dashedGuard = '${newCnic.substring(0, 5)}-${newCnic.substring(5, 12)}-${newCnic.substring(12, 13)}';
+      final oldGuardPrefixDigits = oldPatientId.contains('_child_')
+          ? oldPatientId.split('_child_').first.replaceAll(RegExp(r'\D'), '')
+          : oldCnicDigits;
+      final canonicalName = resolveCanonicalPatientName(mergedInput);
+      final safeName = canonicalName.isNotEmpty ? _normalizeName(canonicalName) : 'unnamed';
+      if (oldPatientId.contains('_child_') && oldGuardPrefixDigits == newCnic) {
+        final suffix = oldPatientId.split('_child_').sublist(1).join('_child_').trim();
+        newKey = '${dashedGuard}_child_${suffix.isNotEmpty ? suffix : safeName}';
+      } else {
+        newKey = '${dashedGuard}_child_$safeName';
+      }
+    } else {
+      final forKey = Map<String, dynamic>.from(mergedInput)
+        ..remove('patientId')
+        ..remove('id');
+      newKey = getPatientKey(forKey);
+    }
+
+    mergedInput['patientId'] = newKey;
+    mergedInput['id'] = newKey;
+    mergedInput['updatedAt'] = DateTime.now().toIso8601String();
+    if (!isFromSync) {
+      mergedInput['pendingSync'] = true;
+      mergedInput['syncStatus'] = 'pending';
+      mergedInput['synced'] = false;
+    }
+    normalizePatientRecordIdentity(mergedInput);
+    final sanitized = sanitize(mergedInput);
+    // Keep caller's map aligned with normalized fields & migrated key
+    updatedPatient
+      ..addAll(sanitized)
+      ..['patientId'] = newKey
+      ..['id'] = newKey;
 
     // If key changed, delete old key from box to prevent duplicate ghost patients
     if (oldPatientId.isNotEmpty && oldPatientId != newKey) {
       await box.delete(oldPatientId);
     }
-    // Delete cleanOldCnic ONLY if updating an adult patient whose old CNIC changed
-    if (isAdult && cleanOldCnic.isNotEmpty && cleanOldCnic != newKey && cleanOldCnic == oldPatientId) {
-      await box.delete(cleanOldCnic);
+    // Delete legacy/alternate adult CNIC keys ONLY if updating an adult whose CNIC changed
+    if (isAdult && oldCnicDigits.isNotEmpty && newCnic != null && oldCnicDigits != newCnic) {
+      if (cleanOldCnic.isNotEmpty && cleanOldCnic != newKey) {
+        await box.delete(cleanOldCnic);
+      }
+      if (oldCnicDashed.isNotEmpty && oldCnicDashed != newKey) {
+        await box.delete(oldCnicDashed);
+      }
     }
 
     await box.put(newKey, sanitized);
     await box.flush();
 
-    // Update all active tokens/entries for this patient to point to new key & new CNIC
+    // Update all active tokens/entries (and prescriptions) for this patient to point to new key & new details
     final bId = (sanitized['branchId'] ?? getActiveUserBranchId()).toString();
-    await updateActiveEntriesForPatient(bId, newKey, sanitized);
-
-    // Update prescriptions referencing old CNIC or old patientId with strict identity check
-    if (cleanOldCnic.isNotEmpty && newCnic != null && newCnic.isNotEmpty && cleanOldCnic != newCnic && !_isDummyCnicValue(cleanOldCnic)) {
-      try {
-        if (!Hive.isBoxOpen(prescriptionsBox)) {
-          await openBoxSafe(prescriptionsBox);
-        }
-        final pBox = Hive.box(prescriptionsBox);
-        final targetNameNorm = _normalizeName((updatedPatient['name'] ?? updatedPatient['patientName'] ?? '').toString());
-
-        for (final pk in pBox.keys) {
-          final pVal = pBox.get(pk);
-          if (pVal is Map) {
-            final pCnic = (pVal['patientCnic'] ?? pVal['cnic'])?.toString().replaceAll('-', '').trim();
-            final pId = (pVal['patientId'] ?? pVal['id'])?.toString().trim();
-            final pNameNorm = _normalizeName((pVal['patientName'] ?? pVal['name'] ?? '').toString());
-            final pIsAdult = pVal['isAdult'] is bool ? pVal['isAdult'] as bool : !(pId?.contains('_child_') ?? false);
-
-            bool shouldUpdate = false;
-            if (oldPatientId.isNotEmpty && pId == oldPatientId) {
-              shouldUpdate = true;
-            } else if (pCnic == cleanOldCnic && isAdult == pIsAdult) {
-              if (targetNameNorm.isEmpty || pNameNorm.isEmpty || targetNameNorm == pNameNorm) {
-                shouldUpdate = true;
-              }
-            }
-
-            if (shouldUpdate) {
-              final updatedP = Map<String, dynamic>.from(pVal);
-              updatedP['patientCnic'] = updatedPatient['cnic'] ?? newCnic;
-              updatedP['patientId'] = newKey;
-              await pBox.put(pk, updatedP);
-            }
-          }
-        }
-        await pBox.flush();
-      } catch (_) {}
+    // Today's token may carry either the OLD id or the NEW id: update both when keyChanged.
+    final keyChanged = oldPatientId.isNotEmpty && oldPatientId != newKey;
+    if (keyChanged) {
+      await updateActiveEntriesForPatient(bId, oldPatientId, sanitized);
     }
+    await updateActiveEntriesForPatient(bId, newKey, sanitized);
 
     // Broadcast over LAN and Enqueue to Firestore ONLY if this save did NOT originate from cloud/LAN sync
     if (!isFromSync) {
@@ -6006,7 +6565,7 @@ class LocalStorageService {
         }
       } catch (_) {}
 
-      // Enqueue Firestore sync
+      // Enqueue Firestore sync and trigger immediate upload so cloud pulls don't revert the edit
       await enqueueSync({
         'type': 'save_patient',
         'branchId': bId,
@@ -6014,9 +6573,21 @@ class LocalStorageService {
         'oldPatientId': oldPatientId,
         'data': sanitized,
       });
+      if (!LanFirestoreGate.isLanDesk) {
+        unawaited(SyncService().triggerUpload(urgent: true).catchError((_) {}));
+      }
     }
 
     return newKey;
+  }
+
+  /// Removes one local key of a patient that moved to a new key (CNIC edit). Not a deletion:
+  /// no audit "DELETE" and no cloud delete.
+  static Future<void> removeLocalPatientKey(String patientId) async {
+    try {
+      final box = await ensureBoxOpen(patientsBox);
+      await box.delete(patientId);
+    } catch (_) {}
   }
 
   static Future<void> deleteLocalPatient(String patientId, {String? reason, String? performedBy, String? approvedBy}) async {
@@ -6059,119 +6630,239 @@ class LocalStorageService {
     'patientId', 'patientName', 'name', 'fullName',
     'cnic', 'patientCnic', 'guardianCnic', 'guardianName', 'isAdult',
     'phone', 'contactPhone', 'address',
-    'gender', 'patientGender', 'age', 'patientAge', 'dob', 'bloodGroup',
+    'gender', 'patientGender', 'age', 'patientAge', 'dob', 'dateOfBirth', 'patientDob', 'bloodGroup',
   ];
 
   static Future<void> updateActiveEntriesForPatient(String branchId, String patientId, Map<String, dynamic> changes) async {
     try {
-      if (!Hive.isBoxOpen(entriesBox)) return;
-      final box = Hive.box(entriesBox);
       final sanitizedChanges = sanitize(changes);
-      final keysToUpdate = <dynamic, Map<String, dynamic>>{};
-
       final isTargetAdult = sanitizedChanges['isAdult'] is bool
           ? sanitizedChanges['isAdult'] as bool
           : !patientId.contains('_child_');
       final targetCnic = (sanitizedChanges['cnic'] ?? sanitizedChanges['patientCnic'] ?? '').toString().replaceAll('-', '').trim();
       final targetGuardian = (sanitizedChanges['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
-      final targetName = _normalizeName((sanitizedChanges['patientName'] ?? sanitizedChanges['name'] ?? '').toString());
-      final cleanTargetPid = patientId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+      final targetName = _normalizeName((sanitizedChanges['patientName'] ?? sanitizedChanges['name'] ?? sanitizedChanges['fullName'] ?? '').toString());
+      // Strip all non-alphanumeric characters (including underscores) so `_child_alikhan`
+      // and `_child_ali_khan` match reliably.
+      String cleanPidForMatch(String raw) => raw.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase();
+      final cleanTargetPid = cleanPidForMatch(patientId);
+      final newCanonicalPid = (sanitizedChanges['patientId'] ?? sanitizedChanges['id'] ?? '').toString().trim();
+      final cleanNewCanonicalPid = cleanPidForMatch(newCanonicalPid);
+      final targetChildSuffixNorm = patientId.contains('_child_')
+          ? _normalizeName(patientId.split('_child_').sublist(1).join('_child_'))
+          : (newCanonicalPid.contains('_child_')
+              ? _normalizeName(newCanonicalPid.split('_child_').sublist(1).join('_child_'))
+              : '');
 
-      for (final key in box.keys) {
-        final val = box.get(key);
-        if (val is Map) {
-          final entry = Map<String, dynamic>.from(val);
-          final ePid = (entry['patientId'] ?? entry['id'])?.toString().trim() ?? '';
-          final cleanEPid = ePid.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
-          final resolvedEPid = resolveIndividualPatientId(entry).trim();
-          final cleanResolvedEPid = resolvedEPid.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
+      final newName = (sanitizedChanges['patientName'] ?? sanitizedChanges['name'] ?? sanitizedChanges['fullName'])?.toString().trim();
+      final matchedSerials = <String>{};
 
-          final eName = _normalizeName((entry['patientName'] ?? entry['name'] ?? '').toString());
-          final eCnic = (entry['cnic'] ?? entry['patientCnic'] ?? '').toString().replaceAll('-', '').trim();
-          final eGuardian = (entry['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
-          final eAge = (entry['age'] is num) ? (entry['age'] as num).toInt() : (int.tryParse(entry['age']?.toString() ?? '') ?? 0);
-          final eIsAdult = entry['isAdult'] is bool
-              ? entry['isAdult'] as bool
-              : (!ePid.contains('_child_') && !resolvedEPid.contains('_child_') && eGuardian.isEmpty && (eAge == 0 || eAge >= 20));
+      if (Hive.isBoxOpen(entriesBox)) {
+        final box = Hive.box(entriesBox);
+        final keysToUpdate = <dynamic, Map<String, dynamic>>{};
 
-          // Rule 0: Never cross-update between adult and child UNLESS explicitly migrating by exact patientId
-          final isExactIdMatch = cleanTargetPid.isNotEmpty && (cleanTargetPid == cleanEPid || cleanTargetPid == cleanResolvedEPid);
-          if (!isExactIdMatch && isTargetAdult != eIsAdult) continue;
+        for (final key in box.keys) {
+          final val = box.get(key);
+          if (val is Map) {
+            final entry = Map<String, dynamic>.from(val);
+            final ePid = (entry['patientId'] ?? entry['id'])?.toString().trim() ?? '';
+            final cleanEPid = cleanPidForMatch(ePid);
+            final resolvedEPid = resolveIndividualPatientId(entry).trim();
+            final cleanResolvedEPid = cleanPidForMatch(resolvedEPid);
 
-          bool matches = isExactIdMatch;
+            final eName = _normalizeName((entry['patientName'] ?? entry['name'] ?? entry['fullName'] ?? '').toString());
+            final eCnic = (entry['cnic'] ?? entry['patientCnic'] ?? '').toString().replaceAll('-', '').trim();
+            final eGuardian = (entry['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
+            final eAge = (entry['age'] is num) ? (entry['age'] as num).toInt() : (int.tryParse(entry['age']?.toString() ?? '') ?? 0);
+            final eIsAdult = entry['isAdult'] is bool
+                ? entry['isAdult'] as bool
+                : (!ePid.contains('_child_') && !resolvedEPid.contains('_child_') && eGuardian.isEmpty && (eAge == 0 || eAge >= 20));
 
-          // 1. Exact canonical ID match (already handled by isExactIdMatch)
-          if (matches) {
-            // Already matched
-          } else if (isTargetAdult && eIsAdult) {
-            // 2. Adult matching: must both be adults with matching non-dummy CNIC
-            if (targetCnic.isNotEmpty && eCnic.isNotEmpty && targetCnic == eCnic && !_isDummyCnicValue(targetCnic)) {
-              if (targetName.isEmpty || eName.isEmpty || targetName == eName) {
+            // Rule 0: Never cross-update between adult and child UNLESS explicitly migrating by exact patientId
+            final isExactIdMatch = (cleanTargetPid.isNotEmpty &&
+                    (cleanTargetPid == cleanEPid || cleanTargetPid == cleanResolvedEPid)) ||
+                (cleanNewCanonicalPid.isNotEmpty &&
+                    (cleanNewCanonicalPid == cleanEPid || cleanNewCanonicalPid == cleanResolvedEPid));
+            if (!isExactIdMatch && isTargetAdult != eIsAdult) continue;
+
+            bool matches = isExactIdMatch;
+
+            if (!matches && isTargetAdult && eIsAdult) {
+              // 2. Adult matching: 1 adult per CNIC rule guarantees two adults with the same
+              //    valid 13-digit CNIC are the same person (even when their name is being edited).
+              if (targetCnic.isNotEmpty && eCnic.isNotEmpty && targetCnic == eCnic && !_isDummyCnicValue(targetCnic)) {
                 matches = true;
               }
-            }
-          } else if (!isTargetAdult && !eIsAdult) {
-            // 3. Child matching: must both be children under same guardian CNIC with exact matching name
-            final effTargetG = targetGuardian.isNotEmpty ? targetGuardian : targetCnic;
-            final effEG = eGuardian.isNotEmpty ? eGuardian : eCnic;
-            if (effTargetG.isNotEmpty && effEG.isNotEmpty && effTargetG == effEG && !_isDummyCnicValue(effTargetG)) {
-              if (targetName.isNotEmpty && eName.isNotEmpty && targetName == eName) {
-                matches = true;
+            } else if (!matches && !isTargetAdult && !eIsAdult) {
+              // 3. Child matching: same guardian CNIC + matching current name OR matching child key suffix
+              final effTargetG = targetGuardian.isNotEmpty ? targetGuardian : targetCnic;
+              final effEG = eGuardian.isNotEmpty ? eGuardian : eCnic;
+              if (effTargetG.isNotEmpty && effEG.isNotEmpty && effTargetG == effEG && !_isDummyCnicValue(effTargetG)) {
+                if ((targetName.isNotEmpty && eName.isNotEmpty && targetName == eName) ||
+                    (targetChildSuffixNorm.isNotEmpty && eName.isNotEmpty && targetChildSuffixNorm == eName)) {
+                  matches = true;
+                }
               }
             }
-          }
 
-          if (matches) {
-            // Copy only patient-identity fields. The changes map is usually a whole patient
-            // record, whose 'status' (Zakat), 'createdAt', 'createdBy', 'id' etc. belong to the
-            // patient, not to the token — merging them all clobbered the queue entry.
-            final updatedEntry = Map<String, dynamic>.from(entry);
-            for (final f in _patientIdentityFields) {
-              if (sanitizedChanges.containsKey(f)) updatedEntry[f] = sanitizedChanges[f];
-            }
+            if (matches) {
+              final eSerial = (entry['serial'] ?? entry['id'])?.toString().trim() ?? '';
+              if (eSerial.isNotEmpty) matchedSerials.add(eSerial.toUpperCase());
 
-            if (sanitizedChanges['patientName'] != null) {
-              updatedEntry['patientName'] = sanitizedChanges['patientName'];
-              updatedEntry['name'] = sanitizedChanges['patientName'];
-            }
+              // Copy only patient-identity fields. The changes map is usually a whole patient
+              // record, whose 'status' (Zakat), 'createdAt', 'createdBy', 'id' etc. belong to the
+              // patient, not to the token — merging them all clobbered the queue entry.
+              final updatedEntry = Map<String, dynamic>.from(entry);
+              for (final f in _patientIdentityFields) {
+                if (sanitizedChanges.containsKey(f)) updatedEntry[f] = sanitizedChanges[f];
+              }
 
-            if (sanitizedChanges.containsKey('vitals')) {
+              // Keep all three name fields on the token in sync with the edit.
+              if (newName != null && newName.isNotEmpty) {
+                updatedEntry['patientName'] = newName;
+                updatedEntry['name'] = newName;
+                updatedEntry['fullName'] = newName;
+              }
+
               final newVitals = Map<String, dynamic>.from(entry['vitals'] is Map ? entry['vitals'] : {});
+              var vitalsChanged = false;
               if (sanitizedChanges['vitals'] is Map) {
                 newVitals.addAll(Map<String, dynamic>.from(sanitizedChanges['vitals']));
+                vitalsChanged = true;
               }
-              updatedEntry['vitals'] = newVitals;
-            }
+              // Age / gender / blood group / DOB were frozen on the token when it was issued
+              // (vitals.* and patientAge / patientGender), and the doctor and dispenser read
+              // those copies first, so an edited DOB or blood group never showed.
+              void copyDemo(String field, List<String> tokenFields, {String? vitalsField}) {
+                final v = sanitizedChanges[field];
+                if (v == null || (v is String && v.trim().isEmpty)) return;
+                for (final f in tokenFields) {
+                  updatedEntry[f] = v;
+                }
+                if (vitalsField != null) {
+                  newVitals[vitalsField] = v;
+                  vitalsChanged = true;
+                }
+              }
+              copyDemo('age', ['age', 'patientAge'], vitalsField: 'age');
+              copyDemo('gender', ['gender', 'patientGender'], vitalsField: 'gender');
+              copyDemo('bloodGroup', ['bloodGroup'], vitalsField: 'bloodGroup');
+              copyDemo('dob', ['dob', 'dateOfBirth'], vitalsField: 'dob');
+              copyDemo('dateOfBirth', ['dob', 'dateOfBirth'], vitalsField: 'dob');
+              if (vitalsChanged) updatedEntry['vitals'] = newVitals;
 
-            // Explicit Receptionist / Supervisor identity edit bumps identityRevision
-            // and clears lanPushSig so the corrected name/CNIC is synced across the LAN.
-            final int prevIdRev = intOf(entry['identityRevision']);
-            updatedEntry['identityRevision'] = prevIdRev + 1;
-            updatedEntry['updatedAt'] = CampSessionService.getAuthoritativeTime().toIso8601String();
-            updatedEntry.remove('lanPushSig');
-            if (updatedEntry['prescription'] is Map) {
-              final updRx = Map<String, dynamic>.from(updatedEntry['prescription'] as Map);
-              if (updatedEntry['patientName'] != null) {
-                updRx['patientName'] = updatedEntry['patientName'];
-                updRx['name'] = updatedEntry['patientName'];
+              // Explicit Receptionist / Supervisor identity edit bumps identityRevision
+              // and clears lanPushSig so the corrected name/CNIC is synced across the LAN.
+              final int prevIdRev = intOf(entry['identityRevision']);
+              final int nextIdRev = prevIdRev + 1;
+              updatedEntry['identityRevision'] = nextIdRev;
+              updatedEntry['updatedAt'] = CampSessionService.getAuthoritativeTime().toIso8601String();
+              updatedEntry.remove('lanPushSig');
+              if (updatedEntry['prescription'] is Map) {
+                final updRx = Map<String, dynamic>.from(updatedEntry['prescription'] as Map);
+                for (final f in _patientIdentityFields) {
+                  if (updatedEntry[f] != null) updRx[f] = updatedEntry[f];
+                }
+                if (newName != null && newName.isNotEmpty) {
+                  updRx['patientName'] = newName;
+                  updRx['name'] = newName;
+                  updRx['fullName'] = newName;
+                }
+                if (updatedEntry['vitals'] is Map) {
+                  final rxVitals = Map<String, dynamic>.from(updRx['vitals'] is Map ? updRx['vitals'] as Map : {});
+                  final uVitals = updatedEntry['vitals'] as Map;
+                  for (final vf in const ['age', 'gender', 'bloodGroup', 'dob']) {
+                    if (uVitals[vf] != null) rxVitals[vf] = uVitals[vf];
+                  }
+                  updRx['vitals'] = rxVitals;
+                }
+                updRx['identityRevision'] = nextIdRev;
+                updatedEntry['prescription'] = updRx;
               }
-              if (updatedEntry['patientCnic'] != null) {
-                updRx['patientCnic'] = updatedEntry['patientCnic'];
-                updRx['cnic'] = updatedEntry['patientCnic'];
-              }
-              updRx['identityRevision'] = prevIdRev + 1;
-              updatedEntry['prescription'] = updRx;
-            }
 
-            keysToUpdate[key] = updatedEntry;
+              keysToUpdate[key] = updatedEntry;
+            }
           }
+        }
+
+        if (keysToUpdate.isNotEmpty) {
+          for (final e in keysToUpdate.entries) {
+            await box.put(e.key, e.value);
+          }
+          await box.flush();
+          invalidateLocalEntriesCache();
         }
       }
 
-      for (final e in keysToUpdate.entries) {
-        await box.put(e.key, e.value);
+      // Also update matching records in `prescriptionsBox` so Dispenser (`PatientForm`) and
+      // Visit History (`PatientHistory`) immediately show the edited name, DOB, age, gender,
+      // blood group, and CNIC instead of stale prescription copies.
+      if (Hive.isBoxOpen(prescriptionsBox)) {
+        final pBox = Hive.box(prescriptionsBox);
+        final rxUpdates = <dynamic, Map<String, dynamic>>{};
+        for (final pk in pBox.keys) {
+          final pVal = pBox.get(pk);
+          if (pVal is! Map) continue;
+          final rx = Map<String, dynamic>.from(pVal);
+          final rxPid = (rx['patientId'] ?? '').toString().trim();
+          final cleanRxPid = cleanPidForMatch(rxPid);
+          final rxSerial = (rx['serial'] ?? rx['id'] ?? '').toString().trim().toUpperCase();
+          final rxCnic = (rx['patientCnic'] ?? rx['cnic'] ?? '').toString().replaceAll('-', '').trim();
+          final rxGuardian = (rx['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
+          final rxName = _normalizeName((rx['patientName'] ?? rx['name'] ?? rx['fullName'] ?? '').toString());
+          final rxIsAdult = rx['isAdult'] is bool
+              ? rx['isAdult'] as bool
+              : (!rxPid.contains('_child_') && rxGuardian.isEmpty);
+
+          bool rxMatches = (cleanTargetPid.isNotEmpty && cleanTargetPid == cleanRxPid) ||
+              (cleanNewCanonicalPid.isNotEmpty && cleanNewCanonicalPid == cleanRxPid) ||
+              (rxSerial.isNotEmpty && matchedSerials.contains(rxSerial));
+
+          if (!rxMatches && isTargetAdult == rxIsAdult) {
+            if (isTargetAdult && targetCnic.isNotEmpty && rxCnic == targetCnic && !_isDummyCnicValue(targetCnic)) {
+              rxMatches = true;
+            } else if (!isTargetAdult) {
+              final effTargetG = targetGuardian.isNotEmpty ? targetGuardian : targetCnic;
+              final effRxG = rxGuardian.isNotEmpty ? rxGuardian : rxCnic;
+              if (effTargetG.isNotEmpty && effRxG == effTargetG && !_isDummyCnicValue(effTargetG)) {
+                if ((targetName.isNotEmpty && rxName == targetName) ||
+                    (targetChildSuffixNorm.isNotEmpty && rxName == targetChildSuffixNorm)) {
+                  rxMatches = true;
+                }
+              }
+            }
+          }
+
+          if (rxMatches) {
+            for (final f in _patientIdentityFields) {
+              if (sanitizedChanges.containsKey(f) && sanitizedChanges[f] != null) {
+                rx[f] = sanitizedChanges[f];
+              }
+            }
+            if (newName != null && newName.isNotEmpty) {
+              rx['patientName'] = newName;
+              rx['name'] = newName;
+              rx['fullName'] = newName;
+            }
+            final rxVitals = Map<String, dynamic>.from(rx['vitals'] is Map ? rx['vitals'] as Map : {});
+            var rxVitalsChanged = false;
+            for (final vf in const ['age', 'gender', 'bloodGroup', 'dob']) {
+              final v = sanitizedChanges[vf] ?? (vf == 'dob' ? sanitizedChanges['dateOfBirth'] : null);
+              if (v != null && (v is! String || v.trim().isNotEmpty)) {
+                rxVitals[vf] = v;
+                rxVitalsChanged = true;
+              }
+            }
+            if (rxVitalsChanged) rx['vitals'] = rxVitals;
+            rx['identityRevision'] = intOf(rx['identityRevision']) + 1;
+            rxUpdates[pk] = rx;
+          }
+        }
+        if (rxUpdates.isNotEmpty) {
+          await pBox.putAll(rxUpdates);
+          await pBox.flush();
+        }
       }
-      await box.flush();
     } catch (e) {
       debugPrint('[LocalStorage] Error updating active entries for patient $patientId: $e');
     }
@@ -6184,6 +6875,9 @@ class LocalStorageService {
     for (final patient in patients) {
       try {
         var s = sanitize(patient);
+        // Standardize CNIC fields and repair adult/child identity before keying/merging
+        _standardizePatientCnicFields(s);
+        normalizePatientRecordIdentity(s);
         final key  = getPatientKey(s);
         final status = (s['status'] ?? '').toString().toLowerCase().trim();
         final isDeleted = s['isDeleted'] == true || status == 'deleted';
@@ -6202,27 +6896,39 @@ class LocalStorageService {
           s['pendingSync'] = false;
         }
 
-        // MERGE with existing record in Hive so partial objects (sync stubs) never wipe genuine patient data
+        // MERGE with existing record in Hive so partial objects (sync stubs) or older cloud
+        // snapshots never wipe genuine patient data or local edits pending upload.
+        // Never merge an adult record with a child record (or vice versa).
         final existing = box.get(key) ?? box.get(key.replaceAll('-', '').trim());
         if (existing is Map) {
-          bool blank(dynamic v) {
-            if (v == null) return true;
-            if (v is String) {
-              final t = v.trim();
-              return t.isEmpty || t == '0' || t.toLowerCase() == 'null';
-            }
-            return false;
+          final existingMap = Map<String, dynamic>.from(existing.map((k, v) => MapEntry(k.toString(), v)));
+          if (isChildPatientRecord(s) == isChildPatientRecord(existingMap)) {
+            bool blank(dynamic v) => _isBlankPatientField(v);
+            final exUpdated = existingMap['updatedAt']?.toString() ?? '';
+            final inUpdated = s['updatedAt']?.toString() ?? '';
+            final exEdited = existingMap['nameEditedAt']?.toString() ?? '';
+            final inEdited = s['nameEditedAt']?.toString() ?? '';
+            final localIsNewer = existingMap['pendingSync'] == true ||
+                (exEdited.isNotEmpty && exEdited.compareTo(inEdited) > 0) ||
+                (exUpdated.isNotEmpty && inUpdated.isNotEmpty && exUpdated.compareTo(inUpdated) > 0) ||
+                (exUpdated.isNotEmpty && inUpdated.isEmpty);
+
+            final merged = existingMap;
+            s.forEach((k, v) {
+              if (localIsNewer) {
+                if (blank(merged[k]) && !blank(v)) merged[k] = v;
+              } else {
+                if (!blank(v) || blank(merged[k])) merged[k] = v;
+              }
+            });
+            s = merged;
+            s['patientId'] = key;
           }
-          final merged = Map<String, dynamic>.from(existing.map((k, v) => MapEntry(k.toString(), v)));
-          s.forEach((k, v) {
-            if (!blank(v) || blank(merged[k])) merged[k] = v;
-          });
-          s = merged;
-          s['patientId'] = key;
         }
 
-        // Standardize internal CNIC fields to dashed format
+        // Standardize internal CNIC fields to dashed format and enforce adult/child identity
         _standardizePatientCnicFields(s);
+        normalizePatientRecordIdentity(s);
         final canonicalKey = getPatientKey(s);
         s['patientId'] = canonicalKey;
         s['id'] = canonicalKey;
@@ -6283,40 +6989,97 @@ class LocalStorageService {
     return getLocalPatientByCnic(patientId);
   }
 
-  static Map<String, dynamic>? getLocalPatientByCnic(String cnic) {
+  /// Returns the single registered adult for [cnic] (1 adult per CNIC rule), or
+  /// `null` if no active adult exists on that CNIC (e.g. unregistered or only children).
+  /// Uses canonical [isChildPatientRecord] and [normalizePatientRecordIdentity] so
+  /// self-guardian corrupted adult records are still recognized and deleted stubs are ignored.
+  static Map<String, dynamic>? getLocalAdultByCnic(String cnic) {
     if (!Hive.isBoxOpen(patientsBox)) return null;
-    final normalized = cnic.replaceAll('-', '').trim();
-    final box        = Hive.box(patientsBox);
-    var direct = box.get(normalized) ?? box.get(cnic);
-    if (direct == null && normalized.length == 13) {
-      final hyphenated = '${normalized.substring(0, 5)}-${normalized.substring(5, 12)}-${normalized.substring(12)}';
-      direct = box.get(hyphenated);
-    }
-    if (direct != null && direct is Map) {
-      final isDirectAdult = direct['isAdult'] != false && !(direct['patientId']?.toString().contains('_child_') ?? false);
-      if (isDirectAdult) return Map<String, dynamic>.from(direct);
+    final digits = cnic.replaceAll(RegExp(r'\D'), '').trim();
+    if (digits.isEmpty) return null;
+    final dashed = digits.length == 13
+        ? '${digits.substring(0, 5)}-${digits.substring(5, 12)}-${digits.substring(12, 13)}'
+        : '';
+    final box = Hive.box(patientsBox);
+
+    bool isValidAdultRecord(dynamic raw, {bool verifyCnic = false}) {
+      if (raw is! Map) return false;
+      final status = (raw['status'] ?? '').toString().toLowerCase().trim();
+      if (raw['isDeleted'] == true || status == 'deleted') return false;
+      final copy = Map<String, dynamic>.from(raw.map((k, v) => MapEntry(k.toString(), v)));
+      if (isChildPatientRecord(copy)) return false;
+      final recCnic = (copy['cnic'] ?? copy['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
+      final recPid = (copy['patientId'] ?? copy['id'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
+      if (verifyCnic && recCnic != digits) return false;
+      if (!verifyCnic && recCnic.isNotEmpty && recCnic != digits && recPid != digits) return false;
+      final name = resolveCanonicalPatientName(copy);
+      final hasRealCnic = recCnic.length == 13 && !_isDummyCnicValue(recCnic);
+      return name.isNotEmpty || hasRealCnic;
     }
 
-    // Prioritize scanning for adult patient record first
-    for (final raw in box.values) {
-      if (raw is! Map) continue;
-      final rawCnic = (raw['cnic'] ?? raw['patientCnic'])?.toString().replaceAll('-', '').trim();
-      final isAdult = raw['isAdult'] != false && !(raw['patientId']?.toString().contains('_child_') ?? false);
-      if (isAdult && rawCnic == normalized) {
-        return Map<String, dynamic>.from(raw);
+    Map<String, dynamic> normalizeFound(Map raw) {
+      final copy = Map<String, dynamic>.from(raw.map((k, v) => MapEntry(k.toString(), v)));
+      _standardizePatientCnicFields(copy);
+      normalizePatientRecordIdentity(copy);
+      final pid = getPatientKey(copy);
+      copy['patientId'] = pid;
+      copy['id'] = pid;
+      return copy;
+    }
+
+    for (final key in [
+      if (dashed.isNotEmpty) dashed,
+      digits,
+      if (cnic.trim().isNotEmpty && cnic.trim() != dashed && cnic.trim() != digits) cnic.trim(),
+    ]) {
+      final direct = box.get(key);
+      if (isValidAdultRecord(direct)) {
+        return normalizeFound(direct as Map);
       }
     }
 
-    if (direct != null && direct is Map) {
-      return Map<String, dynamic>.from(direct);
+    for (final raw in box.values) {
+      if (isValidAdultRecord(raw, verifyCnic: true)) {
+        return normalizeFound(raw as Map);
+      }
+    }
+    return null;
+  }
+
+  static Map<String, dynamic>? getLocalPatientByCnic(String cnic) {
+    if (!Hive.isBoxOpen(patientsBox)) return null;
+    final adult = getLocalAdultByCnic(cnic);
+    if (adult != null) return adult;
+
+    final normalized = cnic.replaceAll('-', '').trim();
+    final digits = normalized.replaceAll(RegExp(r'\D'), '');
+    final hyphenated = digits.length == 13
+        ? '${digits.substring(0, 5)}-${digits.substring(5, 12)}-${digits.substring(12)}'
+        : '';
+    final box = Hive.box(patientsBox);
+
+    bool isNotDeleted(dynamic raw) {
+      if (raw is! Map) return false;
+      final status = (raw['status'] ?? '').toString().toLowerCase().trim();
+      return raw['isDeleted'] != true && status != 'deleted';
+    }
+
+    final direct = box.get(normalized) ??
+        box.get(cnic) ??
+        (hyphenated.isNotEmpty ? box.get(hyphenated) : null);
+    if (isNotDeleted(direct)) {
+      return Map<String, dynamic>.from(direct as Map);
     }
 
     // Fallback: search for child patient registered under this guardian CNIC
     for (final key in box.keys) {
-      if (key is String && (key.startsWith('${normalized}_child_') || key.startsWith('${cnic}_child_'))) {
+      if (key is String &&
+          (key.startsWith('${normalized}_child_') ||
+              key.startsWith('${cnic}_child_') ||
+              (hyphenated.isNotEmpty && key.startsWith('${hyphenated}_child_')))) {
         final val = box.get(key);
-        if (val is Map) {
-          return Map<String, dynamic>.from(val);
+        if (isNotDeleted(val)) {
+          return Map<String, dynamic>.from(val as Map);
         }
       }
     }
@@ -6638,8 +7401,9 @@ class LocalStorageService {
 
         final p = Map<String, dynamic>.from(val);
         _standardizePatientCnicFields(p);
+        normalizePatientRecordIdentity(p);
         // For direct key lookups (exact CNIC / ID), we always accept to prevent "Patient not found" -> "Already exists" deadlocks!
-        final pid = (p['patientId'] ?? getPatientKey(p)).toString();
+        final pid = getPatientKey(p);
         p['patientId'] = pid;
         p['id'] = pid;
         if (!seenIds.contains(pid)) {
@@ -6647,7 +7411,7 @@ class LocalStorageService {
           results.add(p);
         } else {
           final idx = results.indexWhere((r) => (r['patientId'] ?? r['id'])?.toString() == pid);
-          if (idx != -1) {
+          if (idx != -1 && isChildPatientRecord(results[idx]) == isChildPatientRecord(p)) {
             results[idx] = mergePatientMaps(results[idx], p);
           }
         }
@@ -6668,12 +7432,21 @@ class LocalStorageService {
 
     tryAddDirect(box.get(trimmed));
     if (normalized != trimmed) tryAddDirect(box.get(normalized));
+    if (normalizedPhone.length == 13) {
+      final dashed = '${normalizedPhone.substring(0, 5)}-${normalizedPhone.substring(5, 12)}-${normalizedPhone.substring(12, 13)}';
+      if (dashed != trimmed && dashed != normalized) tryAddDirect(box.get(dashed));
+    }
 
-    // Also check child prefix keys in box for fast direct lookup (only on complete 13-digit guardian CNIC)
+    // Also check child prefix keys in box for fast direct lookup (both dashed and un-dashed guardian CNIC)
     if (normalizedPhone.length == 13 || (hasLetters && normalized.length >= 5)) {
-      final childPrefix = '${normalized}_child_';
+      final childPrefixRaw = '${normalized}_child_';
+      final childPrefixDashed = normalizedPhone.length == 13
+          ? '${normalizedPhone.substring(0, 5)}-${normalizedPhone.substring(5, 12)}-${normalizedPhone.substring(12, 13)}_child_'
+          : '';
       for (final k in box.keys) {
-        if (k is String && k.startsWith(childPrefix)) {
+        if (k is String &&
+            (k.startsWith(childPrefixRaw) ||
+                (childPrefixDashed.isNotEmpty && k.startsWith(childPrefixDashed)))) {
           tryAddDirect(box.get(k));
         }
       }
@@ -6739,7 +7512,8 @@ class LocalStorageService {
 
         final p = Map<String, dynamic>.from(raw);
         _standardizePatientCnicFields(p);
-        final pid = (p['patientId'] ?? getPatientKey(p)).toString();
+        normalizePatientRecordIdentity(p);
+        final pid = getPatientKey(p);
         p['patientId'] = pid;
         p['id'] = pid;
         if (!seenIds.contains(pid)) {
@@ -6747,7 +7521,7 @@ class LocalStorageService {
           results.add(p);
         } else {
           final idx = results.indexWhere((r) => (r['patientId'] ?? r['id'])?.toString() == pid);
-          if (idx != -1) {
+          if (idx != -1 && isChildPatientRecord(results[idx]) == isChildPatientRecord(p)) {
             results[idx] = mergePatientMaps(results[idx], p);
           }
         }
@@ -6930,10 +7704,65 @@ class LocalStorageService {
     return '';
   }
 
+  // ── Reversed tokens ──────────────────────────────────────────────────────────
+  // A reversed token is deleted on every PC, but any later copy of it (a desk's outbox, a
+  // LAN catch-up, the server's cloud re-download) used to recreate it as "waiting". The
+  // serial is remembered for 3 days so those copies are refused.
+  static const _reversedKey = 'reversed_serials';
+  static Map<String, int>? _reversedCache;
+
+  static String _reversedId(String serial) => serial.trim().toUpperCase();
+
+  static Map<String, int> _reversedMap() {
+    if (_reversedCache != null) return _reversedCache!;
+    final out = <String, int>{};
+    try {
+      if (Hive.isBoxOpen('app_flags')) {
+        final raw = Hive.box('app_flags').get(_reversedKey);
+        if (raw is Map) {
+          raw.forEach((k, v) {
+            if (v is num) out[k.toString()] = v.toInt();
+          });
+        }
+        _reversedCache = out;
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  static Future<void> markSerialReversed(String branchId, String serial) async {
+    final id = _reversedId(CampSessionService.cleanSerial(serial, branchId));
+    if (id.isEmpty) return;
+    try {
+      final box = await ensureBoxOpen('app_flags');
+      final map = Map<String, int>.from(_reversedMap());
+      final now = DateTime.now().millisecondsSinceEpoch;
+      map.removeWhere((_, at) => now - at > const Duration(days: 3).inMilliseconds);
+      map[id] = now;
+      _reversedCache = map;
+      await box.put(_reversedKey, map);
+      _localEntriesCache.clear();
+    } catch (_) {}
+  }
+
+  /// Serials reversed in the last 3 days (upper-case, without branch prefix). Number
+  /// allocation counts them as used: a reused number would be refused as "reversed".
+  static Iterable<String> reversedSerials() => _reversedMap().keys;
+
+  static bool isSerialReversed(String branchId, String serial) {
+    final id = _reversedId(CampSessionService.cleanSerial(serial, branchId));
+    return id.isNotEmpty && _reversedMap().containsKey(id);
+  }
+
   /// Returns false when the serial already belongs to a different patient (A4 collision):
   /// the incoming record is kept under a -COLLISION- key and must not be synced as this serial.
   static Future<bool> saveEntryLocal(
       String branchId, String serial, Map<String, dynamic> entryData) async {
+    // A reversed token never comes back (see markSerialReversed).
+    if (isSerialReversed(branchId, serial)) {
+      debugPrint('[LocalStorage] Reversed token $serial not saved again');
+      return false;
+    }
     final normBranch = branchId.toLowerCase().trim();
     var cleanSerial  = serial.trim();
     if (cleanSerial.toLowerCase().startsWith('$normBranch-')) {
@@ -7167,21 +7996,51 @@ class LocalStorageService {
           if (authoritativeName.isNotEmpty) {
             rxMap['patientName'] = authoritativeName;
             rxMap['name'] = authoritativeName;
+            rxMap['fullName'] = authoritativeName;
           }
           if (authoritativeCnic.isNotEmpty) {
             rxMap['patientCnic'] = authoritativeCnic;
             rxMap['cnic'] = authoritativeCnic;
+          }
+          for (final demoField in const [
+            'patientId', 'guardianCnic', 'guardianName', 'isAdult',
+            'age', 'patientAge', 'gender', 'patientGender', 'bloodGroup', 'dob', 'dateOfBirth', 'phone'
+          ]) {
+            if (sanitized[demoField] != null) {
+              rxMap[demoField] = sanitized[demoField];
+            }
           }
           rxMap['identityRevision'] = nextIdRev;
           sanitized['prescription'] = rxMap;
         }
       } else if (exIdRev > inIdRev) {
         sanitized['identityRevision'] = exIdRev;
+        // Existing token has a newer patient edit than the incoming copy: keep edited demographics.
+        for (final editedField in const [
+          'patientId', 'fullName', 'guardianCnic', 'guardianName', 'isAdult',
+          'age', 'patientAge', 'gender', 'patientGender', 'bloodGroup', 'dob', 'dateOfBirth', 'phone', 'contactPhone', 'address'
+        ]) {
+          final exVal = existing[editedField];
+          if (exVal != null && !_isBlankPatientField(exVal)) {
+            sanitized[editedField] = exVal;
+          }
+        }
+        if (existing['vitals'] is Map) {
+          final exVitals = existing['vitals'] as Map;
+          final curVitals = Map<String, dynamic>.from(sanitized['vitals'] is Map ? sanitized['vitals'] as Map : {});
+          for (final vf in const ['age', 'gender', 'bloodGroup', 'dob']) {
+            if (exVitals[vf] != null && !_isBlankPatientField(exVitals[vf])) {
+              curVitals[vf] = exVitals[vf];
+            }
+          }
+          sanitized['vitals'] = curVitals;
+        }
       }
 
       for (final field in [
         'patientName', 'name', 'fullName', 'patientCnic', 'cnic', 'guardianName',
         'guardianCnic', 'patientAge', 'age', 'patientGender', 'gender',
+        'dob', 'dateOfBirth', 'bloodGroup', 'isAdult',
         'queueType', 'visitReason', 'isVitalsOnly', 'vitalsOnly',
         'suggestedDays', 'phone', 'contactPhone', 'address', 'dateKey', 'patientId'
       ]) {
@@ -7210,7 +8069,11 @@ class LocalStorageService {
             !oldStr.startsWith('unknown_');
         if (isCurEmpty && isOldValid) {
           sanitized[field] = oldVal;
-        } else if (isOldValid && (field == 'fullName' || field == 'guardianCnic' || field == 'guardianName')) {
+        } else if (isOldValid && !isExplicitIdentityEdit &&
+            (field == 'fullName' || field == 'guardianCnic' || field == 'guardianName')) {
+          // Kept against ordinary (doctor/dispenser) copies — but a receptionist correction
+          // (explicit identity edit) must go through: a child's guardian CNIC fix used to stay
+          // old on the doctor and dispenser desks.
           sanitized[field] = oldVal;
         }
       }
@@ -7312,7 +8175,18 @@ class LocalStorageService {
         final hasDistinctPid = exPid.isNotEmpty && inPid.isNotEmpty && exPid != inPid &&
             !placeholder(exPid) && !placeholder(inPid) && !related && namesDiffer;
 
-        if (hasDistinctCnic || hasDistinctPid) {
+        // The same token (same issue time / creation time from the receptionist) with its
+        // patient's CNIC or id corrected is an identity edit, not a different patient. Seen as a
+        // collision, the correction went to a hidden -COLLISION- copy and the token kept the
+        // old CNIC and name on every desk.
+        final exIssued = existingExactMap['issuedAtMs'];
+        final inIssued = sanitized['issuedAtMs'];
+        final exCreated = (existingExactMap['createdAt'] ?? '').toString().trim();
+        final inCreated = (sanitized['createdAt'] ?? '').toString().trim();
+        final sameToken = (exIssued is num && inIssued is num && exIssued.toInt() == inIssued.toInt()) ||
+            (exCreated.isNotEmpty && exCreated == inCreated);
+
+        if ((hasDistinctCnic || hasDistinctPid) && !sameToken) {
           isCollision = true;
         }
       }
@@ -7474,7 +8348,9 @@ class LocalStorageService {
         );
         if (matchedRx != null && _isSamePrescriptionScope(sanitized, matchedRx)) {
           final existingPrescription = Map<String, dynamic>.from(matchedRx);
-          preservePatientFields(existingPrescription);
+          if (intOf(existingPrescription['identityRevision']) >= intOf(sanitized['identityRevision'])) {
+            preservePatientFields(existingPrescription);
+          }
           sanitized['status']         = 'completed';
           // The stored record wins only when it is not older and not emptier than the token's.
           sanitized['prescription']   = preferredPrescription(sanitized['prescription'], existingPrescription);
@@ -7582,6 +8458,8 @@ class LocalStorageService {
       final be = kv.value;
       var cleanS = be.serialKey;
       if (cleanS.isEmpty) continue;
+      // Reversed, but written back by a path that bypassed saveEntryLocal: never listed.
+      if (isSerialReversed(normBranch, cleanS)) continue;
       // A "-COLLISION-" record is a DIFFERENT patient who got the same number (two desks
       // numbering offline). Merged as a duplicate it vanished from every queue — and its
       // dispensed status could be copied onto the other patient. It is kept as its own row
@@ -7632,7 +8510,8 @@ class LocalStorageService {
       }
       for (final f in const [
         'patientName', 'name', 'fullName', 'patientCnic', 'cnic', 'guardianCnic', 'guardianName',
-        'patientId', 'age', 'patientAge', 'gender', 'patientGender', 'phone', 'contactPhone',
+        'patientId', 'isAdult', 'age', 'patientAge', 'gender', 'patientGender', 'bloodGroup',
+        'dob', 'dateOfBirth', 'phone', 'contactPhone',
         'createdBy', 'createdByName', 'receptionistId', 'receptionistName', 'tokenBy',
         'campId', 'dispensaryId', 'dispensaryTag', 'campName', 'queueType', 'visitReason',
         'isVitalsOnly', 'vitalsOnly', 'suggestedDays', 'dateKey', 'session', 'createdAt',
@@ -10287,6 +11166,11 @@ class LocalStorageService {
       }
       final box = Hive.box(auditLogsBox);
       final id = logData['id'] ?? logData['docId'] ?? const Uuid().v4();
+      // Written back so StockLog.share sends the same id to the LAN and the cloud.
+      try {
+        logData['id'] = id;
+        logData['createdAt'] ??= DateTime.now().toIso8601String();
+      } catch (_) {}
       final key = 'inv_log_$id';
       await box.put(key, sanitize({
         ...logData,
@@ -10629,6 +11513,8 @@ class LocalStorageService {
             final rawId = doc.id.trim();
             final upperId = rawId.toUpperCase();
             final isLowercase = (rawId != upperId);
+            // Reversed here; its cloud copy may not be deleted yet. Never re-insert it.
+            if (isSerialReversed(branchId, upperId)) continue;
 
             final d = Map<String, dynamic>.from(doc.data());
             d['serial']    = upperId;
@@ -11589,22 +12475,20 @@ class LocalStorageService {
     formatField('fatherCnic');
     formatField('cNic');
 
-    if (cnicFormatted != null && !p.containsKey('patientCnic')) {
-      p['patientCnic'] = cnicFormatted;
-    }
-    if (p['patientCnic'] != null && !p.containsKey('cnic')) {
-      p['cnic'] = p['patientCnic'];
+    final bool isChildRec = isChildPatientRecord(p);
+    if (!isChildRec) {
+      if (cnicFormatted != null && cnicFormatted.isNotEmpty && !p.containsKey('patientCnic')) {
+        p['patientCnic'] = cnicFormatted;
+      }
+      if (p['patientCnic'] != null && p['patientCnic'].toString().trim().isNotEmpty && !p.containsKey('cnic')) {
+        p['cnic'] = p['patientCnic'];
+      }
     }
 
     // Canonicalize patientId
     final pid = (p['patientId'] ?? p['id'])?.toString().trim();
     if (pid != null && pid.isNotEmpty) {
-      if (RegExp(r'^\d{13}$').hasMatch(pid)) {
-        final dashed = '${pid.substring(0, 5)}-${pid.substring(5, 12)}-${pid.substring(12, 13)}';
-        p['patientId'] = dashed;
-        p['id'] = dashed;
-        changed = true;
-      } else if (pid.contains('_child_')) {
+      if (pid.contains('_child_')) {
         final parts = pid.split('_child_');
         final gDigits = parts[0].replaceAll(RegExp(r'\D'), '');
         if (gDigits.length == 13) {
@@ -11614,19 +12498,20 @@ class LocalStorageService {
           p['id'] = dashedChild;
           changed = true;
         }
+      } else if (!isChildRec && RegExp(r'^\d{13}$').hasMatch(pid)) {
+        final dashed = '${pid.substring(0, 5)}-${pid.substring(5, 12)}-${pid.substring(12, 13)}';
+        p['patientId'] = dashed;
+        p['id'] = dashed;
+        changed = true;
       }
     }
     return changed;
   }
 
   /// Safely merges two patient records for the same individual, combining all genuine fields
-  /// and guaranteeing that no valid data (name, phone, dob, etc.) is overwritten with empty/null/dummy stubs.
+  /// and guaranteeing that no valid data (name, phone, dob, bloodGroup, etc.) is overwritten with empty/null/dummy stubs.
   static Map<String, dynamic> mergePatientMaps(Map<String, dynamic> a, Map<String, dynamic> b) {
-    bool blank(dynamic v) {
-      if (v == null) return true;
-      final s = v.toString().trim();
-      return s.isEmpty || s == '0' || s.toLowerCase() == 'null' || s == '-';
-    }
+    bool blank(dynamic v) => _isBlankPatientField(v);
 
     bool isDummyVal(dynamic v) {
       if (blank(v)) return true;
@@ -11634,22 +12519,30 @@ class LocalStorageService {
       return _isDummyCnicValue(s) || s == '0300-0000000' || s.toLowerCase() == 'unknown' || s.toLowerCase() == 'unknown patient';
     }
 
+    final aUpdated = a['updatedAt']?.toString() ?? '';
+    final bUpdated = b['updatedAt']?.toString() ?? '';
+    final aEdited = a['nameEditedAt']?.toString() ?? '';
+    final bEdited = b['nameEditedAt']?.toString() ?? '';
+    final bIsNewer = (b['pendingSync'] == true && a['pendingSync'] != true) ||
+        (bEdited.isNotEmpty && bEdited.compareTo(aEdited) > 0) ||
+        (bUpdated.isNotEmpty && aUpdated.isNotEmpty && bUpdated.compareTo(aUpdated) > 0) ||
+        (bUpdated.isNotEmpty && aUpdated.isEmpty);
+
     final merged = Map<String, dynamic>.from(a);
 
     b.forEach((k, v) {
       final existingVal = merged[k];
       if (blank(existingVal)) {
-        merged[k] = v;
+        if (!blank(v)) merged[k] = v;
       } else if (isDummyVal(existingVal) && !isDummyVal(v)) {
         merged[k] = v;
-      } else if (v is String && existingVal is String) {
-        if (existingVal.trim().length < v.trim().length && !isDummyVal(v)) {
-          merged[k] = v;
-        }
+      } else if (!isDummyVal(v) && bIsNewer) {
+        merged[k] = v;
       }
     });
 
     _standardizePatientCnicFields(merged);
+    normalizePatientRecordIdentity(merged);
     final canonicalId = getPatientKey(merged);
     merged['patientId'] = canonicalId;
     merged['id'] = canonicalId;
@@ -11707,6 +12600,7 @@ class LocalStorageService {
 
         stats['localProcessed'] = (stats['localProcessed'] ?? 0) + 1;
         _standardizePatientCnicFields(p);
+        normalizePatientRecordIdentity(p);
         final canonicalKey = getPatientKey(p);
         groups.putIfAbsent(canonicalKey, () => []).add((oldKey: k, data: p));
       }
@@ -11730,6 +12624,7 @@ class LocalStorageService {
         }
 
         _standardizePatientCnicFields(merged);
+        normalizePatientRecordIdentity(merged);
         merged['patientId'] = canonicalKey;
         merged['id'] = canonicalKey;
         final sanitized = sanitize(merged);
@@ -11770,7 +12665,13 @@ class LocalStorageService {
           final updatedE = Map<String, dynamic>.from(eval);
 
           if (keyRedirects.containsKey(ePid)) {
-            updatedE['patientId'] = keyRedirects[ePid];
+            final newPid = keyRedirects[ePid];
+            updatedE['patientId'] = newPid;
+            if (updatedE['prescription'] is Map) {
+              final updRx = Map<String, dynamic>.from(updatedE['prescription'] as Map);
+              updRx['patientId'] = newPid;
+              updatedE['prescription'] = updRx;
+            }
             tokenChanged = true;
           }
           if (RegExp(r'^\d{13}$').hasMatch(eCnicRaw)) {
@@ -11827,6 +12728,7 @@ class LocalStorageService {
             final data = Map<String, dynamic>.from(doc.data());
             data['patientId'] = doc.id;
             _standardizePatientCnicFields(data);
+            normalizePatientRecordIdentity(data);
             final canonicalId = getPatientKey(data);
             remoteGroups.putIfAbsent(canonicalId, () => []).add(doc);
           }
@@ -11847,6 +12749,7 @@ class LocalStorageService {
               }
             }
             _standardizePatientCnicFields(merged);
+            normalizePatientRecordIdentity(merged);
             merged['patientId'] = canonicalId;
             merged['id'] = canonicalId;
 
@@ -12044,6 +12947,22 @@ class LocalStorageService {
     final normPid = _cleanId(patientId);
     final today = dateKey ?? getTodayDateKey();
     final key = '${normBranch}_${normPid}_$today';
+
+    // The server re-sends approvals on every desk reconnect. An exception already used for
+    // this same request must stay used, or each reconnect allowed one more extra token.
+    try {
+      if (Hive.isBoxOpen(tokenExceptionsBox)) {
+        final existing = Hive.box(tokenExceptionsBox).get(key);
+        if (existing is Map && existing['used'] == true) {
+          final oldReq = existing['requestId']?.toString() ?? '';
+          final newReq = requestId ?? '';
+          if (newReq.isEmpty || oldReq.isEmpty || newReq == oldReq) {
+            debugPrint('[LocalStorage] 🎟️ Token exception for $normPid on $today already used; not re-granted');
+            return;
+          }
+        }
+      }
+    } catch (_) {}
 
     try {
       if (Hive.isBoxOpen(tokenExceptionsBox)) {
@@ -12472,6 +13391,13 @@ class LocalStorageService {
           final seq = parseSequenceFromSerial(s);
           if (inBand(seq) && seq > scanned) scanned = seq;
         }
+      }
+      // Reversed numbers stay used (the token is gone from the list, its number is not free).
+      final tagPart = '-${dispTag.toUpperCase()}-';
+      for (final s in reversedSerials()) {
+        if (!s.startsWith('$cleanDateKey$sessionLetter-') || !s.contains(tagPart)) continue;
+        final seq = parseSequenceFromSerial(s);
+        if (inBand(seq) && seq > scanned) scanned = seq;
       }
       _serialScanCache[scanKey] = (maxSeq: scanned, entriesLen: entriesLen, at: DateTime.now());
       maxSeq = scanned > savedSeq ? scanned : (savedSeq > 0 ? savedSeq : bandLow);

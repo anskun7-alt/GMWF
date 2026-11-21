@@ -1988,6 +1988,7 @@ class HomeLineChartPoint {
   final int donations;
   final int tokens;
   final int employeesPresent;
+  final int foodTokens;
 
   const HomeLineChartPoint({
     required this.date,
@@ -1995,6 +1996,7 @@ class HomeLineChartPoint {
     required this.donations,
     required this.tokens,
     required this.employeesPresent,
+    this.foodTokens = 0,
   });
 }
 
@@ -2067,6 +2069,7 @@ Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {
   final revList = List<int>.filled(months, 0);
   final donList = List<double>.filled(months, 0);
   final tokenList = List<int>.filled(months, 0);
+  final foodTokenList = List<int>.filled(months, 0);
   final monthEmpDayCounts = List<Map<String, int>>.generate(months, (_) => <String, int>{});
 
   // Single pass 1: Donations
@@ -2158,6 +2161,7 @@ Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {
         final m = getMonthIndex(dt);
         if (m >= 0 && m < months) {
           tokenList[m]++;
+          foodTokenList[m]++;
         }
       }
     }
@@ -2213,6 +2217,7 @@ Future<List<HomeLineChartPoint>> fetchLocalChartPoints(List<String> branchIds, {
       patientsRevenue: revList[m],
       donations: donList[m].round(),
       tokens: tokenList[m],
+      foodTokens: foodTokenList[m],
       employeesPresent: empAvg,
     );
   });

@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -742,14 +743,10 @@ class _PatientHistoryPanelState extends State<PatientHistoryPanel> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Image.asset(
-                'assets/images/doctor_empty_history.jpg',
-                width: 96,
-                height: 96,
-                fit: BoxFit.cover,
-              ),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.activity,
+              size: 112,
+              fallbackIcon: Icons.history_rounded,
             ),
             const SizedBox(height: 10),
             Text('No visit history yet',
@@ -2077,14 +2074,10 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
           ? Center(child: CircularProgressIndicator(color: brand))
           : _entries.isEmpty
               ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Image.asset(
-                      'assets/images/doctor_empty_history.jpg',
-                      width: 128,
-                      height: 128,
-                      fit: BoxFit.cover,
-                    ),
+                  const GEmptyIllustration(
+                    GEmptyIllustrationKind.activity,
+                    size: 140,
+                    fallbackIcon: Icons.history_rounded,
                   ),
                   const SizedBox(height: 14),
                   Text('No visit history found for $name',

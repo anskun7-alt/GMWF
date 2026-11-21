@@ -11,8 +11,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
+import '../services/branch_directory.dart';
 import '../services/local_storage_service.dart';
-import '../services/finance_local_storage.dart';
 import '../services/serials_service.dart';
 import '../services/camp_session_service.dart';
 import '../services/quota_service.dart';
@@ -36,60 +36,18 @@ final singleBranchIdProvider = StateProvider<String?>((ref) => null);
 final selectedBranchTabIdProvider = StateProvider<String?>((ref) => null);
 
 List<Map<String, dynamic>> _getLocalBranchesList(String? singleId) {
-  final merged = FinanceLocalStorage.getAllKnownBranches([]);
-  final defaults = [
-    {'id': 'karachi', 'name': 'Karachi'},
-    {'id': 'gujrat', 'name': 'Gujrat'},
-    {'id': 'sialkot', 'name': 'Sialkot'},
-    {'id': 'rawalpindi', 'name': 'Rawalpindi'},
-    {'id': 'jalalpurjattan', 'name': 'Jalalpur Jattan'},
+  // One clean list (BranchDirectory): no 'global' / 'main', no duplicate spellings, camps
+  // fold into their branch. "All Branches" is added only as the FIRST TAB — a filter that
+  // shows every branch together — never as a branch of its own.
+  final merged = <Map<String, dynamic>>[
+    for (final b in BranchDirectory.list()) Map<String, dynamic>.from(b),
   ];
-  for (final d in defaults) {
-    if (!merged.any((b) => (b['id'] ?? '').toString().toLowerCase() == d['id'])) {
-      merged.add(Map<String, dynamic>.from(d));
-    }
-  }
-
-  try {
-    if (Hive.isBoxOpen(LocalStorageService.branchesBox)) {
-      final box = Hive.box(LocalStorageService.branchesBox);
-      for (final val in box.values) {
-        if (val is Map) {
-          final id = (val['id'] ?? '').toString().trim();
-          final name = (val['name'] ?? id).toString().trim();
-          if (id.isNotEmpty && id.toLowerCase() != 'all' && id.toLowerCase() != 'global') {
-            if (!merged.any((b) => (b['id'] ?? '').toString().toLowerCase() == id.toLowerCase())) {
-              merged.add({'id': id, 'name': name.isNotEmpty ? name : id});
-            }
-          }
-        }
-      }
-    }
-  } catch (_) {}
-  try {
-    if (Hive.isBoxOpen('local_branches')) {
-      final box = Hive.box('local_branches');
-      for (final key in box.keys) {
-        final val = box.get(key);
-        if (val is Map) {
-          final id = (val['id'] ?? key.toString().replaceAll('branch:', '')).toString().trim();
-          final name = (val['name'] ?? id).toString().trim();
-          if (id.isNotEmpty && id.toLowerCase() != 'all' && id.toLowerCase() != 'global') {
-            if (!merged.any((b) => (b['id'] ?? '').toString().toLowerCase() == id.toLowerCase())) {
-              merged.add({'id': id, 'name': name.isNotEmpty ? name : id});
-            }
-          }
-        }
-      }
-    }
-  } catch (_) {}
 
   if (singleId != null) {
-    merged.retainWhere((b) => (b['id'] ?? '').toString().toLowerCase() == singleId.toLowerCase());
+    final want = BranchDirectory.canonical(singleId) ?? singleId.toLowerCase();
+    merged.retainWhere((b) => (b['id'] ?? '').toString().toLowerCase() == want);
   }
 
-  merged.sort((a, b) =>
-      ((a['name'] ?? '') as String).compareTo((b['name'] ?? '') as String));
   if (singleId == null && merged.length > 1) {
     merged.insert(0, {'id': 'all', 'name': 'All Branches'});
   }

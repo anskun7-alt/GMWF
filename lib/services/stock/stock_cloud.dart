@@ -28,6 +28,18 @@ class StockCloud {
 
   static const Duration _timeout = Duration(seconds: 30);
   static bool _uploading = false;
+  static bool get isUploading => _uploading;
+
+  static String wipeMetaDocId(StockPool pool) => 'wipe_${pool.collection}';
+  static String wipeMetaPath(StockPool pool) =>
+      'branches/${pool.cloudBranch}/inventory_meta/${wipeMetaDocId(pool)}';
+
+  static DocumentReference<Map<String, dynamic>> wipeMetaRef(StockPool pool) =>
+      FirebaseFirestore.instance
+          .collection('branches')
+          .doc(pool.cloudBranch)
+          .collection('inventory_meta')
+          .doc(wipeMetaDocId(pool));
 
   static DocumentReference<Map<String, dynamic>> docRef(StockPool pool, String medicineId) =>
       FirebaseFirestore.instance
@@ -50,14 +62,22 @@ class StockCloud {
     }
     if (fresh.isEmpty) return null;
     final q = cur['quantity'];
-    final base = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
-    final inc = fresh.fold<double>(0, (s, m) => s + m.delta);
+    final rawBase = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
+    var running = rawBase < 0 ? 0.0 : rawBase;
+    fresh.sort((a, b) {
+      final c = a.at.compareTo(b.at);
+      return c != 0 ? c : a.opId.compareTo(b.opId);
+    });
+    for (final m in fresh) {
+      running += m.delta;
+      if (running < 0) running = 0.0;
+    }
     final r = cur['rev'];
     final rev = (r is num ? r.toInt() : int.tryParse(r?.toString() ?? '') ?? 0) + 1;
     final ops = [...lastOps, ...fresh.map((m) => m.opId)];
     final capped = ops.length > StockLedger.baseOpsCap ? ops.sublist(ops.length - StockLedger.baseOpsCap) : ops;
     final out = <String, dynamic>{
-      'quantity': double.parse((base + inc).toStringAsFixed(4)),
+      'quantity': double.parse((running < 0 ? 0.0 : running).toStringAsFixed(4)),
       'rev': rev,
       'lastOps': capped,
       '_applied': fresh.map((m) => m.opId).toList(), // stripped before writing
@@ -92,6 +112,12 @@ class StockCloud {
         try {
           final res = await _applyGroup(pool, first.medicineId, group, details);
           done += group.length;
+          if (res == null) {
+            // Orphan negative movement for a wiped/deleted batch — mark handled so it does
+            // not recreate a nameless ghost doc in Firestore or Hive.
+            await StockLedger.markInCloud(group.map((m) => m.opId));
+            continue;
+          }
           await StockLedger.markInCloud(group.map((m) => m.opId), cloudRev: res.rev);
           await StockLedger.applyBase(
             pool: pool.key,
@@ -110,12 +136,17 @@ class StockCloud {
     return done;
   }
 
-  static Future<({double quantity, int rev, List<String> lastOps})> _applyGroup(
+  static Future<({double quantity, int rev, List<String> lastOps})?> _applyGroup(
       StockPool pool, String medicineId, List<StockMovement> moves, Map<String, dynamic>? details) async {
     final ref = docRef(pool, medicineId);
     return FirebaseFirestore.instance.runTransaction((tx) async {
       final snap = await tx.get(ref);
       final cur = snap.exists ? snap.data() : null;
+      // Never resurrect a wiped/deleted batch in Firestore from an orphan dispense movement.
+      final netDelta = moves.fold<double>(0, (s, m) => s + m.delta);
+      if (cur == null && details == null && netDelta <= 0) {
+        return null;
+      }
       final merged = mergeIntoDoc(cur, moves, details: details);
       if (merged == null) {
         final q = cur?['quantity'];
@@ -173,16 +204,38 @@ class StockCloud {
 
   static String _syncKey(StockPool p) => 'stock_v2_${p.key.replaceAll('/', '_')}';
 
+  /// Checks the cloud wipe marker for [pool] and purges local state if a newer master wipe
+  /// happened on the server. Returns true if a new wipe was applied.
+  static Future<bool> checkAndApplyCloudWipe(StockPool pool) async {
+    try {
+      final snap = await wipeMetaRef(pool)
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 10));
+      if (!snap.exists) return false;
+      final wid = (snap.data()?['wipeId'] ?? '').toString().trim();
+      if (wid.isEmpty || StockLedger.poolWipeId(pool.key) == wid) return false;
+      await StockLedger.purgePool(pool.key, wipeId: wid);
+      await StockLedger.purgeStockQueues(pool);
+      debugPrint('[StockCloud] Applied cloud wipe marker $wid for pool ${pool.key}');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Reads the pool's collection (only what changed since the last read, unless [full]) and
   /// gives every document to the ledger. Never throws. Returns the number of documents read.
   static Future<int> download(StockPool pool, {bool full = false}) async {
     try {
+      final wiped = await checkAndApplyCloudWipe(pool);
       Query<Map<String, dynamic>> q =
           FirebaseFirestore.instance.collection('branches').doc(pool.cloudBranch).collection(pool.collection);
-      final last = full ? null : LocalStorageService.getLastSyncedServerTimestamp(_syncKey(pool));
+      final last = (full || wiped) ? null : LocalStorageService.getLastSyncedServerTimestamp(_syncKey(pool));
       final since = last == null ? null : DateTime.tryParse(last);
       if (since != null) q = q.where('updatedAt', isGreaterThan: Timestamp.fromDate(since));
-      final snap = await q.get().timeout(const Duration(seconds: 45));
+      final snap = await q
+          .get((full || wiped) ? const GetOptions(source: Source.server) : null)
+          .timeout(const Duration(seconds: 45));
       Timestamp? maxTs;
       for (final doc in snap.docs) {
         await applyCloudDoc(pool, doc.id, doc.data());
@@ -192,6 +245,9 @@ class StockCloud {
       if (maxTs != null) {
         await LocalStorageService.setLastSyncedServerTimestamp(
             _syncKey(pool), maxTs.toDate().toUtc().toIso8601String());
+      } else if (wiped && snap.docs.isEmpty) {
+        await LocalStorageService.setLastSyncedServerTimestamp(
+            _syncKey(pool), DateTime.now().toUtc().toIso8601String());
       }
       return snap.docs.length;
     } catch (e) {
@@ -209,10 +265,11 @@ class StockCloud {
     final details = Map<String, dynamic>.from(data)
       ..removeWhere((k, v) => v is Timestamp || v is FieldValue);
     final q = data['quantity'];
+    final rawQ = q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0;
     await StockLedger.applyBase(
       pool: pool.key,
       medicineId: id,
-      base: q is num ? q.toDouble() : double.tryParse(q?.toString() ?? '') ?? 0.0,
+      base: rawQ < 0 ? 0.0 : rawQ,
       rev: (data['rev'] as num?)?.toInt() ?? 0,
       baseOps: ((data['lastOps'] as List?) ?? const []).map((e) => e.toString()).toList(),
       details: details,
@@ -235,14 +292,16 @@ class StockCloud {
         final d = doc.data();
         if (d['deleted'] == true) continue;
         final local = StockLedger.item(pool.key, doc.id);
-        final cloudQ = (d['quantity'] as num?)?.toDouble() ?? 0.0;
+        final rawCloudQ = (d['quantity'] as num?)?.toDouble() ?? 0.0;
+        final cloudQ = rawCloudQ < 0 ? 0.0 : rawCloudQ;
         final cloudRev = (d['rev'] as num?)?.toInt() ?? 0;
         if (local == null) {
           if (cloudQ != 0) out[doc.id] = (0.0, cloudQ);
           continue;
         }
         final localRev = (local['rev'] as num?)?.toInt() ?? 0;
-        final localBase = (local['base'] as num?)?.toDouble() ?? 0.0;
+        final rawLocalBase = (local['base'] as num?)?.toDouble() ?? 0.0;
+        final localBase = rawLocalBase < 0 ? 0.0 : rawLocalBase;
         if (localRev == cloudRev && (localBase - cloudQ).abs() > 1e-6) out[doc.id] = (localBase, cloudQ);
         if (localRev < cloudRev) {
           // Simply behind: take the newer figure (this is normal catching up, not drift).

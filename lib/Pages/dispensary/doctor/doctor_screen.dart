@@ -30,6 +30,7 @@ import 'doctor_right_panel.dart';
 import 'patient_history.dart';
 import 'package:gmwf/pages/dispensary/dispensar/inventory.dart';
 import 'package:gmwf/pages/request.dart';
+import 'package:gmwf/widgets/notification_bell_popover.dart';
 import 'package:gmwf/widgets/update_dialog_widget.dart';
 import 'package:gmwf/services/prescription_template_service.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -104,6 +105,7 @@ class _DoctorScreenState extends State<DoctorScreen>
   Color get _teal => context.comfort.brand;
 
   int _rightPanelKey = 0;
+  final GlobalKey _doctorBellKey = GlobalKey();
 
   late TabController _tabController;
 
@@ -335,6 +337,18 @@ class _DoctorScreenState extends State<DoctorScreen>
           ),
         );
       }
+    } else if (type == RealtimeEvents.savePatient ||
+               type == 'save_patient' ||
+               type == 'migrate_patient_key' ||
+               type == 'patient_edit_approved') {
+      final selectedSerial = (_selectedPatientData?['serial'] ?? _selectedPatientData?['id'])?.toString();
+      if (_selectedPatientData != null && selectedSerial != null && selectedSerial.isNotEmpty) {
+        final latestEntry = LocalStorageService.getLocalEntry(widget.branchId, selectedSerial);
+        if (latestEntry != null) {
+          _mergeReceptionistFieldsIntoSelectedPatient(latestEntry);
+        }
+      }
+      _scheduleRefresh();
     } else if (type == RealtimeEvents.tokenReversalApproved || type == 'token_reversal_approved') {
       final serial = (data['tokenSerial'] ?? data['serial'] ?? data['tokenId'])?.toString();
       if (serial != null && serial.isNotEmpty && serial == _selectedPatientData?['serial']) {
@@ -364,8 +378,8 @@ class _DoctorScreenState extends State<DoctorScreen>
 
     const receptionistKeys = [
       'patientName', 'name', 'fullName',
-      'patientCnic', 'cnic', 'guardianCnic', 'guardianName', 'patientId',
-      'age', 'patientAge', 'gender', 'patientGender',
+      'patientCnic', 'cnic', 'guardianCnic', 'guardianName', 'patientId', 'isAdult',
+      'age', 'patientAge', 'gender', 'patientGender', 'bloodGroup', 'dob', 'dateOfBirth',
       'phone', 'contactNumber', 'mobile', 'address',
       'bp', 'temp', 'sugar', 'weight',
       'campId', 'campName', 'dispensaryId', 'dispensaryTag', 'session',
@@ -1351,12 +1365,35 @@ class _DoctorScreenState extends State<DoctorScreen>
         ),
       );
 
-  void _openRequests() => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => RequestPage(branchId: widget.branchId, isSupervisor: true)),
-      ).then((_) {
-        if (mounted) setState(() {});
-      });
+  void _openRequests({String? initialRequestId}) {
+    RequestPage.focusRequest(initialRequestId);
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RequestPage(
+          branchId: widget.branchId,
+          isSupervisor: true,
+          initialRequestId: initialRequestId,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _openBellPopover() {
+    NotificationBellHelper.showBellPopover(
+      context: context,
+      bellKey: _doctorBellKey,
+      branchId: widget.branchId,
+      userId: widget.doctorId,
+      role: 'doctor',
+      onSelectRequest: (req) => _openRequests(
+        initialRequestId: (req['requestId'] ?? req['id'])?.toString(),
+      ),
+      onViewAllRequests: () => _openRequests(),
+    );
+  }
 
   Widget _buildHeaderIconButton({
     required bool isDark,
@@ -1419,13 +1456,16 @@ class _DoctorScreenState extends State<DoctorScreen>
     required int pending,
   }) =>
       [
-        _buildHeaderIconButton(
-          isDark: isDark,
-          isMobile: isMobile,
-          tooltip: pending > 0 ? 'Requests & approvals ($pending pending)' : 'Requests & approvals',
-          icon: pending > 0 ? Icons.notifications_active_outlined : Icons.notifications_outlined,
-          badge: pending,
-          onTap: _openRequests,
+        KeyedSubtree(
+          key: _doctorBellKey,
+          child: _buildHeaderIconButton(
+            isDark: isDark,
+            isMobile: isMobile,
+            tooltip: pending > 0 ? 'Requests & approvals ($pending pending)' : 'Requests & approvals',
+            icon: pending > 0 ? Icons.notifications_active_outlined : Icons.notifications_outlined,
+            badge: pending,
+            onTap: _openBellPopover,
+          ),
         ),
         SizedBox(width: isMobile ? 6 : 8),
         _buildHeaderIconButton(
@@ -1566,14 +1606,10 @@ class _DoctorScreenState extends State<DoctorScreen>
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Image.asset(
-                'assets/images/doctor_select_patient.jpg',
-                width: 140,
-                height: 140,
-                fit: BoxFit.cover,
-              ),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.people,
+              size: 156,
+              fallbackIcon: Icons.people_outline_rounded,
             ),
             const SizedBox(height: 14),
             Text('Select a patient from the queue',
@@ -1648,14 +1684,10 @@ class _DoctorScreenState extends State<DoctorScreen>
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Image.asset(
-                  'assets/images/doctor_empty_history.jpg',
-                  width: 112,
-                  height: 112,
-                  fit: BoxFit.cover,
-                ),
+              const GEmptyIllustration(
+                GEmptyIllustrationKind.activity,
+                size: 128,
+                fallbackIcon: Icons.history_rounded,
               ),
               const SizedBox(height: 12),
               Text('Select a patient to view history',

@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -632,7 +633,11 @@ class _DonorPortalState extends State<DonorPortal> {
       ),
       child: Column(
         children: [
-          Icon(Icons.history_rounded, color: SoftPalette.gray50.withValues(alpha: 0.05), size: 64),
+          const GEmptyIllustration(
+            GEmptyIllustrationKind.finance,
+            size: 144,
+            fallbackIcon: Icons.history_rounded,
+          ),
           const SizedBox(height: 16),
           Text('No donation history found yet', style: DS.body(color: SoftPalette.gray50.withValues(alpha: 0.3))),
           const SizedBox(height: 8),

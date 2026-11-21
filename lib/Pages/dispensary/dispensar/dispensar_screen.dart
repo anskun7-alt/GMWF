@@ -91,6 +91,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
   bool _loadingBranch = true;
 
   Map<String, dynamic>? _selectedQueueEntry;
+  bool _isDispenseBusy = false;
 
   // [BUG-13] Remove function returned by addReconnectListener
   VoidCallback? _removeReconnectListener;
@@ -386,6 +387,10 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
       final notes = (data['notes'] ?? '').toString();
       final reqId = data['id']?.toString() ?? 'restock_${DateTime.now().millisecondsSinceEpoch}';
 
+      // Kept on this PC too, so it survives the cloud list refresh and a restart.
+      if (!LocalStorageService.isLocalRequestDecided(reqId)) {
+        unawaited(LocalStorageService.saveRestockRequest(widget.branchId, {...data, 'id': reqId, 'status': data['status'] ?? 'pending'}));
+      }
       final exists = _pendingRestockAlerts.any((r) => r['id'] == reqId || (r['medicineName'] == medName && r['status'] == 'pending'));
       if (!exists) {
         _pendingRestockAlerts.insert(0, {
@@ -919,6 +924,13 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
             branchId: widget.branchId,
             queueEntry: _selectedQueueEntry!,
             onDispensed: () => setState(() { _selectedQueueEntry = null; _showingForm = false; }),
+            onDispenseBusyChanged: (busy) {
+              if (_isDispenseBusy != busy && mounted) {
+                setState(() => _isDispenseBusy = busy);
+              } else {
+                _isDispenseBusy = busy;
+              }
+            },
             dispenserName: _dispenserName,
           ),
         ),
@@ -932,6 +944,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
         dispenserId: widget.dispenserId,
         dispenserName: _dispenserName ?? widget.dispenserName,
         selectedPatient: _selectedQueueEntry,
+        isDispenseBusy: _isDispenseBusy,
         onPatientSelected: (e) {
           if (e.isEmpty) return;
           setState(() {
@@ -960,6 +973,7 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
                 dispenserId: widget.dispenserId,
                 dispenserName: _dispenserName ?? widget.dispenserName,
                 selectedPatient: _selectedQueueEntry,
+                isDispenseBusy: _isDispenseBusy,
                 onPatientSelected: (e) {
                   if (mounted) {
                     setState(() => _selectedQueueEntry = e);
@@ -1045,14 +1059,10 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
                                     child: Column(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(16),
-                                          child: Image.asset(
-                                            'assets/images/doctor_empty_medicines.jpg',
-                                            width: 140,
-                                            height: 140,
-                                            fit: BoxFit.cover,
-                                          ),
+                                        const GEmptyIllustration(
+                                          GEmptyIllustrationKind.inventory,
+                                          size: 156,
+                                          fallbackIcon: Icons.medication_outlined,
                                         ),
                                         const SizedBox(height: 16),
                                         Text(
@@ -1077,6 +1087,13 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
                                   onDispensed: () {
                                     if (mounted) {
                                       setState(() => _selectedQueueEntry = null);
+                                    }
+                                  },
+                                  onDispenseBusyChanged: (busy) {
+                                    if (_isDispenseBusy != busy && mounted) {
+                                      setState(() => _isDispenseBusy = busy);
+                                    } else {
+                                      _isDispenseBusy = busy;
                                     }
                                   },
                                   dispenserName: _dispenserName,
@@ -1117,6 +1134,12 @@ class _DispensarScreenState extends State<DispensarScreen> with AutomaticKeepAli
           LocalStorageService.saveRestockRequest(widget.branchId, data);
           return data;
         }).toList();
+        // Plus alerts that came over the LAN and are not in the cloud yet (a LAN desk's cloud
+        // view is its cache, which lacks them): replacing the list made them vanish.
+        final ids = alerts.map((a) => a['id']).toSet();
+        for (final local in LocalStorageService.getPendingRestockRequests(widget.branchId)) {
+          if (!ids.contains(local['id'])) alerts.add(local);
+        }
         setState(() {
           _pendingRestockAlerts = alerts;
         });

@@ -106,6 +106,7 @@ const Map<String, IconData> _moduleIcons = {
   'doctor_consultation': GIcons.doctor,
   'pharmacy': GIcons.pharmacy,
   'inventory': GIcons.inventory,
+  // Legacy 'proforma' module ID kept for saved permissions/shortcuts (folded into inventory).
   'medicine_proforma': GIcons.receiptLong,
   'inventory_ledger': GIcons.ledger,
   'pending_requests': GIcons.checklist,

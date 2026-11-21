@@ -7,6 +7,7 @@
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/pages/home/home_module_host.dart';
@@ -4253,10 +4254,12 @@ class _HistoryScreenState extends State<_HistoryScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.event_note_rounded,
-                        size: 64,
-                        color: _DS.mint.withValues(alpha: 0.20)),
-                    const SizedBox(height: 12),
+                    const GEmptyIllustration(
+                      GEmptyIllustrationKind.kitchen,
+                      size: 148,
+                      fallbackIcon: Icons.event_note_rounded,
+                    ),
+                    const SizedBox(height: 14),
                     Text(
                       _isMonthView
                           ? 'No records for $monthLabel'

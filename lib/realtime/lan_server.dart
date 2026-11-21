@@ -115,7 +115,10 @@ class LanServer {
     return t.startsWith('save_') || t.startsWith('delete_') || t.startsWith('request_') ||
         t.startsWith('token_exception') || t.startsWith('token_reversal') ||
         t.startsWith('approve_') || t.startsWith('reject_') || t.startsWith('migrate_') ||
-        t.startsWith('restriction') || t.startsWith('workflow_') || t.startsWith('offboard_');
+        t.startsWith('restriction') || t.startsWith('workflow_') || t.startsWith('offboard_') ||
+        // Restock alerts and their dismissals, supervisor-approved patient edits, and pool wipes:
+        // a desk that was off when they were sent gets them on reconnect.
+        t.startsWith('restock_') || t == 'patient_edit_approved' || t == 'stock_wipe';
   }
 
   Future<void> _openEventLog() async {
@@ -251,6 +254,12 @@ class LanServer {
       if (!Hive.isBoxOpen(LocalStorageService.entriesBox)) return;
       for (final v in Hive.box(LocalStorageService.entriesBox).values) {
         if (v is Map) _noteIssuedSerial(v['serial']?.toString());
+      }
+    } catch (_) {}
+    // A reversed token's number is not free again (it is gone from the entries above).
+    try {
+      for (final s in LocalStorageService.reversedSerials()) {
+        _noteIssuedSerial(s);
       }
     } catch (_) {}
   }

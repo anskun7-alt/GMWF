@@ -876,13 +876,19 @@ class PatientInfo extends StatelessWidget {
     final recSugar = recVitals['sugar'];
     final recWeight = recVitals['weight'];
 
-    final patientName = (patient['patientName'] ?? patient['name'] ?? 'Unknown Patient').toString();
+    final pId = (patient['patientId'] ?? '').toString().trim();
+    final localPatient = pId.isNotEmpty ? LocalStorageService.getLocalPatient(pId) : null;
+    final resolvedCanonicalName = LocalStorageService.resolveCanonicalPatientName(localPatient ?? patient);
+    final patientName = (resolvedCanonicalName.isNotEmpty
+            ? resolvedCanonicalName
+            : (patient['patientName'] ?? patient['name'] ?? 'Unknown Patient'))
+        .toString();
     final guardianName = _resolveGuardianName(patient);
     final isChild = (patient['guardianCnic'] != null && patient['guardianCnic'].toString().trim().isNotEmpty) ||
         (patient['isAdult'] == false);
 
-    final ageStr = (vitals['age'] ?? patient['age'] ?? '').toString().trim();
-    final genderStr = (vitals['gender'] ?? patient['gender'] ?? '').toString().trim();
+    final ageStr = (vitals['age'] ?? patient['age'] ?? patient['patientAge'] ?? localPatient?['age'] ?? '').toString().trim();
+    final genderStr = (vitals['gender'] ?? patient['gender'] ?? patient['patientGender'] ?? localPatient?['gender'] ?? '').toString().trim();
     final staffInfo = StaffPatientLinkService.getStaffInfoFromPatientMap(patient);
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -895,7 +901,11 @@ class PatientInfo extends StatelessWidget {
       final tempEval   = evaluateTemp(vitals['temp'], isDark);
       final sugarEval  = evaluateSugar(vitals['sugar'], isDark);
       final weightEval = evaluateWeight(vitals['weight'], isDark);
-      final bgEval     = evaluateBloodGroup(vitals['bloodGroup'] ?? patient['bloodGroup'], isDark);
+      final rawBgVal   = vitals['bloodGroup'] ?? patient['bloodGroup'];
+      final effBgVal   = (rawBgVal == null || rawBgVal.toString().trim().isEmpty || rawBgVal.toString().trim().toUpperCase() == 'N/A')
+          ? (localPatient?['bloodGroup'] ?? rawBgVal)
+          : rawBgVal;
+      final bgEval     = evaluateBloodGroup(effBgVal, isDark);
 
       final clinicalVitals = [
         {

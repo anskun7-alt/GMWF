@@ -9,7 +9,7 @@ import '../pages/dispensary/receptionist/receptionist_screen.dart';
 import '../pages/dispensary/doctor/doctor_screen.dart';
 import '../pages/dispensary/dispensar/dispensar_screen.dart';
 import '../pages/dispensary/dispensar/inventory.dart';
-import '../pages/dispensary/dispensar/universal_proforma_sheet.dart';
+import '../pages/dispensary/dispensar/add_medicine_page.dart';
 import '../pages/dispensary/dispensar/stock_check_report.dart';
 import '../pages/donations/donations_screen.dart';
 import '../pages/donations/donations_shared.dart';
@@ -452,18 +452,19 @@ class ModuleRegistry {
       category: ModuleCategory.dispensary,
     ),
     AppModule(
+      // Legacy 'proforma' module ID kept so saved permissions and shortcuts still work.
       id: 'medicine_proforma',
-      title: 'Medicine Proforma',
-      description: 'Master medicine catalog — register, edit, and audit medicines',
-      icon: Icons.list_alt_rounded,
+      title: 'Add Medicine',
+      description: 'Add stock and expiry dates to dispensary inventory',
+      icon: Icons.playlist_add_rounded,
       requiredPermission: AppPermission.manageInventory,
       isBranchDependent: true,
       supportsGlobalWrapper: true,
-      isFeatured: true,
+      isFeatured: false,
       builder: (context, data) {
         final role = (data['role'] as String? ?? '').toLowerCase().trim();
         final isAdminRole = ['chairman', 'ceo', 'admin', 'administrator', 'super admin', 'global admin', 'hq manager', 'president', 'founder'].contains(role);
-        return UniversalProformaSheetPage(
+        return AddMedicinePage(
           branchId: data['branchId'] ?? 'unknown',
           isDispenser: false,
           isAdmin: isAdminRole,

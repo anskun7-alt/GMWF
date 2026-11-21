@@ -1,6 +1,7 @@
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:convert';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
@@ -254,9 +255,20 @@ class _ServerDataViewerState extends State<ServerDataViewer> {
 
           if (sortedDates.isEmpty) {
             return Center(
-              child: Text(
-                'No data saved on this server yet.',
-                style: TextStyle(color: isDark ? SoftPalette.gray50A54 : SoftPalette.slate350, fontSize: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const GEmptyIllustration(
+                    GEmptyIllustrationKind.general,
+                    size: 152,
+                    fallbackIcon: Icons.folder_open_rounded,
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'No data saved on this server yet.',
+                    style: TextStyle(color: isDark ? SoftPalette.gray50A54 : SoftPalette.slate350, fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ],
               ),
             );
           }
@@ -450,8 +462,14 @@ class _ServerDataViewerState extends State<ServerDataViewer> {
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  Icon(Icons.folder_open_rounded, size: 48, color: isDark ? SoftPalette.gray50A24 : SoftPalette.slate200),
-                                  const SizedBox(height: 12),
+                                  GEmptyIllustration(
+                                    _searchQuery.isNotEmpty
+                                        ? GEmptyIllustrationKind.search
+                                        : GEmptyIllustrationKind.general,
+                                    size: 144,
+                                    fallbackIcon: Icons.folder_open_rounded,
+                                  ),
+                                  const SizedBox(height: 14),
                                   Text(
                                     _searchQuery.isNotEmpty
                                         ? 'No records matching "$_searchQuery"'

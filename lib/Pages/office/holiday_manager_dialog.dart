@@ -913,7 +913,13 @@ class _HolidayManagerDialogState extends State<HolidayManagerDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.event_busy_outlined, size: 48, color: t.textTertiary),
+          GEmptyIllustration(
+            isTotallyEmpty
+                ? GEmptyIllustrationKind.people
+                : GEmptyIllustrationKind.search,
+            size: 136,
+            fallbackIcon: Icons.event_busy_outlined,
+          ),
           const SizedBox(height: 12),
           Text(
             isTotallyEmpty ? 'No holidays scheduled' : 'No holidays match your filter',

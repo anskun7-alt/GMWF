@@ -1555,7 +1555,7 @@ class _BranchFacilityEditorDialogState
                 const SizedBox(height: 4),
                 Text(
                   _allowDoctorInventoryApproval
-                      ? 'Doctor panel includes full medicine inventory access and supervisor-level request approval powers (medicine restock, proforma, stock edits).'
+                      ? 'Doctor panel includes full medicine inventory access and supervisor-level request approval powers (medicine restock, add medicine, stock edits).'
                       : 'Doctor panel is restricted to clinical consultation and prescriptions only.',
                   style: TextStyle(fontSize: 11, color: subtextColor),
                 ),

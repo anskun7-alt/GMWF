@@ -1,6 +1,7 @@
 // lib/pages/dispensary/receptionist/token_screen.dart
 
 import 'package:gmwf/services/cloud/cloud_db.dart';
+import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/services/quota_service.dart';
 import 'package:gmwf/utils/perf_trace.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
@@ -176,6 +177,58 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           setState(() {
             _hasTokenToday = false;
           });
+        }
+        _instantRefresh();
+      } else if (type == 'patient_edit_approved' ||
+          type == RealtimeEvents.savePatient ||
+          type == 'save_patient' ||
+          type == 'migrate_patient_key') {
+        final eventPid = (data['patientId'] ?? data['oldPatientId'] ?? '').toString().trim();
+        final newPid = (data['newPatientId'] ?? data['changes']?['patientId'] ?? eventPid).toString().trim();
+        final rawChanges = data['changes'] ?? data['patient'] ?? data;
+        if (type == 'patient_edit_approved' && eventPid.isNotEmpty && rawChanges is Map) {
+          await LocalStorageService.updatePatientWithCnicMigration(
+            oldPatientId: eventPid,
+            updatedPatient: {
+              ...Map<String, dynamic>.from(rawChanges),
+              'branchId': widget.branchId,
+            },
+            isFromSync: true,
+          );
+        }
+        if (mounted) {
+          setState(() {
+            if (_patientData != null) {
+              final curPid = (_patientData!['patientId'] ?? _patientData!['id'] ?? '').toString().trim();
+              if (curPid.isNotEmpty && (curPid == eventPid || curPid == newPid || eventPid.isEmpty)) {
+                final fresh = (newPid.isNotEmpty ? LocalStorageService.getLocalPatient(newPid) : null) ??
+                    LocalStorageService.getLocalPatient(curPid);
+                if (fresh != null) {
+                  _patientData = fresh;
+                }
+              }
+            }
+            for (int i = 0; i < _patientsList.length; i++) {
+              final itemPid = (_patientsList[i]['patientId'] ?? _patientsList[i]['id'] ?? '').toString().trim();
+              if (itemPid.isNotEmpty && (itemPid == eventPid || itemPid == newPid)) {
+                final fresh = (newPid.isNotEmpty ? LocalStorageService.getLocalPatient(newPid) : null) ??
+                    LocalStorageService.getLocalPatient(itemPid);
+                if (fresh != null) {
+                  _patientsList[i] = fresh;
+                }
+              }
+            }
+          });
+          if (type == 'patient_edit_approved') {
+            AppToast.showSnackBar(
+              context,
+              const SnackBar(
+                content: Text('✅ Patient edit request approved & applied!'),
+                backgroundColor: SoftPalette.green500,
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
         }
         _instantRefresh();
       } else if (type == RealtimeEvents.tokenExceptionApproved || type == 'restriction_removed') {
@@ -514,13 +567,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     final resolvedPId = LocalStorageService.resolveIndividualPatientId(patient).trim();
     final cleanResolvedPId = resolvedPId.replaceAll(RegExp(r'[^\w]'), '').toLowerCase();
 
-    final pNameNorm = norm(patient['patientName'] ?? patient['name'] ?? patient['fullName']);
+    final pNameNorm = norm(LocalStorageService.resolveCanonicalPatientName(patient));
     final pCnicNorm = norm(patient['cnic'] ?? patient['patientCnic']);
     final pGuardNorm = norm(patient['guardianCnic']);
     final pPhoneNorm = norm(patient['phone'] ?? patient['contactPhone']);
 
-    final pAge = (patient['age'] is num) ? (patient['age'] as num).toInt() : (int.tryParse(patient['age']?.toString() ?? '') ?? 0);
-    final isChild = patient['isAdult'] == false || pGuardNorm.isNotEmpty || pId.contains('_child_') || resolvedPId.contains('_child_') || (pAge > 0 && pAge < 20);
+    final isChild = LocalStorageService.isChildPatientRecord(patient);
 
     final shiftInfo = CampSessionService.resolveShiftAndDateKey(null, widget.branchId);
     final targetDate = shiftInfo.dateKey;
@@ -568,7 +620,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       final ePhoneNorm = norm(e['phone'] ?? e['contactPhone']);
 
       final eAge = (e['age'] is num) ? (e['age'] as num).toInt() : (int.tryParse(e['age']?.toString() ?? '') ?? 0);
-      final eIsChild = (e['isAdult'] == false) || eGuardNorm.isNotEmpty || eId.contains('_child_') || resolvedEId.contains('_child_') || (eAge > 0 && eAge < 20);
+      final eExplicitAdult = e['isAdult'] is bool ? e['isAdult'] as bool : null;
+      final eIsChild = eId.contains('_child_') ||
+          resolvedEId.contains('_child_') ||
+          (eExplicitAdult != null
+              ? !eExplicitAdult
+              : (eGuardNorm.isNotEmpty || (eAge > 0 && eAge < 18)));
 
       // Rule 0: Adult and Child are strictly distinct entities. Never cross-match!
       if (isChild != eIsChild) {
@@ -909,20 +966,40 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
   // ── Search ─────────────────────────────────────────────────────────────────
   String _getPatientDisplayName(Map<String, dynamic> p) {
-    final raw = (p['name'] ?? p['patientName'] ?? p['fullName'] ?? p['guardianName'])?.toString().trim() ?? '';
-    if (raw.isNotEmpty && raw != '0' && raw.toLowerCase() != 'null') {
-      return raw;
-    }
-    final pid = (p['patientId'] ?? p['id'] ?? '').toString();
-    if (pid.contains('_child_')) {
-      final child = pid.split('_child_').last.trim();
-      if (child.isNotEmpty) return child;
+    final canonical = LocalStorageService.resolveCanonicalPatientName(p);
+    if (canonical.isNotEmpty) {
+      return canonical;
     }
     final cnicInfo = _getDisplayCnicInfo(p);
     if (cnicInfo.cnic.isNotEmpty && cnicInfo.cnic != '-') {
       return 'Patient (${cnicInfo.cnic})';
     }
     return 'Patient';
+  }
+
+  /// Resolves the guardian's display name for a child patient (used ONLY for a
+  /// secondary "Guardian: …" subtitle/label — never as the child's own name).
+  String? _resolveChildGuardianName(Map<String, dynamic> child) {
+    if (!LocalStorageService.isChildPatientRecord(child)) return null;
+    final raw = child['guardianName']?.toString().trim() ?? '';
+    if (raw.isNotEmpty && raw != '0' && raw.toLowerCase() != 'null' && raw != '-') {
+      return raw;
+    }
+    final gDigits = (child['guardianCnic'] ?? child['guardian_cnic'] ?? '')
+        .toString()
+        .replaceAll(RegExp(r'\D'), '');
+    if (gDigits.isEmpty) return null;
+    for (final other in _patientsList) {
+      if (LocalStorageService.isChildPatientRecord(other)) continue;
+      final oDigits = (other['cnic'] ?? other['patientCnic'] ?? '')
+          .toString()
+          .replaceAll(RegExp(r'\D'), '');
+      if (oDigits == gDigits) {
+        final adultName = LocalStorageService.resolveCanonicalPatientName(other);
+        if (adultName.isNotEmpty) return adultName;
+      }
+    }
+    return null;
   }
 
   String _getPatientDisplayPhone(Map<String, dynamic> p) {
@@ -932,12 +1009,14 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
   }
 
   /// Merges duplicate patient records (e.g. dashed and un-dashed stubs for same CNIC)
-  /// and applies field healing across all records in the list.
+  /// and applies field healing across all records in the list while strictly isolating
+  /// adults from children sharing the same guardian CNIC.
   List<Map<String, dynamic>> _deduplicateAndHealPatientList(List<Map<String, dynamic>> list) {
     if (list.isEmpty) return [];
     final grouped = <String, Map<String, dynamic>>{};
     for (final raw in list) {
       final healed = _healPatient(raw);
+      final isChild = LocalStorageService.isChildPatientRecord(healed);
       final cleanCnic = (healed['cnic'] ?? healed['patientCnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
       final cleanGuard = (healed['guardianCnic'] ?? healed['guardian_cnic'])?.toString().replaceAll(RegExp(r'\D'), '').trim() ?? '';
       final pid = (healed['patientId'] ?? healed['id'] ?? '').toString().trim();
@@ -946,13 +1025,18 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       if (pid.contains('_child_')) {
         final parts = pid.split('_child_');
         final g = parts[0].replaceAll(RegExp(r'\D'), '');
-        final child = parts.sublist(1).join('_child_').toLowerCase().trim();
+        final child = parts.sublist(1).join('_child_').replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase().trim();
         final gDash = g.length == 13 ? '${g.substring(0, 5)}-${g.substring(5, 12)}-${g.substring(12, 13)}' : g;
         effectiveKey = '${gDash}_child_$child';
+      } else if (isChild) {
+        final g = cleanGuard.isNotEmpty ? cleanGuard : cleanCnic;
+        final gDash = g.length == 13 ? '${g.substring(0, 5)}-${g.substring(5, 12)}-${g.substring(12, 13)}' : g;
+        final childName = LocalStorageService.resolveCanonicalPatientName(healed)
+            .replaceAll(RegExp(r'[^a-zA-Z0-9]'), '')
+            .toLowerCase();
+        effectiveKey = '${gDash}_child_${childName.isNotEmpty ? childName : 'child'}';
       } else if (cleanCnic.length == 13) {
         effectiveKey = '${cleanCnic.substring(0, 5)}-${cleanCnic.substring(5, 12)}-${cleanCnic.substring(12, 13)}';
-      } else if (cleanGuard.length == 13) {
-        effectiveKey = '${cleanGuard.substring(0, 5)}-${cleanGuard.substring(5, 12)}-${cleanGuard.substring(12, 13)}';
       } else {
         effectiveKey = pid;
       }
@@ -972,85 +1056,157 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         }
       }
     }
-    return grouped.values.toList();
+    final result = grouped.values.toList();
+    // Deterministic ordering: adult guardian first, then children alphabetically.
+    result.sort((a, b) {
+      final aChild = LocalStorageService.isChildPatientRecord(a);
+      final bChild = LocalStorageService.isChildPatientRecord(b);
+      if (aChild != bChild) return aChild ? 1 : -1;
+      return _getPatientDisplayName(a).toLowerCase().compareTo(_getPatientDisplayName(b).toLowerCase());
+    });
+    return result;
   }
 
   /// Rebuilds a wiped patient record (blank name/CNIC/phone) from tokens and prescriptions,
-  /// and saves it back so it stays permanently restored in Hive.
+  /// strictly isolating adults from children so family members sharing a CNIC never
+  /// cross-contaminate each other's name, guardianCnic, or demographics.
   Map<String, dynamic> _healPatient(Map<String, dynamic> p) {
     bool blank(dynamic v) {
       final s = (v ?? '').toString().trim();
-      return s.isEmpty || s == '0' || s.toLowerCase() == 'null' || s == '-';
+      final lower = s.toLowerCase();
+      return s.isEmpty || s == '0' || lower == 'null' || s == '-' || lower == 'unknown' || lower == 'unknown patient';
     }
+    String normAlnum(dynamic v) => (v ?? '').toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
 
     final healed = Map<String, dynamic>.from(p);
-    final pid = (healed['patientId'] ?? healed['id'] ?? '').toString().trim();
-    final normPid = pid.replaceAll('-', '').toLowerCase();
+    bool changed = LocalStorageService.normalizePatientRecordIdentity(healed);
 
-    // 1. Resolve CNIC from all possible fields or patientId
-    String pCnic = (healed['cnic'] ?? healed['patientCnic'] ?? '').toString().trim();
-    String pGuard = (healed['guardianCnic'] ?? healed['guardian_cnic'] ?? '').toString().trim();
-    if (blank(pCnic) && blank(pGuard) && pid.isNotEmpty) {
-      if (pid.contains('_child_')) {
-        pGuard = pid.split('_child_').first;
+    final pid = (healed['patientId'] ?? healed['id'] ?? '').toString().trim();
+    final isChild = LocalStorageService.isChildPatientRecord(healed);
+
+    String normPidForMatch(String raw) {
+      final s = raw.trim().toLowerCase();
+      if (s.contains('_child_')) {
+        final parts = s.split('_child_');
+        final g = parts[0].replaceAll(RegExp(r'\D'), '');
+        final c = parts.sublist(1).join('_child_').replaceAll(RegExp(r'[^a-z0-9]'), '');
+        return '${g}_child_$c';
+      }
+      return s.replaceAll(RegExp(r'[-\s]'), '');
+    }
+    final normPid = normPidForMatch(pid);
+
+    // 1. Resolve CNIC from own fields or patientId (strictly respecting adult vs child)
+    String pCnic = isChild ? '' : (healed['cnic'] ?? healed['patientCnic'] ?? '').toString().trim();
+    String pGuard = isChild ? (healed['guardianCnic'] ?? healed['guardian_cnic'] ?? '').toString().trim() : '';
+    if (isChild && blank(pGuard) && pid.contains('_child_')) {
+      final gDigits = pid.split('_child_').first.replaceAll(RegExp(r'\D'), '');
+      if (gDigits.length == 13) {
+        pGuard = _formatCnic(gDigits);
         healed['guardianCnic'] = pGuard;
-      } else {
-        final clean = pid.replaceAll(RegExp(r'\D'), '');
-        if (clean.length == 13) {
-          pCnic = clean;
-          healed['cnic'] = _formatCnic(clean);
-        }
+        changed = true;
+      }
+    } else if (!isChild && blank(pCnic) && pid.isNotEmpty && !pid.contains('_child_') && RegExp(r'^[\d\-\s]+$').hasMatch(pid)) {
+      final clean = pid.replaceAll(RegExp(r'\D'), '');
+      if (clean.length == 13) {
+        pCnic = _formatCnic(clean);
+        healed['cnic'] = pCnic;
+        changed = true;
       }
     }
-    final normCnic = pCnic.replaceAll('-', '').trim();
-    final normGuard = pGuard.replaceAll('-', '').trim();
-    final searchDigits = cnicController.text.replaceAll(RegExp(r'\D'), '');
+    final normCnic = pCnic.replaceAll(RegExp(r'\D'), '');
+    final normGuard = pGuard.replaceAll(RegExp(r'\D'), '');
 
-    // 2. Resolve name from patientId if child key
-    if (blank(healed['name']) && blank(healed['patientName']) && pid.contains('_child_')) {
-      final childPart = pid.split('_child_').last.trim();
+    // 2. Resolve canonical name from patientId if child record has no valid name
+    final existingCanonicalName = LocalStorageService.resolveCanonicalPatientName(healed);
+    if (existingCanonicalName.isEmpty && pid.contains('_child_')) {
+      final childPart = pid.split('_child_').sublist(1).join('_child_').replaceAll('_', ' ').trim();
       if (childPart.isNotEmpty) {
         healed['name'] = childPart;
         healed['patientName'] = childPart;
+        changed = true;
       }
     }
+    final currentNameNorm = normAlnum(LocalStorageService.resolveCanonicalPatientName(healed));
 
-    // 3. Heal from entriesBox (tokens issued to patient)
-    final needsHealing = blank(healed['name']) || blank(healed['phone']) || (blank(healed['cnic']) && blank(healed['guardianCnic']));
-    if (needsHealing && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
+    // 3. Heal missing fields from entriesBox ONLY from entries belonging to THIS exact individual
+    final needsName = blank(healed['name']) || blank(healed['patientName']);
+    final needsPhone = blank(healed['phone']);
+    final needsCnic = isChild ? blank(healed['guardianCnic']) : blank(healed['cnic']);
+    if ((needsName || needsPhone || needsCnic) && Hive.isBoxOpen(LocalStorageService.entriesBox)) {
       try {
         final eBox = Hive.box(LocalStorageService.entriesBox);
         for (final raw in eBox.values) {
           if (raw is! Map) continue;
           final entryPid = (raw['patientId'] ?? raw['id'] ?? '').toString().trim();
-          final entryNormPid = entryPid.replaceAll('-', '').toLowerCase();
-          final entryCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll('-', '').trim();
-          final entryGuard = (raw['guardianCnic'] ?? '').toString().replaceAll('-', '').trim();
+          final entryNormPid = normPidForMatch(entryPid);
+          final entryCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final entryGuard = (raw['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final entryNameRaw = (raw['patientName'] ?? raw['name'] ?? raw['fullName'])?.toString().trim() ?? '';
+          final entryNameNorm = normAlnum(entryNameRaw);
 
-          final idMatches = normPid.isNotEmpty && (normPid == entryNormPid || entryPid == pid);
-          final cnicMatches = (normCnic.isNotEmpty && (entryCnic == normCnic || entryGuard == normCnic)) ||
-                              (normGuard.isNotEmpty && (entryCnic == normGuard || entryGuard == normGuard)) ||
-                              (searchDigits.length == 13 && (entryCnic == searchDigits || entryGuard == searchDigits));
+          // Strict adult/child isolation: NEVER heal an adult from a child's token or vice versa!
+          final entryIsChild = raw['isAdult'] == false ||
+              entryPid.contains('_child_') ||
+              (raw['isAdult'] != true && entryGuard.isNotEmpty);
+          if (isChild != entryIsChild) continue;
 
-          if (!idMatches && !cnicMatches) continue;
+          final idMatches = normPid.isNotEmpty &&
+              !normPid.startsWith('unknown') &&
+              entryNormPid.isNotEmpty &&
+              normPid == entryNormPid;
 
-          final n = raw['patientName'] ?? raw['name'] ?? raw['fullName'];
-          if (!blank(n)) {
-            healed['name'] ??= n.toString().trim();
-            healed['patientName'] ??= n.toString().trim();
+          bool individualCnicMatch = false;
+          if (!idMatches) {
+            if (isChild) {
+              // Child match requires guardian CNIC match AND exact child name match
+              final effEntryGuard = entryGuard.isNotEmpty ? entryGuard : entryCnic;
+              if (normGuard.length == 13 &&
+                  effEntryGuard == normGuard &&
+                  currentNameNorm.isNotEmpty &&
+                  entryNameNorm.isNotEmpty &&
+                  currentNameNorm == entryNameNorm) {
+                individualCnicMatch = true;
+              }
+            } else {
+              // Adult match requires adult CNIC match AND (missing name OR same adult name)
+              if (normCnic.length == 13 && entryCnic == normCnic) {
+                if (currentNameNorm.isEmpty || entryNameNorm.isEmpty || currentNameNorm == entryNameNorm) {
+                  individualCnicMatch = true;
+                }
+              }
+            }
+          }
+
+          if (!idMatches && !individualCnicMatch) continue;
+
+          // Only fill name if BOTH name and patientName are blank (never stamp another person's name)
+          if (blank(healed['name']) && blank(healed['patientName']) && !blank(entryNameRaw)) {
+            healed['name'] = entryNameRaw;
+            healed['patientName'] = entryNameRaw;
+            changed = true;
           }
           final ph = raw['phone'] ?? raw['contactPhone'] ?? raw['patientPhone'] ?? raw['phoneNumber'];
           if (blank(healed['phone']) && !blank(ph)) {
             healed['phone'] = ph.toString().trim();
+            changed = true;
           }
-          if (blank(healed['cnic']) && !blank(entryCnic)) {
-            healed['cnic'] = entryCnic.length == 13 ? _formatCnic(entryCnic) : entryCnic;
+          if (!isChild && blank(healed['cnic']) && entryCnic.length == 13) {
+            healed['cnic'] = _formatCnic(entryCnic);
+            changed = true;
           }
-          if (blank(healed['guardianCnic']) && !blank(entryGuard)) {
-            healed['guardianCnic'] = entryGuard.length == 13 ? _formatCnic(entryGuard) : entryGuard;
+          if (isChild && blank(healed['guardianCnic'])) {
+            final g = entryGuard.length == 13 ? entryGuard : (entryCnic.length == 13 ? entryCnic : '');
+            if (g.length == 13) {
+              healed['guardianCnic'] = _formatCnic(g);
+              changed = true;
+            }
           }
           for (final k in ['gender', 'age', 'dob', 'address', 'bloodGroup', 'status']) {
-            if (blank(healed[k]) && !blank(raw[k])) healed[k] = raw[k];
+            if (blank(healed[k]) && !blank(raw[k])) {
+              healed[k] = raw[k];
+              changed = true;
+            }
           }
 
           if (!blank(healed['name']) && !blank(healed['phone'])) break;
@@ -1060,21 +1216,32 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       }
     }
 
-    // 4. Also check prescriptionsBox if still missing name
-    if (blank(healed['name']) && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
+    // 4. Also check prescriptionsBox if still missing name (strictly matching patientId or adult CNIC)
+    if (blank(healed['name']) && blank(healed['patientName']) && Hive.isBoxOpen(LocalStorageService.prescriptionsBox)) {
       try {
         final rxBox = Hive.box(LocalStorageService.prescriptionsBox);
         for (final raw in rxBox.values) {
           if (raw is! Map) continue;
           final rxPid = (raw['patientId'] ?? '').toString().trim();
-          final rxCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll('-', '').trim();
-          final idMatches = normPid.isNotEmpty && rxPid.replaceAll('-', '').toLowerCase() == normPid;
-          final cnicMatches = searchDigits.length == 13 && rxCnic == searchDigits;
-          if (idMatches || cnicMatches) {
+          final rxNormPid = normPidForMatch(rxPid);
+          final rxCnic = (raw['patientCnic'] ?? raw['cnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final rxGuard = (raw['guardianCnic'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+          final rxIsChild = raw['isAdult'] == false ||
+              rxPid.contains('_child_') ||
+              (raw['isAdult'] != true && rxGuard.isNotEmpty);
+          if (isChild != rxIsChild) continue;
+
+          final idMatches = normPid.isNotEmpty &&
+              !normPid.startsWith('unknown') &&
+              rxNormPid.isNotEmpty &&
+              rxNormPid == normPid;
+          final adultCnicMatches = !isChild && normCnic.length == 13 && rxCnic == normCnic;
+          if (idMatches || adultCnicMatches) {
             final n = raw['patientName'] ?? raw['name'];
             if (!blank(n)) {
               healed['name'] = n.toString().trim();
               healed['patientName'] = n.toString().trim();
+              changed = true;
               break;
             }
           }
@@ -1082,8 +1249,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       } catch (_) {}
     }
 
-    // 5. Persist healed patient so future lookups have full details
-    if (!blank(healed['name'])) {
+    // 5. Persist healed patient ONLY when a field was actually repaired
+    if (changed && !blank(healed['name'])) {
       unawaited(LocalStorageService.saveLocalPatient(healed, isFromSync: true));
     }
     return healed;
@@ -1376,10 +1543,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
     if (mounted) setState(() => _isLoading = true);
     try {
-      final rawName = (_patientData!['patientName'] ?? _patientData!['name'] ?? _patientData!['fullName'])?.toString().trim();
-      final patientName = (rawName != null && rawName.isNotEmpty && rawName.toLowerCase() != 'null')
-          ? rawName
-          : 'Unknown Patient';
+      final rawName = LocalStorageService.resolveCanonicalPatientName(_patientData);
+      final patientName = rawName.isNotEmpty ? rawName : 'Unknown Patient';
 
       if (!hasException && await _tokenExistsToday(patientId, isVitalsOnly: isVitalsOnly)) {
         AppToast.showSnackBar(context, SnackBar(
@@ -1499,9 +1664,18 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         'patientId':     effectivePidForEntry,
         'patientName':   patientName,
         'name':          patientName,
+        'fullName':      patientName,
         'isAdult':       !isChildPatient,
         'age':           _patientData!['age'] ?? 0,
+        'patientAge':    _patientData!['age'] ?? 0,
         'gender':        _patientData!['gender'] ?? 'Unknown',
+        'patientGender': _patientData!['gender'] ?? 'Unknown',
+        'bloodGroup':    _patientData!['bloodGroup'] ?? 'N/A',
+        if (_patientData!['dob'] != null) 'dob': _patientData!['dob'],
+        if (_patientData!['dob'] != null || _patientData!['dateOfBirth'] != null)
+          'dateOfBirth': _patientData!['dob'] ?? _patientData!['dateOfBirth'],
+        if (_patientData!['phone']?.toString().trim().isNotEmpty == true)
+          'phone': _patientData!['phone'].toString().trim(),
         'isVitalsOnly':  isVitalsOnly,
         'vitalsOnly':    isVitalsOnly,
         'visitReason':   isVitalsOnly ? 'Vitals Inspection Only' : 'Regular Visit',
@@ -1669,7 +1843,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       if (mounted) {
         final currentQuery = cnicController.text.trim();
         final refreshedPatients = currentQuery.isNotEmpty
-            ? LocalStorageService.searchPatientsByCnicOrGuardian(currentQuery, branchId: widget.branchId)
+            ? _deduplicateAndHealPatientList(
+                LocalStorageService.searchPatientsByCnicOrGuardian(currentQuery, branchId: widget.branchId),
+              )
             : <Map<String, dynamic>>[];
         setState(() {
           _hasTokenToday = true;
@@ -1826,45 +2002,34 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     }
   }
 
-  // ── Direct edit patient on token screen ────────────────────────────────────
+  // ── Request patient details edit on token screen (requires approval) ───────
   Future<void> _requestEditPatient() async {
     if (_patientData == null) return;
 
     try {
-      bool isChild = _patientData!['isAdult'] != true;
+      bool isChild = LocalStorageService.isChildPatientRecord(_patientData!);
       final cnicCtrl = TextEditingController(
           text: isChild
               ? (_patientData!['guardianCnic']?.toString() ?? '')
               : (_patientData!['cnic']?.toString() ?? ''));
       final nameCtrl = TextEditingController(
-          text: (_patientData!['patientName'] ?? _patientData!['name'] ?? '').toString());
+          text: LocalStorageService.resolveCanonicalPatientName(_patientData));
       final phoneCtrl = TextEditingController(
           text: _patientData!['phone']?.toString() ?? '');
       final dobCtrl = TextEditingController();
-      final bloodGroupCtrl = TextEditingController(
-          text: _patientData!['bloodGroup']?.toString() ?? 'N/A');
+      final reasonCtrl = TextEditingController();
+      const validBloodGroups = ['N/A', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+      final rawBgInit = (_patientData!['bloodGroup']?.toString() ?? 'N/A').trim().toUpperCase();
+      String selectedBloodGroup = validBloodGroups.contains(rawBgInit) ? rawBgInit : 'N/A';
       String selectedStatus = _patientData!['status']?.toString() ?? 'Zakat';
       if (_isKarachi && selectedStatus.toLowerCase().contains('non')) {
         selectedStatus = 'Zakat';
       }
       String selectedGender = _patientData!['gender']?.toString() ?? 'Male';
 
-      final dobValue = _patientData!['dob'];
+      final dobValue = _patientData!['dob'] ?? _patientData!['dateOfBirth'];
       if (dobValue != null) {
-        DateTime? birthDate;
-        if (dobValue is Timestamp) {
-          birthDate = dobValue.toDate();
-        } else if (dobValue is DateTime) {
-          birthDate = dobValue;
-        } else if (dobValue is String) {
-          try {
-            birthDate = DateFormat('dd-MM-yyyy').parse(dobValue);
-          } catch (_) {
-            try {
-              birthDate = DateTime.parse(dobValue);
-            } catch (_) {}
-          }
-        }
+        final birthDate = LocalStorageService.tryParseDob(dobValue);
         if (birthDate != null) {
           dobCtrl.text = DateFormat('dd-MM-yyyy').format(birthDate);
         }
@@ -1882,7 +2047,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
             insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
             child: Container(
               width: 520,
-              constraints: const BoxConstraints(maxHeight: 700),
+              constraints: const BoxConstraints(maxHeight: 740),
               decoration: BoxDecoration(
                 color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
                 borderRadius: BorderRadius.circular(24),
@@ -1908,7 +2073,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                         const Icon(Icons.edit_note_rounded, color: SoftPalette.gray50, size: 26),
                         const SizedBox(width: 10),
                         const Expanded(
-                          child: Text('Edit Patient Details',
+                          child: Text('Request Patient Details Edit',
                               style: TextStyle(
                                   color: SoftPalette.gray50,
                                   fontSize: 18,
@@ -1941,11 +2106,75 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                             maxLen: 15,
                           ),
                           const SizedBox(height: 14),
-                          _editField(phoneCtrl, 'Phone Number', Icons.phone),
+                          _editField(
+                            phoneCtrl,
+                            'Phone Number (optional)',
+                            Icons.phone,
+                            keyboardType: TextInputType.phone,
+                            formatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                              LengthLimitingTextInputFormatter(11),
+                            ],
+                            maxLen: 11,
+                          ),
                           const SizedBox(height: 14),
-                          _editField(dobCtrl, 'Date of Birth (dd-MM-yyyy)', Icons.cake),
+                          _editField(
+                            dobCtrl,
+                            'Date of Birth (dd-MM-yyyy)',
+                            Icons.cake,
+                            keyboardType: TextInputType.datetime,
+                            formatters: [
+                              FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                              LengthLimitingTextInputFormatter(10),
+                              DobInputFormatter(),
+                            ],
+                            maxLen: 10,
+                            suffixIcon: IconButton(
+                              tooltip: 'Pick Date of Birth from Calendar',
+                              icon: Icon(
+                                Icons.calendar_month_rounded,
+                                color: context.comfort.brand,
+                                size: 20,
+                              ),
+                              onPressed: () async {
+                                final now = DateTime.now();
+                                final currentDob = LocalStorageService.tryParseDob(dobCtrl.text.trim()) ??
+                                    (isChild
+                                        ? now.subtract(const Duration(days: 365 * 5))
+                                        : now.subtract(const Duration(days: 365 * 25)));
+                                final picked = await showDatePicker(
+                                  context: ctx,
+                                  initialDate: currentDob.isAfter(now)
+                                      ? now
+                                      : (currentDob.year < 1900 ? DateTime(1900) : currentDob),
+                                  firstDate: DateTime(1900),
+                                  lastDate: now,
+                                );
+                                if (picked != null) {
+                                  setStateDialog(() {
+                                    dobCtrl.text =
+                                        '${picked.day.toString().padLeft(2, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.year}';
+                                  });
+                                }
+                              },
+                            ),
+                          ),
                           const SizedBox(height: 14),
-                          _editField(bloodGroupCtrl, 'Blood Group', Icons.bloodtype),
+                          _editDropdown(
+                            label: 'Blood Group',
+                            icon: Icons.bloodtype_outlined,
+                            value: selectedBloodGroup,
+                            items: validBloodGroups,
+                            onChanged: (v) {
+                              if (v != null) setStateDialog(() => selectedBloodGroup = v);
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          _editField(
+                            reasonCtrl,
+                            'Reason for Edit Request (Required)',
+                            Icons.notes_rounded,
+                          ),
                           const SizedBox(height: 18),
 
                           _radioGroup(
@@ -1992,73 +2221,204 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   _patientData!['id']?.toString() ?? '';
                               if (pId.isEmpty) return;
 
-                              final updated = Map<String, dynamic>.from(_patientData!);
-                              final newCnic = cnicCtrl.text.trim();
-                              if (isChild) {
-                                updated['guardianCnic'] = newCnic;
-                              } else {
-                                updated['cnic'] = newCnic;
-                                updated['patientCnic'] = newCnic;
+                              final trimmedName = nameCtrl.text.trim();
+                              if (trimmedName.isEmpty) {
+                                AppToast.showSnackBar(
+                                  context,
+                                  const SnackBar(
+                                    content: Text('Please enter the patient name.'),
+                                    backgroundColor: SoftPalette.orange400,
+                                  ),
+                                );
+                                return;
                               }
-                              updated['name'] = nameCtrl.text.trim();
-                              updated['patientName'] = nameCtrl.text.trim();
-                              updated['phone'] = phoneCtrl.text.trim().isNotEmpty
-                                  ? phoneCtrl.text.trim()
-                                  : null;
+
+                              final reasonText = reasonCtrl.text.trim();
+                              if (reasonText.isEmpty) {
+                                AppToast.showSnackBar(
+                                  context,
+                                  const SnackBar(
+                                    content: Text('Please enter a reason for the edit request.'),
+                                    backgroundColor: SoftPalette.orange400,
+                                  ),
+                                );
+                                return;
+                              }
+
+                              final newCnic = cnicCtrl.text.trim();
+                              // Rule: 1 adult per CNIC — prevent changing an adult's CNIC onto
+                              // a CNIC that already belongs to another registered adult.
+                              if (!isChild) {
+                                final newDigits = newCnic.replaceAll(RegExp(r'\D'), '');
+                                final oldDigits = (_patientData!['cnic'] ?? _patientData!['patientCnic'] ?? pId)
+                                    .toString()
+                                    .replaceAll(RegExp(r'\D'), '');
+                                if (newDigits.length == 13 && newDigits != oldDigits) {
+                                  final conflictingAdult = LocalStorageService.getLocalAdultByCnic(newCnic);
+                                  if (conflictingAdult != null) {
+                                    final conflictPid = (conflictingAdult['patientId'] ?? conflictingAdult['id'] ?? '')
+                                        .toString()
+                                        .replaceAll('-', '')
+                                        .toLowerCase();
+                                    if (conflictPid != pId.replaceAll('-', '').toLowerCase()) {
+                                      final conflictName = LocalStorageService.resolveCanonicalPatientName(conflictingAdult);
+                                      AppToast.showSnackBar(
+                                        context,
+                                        SnackBar(
+                                          content: Text(
+                                            'Only 1 adult is allowed per CNIC. This CNIC already belongs to '
+                                            '${conflictName.isNotEmpty ? conflictName : 'another adult'}.',
+                                          ),
+                                          backgroundColor: SoftPalette.orange400,
+                                          duration: const Duration(seconds: 4),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                  }
+                                }
+                              }
+
+                              final rawDobInput = dobCtrl.text.trim();
+                              DateTime? parsedDob;
+                              if (rawDobInput.isNotEmpty) {
+                                parsedDob = LocalStorageService.tryParseDob(rawDobInput) ??
+                                    parseDobDateTime(rawDobInput);
+                                if (parsedDob == null) {
+                                  AppToast.showSnackBar(
+                                    context,
+                                    const SnackBar(
+                                      content: Text('Invalid Date of Birth. Please use dd-MM-yyyy (e.g. 15-08-1990).'),
+                                      backgroundColor: SoftPalette.orange400,
+                                    ),
+                                  );
+                                  return;
+                                }
+                              }
+
                               final updatedStatus = (_isKarachi && selectedStatus.toLowerCase().contains('non'))
                                   ? 'Zakat'
                                   : selectedStatus;
-                              updated['status'] = updatedStatus;
-                              updated['gender'] = selectedGender;
-                              updated['bloodGroup'] = bloodGroupCtrl.text.trim().isNotEmpty
-                                  ? bloodGroupCtrl.text.trim()
-                                  : 'N/A';
-                              updated['branchId'] = widget.branchId;
+                              final isoDob = parsedDob?.toIso8601String();
+                              final calcAge = isoDob != null
+                                  ? LocalStorageService.calculateAgeFromDob(isoDob)
+                                  : (_patientData!['age'] is num
+                                      ? (_patientData!['age'] as num).toInt()
+                                      : int.tryParse(_patientData!['age']?.toString() ?? ''));
 
-                              if (dobCtrl.text.isNotEmpty &&
-                                  RegExp(r'^\d{2}-\d{2}-\d{4}$').hasMatch(dobCtrl.text)) {
-                                final parts = dobCtrl.text.split('-');
-                                try {
-                                  final dt = DateTime(int.parse(parts[2]),
-                                      int.parse(parts[1]), int.parse(parts[0]));
-                                  updated['dob'] = dt.toIso8601String();
-                                  final nowDt = DateTime.now();
-                                  int calcAge = nowDt.year - dt.year;
-                                  if (nowDt.month < dt.month ||
-                                      (nowDt.month == dt.month && nowDt.day < dt.day)) {
-                                    calcAge--;
-                                  }
-                                  if (calcAge >= 0) {
-                                    updated['age'] = calcAge;
-                                    updated['isAdult'] = calcAge >= 18;
-                                  }
-                                } catch (_) {}
+                              final proposedData = <String, dynamic>{
+                                'name': trimmedName,
+                                'patientName': trimmedName,
+                                'fullName': trimmedName,
+                                'isAdult': !isChild,
+                                if (isChild) 'guardianCnic': newCnic,
+                                if (!isChild) 'cnic': newCnic,
+                                if (!isChild) 'patientCnic': newCnic,
+                                'phone': phoneCtrl.text.trim().isNotEmpty
+                                    ? phoneCtrl.text.trim()
+                                    : null,
+                                'status': updatedStatus,
+                                'gender': selectedGender,
+                                'patientGender': selectedGender,
+                                'bloodGroup': selectedBloodGroup.isNotEmpty
+                                    ? selectedBloodGroup
+                                    : 'N/A',
+                                if (isoDob != null) 'dob': isoDob,
+                                if (isoDob != null) 'dateOfBirth': isoDob,
+                                if (calcAge != null && calcAge >= 0) 'age': calcAge,
+                                if (calcAge != null && calcAge >= 0) 'patientAge': calcAge,
+                                'branchId': widget.branchId,
+                                'reason': reasonText,
+                              };
+
+                              final reqId = 'req_patient_edit_${widget.receptionistId}_${DateTime.now().millisecondsSinceEpoch}';
+                              final currentDisplayName = LocalStorageService.resolveCanonicalPatientName(_patientData);
+                              final reqPayload = <String, dynamic>{
+                                'id': reqId,
+                                'requestId': reqId,
+                                'type': 'patient_edit',
+                                'requestType': 'patient_edit',
+                                'collection': 'edit_requests',
+                                'status': 'pending',
+                                'branchId': widget.branchId,
+                                if (_capturedDispensaryId != null && _capturedDispensaryId!.isNotEmpty)
+                                  'dispensaryId': _capturedDispensaryId,
+                                if (_capturedDispensaryId != null && _capturedDispensaryId!.isNotEmpty)
+                                  'campId': _capturedDispensaryId,
+                                'patientId': pId,
+                                'patientName': currentDisplayName.isNotEmpty ? currentDisplayName : trimmedName,
+                                'cnic': _patientData!['cnic'],
+                                'guardianCnic': _patientData!['guardianCnic'],
+                                'originalData': LocalStorageService.sanitize(Map<String, dynamic>.from(_patientData!)),
+                                'proposedData': LocalStorageService.sanitize(proposedData),
+                                'reason': reasonText,
+                                'requestedBy': widget.receptionistId,
+                                'requestedByName': widget.receptionistName,
+                                'requesterName': widget.receptionistName,
+                                'requestedAt': DateTime.now().toIso8601String(),
+                                'targetRole': 'supervisor',
+                              };
+
+                              // 1. Save locally to local_edit_requests so it shows up immediately in Requests
+                              await LocalStorageService.saveLocalEditRequest(reqPayload);
+
+                              // 2. Cloud upload & durable sync queue (when not on a LAN client desk)
+                              final uploadsHere = !LanFirestoreGate.isLanDesk;
+                              if (uploadsHere) {
+                                unawaited(CloudDb.instance
+                                    .collection('branches')
+                                    .doc(widget.branchId)
+                                    .collection('edit_requests')
+                                    .doc(reqId)
+                                    .set({
+                                  ...reqPayload,
+                                  'requestedAt': FieldValue.serverTimestamp(),
+                                }, SetOptions(merge: true)).then<void>((_) {}, onError: (Object e) {
+                                  debugPrint('[TokenScreen] Firestore offline — queued patient_edit: $reqId ($e)');
+                                }));
+
+                                await LocalStorageService.enqueueSync({
+                                  'type': 'save_edit_request',
+                                  'branchId': widget.branchId,
+                                  'requestId': reqId,
+                                  'collection': 'edit_requests',
+                                  'data': reqPayload,
+                                });
+                                unawaited(SyncService().triggerUpload(urgent: true).catchError((_) {}));
                               }
 
-                              updated['performedBy'] = widget.receptionistName;
-                              updated['performedByRole'] = 'receptionist';
+                              // 3. Broadcast over LAN to Server, Supervisor, and Doctor screens
+                              try {
+                                RealtimeManager().sendMessage({
+                                  ...RealtimeEvents.payload(
+                                    type: RealtimeEvents.requestCreated,
+                                    branchId: widget.branchId,
+                                    data: reqPayload,
+                                  ),
+                                });
+                              } catch (_) {}
 
-                              // 1. Save and atomically migrate CNIC in local storage and active queue entries
-                              await LocalStorageService.updatePatientWithCnicMigration(
-                                oldPatientId: pId,
-                                updatedPatient: updated,
-                                oldCnic: _patientData!['cnic']?.toString() ?? _patientData!['guardianCnic']?.toString(),
-                              );
+                              // 4. Push notification to Supervisor
+                              try {
+                                CloudMessagingService().notifySupervisorPendingRequests(
+                                  branchId: widget.branchId,
+                                  requestType: 'Patient Edit',
+                                  requesterName: widget.receptionistName,
+                                  details: 'Patient edit requested for ${reqPayload['patientName']} ($reasonText)',
+                                );
+                              } catch (_) {}
 
-                              Navigator.pop(ctx);
+                              if (ctx.mounted) Navigator.pop(ctx);
 
                               if (mounted) {
-                                setState(() {
-                                  _patientData = updated;
-                                  if (newCnic.isNotEmpty) {
-                                    cnicController.text = newCnic;
-                                  }
-                                });
-                                AppToast.showSnackBar(context, const SnackBar(
-                                  content: Text('✅ Patient details & CNIC updated instantly!'),
-                                  backgroundColor: SoftPalette.green400,
-                                  duration: Duration(seconds: 3),
-                                ));
+                                AppToast.showSnackBar(
+                                  context,
+                                  const SnackBar(
+                                    content: Text('✅ Patient edit request sent for approval!'),
+                                    backgroundColor: SoftPalette.blue400,
+                                    duration: Duration(seconds: 3),
+                                  ),
+                                );
                               }
                             },
                             style: ElevatedButton.styleFrom(
@@ -2069,7 +2429,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                   borderRadius: BorderRadius.circular(10)),
                               elevation: 2,
                             ),
-                            child: const Text('Save Changes',
+                            child: const Text('Send Edit Request',
                                 style: TextStyle(fontWeight: FontWeight.w700)),
                           ),
                         ),
@@ -2183,7 +2543,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       final blockingId = blocking?['patientId']?.toString() ?? '';
       final matchedId = blocking == null ? pId : (blockingId.isNotEmpty ? blockingId : rId);
 
-      final patientName = _patientData!['name']?.toString() ?? 'Unknown';
+      final patientName = LocalStorageService.resolveCanonicalPatientName(_patientData).isNotEmpty
+          ? LocalStorageService.resolveCanonicalPatientName(_patientData)
+          : 'Unknown';
 
       final requestData = <String, dynamic>{
         'requestType':     'token_exception',
@@ -2205,8 +2567,12 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
       final docId = 'req_exception_${widget.receptionistId}_${DateTime.now().millisecondsSinceEpoch}';
 
-      try {
-        await CloudDb.instance
+      // Local copy and the LAN message come first: the cloud write used to be awaited before
+      // them (up to 15–30 s without internet), so the doctor got the request late. A desk
+      // linked to the LAN does not upload at all — the server uploads it once.
+      final uploadsHere = !LanFirestoreGate.isLanDesk;
+      if (uploadsHere) {
+        unawaited(CloudDb.instance
             .collection('branches')
             .doc(widget.branchId)
             .collection('edit_requests')
@@ -2214,9 +2580,9 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
             .set({
           ...requestData,
           'requestedAt': FieldValue.serverTimestamp(),
-        });
-      } catch (e) {
-        debugPrint('[TokenScreen] Firestore offline — using generated ID: $docId');
+        }, SetOptions(merge: true)).then<void>((_) {}, onError: (Object e) {
+          debugPrint('[TokenScreen] Firestore offline — queued: $docId ($e)');
+        }));
       }
 
       await LocalStorageService.saveLocalEditRequest({
@@ -2228,7 +2594,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
         'requestedAt': DateTime.now().toIso8601String(),
       });
 
-      await LocalStorageService.enqueueSync({
+      if (uploadsHere) await LocalStorageService.enqueueSync({
         'type':      'save_token_exception_request',
         'branchId':  widget.branchId,
         'requestId': docId,
@@ -2293,6 +2659,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
     bool readOnly = false,
     List<TextInputFormatter>? formatters,
     int? maxLen,
+    TextInputType? keyboardType,
+    Widget? suffixIcon,
   }) {
     final isDark = _isDark;
     return Container(
@@ -2300,6 +2668,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
       child: TextField(
         controller: ctrl,
         readOnly: readOnly,
+        keyboardType: keyboardType,
         inputFormatters: formatters,
         maxLength: maxLen,
         buildCounter: maxLen != null ? (_, {required currentLength, required isFocused, maxLength}) => null : null,
@@ -2317,6 +2686,7 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
           ),
           isDense: true,
           prefixIcon: Icon(icon, color: context.comfort.brand, size: 20),
+          suffixIcon: suffixIcon,
           filled: true,
           fillColor: isDark
               ? (readOnly ? SoftPalette.slate900.withValues(alpha: 0.6) : SoftPalette.slate900)
@@ -2332,6 +2702,65 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
               borderSide: BorderSide(color: context.comfort.brand, width: 2)),
           contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
         ),
+      ),
+    );
+  }
+
+  Widget _editDropdown({
+    required String label,
+    required IconData icon,
+    required String value,
+    required List<String> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    final isDark = _isDark;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: DropdownButtonFormField<String>(
+        initialValue: items.contains(value) ? value : items.first,
+        isExpanded: true,
+        dropdownColor: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+        icon: Icon(Icons.keyboard_arrow_down_rounded, color: context.comfort.brand),
+        style: TextStyle(
+          fontSize: 14,
+          color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87,
+          fontWeight: FontWeight.w500,
+        ),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: TextStyle(
+            color: context.comfort.brand,
+            fontWeight: FontWeight.w500,
+            fontSize: 12,
+          ),
+          isDense: true,
+          prefixIcon: Icon(icon, color: context.comfort.brand, size: 20),
+          filled: true,
+          fillColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.gray150)),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: isDark ? SoftPalette.slate700 : SoftPalette.gray150)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: context.comfort.brand, width: 2)),
+          contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        ),
+        items: items
+            .map((e) => DropdownMenuItem<String>(
+                  value: e,
+                  child: Text(
+                    e,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87,
+                    ),
+                  ),
+                ))
+            .toList(),
+        onChanged: onChanged,
       ),
     );
   }
@@ -2629,6 +3058,13 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                   const SizedBox(height: 8),
                   ..._patientsList.map((p) {
                     final cnicInfo = _getDisplayCnicInfo(p);
+                    final isChildRec = LocalStorageService.isChildPatientRecord(p);
+                    final guardianName = isChildRec ? _resolveChildGuardianName(p) : null;
+                    final rawAge = p['age'];
+                    final ageVal = rawAge is num ? rawAge.toInt() : int.tryParse(rawAge?.toString() ?? '');
+                    final genderVal = p['gender']?.toString().trim() ?? '';
+                    final hasDemo = (ageVal != null && ageVal > 0) ||
+                        (genderVal.isNotEmpty && genderVal.toLowerCase() != 'unknown' && genderVal.toLowerCase() != 'null');
                     final vitalsToken = _getPatientTodayToken(p, isVitalsOnly: true);
                     final regularToken = _getPatientTodayToken(p, isVitalsOnly: false);
                     final rId = _getRestrictionId(p);
@@ -2666,12 +3102,37 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                         title: Row(
                           children: [
                             Expanded(
-                              child: Text(
-                                _getPatientDisplayName(p),
-                                style: TextStyle(
-                                    color: hasBoth ? c.danger : c.textPrimary,
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: isMobile ? 15 : 15.5),
+                              child: Wrap(
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                spacing: 6,
+                                runSpacing: 4,
+                                children: [
+                                  Text(
+                                    _getPatientDisplayName(p),
+                                    style: TextStyle(
+                                        color: hasBoth ? c.danger : c.textPrimary,
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: isMobile ? 15 : 15.5),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                    decoration: BoxDecoration(
+                                      color: isChildRec ? c.infoBg : c.brandSoft,
+                                      borderRadius: BorderRadius.circular(5),
+                                      border: Border.all(
+                                        color: (isChildRec ? c.info : c.brand).withValues(alpha: 0.35),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      isChildRec ? 'Child' : 'Adult',
+                                      style: TextStyle(
+                                        color: isChildRec ? c.info : c.brand,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                             if (hasBoth)
@@ -2758,6 +3219,20 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              if (isChildRec && guardianName != null && guardianName.isNotEmpty)
+                                Text('Guardian: $guardianName',
+                                    style: TextStyle(color: c.textSecondary, fontSize: 12, fontWeight: FontWeight.w600)),
+                              if (hasDemo || (p['bloodGroup'] != null && p['bloodGroup'].toString().trim().isNotEmpty && p['bloodGroup'].toString().trim().toUpperCase() != 'N/A'))
+                                Text(
+                                  [
+                                    if (genderVal.isNotEmpty && genderVal.toLowerCase() != 'unknown' && genderVal.toLowerCase() != 'null')
+                                      genderVal,
+                                    if (ageVal != null && ageVal > 0) '$ageVal yrs',
+                                    if (p['bloodGroup'] != null && p['bloodGroup'].toString().trim().isNotEmpty && p['bloodGroup'].toString().trim().toUpperCase() != 'N/A')
+                                      'Blood: ${p['bloodGroup'].toString().trim().toUpperCase()}',
+                                  ].join(' · '),
+                                  style: TextStyle(color: c.textMuted, fontSize: 11.5),
+                                ),
                               Text('${cnicInfo.label}: ${cnicInfo.cnic}',
                                   style: TextStyle(color: c.textSecondary, fontSize: 12)),
                               Text('Phone: ${_getPatientDisplayPhone(p)}',
@@ -2878,6 +3353,8 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                     final hasVitalsToday = _isVitalsTokenAllowed && vitalsTodayToken != null;
                     final hasRegularToday = regularTodayToken != null;
                     final hasBothToday = hasVitalsToday && hasRegularToday;
+                    final selectedIsChild = LocalStorageService.isChildPatientRecord(_patientData!);
+                    final selectedGuardianName = selectedIsChild ? _resolveChildGuardianName(_patientData!) : null;
 
                     return Container(
                       padding: EdgeInsets.all(isMobile ? 12 : 16),
@@ -2904,6 +3381,24 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                                           fontSize:   isMobile ? 16.5 : 18,
                                           color:      c.textPrimary,
                                           fontWeight: FontWeight.w800),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: selectedIsChild ? c.infoBg : c.brandSoft,
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(
+                                          color: (selectedIsChild ? c.info : c.brand).withValues(alpha: 0.35),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        selectedIsChild ? 'Child' : 'Adult',
+                                        style: TextStyle(
+                                          color: selectedIsChild ? c.info : c.brand,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
                                     ),
                                     _buildCategoryBadge(),
                                     Builder(builder: (context) {
@@ -2949,12 +3444,33 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
                             runSpacing: 8,
                             crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
+                              if (selectedIsChild && selectedGuardianName != null && selectedGuardianName.isNotEmpty)
+                                _infoBadge(Icons.family_restroom_rounded, 'Guardian: $selectedGuardianName'),
                               _infoBadge(Icons.badge_outlined, () {
                                 final i = _getDisplayCnicInfo(_patientData!);
                                 return '${i.label}: ${i.cnic}';
                               }()),
                               _infoBadge(Icons.phone_outlined,
                                   'Phone: ${_getPatientDisplayPhone(_patientData!)}'),
+                              if ((_patientData!['age'] ?? _patientData!['patientAge']) != null &&
+                                  ((_patientData!['age'] ?? _patientData!['patientAge']).toString().trim() != '0'))
+                                _infoBadge(Icons.calendar_today_outlined,
+                                    'Age: ${_patientData!['age'] ?? _patientData!['patientAge']} yrs'),
+                              if ((_patientData!['gender'] ?? _patientData!['patientGender']) != null &&
+                                  (_patientData!['gender'] ?? _patientData!['patientGender']).toString().trim().isNotEmpty &&
+                                  (_patientData!['gender'] ?? _patientData!['patientGender']).toString().trim().toLowerCase() != 'unknown')
+                                _infoBadge(Icons.wc_rounded,
+                                    'Gender: ${_patientData!['gender'] ?? _patientData!['patientGender']}'),
+                              if (LocalStorageService.tryParseDob(_patientData!['dob'] ?? _patientData!['dateOfBirth']) != null)
+                                _infoBadge(
+                                  Icons.cake_outlined,
+                                  'DOB: ${DateFormat('dd-MM-yyyy').format(LocalStorageService.tryParseDob(_patientData!['dob'] ?? _patientData!['dateOfBirth'])!)}',
+                                ),
+                              if (_patientData!['bloodGroup'] != null &&
+                                  _patientData!['bloodGroup'].toString().trim().isNotEmpty &&
+                                  _patientData!['bloodGroup'].toString().trim().toUpperCase() != 'N/A')
+                                _infoBadge(Icons.bloodtype_outlined,
+                                    'Blood: ${_patientData!['bloodGroup'].toString().trim().toUpperCase()}'),
                             ],
                           ),
                           if ((hasBothToday && _isVitalsTokenAllowed) || ((hasRegularToday || hasVitalsToday) && !_isVitalsTokenAllowed)) ...[
@@ -3254,37 +3770,44 @@ class TokenScreenState extends State<TokenScreen> with WidgetsBindingObserver {
 
   ({String cnic, String label}) _getDisplayCnicInfo(
       Map<String, dynamic> patient) {
+    final isChild = LocalStorageService.isChildPatientRecord(patient);
     final ownCnic = (patient['cnic'] ?? patient['patientCnic'] ?? patient['cNic'])?.toString().trim();
     final guardianCnic = (patient['guardianCnic'] ?? patient['guardian_cnic'])?.toString().trim();
-    if (ownCnic != null && ownCnic.isNotEmpty && ownCnic != '-' && !ownCnic.startsWith('unknown_')) {
-      final clean = ownCnic.replaceAll(RegExp(r'\D'), '');
-      final formatted = clean.length == 13 ? _formatCnic(clean) : ownCnic;
-      return (cnic: formatted, label: 'CNIC');
-    }
-    if (guardianCnic != null && guardianCnic.isNotEmpty && guardianCnic != '-' && !guardianCnic.startsWith('unknown_')) {
-      final clean = guardianCnic.replaceAll(RegExp(r'\D'), '');
-      final formatted = clean.length == 13 ? _formatCnic(clean) : guardianCnic;
-      return (cnic: formatted, label: 'Guardian CNIC');
-    }
     final pid = (patient['patientId'] ?? patient['id'] ?? '').toString().trim();
-    if (pid.isNotEmpty) {
-      if (pid.contains('_child_')) {
-        final g = pid.split('_child_').first.replaceAll(RegExp(r'\D'), '');
-        final formatted = g.length == 13 ? _formatCnic(g) : pid.split('_child_').first;
-        return (cnic: formatted, label: 'Guardian CNIC');
-      }
-      final clean = pid.replaceAll(RegExp(r'\D'), '');
-      if (clean.length == 13) {
-        return (cnic: _formatCnic(clean), label: 'CNIC');
-      }
+
+    String? formatValid(String? raw) {
+      if (raw == null || raw.isEmpty || raw == '-' || raw.startsWith('unknown_')) return null;
+      final clean = raw.replaceAll(RegExp(r'\D'), '');
+      return clean.length == 13 ? _formatCnic(clean) : raw;
     }
-    final searched = cnicController.text.trim();
-    final searchDigits = searched.replaceAll(RegExp(r'\D'), '');
+
+    if (isChild) {
+      final fromGuard = formatValid(guardianCnic);
+      if (fromGuard != null) return (cnic: fromGuard, label: 'Guardian CNIC');
+      if (pid.contains('_child_')) {
+        final fromPid = formatValid(pid.split('_child_').first);
+        if (fromPid != null) return (cnic: fromPid, label: 'Guardian CNIC');
+      }
+      final fromOwn = formatValid(ownCnic);
+      if (fromOwn != null) return (cnic: fromOwn, label: 'Guardian CNIC');
+      final searchDigits = cnicController.text.replaceAll(RegExp(r'\D'), '');
+      if (searchDigits.length == 13) {
+        return (cnic: _formatCnic(searchDigits), label: 'Guardian CNIC');
+      }
+      return (cnic: '-', label: 'Guardian CNIC');
+    }
+
+    final fromOwn = formatValid(ownCnic);
+    if (fromOwn != null) return (cnic: fromOwn, label: 'CNIC');
+    if (pid.isNotEmpty && !pid.contains('_child_') && RegExp(r'^[\d\-\s]+$').hasMatch(pid)) {
+      final clean = pid.replaceAll(RegExp(r'\D'), '');
+      if (clean.length == 13) return (cnic: _formatCnic(clean), label: 'CNIC');
+    }
+    final fromGuard = formatValid(guardianCnic);
+    if (fromGuard != null) return (cnic: fromGuard, label: 'Guardian CNIC');
+    final searchDigits = cnicController.text.replaceAll(RegExp(r'\D'), '');
     if (searchDigits.length == 13) {
-      return (
-        cnic: _formatCnic(searchDigits),
-        label: patient['isAdult'] == false ? 'Guardian CNIC' : 'CNIC',
-      );
+      return (cnic: _formatCnic(searchDigits), label: 'CNIC');
     }
     return (cnic: '-', label: 'CNIC');
   }
@@ -3514,14 +4037,17 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
     final labelColor = c.textSecondary;
     final dialogBorder = c.border;
 
-    // Placeholder values like '0' or 'null' (bad records) are not names.
-    String cleanPatientName(dynamic v) {
-      final s = (v ?? '').toString().trim();
-      return (s.isEmpty || s == '0' || s.toLowerCase() == 'null') ? '' : s;
-    }
-    final patientName = [widget.patientData?['patientName'], widget.patientData?['name'], widget.patientData?['fullName']]
-        .map(cleanPatientName)
-        .firstWhere((s) => s.isNotEmpty, orElse: () => 'Name not recorded');
+    final canonicalName = LocalStorageService.resolveCanonicalPatientName(widget.patientData);
+    final patientName = canonicalName.isNotEmpty ? canonicalName : 'Name not recorded';
+    final isChildPatient = widget.patientData != null && LocalStorageService.isChildPatientRecord(widget.patientData!);
+    final rawGuardianName = widget.patientData?['guardianName']?.toString().trim() ?? '';
+    final guardianLabel = (isChildPatient &&
+            rawGuardianName.isNotEmpty &&
+            rawGuardianName != '0' &&
+            rawGuardianName.toLowerCase() != 'null' &&
+            rawGuardianName != '-')
+        ? rawGuardianName
+        : null;
 
     return AlertDialog(
       backgroundColor: dialogBg,
@@ -3567,14 +4093,57 @@ class _VitalsInputDialogState extends State<_VitalsInputDialog> {
                     Icon(Icons.person_outline, size: 20, color: _teal),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        patientName,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                          color: textColor,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  patientName,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                    color: textColor,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: isChildPatient ? c.infoBg : c.brandSoft,
+                                  borderRadius: BorderRadius.circular(5),
+                                  border: Border.all(
+                                    color: (isChildPatient ? c.info : c.brand).withValues(alpha: 0.35),
+                                  ),
+                                ),
+                                child: Text(
+                                  isChildPatient ? 'Child' : 'Adult',
+                                  style: TextStyle(
+                                    color: isChildPatient ? c.info : c.brand,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (guardianLabel != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              'Guardian: $guardianLabel',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: labelColor,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                   ],

@@ -24,6 +24,7 @@ import '../providers/madrassa_providers.dart';
 import 'dart:async';
 
 import '../madrassa_strings.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GIcons;
 import '../../../design/design_system.dart';
 import '../../../services/user_theme_service.dart';
 
@@ -417,18 +418,78 @@ _changeNotifier.value++;
     _updateLocalSilent(sId, 'currentLines', currentLines);
   }
 
+  void _decideLeaveSilent(String sId, {required bool approve}) {
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
+    final current = _localChanges[sId] ?? _safeMap(logData[sId]);
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final reqAt = current['leaveRequestedAt'] ?? current['timestamp'];
+
+    _updateLocalSilent(sId, 'attendance', approve ? 'leave' : 'absent');
+    _updateLocalSilent(sId, 'leaveStatus', approve ? 'approved' : 'denied');
+    _updateLocalSilent(sId, 'isParentRequested', false);
+    _updateLocalSilent(sId, 'leaveDecidedAt', nowIso);
+    _updateLocalSilent(sId, 'leaveDecidedBy', widget.editorName);
+    if (reqAt != null) {
+      _updateLocalSilent(sId, 'leaveDecidedFor', reqAt);
+    }
+    _updateLocalSilent(sId, 'uniform', approve ? 'leave' : false);
+    _updateLocalSilent(sId, 'isLate', false);
+    _updateLocalSilent(sId, 'timing', 'on_time');
+    _updateLocalSilent(sId, 'arrivalTime', null);
+  }
+
   void _updateAttendanceSilent(String sId, String value) {
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
+    final current = _localChanges[sId] ?? _safeMap(logData[sId]);
+    final prevAtt = (current['attendance'] ?? '').toString().toLowerCase().trim();
+    final prevLeaveStatus = (current['leaveStatus'] ?? '').toString().toLowerCase().trim();
+    final hadPendingOrApprovedLeave = prevAtt == 'leave_requested' ||
+        prevAtt == 'leave' ||
+        current['isParentRequested'] == true ||
+        prevLeaveStatus == 'pending' ||
+        prevLeaveStatus == 'approved';
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final reqAt = current['leaveRequestedAt'] ?? current['timestamp'];
+
     _updateLocalSilent(sId, 'attendance', value);
     if (value == 'leave') {
       _updateLocalSilent(sId, 'uniform', 'leave');
       _updateLocalSilent(sId, 'isLate', false);
       _updateLocalSilent(sId, 'timing', 'on_time');
       _updateLocalSilent(sId, 'arrivalTime', null);
+      _updateLocalSilent(sId, 'leaveStatus', 'approved');
+      _updateLocalSilent(sId, 'isParentRequested', false);
+      _updateLocalSilent(sId, 'leaveDecidedAt', nowIso);
+      _updateLocalSilent(sId, 'leaveDecidedBy', widget.editorName);
+      if (reqAt != null) {
+        _updateLocalSilent(sId, 'leaveDecidedFor', reqAt);
+      }
     } else if (value == 'absent') {
       _updateLocalSilent(sId, 'uniform', false);
       _updateLocalSilent(sId, 'isLate', false);
       _updateLocalSilent(sId, 'timing', 'on_time');
       _updateLocalSilent(sId, 'arrivalTime', null);
+      if (hadPendingOrApprovedLeave) {
+        _updateLocalSilent(sId, 'leaveStatus', 'denied');
+        _updateLocalSilent(sId, 'isParentRequested', false);
+        _updateLocalSilent(sId, 'leaveDecidedAt', nowIso);
+        _updateLocalSilent(sId, 'leaveDecidedBy', widget.editorName);
+        if (reqAt != null) {
+          _updateLocalSilent(sId, 'leaveDecidedFor', reqAt);
+        }
+      }
+    } else if (value == 'present') {
+      if (hadPendingOrApprovedLeave) {
+        _updateLocalSilent(sId, 'leaveStatus', 'cancelled');
+        _updateLocalSilent(sId, 'isParentRequested', false);
+        _updateLocalSilent(sId, 'leaveDecidedAt', nowIso);
+        _updateLocalSilent(sId, 'leaveDecidedBy', widget.editorName);
+        if (reqAt != null) {
+          _updateLocalSilent(sId, 'leaveDecidedFor', reqAt);
+        }
+      }
     }
   }
 
@@ -1200,6 +1261,8 @@ _changeNotifier.value++;
                                   editorRole: widget.editorRole,
                                   uploadStatus: _uploadStates[sId],
                                   onUpdateLocal: _updateLocalSilent,
+                                  onUpdateAttendance: _updateAttendanceSilent,
+                                  onDecideLeave: _decideLeaveSilent,
                                   onUpdateSabak: _updateSabakLines,
                                   onPickPhoto: _pickAndUploadPhoto,
                                   onSendWhatsApp: _sendDailyWhatsApp,
@@ -1767,6 +1830,15 @@ _changeNotifier.value++;
     final dateTextColor = isDarkStats ? SoftPalette.gray50 : SoftPalette.gray900;
 
     // Date & stats section
+    final statsRow = _buildAttendanceStatsRow(
+      context,
+      present: present,
+      lateCount: lateCount,
+      leave: leave,
+      absent: absent,
+      replied: replied,
+    );
+
     Widget dateAndStatsWidget;
     if (isMobile) {
       dateAndStatsWidget = Column(
@@ -1777,18 +1849,7 @@ _changeNotifier.value++;
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
           ),
           const SizedBox(height: 8),
-          Wrap(
-            spacing: 12,
-            runSpacing: 6,
-            children: [
-              _statText('${context.l.present}: $present', context.adapt(SoftPalette.green400)),
-              if (lateCount > 0)
-                _statText('${context.l.late}: $lateCount', context.adapt(SoftPalette.amber400)),
-              _statText('${context.l.leave}: $leave', context.adapt(SoftPalette.amber300)),
-              _statText('${context.l.absent}: $absent', context.adapt(SoftPalette.red500)),
-              _statText(context.isUrdu ? 'جوابات: $replied' : 'Replied: $replied', context.adapt(SoftPalette.amber300)),
-            ],
-          ),
+          statsRow,
         ],
       );
     } else {
@@ -1800,30 +1861,21 @@ _changeNotifier.value++;
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
             ),
           ),
-          _statText('${context.l.present}: $present', context.adapt(SoftPalette.green400)),
-          if (lateCount > 0) ...[
-            const SizedBox(width: 12),
-            _statText('${context.l.late}: $lateCount', context.adapt(SoftPalette.amber400)),
-          ],
-          const SizedBox(width: 12),
-          _statText('${context.l.leave}: $leave', context.adapt(SoftPalette.amber300)),
-          const SizedBox(width: 12),
-          _statText('${context.l.absent}: $absent', context.adapt(SoftPalette.red500)),
-          const SizedBox(width: 12),
-          _statText(context.isUrdu ? 'جوابات: $replied' : 'Replied: $replied', context.adapt(SoftPalette.amber300)),
+          statsRow,
         ],
       );
     }
 
     // Actions & Legends section
+    final c = context.comfort;
     Widget actionsAndLegendsWidget;
     if (isDesktop) {
       actionsAndLegendsWidget = Row(
         children: [
           _efficiencyButton(
             label: context.l.allPresent,
-            icon: Icons.done_all,
-            color: SoftPalette.green400,
+            icon: GIcons.checkCircle,
+            color: c.success,
             isSelected: _allPresentToggled,
             onTap: isReadOnly ? null : () {
               setState(() {
@@ -1832,7 +1884,7 @@ _changeNotifier.value++;
                   final sId = s['id'] ?? '';
                   final log = _safeMap(logData[sId]);
                   final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                  if (currentAtt != 'leave') {
+                  if (currentAtt != 'leave' && currentAtt != 'leave_requested') {
                     _updateAttendanceSilent(sId, _allPresentToggled ? 'present' : 'absent');
                   }
                 }
@@ -1842,8 +1894,8 @@ _changeNotifier.value++;
           const SizedBox(width: 8),
           _efficiencyButton(
             label: context.l.allUniform,
-            icon: Icons.check_circle_outline,
-            color: SoftPalette.sky400,
+            icon: GIcons.check,
+            color: c.info,
             isSelected: _allUniformToggled,
             onTap: isReadOnly ? null : () {
               setState(() {
@@ -1862,8 +1914,8 @@ _changeNotifier.value++;
           const SizedBox(width: 8),
           _efficiencyButton(
             label: context.isUrdu ? 'سب نے جواب دیا' : 'All Replied',
-            icon: Icons.message_outlined,
-            color: SoftPalette.amber300,
+            icon: GIcons.whatsapp,
+            color: c.warning,
             isSelected: _allRepliedToggled,
             onTap: isReadOnly ? null : () {
               setState(() {
@@ -1879,16 +1931,18 @@ _changeNotifier.value++;
           ElevatedButton.icon(
             onPressed: _localChanges.isEmpty || _isSaving || isReadOnly ? null : _saveChanges,
             icon: _isSaving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 14,
                     height: 14,
-                    child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 1.5),
+                    child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 1.5),
                   )
-                : const Icon(Icons.save, size: 16),
+                : const Icon(GIcons.save, size: 16),
             label: Text(context.l.saveChanges, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
             style: ElevatedButton.styleFrom(
-              backgroundColor: SoftPalette.teal550, // Teal
-              foregroundColor: SoftPalette.gray50,
+              backgroundColor: c.brand,
+              foregroundColor: c.onBrand,
+              disabledBackgroundColor: c.surfaceSunken,
+              disabledForegroundColor: c.textMuted,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
@@ -1896,13 +1950,14 @@ _changeNotifier.value++;
           const SizedBox(width: 8),
           OutlinedButton.icon(
             onPressed: () => _showDailyReportDialog(config, students, logData),
-            icon: FaIcon(FontAwesomeIcons.whatsapp, color: context.adapt(SoftPalette.green350), size: 16),
+            icon: FaIcon(FontAwesomeIcons.whatsapp, color: c.success, size: 16),
             label: Text(
               context.isUrdu ? 'روزانہ گروپ رپورٹ' : 'Daily Group Report',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.teal550)),
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: c.textPrimary),
             ),
             style: OutlinedButton.styleFrom(
-              side: BorderSide(color: context.adapt(SoftPalette.teal550)),
+              side: BorderSide(color: c.border),
+              backgroundColor: c.surface,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
@@ -1919,8 +1974,8 @@ _changeNotifier.value++;
             children: [
               _efficiencyButton(
                 label: context.l.allPresent,
-                icon: Icons.done_all,
-                color: SoftPalette.green400,
+                icon: GIcons.checkCircle,
+                color: c.success,
                 isSelected: _allPresentToggled,
                 onTap: isReadOnly ? null : () {
                   setState(() {
@@ -1929,7 +1984,7 @@ _changeNotifier.value++;
                       final sId = s['id'] ?? '';
                       final log = _safeMap(logData[sId]);
                       final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                      if (currentAtt != 'leave') {
+                      if (currentAtt != 'leave' && currentAtt != 'leave_requested') {
                         _updateAttendanceSilent(sId, _allPresentToggled ? 'present' : 'absent');
                       }
                     }
@@ -1938,8 +1993,8 @@ _changeNotifier.value++;
               ),
               _efficiencyButton(
                 label: context.l.allUniform,
-                icon: Icons.check_circle_outline,
-                color: SoftPalette.sky400,
+                icon: GIcons.check,
+                color: c.info,
                 isSelected: _allUniformToggled,
                 onTap: isReadOnly ? null : () {
                   setState(() {
@@ -1957,8 +2012,8 @@ _changeNotifier.value++;
               ),
               _efficiencyButton(
                 label: context.isUrdu ? 'سب نے جواب دیا' : 'All Replied',
-                icon: Icons.message_outlined,
-                color: SoftPalette.amber300,
+                icon: GIcons.whatsapp,
+                color: c.warning,
                 isSelected: _allRepliedToggled,
                 onTap: isReadOnly ? null : () {
                   setState(() {
@@ -1972,8 +2027,8 @@ _changeNotifier.value++;
               ),
               _efficiencyButton(
                 label: context.isUrdu ? 'روزانہ گروپ رپورٹ' : 'Daily Group Report',
-                icon: Icons.share_outlined,
-                color: SoftPalette.teal550,
+                icon: GIcons.share,
+                color: c.brand,
                 isSelected: false,
                 onTap: () => _showDailyReportDialog(config, students, logData),
               ),
@@ -2006,41 +2061,91 @@ _changeNotifier.value++;
     required bool isSelected,
     required VoidCallback? onTap,
   }) {
+    final c = context.comfort;
     final isDisabled = onTap == null;
+    final bg = isDisabled
+        ? c.surfaceSunken
+        : (isSelected ? color : color.withValues(alpha: 0.08));
+    final border = isDisabled
+        ? c.border
+        : (isSelected ? color : color.withValues(alpha: 0.25));
+    final fg = isDisabled
+        ? c.textMuted
+        : (isSelected ? SoftPalette.gray50 : color);
+
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: isDisabled 
-              ? context.adapt(SoftPalette.gray100) 
-              : (isSelected ? color : color.withValues(alpha: 0.05)),
+          color: bg,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: isDisabled 
-                ? context.adapt(SoftPalette.gray150) 
-                : (isSelected ? color : color.withValues(alpha: 0.2)),
-          ),
+          border: Border.all(color: border),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: isDisabled ? context.adapt(SoftPalette.gray350) : (isSelected ? SoftPalette.gray50 : color)),
+            Icon(icon, size: 16, color: fg),
             const SizedBox(width: 8),
             Text(
               label,
               style: context.urduStyle(
                 style: TextStyle(
-                  fontSize: 11,
+                  fontSize: 11.5,
                   fontWeight: FontWeight.bold,
-                  color: isDisabled ? context.adapt(SoftPalette.gray350) : (isSelected ? SoftPalette.gray50 : color),
+                  color: fg,
                 ),
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildAttendanceStatsRow(
+    BuildContext context, {
+    required int present,
+    required int lateCount,
+    required int leave,
+    required int absent,
+    required int replied,
+  }) {
+    final c = context.comfort;
+    final isUrdu = context.isUrdu;
+
+    Widget presentWidget;
+    if (lateCount > 0) {
+      final lateLabel = isUrdu ? ' ($lateCount ${context.l.late})' : ' ($lateCount ${context.l.late})';
+      presentWidget = Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: '${context.l.present}: $present',
+              style: TextStyle(color: c.success, fontWeight: FontWeight.bold, fontSize: 14),
+            ),
+            TextSpan(
+              text: lateLabel,
+              style: TextStyle(color: c.warning, fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+          ],
+        ),
+      );
+    } else {
+      presentWidget = _statText('${context.l.present}: $present', c.success);
+    }
+
+    return Wrap(
+      spacing: 12,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        presentWidget,
+        _statText('${context.l.leave}: $leave', c.warning),
+        _statText('${context.l.absent}: $absent', c.danger),
+        _statText(isUrdu ? 'جوابات: $replied' : 'Replied: $replied', c.info),
+      ],
     );
   }
 
@@ -3117,6 +3222,8 @@ class _StudentLogCard extends StatelessWidget {
   final String editorRole;
   final PhotoUploadStatus? uploadStatus;
   final Function(String sId, String key, dynamic value) onUpdateLocal;
+  final Function(String sId, String newAtt) onUpdateAttendance;
+  final void Function(String sId, {required bool approve}) onDecideLeave;
   final Function(String sId, int newSabak)? onUpdateSabak;
   final Function(String sId) onPickPhoto;
   final Function(Map<String, dynamic> s, Map<String, dynamic> log) onSendWhatsApp;
@@ -3135,6 +3242,8 @@ class _StudentLogCard extends StatelessWidget {
     this.editorRole = 'Madrassa Teacher',
     this.uploadStatus,
     required this.onUpdateLocal,
+    required this.onUpdateAttendance,
+    required this.onDecideLeave,
     this.onUpdateSabak,
     required this.onPickPhoto,
     required this.onSendWhatsApp,
@@ -3871,10 +3980,21 @@ class _StudentLogCard extends StatelessWidget {
         final msg = log['parentReplied'] ?? false;
         final isLate = log['isLate'] == true || log['timing'] == 'late';
         final arrivalTime = log['arrivalTime']?.toString();
-        final leaveStatus = log['leaveStatus'] ?? 'pending';
-        final isParentRequested = log['isParentRequested'] == true ||
-            att == 'leave_requested' ||
-            (leaveStatus == 'pending' && log['leaveReason'] != null && log['leaveReason'].toString().isNotEmpty);
+        final rawLeaveStatus = log['leaveStatus']?.toString().toLowerCase().trim();
+        final leaveStatus = rawLeaveStatus == 'declined'
+            ? 'denied'
+            : ((rawLeaveStatus == null || rawLeaveStatus.isEmpty)
+                ? (att == 'leave' ? 'approved' : 'pending')
+                : rawLeaveStatus);
+        final isLeaveDecided = leaveStatus == 'approved' ||
+            leaveStatus == 'denied' ||
+            leaveStatus == 'cancelled';
+        final isParentRequested = !isLeaveDecided &&
+            (log['isParentRequested'] == true ||
+                att == 'leave_requested' ||
+                (leaveStatus == 'pending' &&
+                    log['leaveReason'] != null &&
+                    log['leaveReason'].toString().trim().isNotEmpty));
         final parentRepliedRequested = log['parentRepliedRequested'] == true;
         final String? parentMsgText = log['parentReplyText']?.toString() ?? log['parentReplyMessage']?.toString();
         final bool hasPendingReply = parentRepliedRequested ||
@@ -4124,14 +4244,14 @@ class _StudentLogCard extends StatelessWidget {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1.5),
                   decoration: BoxDecoration(
-                    color: context.adapt(SoftPalette.amber300).withValues(alpha: 0.15),
+                    color: context.comfort.warning.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: context.adapt(SoftPalette.amber300).withValues(alpha: 0.5), width: 0.8),
+                    border: Border.all(color: context.comfort.warning.withValues(alpha: 0.4), width: 0.8),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.access_time_filled_rounded, size: 9, color: context.adapt(SoftPalette.amber400)),
+                      Icon(GIcons.time, size: 9, color: context.comfort.warning),
                       const SizedBox(width: 2.5),
                       Text(
                         (arrivalTime != null && arrivalTime.isNotEmpty)
@@ -4140,7 +4260,7 @@ class _StudentLogCard extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 9,
                           fontWeight: FontWeight.bold,
-                          color: context.adapt(SoftPalette.amber400),
+                          color: context.comfort.warning,
                         ),
                       ),
                     ],
@@ -4249,21 +4369,12 @@ class _StudentLogCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      _actionButton(context.isUrdu ? 'منظور' : 'Approve', SoftPalette.green400, () {
-                        onUpdateLocal(sId, 'attendance', 'leave');
-                        onUpdateLocal(sId, 'leaveStatus', 'approved');
-                        onUpdateLocal(sId, 'uniform', 'leave');
-                        onUpdateLocal(sId, 'isLate', false);
-                        onUpdateLocal(sId, 'timing', 'on_time');
-                        onUpdateLocal(sId, 'arrivalTime', null);
+                      _actionButton(context.isUrdu ? 'منظور' : 'Approve', SoftPalette.green400, isReadOnly ? () {} : () {
+                        onDecideLeave(sId, approve: true);
                       }),
                       const SizedBox(width: 6),
-                      _actionButton(context.isUrdu ? 'مسترد' : 'Deny', SoftPalette.red400, () {
-                        onUpdateLocal(sId, 'attendance', 'absent');
-                        onUpdateLocal(sId, 'leaveStatus', 'denied');
-                        onUpdateLocal(sId, 'isLate', false);
-                        onUpdateLocal(sId, 'timing', 'on_time');
-                        onUpdateLocal(sId, 'arrivalTime', null);
+                      _actionButton(context.isUrdu ? 'مسترد' : 'Deny', SoftPalette.red400, isReadOnly ? () {} : () {
+                        onDecideLeave(sId, approve: false);
                       }),
                     ],
                   ),
@@ -4274,20 +4385,7 @@ class _StudentLogCard extends StatelessWidget {
                 value: att,
                 allowStudentLeave: allowStudentLeave,
                 isGlobalUser: _isGlobalLevelUser(editorRole),
-                onChanged: isReadOnly ? null : (newAtt) {
-                  onUpdateLocal(sId, 'attendance', newAtt);
-                  if (newAtt == 'leave') {
-                    onUpdateLocal(sId, 'uniform', 'leave');
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
-                  } else if (newAtt == 'absent') {
-                    onUpdateLocal(sId, 'uniform', false);
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
-                  }
-                },
+                onChanged: isReadOnly ? null : (newAtt) => onUpdateAttendance(sId, newAtt),
                 showLabel: false,
               ),
               _switchCol(
@@ -4368,21 +4466,18 @@ class _StudentLogCard extends StatelessWidget {
                           Row(
                             children: [
                               _actionButton('Allow Leave', SoftPalette.green400, isReadOnly ? () {} : () {
-                                onUpdateLocal(sId, 'attendance', 'leave');
-                                onUpdateLocal(sId, 'leaveStatus', 'approved');
-                                onUpdateLocal(sId, 'isParentRequested', false);
+                                onDecideLeave(sId, approve: true);
                               }),
                               const SizedBox(width: 8),
                               _actionButton('Decline', SoftPalette.red400, isReadOnly ? () {} : () {
-                                onUpdateLocal(sId, 'leaveStatus', 'declined');
-                                onUpdateLocal(sId, 'isParentRequested', false);
+                                onDecideLeave(sId, approve: false);
                               }),
                             ],
                           ),
                         ],
                       ),
                     ),
-                  if (leaveStatus == 'approved')
+                  if (leaveStatus == 'approved' && att == 'leave')
                     Container(
                       margin: const EdgeInsets.only(top: 4),
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -4406,7 +4501,8 @@ class _StudentLogCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                  if (leaveStatus == 'declined')
+                  if ((leaveStatus == 'declined' || leaveStatus == 'denied') &&
+                      att != 'present' && att != 'late')
                     Container(
                       margin: const EdgeInsets.only(top: 4),
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -4538,20 +4634,11 @@ class _StudentLogCard extends StatelessWidget {
               Row(
                 children: [
                   _actionButton('Approve', SoftPalette.green400, isReadOnly ? () {} : () {
-                    onUpdateLocal(sId, 'attendance', 'leave');
-                    onUpdateLocal(sId, 'leaveStatus', 'approved');
-                    onUpdateLocal(sId, 'uniform', 'leave');
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
+                    onDecideLeave(sId, approve: true);
                   }),
                   const SizedBox(width: 8),
                   _actionButton('Deny', SoftPalette.red400, isReadOnly ? () {} : () {
-                    onUpdateLocal(sId, 'attendance', 'absent');
-                    onUpdateLocal(sId, 'leaveStatus', 'denied');
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
+                    onDecideLeave(sId, approve: false);
                   }),
                 ],
               )
@@ -4560,20 +4647,7 @@ class _StudentLogCard extends StatelessWidget {
                 value: att,
                 allowStudentLeave: allowStudentLeave,
                 isGlobalUser: _isGlobalLevelUser(editorRole),
-                onChanged: isReadOnly ? null : (newAtt) {
-                  onUpdateLocal(sId, 'attendance', newAtt);
-                  if (newAtt == 'leave') {
-                    onUpdateLocal(sId, 'uniform', 'leave');
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
-                  } else if (newAtt == 'absent') {
-                    onUpdateLocal(sId, 'uniform', false);
-                    onUpdateLocal(sId, 'isLate', false);
-                    onUpdateLocal(sId, 'timing', 'on_time');
-                    onUpdateLocal(sId, 'arrivalTime', null);
-                  }
-                },
+                onChanged: isReadOnly ? null : (newAtt) => onUpdateAttendance(sId, newAtt),
                 showLabel: true,
               ),
               const SizedBox(width: 14),
@@ -4861,10 +4935,10 @@ class _StudentLogCard extends StatelessWidget {
                                       width: double.infinity,
                                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                                       decoration: BoxDecoration(
-                                        color: context.adapt(SoftPalette.amber300).withValues(alpha: 0.12),
+                                        color: context.comfort.warning.withValues(alpha: 0.12),
                                         borderRadius: BorderRadius.circular(8),
                                         border: Border.all(
-                                          color: context.adapt(SoftPalette.amber300).withValues(alpha: 0.4),
+                                          color: context.comfort.warning.withValues(alpha: 0.4),
                                           width: 0.8,
                                         ),
                                       ),
@@ -4874,14 +4948,14 @@ class _StudentLogCard extends StatelessWidget {
                                           Row(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
-                                              Icon(Icons.schedule_rounded, size: 13, color: context.adapt(SoftPalette.amber400)),
+                                              Icon(GIcons.time, size: 13, color: context.comfort.warning),
                                               const SizedBox(width: 5),
                                               Text(
                                                 context.isUrdu ? 'آمد کا وقت: $arrivalTime' : 'Arrival: $arrivalTime',
                                                 style: TextStyle(
                                                   fontSize: 11,
                                                   fontWeight: FontWeight.bold,
-                                                  color: context.adapt(SoftPalette.amber400),
+                                                  color: context.comfort.warning,
                                                 ),
                                               ),
                                             ],
@@ -4894,11 +4968,11 @@ class _StudentLogCard extends StatelessWidget {
                                                 style: TextStyle(
                                                   fontSize: 10,
                                                   fontWeight: FontWeight.w600,
-                                                  color: context.adapt(SoftPalette.amber400),
+                                                  color: context.comfort.warning,
                                                 ),
                                               ),
                                               const SizedBox(width: 2),
-                                              Icon(Icons.edit_rounded, size: 11, color: context.adapt(SoftPalette.amber400)),
+                                              Icon(GIcons.edit, size: 11, color: context.comfort.warning),
                                             ],
                                           ),
                                         ],

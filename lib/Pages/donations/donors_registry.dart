@@ -5,6 +5,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -1146,19 +1147,16 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: DonDS.teal.withValues(alpha: 0.06),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                query.isNotEmpty ? Icons.search_off_rounded : Icons.group_off_rounded,
-                size: 40,
-                color: DonDS.teal.withValues(alpha: 0.5),
-              ),
+            GEmptyIllustration(
+              query.isNotEmpty
+                  ? GEmptyIllustrationKind.search
+                  : GEmptyIllustrationKind.finance,
+              size: 152,
+              fallbackIcon: query.isNotEmpty
+                  ? Icons.search_off_rounded
+                  : Icons.group_off_rounded,
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 18),
             Text(
               query.isNotEmpty ? 'No donors match "$query"' : 'No Donors Registered Yet',
               style: DS.heading(color: t.textSecondary),

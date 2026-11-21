@@ -2,7 +2,7 @@
 
 import 'dart:ui' as ui;
 import 'package:gmwf/design/tokens/colors.dart';
-import 'package:gmwf_ui/gmwf_ui.dart' show GComfortColorsContext;
+import 'package:gmwf_ui/gmwf_ui.dart' show GComfortColorsContext, GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/shadows.dart';
 import 'package:flutter/material.dart';
@@ -2419,14 +2419,12 @@ class _BranchesState extends ConsumerState<Branches> with AutomaticKeepAliveClie
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: t.accent.withValues(alpha: 0.1),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(Icons.calendar_today_outlined, size: 24, color: t.accent),
+                    GEmptyIllustration(
+                      _searchQuery.isNotEmpty
+                          ? GEmptyIllustrationKind.search
+                          : GEmptyIllustrationKind.people,
+                      size: 140,
+                      fallbackIcon: Icons.calendar_today_outlined,
                     ),
                     const SizedBox(height: 14),
                     Text(

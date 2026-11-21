@@ -5,6 +5,7 @@ import 'package:gmwf/services/network_health_service.dart';
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -14,9 +15,12 @@ import 'package:hive_flutter/hive_flutter.dart';
 import '../services/sync_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/camp_session_service.dart';
+import '../services/stock/expiry_service.dart';
 import '../services/stock/stock_actions.dart';
 import '../services/stock/stock_ledger.dart';
+import '../services/stock/stock_log.dart';
 import '../services/stock/stock_pool.dart';
+import '../services/stock/stock_reader.dart';
 import '../realtime/realtime_manager.dart';
 import '../realtime/realtime_events.dart';
 import '../utils/formatters.dart';
@@ -172,7 +176,24 @@ int _safeInt(dynamic v) {
 class RequestPage extends StatefulWidget {
   final String branchId;
   final bool isSupervisor;
-  const RequestPage({super.key, required this.branchId, this.isSupervisor = false});
+  final String? initialRequestId;
+
+  /// Reactive notifier so selecting a specific request from the top-bar Bell popover
+  /// focuses and highlights that request even if [RequestPage] is already mounted.
+  static final ValueNotifier<String?> focusedRequestIdNotifier = ValueNotifier<String?>(null);
+
+  static void focusRequest(String? requestId) {
+    focusedRequestIdNotifier.value = (requestId != null && requestId.trim().isNotEmpty)
+        ? requestId.trim()
+        : null;
+  }
+
+  const RequestPage({
+    super.key,
+    required this.branchId,
+    this.isSupervisor = false,
+    this.initialRequestId,
+  });
 
   @override
   State<RequestPage> createState() => _RequestPageState();
@@ -209,6 +230,10 @@ class _RequestPageState extends State<RequestPage>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 3, vsync: this);
+    if (widget.initialRequestId != null && widget.initialRequestId!.trim().isNotEmpty) {
+      RequestPage.focusRequest(widget.initialRequestId);
+    }
+    RequestPage.focusedRequestIdNotifier.addListener(_onFocusedRequestChanged);
 
     // Fetch current user details
     final uid = FirebaseAuth.instance.currentUser?.uid;
@@ -260,8 +285,31 @@ class _RequestPageState extends State<RequestPage>
     });
   }
 
+  void _onFocusedRequestChanged() {
+    if (!mounted) return;
+    final focused = RequestPage.focusedRequestIdNotifier.value;
+    if (focused != null && focused.isNotEmpty && _tabCtrl.index != 0) {
+      _tabCtrl.animateTo(0);
+    }
+    setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant RequestPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialRequestId != oldWidget.initialRequestId &&
+        widget.initialRequestId != null &&
+        widget.initialRequestId!.trim().isNotEmpty) {
+      RequestPage.focusRequest(widget.initialRequestId);
+      if (_tabCtrl.index != 0) {
+        _tabCtrl.animateTo(0);
+      }
+    }
+  }
+
   @override
   void dispose() {
+    RequestPage.focusedRequestIdNotifier.removeListener(_onFocusedRequestChanged);
     _tabCtrl.dispose();
     _realtimeSub?.cancel();
     super.dispose();
@@ -271,29 +319,164 @@ class _RequestPageState extends State<RequestPage>
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final isWrapped = GlobalModuleWrapper.isWrapped(context);
+    final c = context.comfort;
+
+    PreferredSizeWidget buildTabsBar() {
+      return PreferredSize(
+        preferredSize: const Size.fromHeight(48),
+        child: Container(
+          decoration: BoxDecoration(
+            color: c.surface,
+            border: Border(
+              bottom: BorderSide(color: c.border, width: 1),
+            ),
+          ),
+          child: TabBar(
+            controller: _tabCtrl,
+            indicatorColor: c.brand,
+            indicatorWeight: 3,
+            indicatorSize: TabBarIndicatorSize.label,
+            labelColor: c.brand,
+            unselectedLabelColor: c.textSecondary,
+            dividerColor: Colors.transparent,
+            labelStyle: const TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.1,
+            ),
+            unselectedLabelStyle: const TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+            ),
+            tabs: const [
+              Tab(
+                height: 46,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.pending_actions_rounded, size: 18),
+                    SizedBox(width: 8),
+                    Text('Pending'),
+                  ],
+                ),
+              ),
+              Tab(
+                height: 46,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_circle_outline_rounded, size: 18),
+                    SizedBox(width: 8),
+                    Text('Approved'),
+                  ],
+                ),
+              ),
+              Tab(
+                height: 46,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.cancel_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('Rejected'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      appBar: AppBar(
-        automaticallyImplyLeading: !isWrapped,
-        toolbarHeight: isWrapped ? 0 : kToolbarHeight,
-        backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.teal600,
-        foregroundColor: SoftPalette.gray50,
-        elevation: 0,
-        title: isWrapped ? null : const Text('Requests',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-        bottom: TabBar(
-          controller: _tabCtrl,
-          indicatorColor: isDark ? SoftPalette.teal300 : SoftPalette.gray50,
-          labelColor: isDark ? SoftPalette.teal300 : SoftPalette.gray50,
-          unselectedLabelColor: SoftPalette.gray50A70,
-          tabs: const [
-            Tab(text: 'Pending', icon: Icon(Icons.pending_actions)),
-            Tab(text: 'Approved', icon: Icon(Icons.check_circle)),
-            Tab(text: 'Rejected', icon: Icon(Icons.cancel)),
-          ],
-        ),
-      ),
+      backgroundColor: c.background,
+      appBar: isWrapped
+          ? buildTabsBar()
+          : AppBar(
+              automaticallyImplyLeading: false,
+              toolbarHeight: 58,
+              backgroundColor: c.surface,
+              foregroundColor: c.textPrimary,
+              surfaceTintColor: Colors.transparent,
+              elevation: 0,
+              titleSpacing: 12,
+              leadingWidth: 52,
+              leading: Padding(
+                padding: const EdgeInsets.only(left: 10),
+                child: Center(
+                  child: Tooltip(
+                    message: 'Back',
+                    child: Material(
+                      color: c.surfaceSunken,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        side: BorderSide(color: c.border),
+                      ),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: () => Navigator.of(context).maybePop(),
+                        child: SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: Icon(
+                            Icons.arrow_back_rounded,
+                            size: 19,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: c.brandSoft,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+                    ),
+                    child: Icon(
+                      Icons.rule_rounded,
+                      size: 18,
+                      color: c.brand,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Requests & Approvals',
+                          style: TextStyle(
+                            fontSize: 16.5,
+                            fontWeight: FontWeight.w800,
+                            color: c.textPrimary,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                        Text(
+                          'Review pending medicine, token reversal, and patient edit requests',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            color: isDark ? SoftPalette.slate400 : c.textMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              bottom: buildTabsBar(),
+            ),
       body: SafeArea(
         child: TabBarView(
           controller: _tabCtrl,
@@ -671,9 +854,15 @@ class _StableRequestTabState extends State<_StableRequestTab>
         ? Hive.box(LocalStorageService.restockRequestsBox)
         : null;
 
-    return ValueListenableBuilder<Box>(
-      valueListenable: DebouncedBoxListenable.shared(editBox),
-      builder: (context, box, _) {
+    final tabListenable = Listenable.merge([
+      DebouncedBoxListenable.shared(editBox),
+      if (restockBox != null) DebouncedBoxListenable.shared(restockBox),
+      RequestPage.focusedRequestIdNotifier,
+    ]);
+
+    return ListenableBuilder(
+      listenable: tabListenable,
+      builder: (context, _) {
         final targetBranch = widget.branchId.toLowerCase().trim();
     bool isBranchMatch(Map<String, dynamic> data) {
       if (targetBranch.isEmpty || targetBranch == 'all' || targetBranch == 'global') return true;
@@ -720,7 +909,22 @@ class _StableRequestTabState extends State<_StableRequestTab>
       }
     }
 
+    final focusedId = RequestPage.focusedRequestIdNotifier.value;
+    bool isFocusedDoc(LocalRequestDoc d) {
+      if (focusedId == null || focusedId.isEmpty) return false;
+      final map = d.data();
+      return d.id == focusedId ||
+          map['requestId']?.toString() == focusedId ||
+          map['id']?.toString() == focusedId;
+    }
+
     allDocs.sort((a, b) {
+      if (widget.status == 'pending') {
+        final aFocus = isFocusedDoc(a);
+        final bFocus = isFocusedDoc(b);
+        if (aFocus && !bFocus) return -1;
+        if (!aFocus && bFocus) return 1;
+      }
       final aData = a.data();
       final bData = b.data();
       final rawA = aData['requestedAt'] ?? aData['createdAt'];
@@ -750,7 +954,12 @@ class _StableRequestTabState extends State<_StableRequestTab>
               data['type']?.toString() ??
               'unknown';
           if (isSupervisorRole && requestType != 'token_exception') return true;
-          if (isDoctor && requestType == 'token_exception') return true;
+          if (isDoctor &&
+              (requestType == 'token_exception' ||
+                  requestType == 'patient_edit' ||
+                  requestType == 'token_reversal')) {
+            return true;
+          }
           return false;
         }).toList();
 
@@ -784,31 +993,47 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
         if (allDocs.isEmpty) {
           return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  widget.status == 'pending'
-                      ? Icons.pending_actions_outlined
-                      : widget.status == 'approved'
-                          ? Icons.check_circle_outline
-                          : Icons.cancel_outlined,
-                  size: 80,
-                  color: SoftPalette.teal500,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  widget.status == 'pending'
-                      ? 'No Pending Requests'
-                      : widget.status == 'approved'
-                          ? 'No Approved Requests'
-                          : 'No Rejected Requests',
-                  style: const TextStyle(
-                      color: SoftPalette.teal500,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold),
-                ),
-              ],
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GEmptyIllustration(
+                    GEmptyIllustrationKind.requests,
+                    size: 164,
+                    fallbackIcon: widget.status == 'pending'
+                        ? Icons.pending_actions_outlined
+                        : widget.status == 'approved'
+                            ? Icons.check_circle_outline
+                            : Icons.cancel_outlined,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    widget.status == 'pending'
+                        ? 'No Pending Requests'
+                        : widget.status == 'approved'
+                            ? 'No Approved Requests'
+                            : 'No Rejected Requests',
+                    style: const TextStyle(
+                        color: SoftPalette.teal500,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    widget.status == 'pending'
+                        ? 'All caught up — new requests awaiting review will appear here.'
+                        : widget.status == 'approved'
+                            ? 'Approved requests will be listed here.'
+                            : 'Rejected requests will be archived here.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: context.comfort.textSecondary,
+                      fontSize: 13.5,
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         }
@@ -941,18 +1166,34 @@ class _StableRequestTabState extends State<_StableRequestTab>
       final isDoctor = role.contains('doctor');
 
       final canApproveAsSupervisor = isSupervisorRole && requestType != 'token_exception';
-      final canApproveAsDoctor = isDoctor && requestType == 'token_exception';
+      final canApproveAsDoctor = isDoctor &&
+          (requestType == 'token_exception' ||
+              requestType == 'patient_edit' ||
+              requestType == 'token_reversal');
 
       final campLabel = RequestUtils.resolveRequestCampName(data, widget.branchId);
+      final activeFocusId = RequestPage.focusedRequestIdNotifier.value;
+      final isFocusedCard = widget.status == 'pending' &&
+          activeFocusId != null &&
+          activeFocusId.isNotEmpty &&
+          (doc.id == activeFocusId ||
+              data['requestId']?.toString() == activeFocusId ||
+              data['id']?.toString() == activeFocusId);
 
       return Card(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        elevation: widget.status == 'pending' ? (isDark ? 3 : 5) : 1,
+        color: isFocusedCard
+            ? (isDark
+                ? Color.alphaBlend(SoftPalette.teal500.withValues(alpha: 0.14), SoftPalette.slate800)
+                : Color.alphaBlend(SoftPalette.teal300.withValues(alpha: 0.12), SoftPalette.gray50))
+            : (isDark ? SoftPalette.slate800 : SoftPalette.gray50),
+        elevation: isFocusedCard ? 8 : (widget.status == 'pending' ? (isDark ? 3 : 5) : 1),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
           side: BorderSide(
-            color: isDark ? SoftPalette.slate700 : SoftPalette.teal100,
-            width: 1,
+            color: isFocusedCard
+                ? (isDark ? SoftPalette.amber300 : SoftPalette.teal550)
+                : (isDark ? SoftPalette.slate700 : SoftPalette.teal100),
+            width: isFocusedCard ? 2.2 : 1,
           ),
         ),
         child: Padding(
@@ -960,6 +1201,50 @@ class _StableRequestTabState extends State<_StableRequestTab>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (isFocusedCard) ...[
+                Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? SoftPalette.amber300.withValues(alpha: 0.18)
+                        : SoftPalette.teal550.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: isDark ? SoftPalette.amber300 : SoftPalette.teal550,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.notifications_active_rounded,
+                        size: 14,
+                        color: isDark ? SoftPalette.amber200 : SoftPalette.teal600,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'SELECTED FROM NOTIFICATIONS',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.4,
+                          color: isDark ? SoftPalette.amber200 : SoftPalette.teal700,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      InkWell(
+                        onTap: () => RequestPage.focusRequest(null),
+                        child: Icon(
+                          Icons.close_rounded,
+                          size: 14,
+                          color: isDark ? SoftPalette.amber200 : SoftPalette.teal700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               Row(children: [
                 Expanded(
                   child: Text(
@@ -1999,10 +2284,13 @@ class _StableRequestTabState extends State<_StableRequestTab>
             original['phone']?.toString() ??
             '');
     final dobCtrl        = TextEditingController();
-    final bloodGroupCtrl = TextEditingController(
-        text: proposed['bloodGroup']?.toString() ??
+    const validBloodGroups = ['N/A', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+    final rawBgInit = (proposed['bloodGroup']?.toString() ??
             original['bloodGroup']?.toString() ??
-            'N/A');
+            'N/A')
+        .trim()
+        .toUpperCase();
+    String selectedBloodGroup = validBloodGroups.contains(rawBgInit) ? rawBgInit : 'N/A';
     String selectedStatus = proposed['status']?.toString() ??
         original['status']?.toString() ??
         'Zakat';
@@ -2010,13 +2298,13 @@ class _StableRequestTabState extends State<_StableRequestTab>
         original['gender']?.toString() ??
         'Male';
 
-    if (proposed['dob'] != null || original['dob'] != null) {
-      final date = (proposed['dob'] as Timestamp?)?.toDate() ??
-          (original['dob'] as Timestamp?)?.toDate();
-      if (date != null) {
-        dobCtrl.text = DateFormat('dd-MM-yyyy').format(date);
+    final rawPropDob = proposed['dob'] ?? proposed['dateOfBirth'] ?? original['dob'] ?? original['dateOfBirth'];
+    if (rawPropDob != null) {
+      final parsed = LocalStorageService.tryParseDob(rawPropDob);
+      if (parsed != null) {
+        dobCtrl.text = DateFormat('dd-MM-yyyy').format(parsed);
       } else {
-        dobCtrl.text = _formatDate(proposed['dob'] ?? original['dob']);
+        dobCtrl.text = _formatDate(rawPropDob);
         if (dobCtrl.text == '—') dobCtrl.text = '';
       }
     }
@@ -2113,6 +2401,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
               const SizedBox(height: 12),
               TextField(
                 controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(11),
+                ],
                 style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87),
                 decoration: InputDecoration(
                   labelText: "Phone (optional)",
@@ -2128,9 +2421,15 @@ class _StableRequestTabState extends State<_StableRequestTab>
               const SizedBox(height: 12),
               TextField(
                 controller: dobCtrl,
+                keyboardType: TextInputType.datetime,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                  LengthLimitingTextInputFormatter(10),
+                  DobInputFormatter(),
+                ],
                 style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87),
                 decoration: InputDecoration(
-                  labelText: "DOB (dd-MM-yyyy)",
+                  labelText: "Date of Birth (dd-MM-yyyy)",
                   labelStyle: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87),
                   prefixIcon:
                       Icon(Icons.cake, color: isDark ? SoftPalette.teal300 : SoftPalette.teal600),
@@ -2141,19 +2440,30 @@ class _StableRequestTabState extends State<_StableRequestTab>
                 ),
               ),
               const SizedBox(height: 12),
-              TextField(
-                controller: bloodGroupCtrl,
+              DropdownButtonFormField<String>(
+                initialValue: validBloodGroups.contains(selectedBloodGroup) ? selectedBloodGroup : 'N/A',
+                isExpanded: true,
+                dropdownColor: dialogBg,
                 style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87),
                 decoration: InputDecoration(
                   labelText: "Blood Group",
                   labelStyle: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87),
-                  prefixIcon: Icon(Icons.bloodtype,
+                  prefixIcon: Icon(Icons.bloodtype_outlined,
                       color: isDark ? SoftPalette.teal300 : SoftPalette.teal600),
                   filled: true,
                   fillColor: fieldBg,
                   enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: borderSide),
                   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: isDark ? SoftPalette.teal300 : SoftPalette.teal500)),
                 ),
+                items: validBloodGroups
+                    .map((bg) => DropdownMenuItem<String>(
+                          value: bg,
+                          child: Text(bg, style: TextStyle(color: isDark ? SoftPalette.gray50 : SoftPalette.gray900A87)),
+                        ))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) setState(() => selectedBloodGroup = v);
+                },
               ),
               const SizedBox(height: 16),
               Align(
@@ -2228,30 +2538,56 @@ class _StableRequestTabState extends State<_StableRequestTab>
               ),
               onPressed: () async {
                 DateTime? dob;
-                if (dobCtrl.text.isNotEmpty) {
-                  dob = parseDobDateTime(dobCtrl.text);
+                if (dobCtrl.text.trim().isNotEmpty) {
+                  dob = LocalStorageService.tryParseDob(dobCtrl.text.trim()) ??
+                      parseDobDateTime(dobCtrl.text.trim());
                 }
+                final trimmedName = nameCtrl.text.trim();
+                final isoDob = dob?.toIso8601String();
+                final calcAge = isoDob != null ? LocalStorageService.calculateAgeFromDob(isoDob) : null;
                 final newProposed = <String, dynamic>{
-                  'name': nameCtrl.text.trim(),
+                  'name': trimmedName,
+                  'patientName': trimmedName,
+                  'fullName': trimmedName,
                   'phone': phoneCtrl.text.trim().isNotEmpty
                       ? phoneCtrl.text.trim()
                       : null,
                   'status': selectedStatus,
-                  'bloodGroup': bloodGroupCtrl.text.trim().isNotEmpty
-                      ? bloodGroupCtrl.text.trim()
+                  'bloodGroup': selectedBloodGroup.isNotEmpty
+                      ? selectedBloodGroup
                       : 'N/A',
                   'gender': selectedGender,
+                  'patientGender': selectedGender,
                   'isAdult': !isChild,
-                  if (dob != null) 'dob': Timestamp.fromDate(dob),
+                  if (isoDob != null) 'dob': isoDob,
+                  if (isoDob != null) 'dateOfBirth': isoDob,
+                  if (calcAge != null && calcAge >= 0) 'age': calcAge,
+                  if (calcAge != null && calcAge >= 0) 'patientAge': calcAge,
                   if (isChild)  'guardianCnic': cnicCtrl.text.trim(),
                   if (!isChild) 'cnic': cnicCtrl.text.trim(),
+                  if (!isChild) 'patientCnic': cnicCtrl.text.trim(),
                 };
-                await FirebaseFirestore.instance
-                    .collection('branches')
-                    .doc(widget.branchId)
-                    .collection('edit_requests')
-                    .doc(requestId)
-                    .update({'draftData': newProposed});
+                try {
+                  if (Hive.isBoxOpen('local_edit_requests')) {
+                    final box = Hive.box('local_edit_requests');
+                    final existingReq = box.get(requestId);
+                    if (existingReq is Map) {
+                      final updReq = Map<String, dynamic>.from(existingReq);
+                      updReq['draftData'] = newProposed;
+                      await box.put(requestId, updReq);
+                    }
+                  }
+                } catch (_) {}
+                if (!LanFirestoreGate.isLanDesk) {
+                  try {
+                    await FirebaseFirestore.instance
+                        .collection('branches')
+                        .doc(widget.branchId)
+                        .collection('edit_requests')
+                        .doc(requestId)
+                        .update({'draftData': newProposed});
+                  } catch (_) {}
+                }
                 Navigator.pop(ctx);
                 AppToast.showSnackBar(context, 
                     const SnackBar(content: Text('Draft updated')));
@@ -2430,6 +2766,22 @@ class _StableRequestTabState extends State<_StableRequestTab>
         final collection = doc.reference.parent.id;
         final docId = doc.id;
 
+        // Decided meanwhile (another PC, or earlier in this list): skip, never re-run.
+        String localStatus = (data['status'] ?? 'pending').toString().toLowerCase();
+        for (final boxName in ['local_edit_requests', LocalStorageService.restockRequestsBox]) {
+          if (!Hive.isBoxOpen(boxName)) continue;
+          final raw = Hive.box(boxName).get(docId);
+          if (raw is Map) {
+            localStatus = (raw['status'] ?? localStatus).toString().toLowerCase();
+            break;
+          }
+        }
+        if (localStatus == 'approved' || localStatus == 'rejected') continue;
+        if (requestType == 'token_reversal' && _reversalBlockedReason(data) != null) {
+          errorCount++;
+          continue;
+        }
+
         await _processSingleDocApproval(
           docId: docId,
           data: data,
@@ -2464,6 +2816,28 @@ class _StableRequestTabState extends State<_StableRequestTab>
         ),
       );
     }
+  }
+
+  /// Why a token reversal may not be approved now, or null. Only a token still waiting for
+  /// the doctor can be reversed: a late approval used to delete a prescribed or dispensed
+  /// token on every PC (stock not returned, prescription left in the cloud).
+  String? _reversalBlockedReason(Map<String, dynamic> data) {
+    final serial = (data['tokenSerial'] ?? data['tokenId'])?.toString() ?? '';
+    if (serial.isEmpty) return null;
+    final branch = (data['branchId']?.toString().isNotEmpty == true) ? data['branchId'].toString() : widget.branchId;
+    final entry = LocalStorageService.getLocalEntry(branch, serial);
+    if (entry == null) return null;
+    final ds = (entry['dispenseStatus'] ?? '').toString().toLowerCase();
+    final st = (entry['status'] ?? '').toString().toLowerCase();
+    if (ds == 'dispensed' || st == 'dispensed') {
+      return 'Token $serial has already been dispensed, so it cannot be reversed.';
+    }
+    final rx = entry['prescription'];
+    final hasOwnRx = rx is Map && rx.isNotEmpty && LocalStorageService.prescriptionFitsToken(rx, entry);
+    if (hasOwnRx || st == 'prescribed') {
+      return 'The doctor has already prescribed for token $serial, so it cannot be reversed.';
+    }
+    return null;
   }
 
   Future<void> _processSingleDocApproval({
@@ -2511,9 +2885,14 @@ class _StableRequestTabState extends State<_StableRequestTab>
         ? data['branchId'].toString()
         : ((widget.branchId.isNotEmpty && widget.branchId != 'all' && widget.branchId != 'global') ? widget.branchId : 'gujrat');
 
+    // A desk linked to the LAN does not upload: the LAN server uploads the decision once from
+    // the request_approved message below (kept in the outbox until the server confirms).
+    // Direct write + queue + server made up to three cloud writes per approval.
+    final uploadsHere = !LanFirestoreGate.isLanDesk;
+
     // Only the branch doc the request lives in (writing to every alias made empty docs).
     final candidateBranches = {_cloudBranchOf[docId] ?? targetBranch};
-    for (final bId in candidateBranches) {
+    for (final bId in uploadsHere ? candidateBranches : const <String>{}) {
       try {
         final ref = CloudDb.instance
             .collection('branches')
@@ -2533,8 +2912,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
       }
     }
 
-    // Always enqueue in offline sync queue so it persists and is pushed to cloud
-    await LocalStorageService.enqueueSync({
+    // Offline sync queue so it persists and is pushed to cloud (not on a LAN desk, see above)
+    if (uploadsHere) await LocalStorageService.enqueueSync({
       'type': 'update_request_status',
       'requestId': docId,
       'id': docId,
@@ -2584,38 +2963,53 @@ class _StableRequestTabState extends State<_StableRequestTab>
         return;
       }
 
+      // The request's own branch (this page can be open for "all" branches).
+      final rb = data['branchId']?.toString().trim() ?? '';
+      final peBranch = (rb.isNotEmpty && rb != 'all' && rb != 'global') ? rb : widget.branchId;
       final patientsRef = FirebaseFirestore.instance
           .collection('branches')
-          .doc(widget.branchId)
+          .doc(peBranch)
           .collection('patients');
 
-      await _bestEffort(patientsRef.doc(patientId).update(toApply), 'patient update');
-
+      String migratedKey = patientId;
+      Map<String, dynamic> appliedPatient = {
+        ...toApply,
+        'branchId': peBranch,
+        'reason': data['reason']?.toString() ?? docReason ?? 'Patient Edit Request Approved',
+        if (reviewerName != null) 'approvedBy': reviewerName,
+      };
       try {
-        if (Hive.isBoxOpen(LocalStorageService.patientsBox)) {
-          final box = Hive.box(LocalStorageService.patientsBox);
-          final existing = box.get('patient:$patientId') ?? box.get(patientId);
-          if (existing is Map) {
-            final updated = Map<String, dynamic>.from(existing)..addAll(toApply);
-            LocalStorageService.saveLocalPatient(updated, isFromSync: true);
-          } else {
-            LocalStorageService.saveLocalPatient(toApply, isFromSync: true);
-          }
-        } else {
-          LocalStorageService.saveLocalPatient(toApply, isFromSync: true);
-        }
-        await LocalStorageService.updateActiveEntriesForPatient(widget.branchId, patientId, toApply);
+        migratedKey = await LocalStorageService.updatePatientWithCnicMigration(
+          oldPatientId: patientId,
+          updatedPatient: appliedPatient,
+          isFromSync: LanFirestoreGate.isLanDesk,
+        );
+        appliedPatient = LocalStorageService.getLocalPatient(migratedKey) ?? appliedPatient;
       } catch (e) {
         debugPrint('Hive patient update error: $e');
       }
 
+      // On a LAN desk the server applies and uploads it (from the message below).
+      if (!LanFirestoreGate.isLanDesk) {
+        final cloudPayload = LocalStorageService.sanitize(appliedPatient);
+        await _bestEffort(
+          patientsRef.doc(migratedKey).set(cloudPayload, SetOptions(merge: true)),
+          'patient update',
+        );
+        if (migratedKey != patientId) {
+          await _bestEffort(patientsRef.doc(patientId).delete(), 'old patient key cleanup');
+        }
+      }
+
       try {
-        final sanitizedChanges = LocalStorageService.sanitize(toApply);
+        final sanitizedChanges = LocalStorageService.sanitize(appliedPatient);
         RealtimeManager().sendMessage({
           'event_type': 'patient_edit_approved',
+          'branchId': peBranch,
           'data': {
-            'branchId': widget.branchId,
+            'branchId': peBranch,
             'patientId': patientId,
+            'newPatientId': migratedKey,
             'changes': sanitizedChanges,
           },
         });
@@ -2637,12 +3031,21 @@ class _StableRequestTabState extends State<_StableRequestTab>
               ? 'gmwf'
               : 'zakat';
 
-      final parts = tokenSerial.split('-');
-      final dateKey = (parts.isNotEmpty && parts[0].toUpperCase() == 'X')
-          ? (parts.length > 1 ? parts[1] : '')
-          : (parts.isNotEmpty ? parts[0] : '');
+      // The day only (no session letter), and the token's own camp document: the cloud stores
+      // tokens under serials/{date}_{camp} in camp branches. Deleting serials/{201126M} hit no
+      // document, so the server downloaded the reversed token back as "waiting".
+      final dateKey = CampSessionService.getDateKeyFromSerial(tokenSerial);
+      final tokenEntry = LocalStorageService.getLocalEntry(widget.branchId, tokenSerial);
+      final campDocKey = CampSessionService.getCampDateDocId(
+        branchId: widget.branchId,
+        dateKey: dateKey,
+        campId: (tokenEntry?['campId'] ?? tokenEntry?['dispensaryId'] ?? data['campId'] ?? data['dispensaryId'])?.toString(),
+        dispensaryTag: (tokenEntry?['dispensaryTag'] ?? data['dispensaryTag'])?.toString(),
+        serial: tokenSerial,
+      );
 
       // Local delete + LAN broadcast FIRST so the token reverses instantly everywhere.
+      await LocalStorageService.markSerialReversed(widget.branchId, tokenSerial);
       await LocalStorageService.deleteLocalEntry(widget.branchId, tokenSerial);
       await LocalStorageService.enqueueSync({
         'type': 'token_reversal',
@@ -2651,15 +3054,17 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'dateKey': dateKey,
         'data': {
           'tokenSerial': tokenSerial,
+          'serial': tokenSerial,
           'queueType': queueCollection,
           'dateKey': dateKey,
+          'campDocKey': campDocKey,
         },
       });
       unawaited(_bestEffort(FirebaseFirestore.instance
           .collection('branches')
           .doc(widget.branchId)
           .collection('serials')
-          .doc(dateKey)
+          .doc(campDocKey)
           .collection(queueCollection)
           .doc(tokenSerial)
           .delete(), 'token delete'));
@@ -2670,8 +3075,10 @@ class _StableRequestTabState extends State<_StableRequestTab>
           'data': {
             'branchId':    widget.branchId,
             'tokenSerial': tokenSerial,
+            'serial':      tokenSerial,
             'queueType':   queueCollection,
             'dateKey':     dateKey,
+            'campDocKey':  campDocKey,
           },
         });
       } catch (e) {
@@ -2693,7 +3100,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
           ? _safeItemList(data['draftItems'])
           : _safeItemList(data['items']);
       if (itemsToUse.isNotEmpty) {
-        await _handleEditMedicine(itemsToUse, reviewerUid ?? '', reviewerName, campId: reqCampId);
+        final orig = data['originalData'];
+        await _handleEditMedicine(itemsToUse, reviewerUid ?? '', reviewerName,
+            campId: reqCampId,
+            requestId: docId,
+            originalQty: orig is Map ? orig['quantity'] : null);
       }
     }
     else if (requestType == 'delete_medicine') {
@@ -2703,6 +3114,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
       if (itemsToUse.isNotEmpty) {
         await _handleDeleteMedicine(itemsToUse, campId: reqCampId);
       }
+    }
+    else if (requestType == ExpiryService.requestType) {
+      // Expired-batch removal / expiry fix asked by a dispenser (Med Inventory › Expiry).
+      await ExpiryService.applyRequestItems({...data, 'requestId': docId},
+          approvedBy: reviewerName ?? LocalStorageService.getActiveUsername());
     }
     else if (requestType == 'change_prescription') {
       final itemsToUse = _safeItemList(data['draftItems']).isNotEmpty
@@ -2788,11 +3204,10 @@ class _StableRequestTabState extends State<_StableRequestTab>
             );
           }
 
-          unawaited(_bestEffort(FirebaseFirestore.instance
-              .collection('branches')
-              .doc(widget.branchId)
-              .collection('inventory_log')
-              .add({
+          // Local + LAN + cloud (once, by id) — was a direct cloud write that a LAN desk
+          // never sent and that no other PC could see.
+          unawaited(StockLog.record({
+            'id': 'log_req_${docId}_$id',
             'action': 'medicine_registered',
             'medicineName': name,
             'medicineType': type,
@@ -2802,11 +3217,12 @@ class _StableRequestTabState extends State<_StableRequestTab>
             'expiryDate': exp,
             'performedBy': reviewerUid,
             'performedByName': reviewerName ?? 'Supervisor',
-            'timestamp': FieldValue.serverTimestamp(),
-            'docId': id,
+            'medicineId': id,
+            'pool': regPool?.key ?? '',
             'approvedRequestId': docId,
+            'branchId': widget.branchId,
             if (reqCampId != null) 'dispensaryId': reqCampId,
-          }), 'inventory log'));
+          }));
         }
       }
     }
@@ -2839,6 +3255,29 @@ class _StableRequestTabState extends State<_StableRequestTab>
       if (raw is Map) data = Map<String, dynamic>.from(raw);
     }
 
+    // Already decided (on another PC, or from a list captured before that decision): a second
+    // approve/reject used to overwrite it and run the stock changes again.
+    final currentStatus = (data['status'] ?? 'pending').toString().toLowerCase().trim();
+    if (currentStatus == 'approved' || currentStatus == 'rejected') {
+      if (mounted) {
+        final by = (data['approvedByName'] ?? data['reviewedByName'] ?? data['approvedBy'] ?? data['reviewedBy'] ?? '').toString();
+        AppToast.showSnackBar(context, SnackBar(
+          content: Text('This request was already $currentStatus${by.isNotEmpty ? ' by $by' : ''}.'),
+          duration: const Duration(seconds: 3),
+        ));
+      }
+      return;
+    }
+    if (newStatus == 'approved' && requestType == 'token_reversal') {
+      final blocked = _reversalBlockedReason(data.isNotEmpty ? data : {});
+      if (blocked != null) {
+        if (mounted) {
+          AppToast.showSnackBar(context, SnackBar(content: Text(blocked), duration: const Duration(seconds: 5)));
+        }
+        return;
+      }
+    }
+
     final targetBranch = (data['branchId']?.toString().isNotEmpty == true && data['branchId'] != 'all' && data['branchId'] != 'global')
         ? data['branchId'].toString()
         : ((widget.branchId.isNotEmpty && widget.branchId != 'all' && widget.branchId != 'global') ? widget.branchId : 'gujrat');
@@ -2869,6 +3308,30 @@ class _StableRequestTabState extends State<_StableRequestTab>
             data = snap.data() as Map<String, dynamic>;
           }
         } catch (_) {}
+      }
+
+      // Inventory requests: the decision itself goes in the inventory log (one entry per
+      // request, so deciding on two PCs never logs twice).
+      final rt = requestType.toLowerCase();
+      if (rt.contains('medicine') || rt.contains('stock') || rt.contains('inventory') || rt.contains('restock')) {
+        final first = _safeItemList(data['draftItems']).isNotEmpty
+            ? _safeItemList(data['draftItems']).first
+            : (_safeItemList(data['items']).isNotEmpty ? _safeItemList(data['items']).first : const <String, dynamic>{});
+        unawaited(StockLog.record({
+          'id': 'log_decision_$docId',
+          'action': newStatus == 'approved' ? 'request_approved' : 'request_rejected',
+          'requestId': docId,
+          'requestType': requestType,
+          'medicineName': first['name'] ?? (data['originalData'] is Map ? data['originalData']['name'] : null) ?? '',
+          'medicineType': first['type'] ?? '',
+          'dose': first['dose'] ?? '',
+          'requestedByName': data['requestedByName'] ?? data['requesterName'] ?? '',
+          'reason': data['reason'] ?? '',
+          if (docReason != null) 'decisionReason': docReason,
+          'performedBy': reviewerUid,
+          'performedByName': reviewerName ?? LocalStorageService.getActiveUsername(),
+          'branchId': targetBranch,
+        }));
       }
 
       if (newStatus == 'approved') {
@@ -2912,9 +3375,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
           await box.put(docId, updated);
         }
 
+        // A LAN desk does not upload: the server does, once, from request_rejected.
+        final uploadsHere = !LanFirestoreGate.isLanDesk;
         // Only the branch doc the request lives in (writing to every alias made empty docs).
         final candidateBranches = {_cloudBranchOf[docId] ?? targetBranch};
-        for (final bId in candidateBranches) {
+        for (final bId in uploadsHere ? candidateBranches : const <String>{}) {
           try {
             final targetRef = CloudDb.instance
                 .collection('branches')
@@ -2935,8 +3400,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
           }
         }
 
-        // Always enqueue in offline sync queue so rejection is persisted
-        await LocalStorageService.enqueueSync({
+        // Offline sync queue so the rejection is persisted (not on a LAN desk, see above)
+        if (uploadsHere) await LocalStorageService.enqueueSync({
           'type': 'update_request_status',
           'requestId': docId,
           'id': docId,
@@ -3051,6 +3516,10 @@ class _StableRequestTabState extends State<_StableRequestTab>
 
       final warehouseSnap = await warehouse.doc(warehouseId).get().timeout(const Duration(seconds: 5));
 
+      final barcode = (item['barcode'] ?? item['rollNo'] ?? '').toString().trim();
+      final itemCode = (item['code'] ?? item['itemCode'] ?? '').toString().trim();
+      final packBarcode = (item['packBarcode'] ?? '').toString().trim();
+
       final commonFields = <String, dynamic>{
         'name':           name,
         'name_lower':     nameLower,
@@ -3061,6 +3530,11 @@ class _StableRequestTabState extends State<_StableRequestTab>
         'price':          price,
         'quantity':       qty,
         'expiryDate':     expiry,
+        if (barcode.isNotEmpty) 'barcode': barcode,
+        if (barcode.isNotEmpty) 'rollNo': barcode,
+        if (itemCode.isNotEmpty) 'code': itemCode,
+        if (itemCode.isNotEmpty) 'itemCode': itemCode,
+        if (packBarcode.isNotEmpty) 'packBarcode': packBarcode,
         if (campId != null && campId.isNotEmpty) 'dispensaryId': campId,
         if (campId != null && campId.isNotEmpty) 'dispensaryTag': CampSessionService.getDispensaryKeyword(campId),
       };
@@ -3141,7 +3615,8 @@ class _StableRequestTabState extends State<_StableRequestTab>
   }
 
   Future<void> _handleEditMedicine(
-      List<Map<String, dynamic>> items, String reviewerUid, String? reviewerName, {String? campId}) async {
+      List<Map<String, dynamic>> items, String reviewerUid, String? reviewerName,
+      {String? campId, String? requestId, Object? originalQty}) async {
     if (items.isEmpty) return;
 
     for (final item in items) {
@@ -3212,32 +3687,54 @@ class _StableRequestTabState extends State<_StableRequestTab>
       final details = Map<String, dynamic>.from(newData)
         ..remove('quantity')
         ..remove('updatedAt');
+      // Only the change the requester typed (new − figure shown when they asked), once per
+      // request. Setting the absolute figure undid every dispense made while the request
+      // waited: asked at 100 (price only), 30 dispensed, approved → shelf back to 100.
+      final o = originalQty is num
+          ? originalQty.toDouble()
+          : double.tryParse(originalQty?.toString() ?? '');
+      final requestedChange = o == null ? null : qty.toDouble() - o;
       if (cleanOldId.isNotEmpty && cleanOldId == newId) {
         await StockActions.saveDetails(editPool, newId, details);
-        await StockActions.setCounted(editPool, newId, qty.toDouble(), reason: 'edit approved');
+        if (requestedChange != null) {
+          await StockActions.countDifference(editPool, newId, requestedChange,
+              name: name, reason: 'edit approved', opKey: 'edit-${requestId ?? '$cleanOldId-$newId'}');
+        } else {
+          // Old requests without the original figure: as before.
+          await StockActions.setCounted(editPool, newId, qty.toDouble(), reason: 'edit approved');
+        }
       } else {
+        // The old batch's stock as it is now (dispenses since the request kept), plus the change.
+        double carry = qty.toDouble();
+        if (requestedChange != null && cleanOldId.isNotEmpty) {
+          final oldItem = StockLedger.item(editPool.key, cleanOldId);
+          final now = oldItem == null ? 0.0 : StockReader.qty(oldItem);
+          carry = now + requestedChange;
+          if (carry < 0) carry = 0;
+        }
         if (cleanOldId.isNotEmpty) await StockActions.deleteBatch(editPool, cleanOldId);
         await StockActions.addBatch(editPool, newId, details,
-            initialQty: qty.toDouble(), ref: 'edit approved', opKey: 'edit-$cleanOldId-$newId');
+            initialQty: carry, ref: 'edit approved',
+            opKey: 'edit-${requestId ?? ''}-$cleanOldId-$newId');
       }
 
-      // Add to log
-      FirebaseFirestore.instance
-          .collection('branches')
-          .doc(widget.branchId)
-          .collection('inventory_log')
-          .add({
+      // Add to log (local + LAN + cloud once by id)
+      unawaited(StockLog.record({
+        'id': 'log_edit_${requestId ?? DateTime.now().millisecondsSinceEpoch}_$newId',
         'action': 'medicine_edited',
         'medicineName': name,
         'medicineType': type,
         'dose': dose,
         'oldId': oldId,
         'newId': newId,
+        'medicineId': newId,
+        'pool': editPool.key,
+        'approvedRequestId': requestId,
         'performedBy': reviewerUid,
         'performedByName': reviewerName ?? 'Supervisor',
-        'timestamp': FieldValue.serverTimestamp(),
+        'branchId': widget.branchId,
         if (campId != null) 'dispensaryId': campId,
-      });
+      }));
     }
   }
 
@@ -3261,7 +3758,22 @@ class _StableRequestTabState extends State<_StableRequestTab>
       // Hidden everywhere (this PC, LAN, cloud) through the stock book; history is kept.
       final delPool = StockPool.of(widget.branchId, campId,
           fallbackCamp: CampSessionService.getActiveCamp(widget.branchId));
-      if (delPool != null) await StockActions.deleteBatch(delPool, id);
+      if (delPool != null) {
+        await StockActions.deleteBatch(delPool, id);
+        unawaited(StockLog.record({
+          'id': 'log_del_${delPool.key.replaceAll('/', '_')}_$id',
+          'action': 'remove_medicine',
+          'medicineName': name,
+          'medicineType': type,
+          'dose': dose,
+          'expiryDate': expiry,
+          'medicineId': id,
+          'pool': delPool.key,
+          'reason': (item['reason'] ?? 'approved delete request').toString(),
+          'branchId': widget.branchId,
+          if (campId != null) 'dispensaryId': campId,
+        }));
+      }
     }
   }
 

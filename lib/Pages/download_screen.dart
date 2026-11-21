@@ -2285,7 +2285,11 @@ class _DownloadScreenState extends State<DownloadScreen>
             vertical: 40, horizontal: 24),
         decoration: _cardDecor(t),
         child: Column(children: [
-          Icon(Icons.tune_rounded, size: 44, color: t.textTertiary),
+          const GEmptyIllustration(
+            GEmptyIllustrationKind.general,
+            size: 136,
+            fallbackIcon: Icons.tune_rounded,
+          ),
           const SizedBox(height: 14),
           Text(
             _selectedBranch == null

@@ -12,12 +12,14 @@ import 'package:gmwf/services/local_storage_service.dart';
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/services/camp_session_service.dart';
 import 'package:gmwf/services/master_proforma_service.dart';
+import 'package:gmwf/services/stock/expiry_rules.dart';
+import 'package:gmwf/services/stock/stock_log.dart';
 import 'package:gmwf/services/stock/stock_actions.dart';
 import 'package:gmwf/services/stock/stock_ledger.dart';
 import 'package:gmwf/services/stock/stock_pool.dart';
 import 'package:gmwf/services/stock/stock_reader.dart';
 import 'package:gmwf/utils/string_similarity_helper.dart';
-import 'package:gmwf/pages/dispensary/dispensar/universal_proforma_sheet.dart';
+import 'package:gmwf/pages/dispensary/dispensar/add_medicine_page.dart';
 import 'package:gmwf/pages/request.dart';
 import 'package:gmwf/realtime/realtime_manager.dart';
 import 'package:gmwf/realtime/realtime_events.dart';
@@ -25,6 +27,8 @@ import 'package:gmwf/widgets/app_back_button.dart';
 import 'package:gmwf/widgets/camp_selector_chip.dart';
 import 'package:gmwf/services/cloud_messaging_service.dart';
 import 'package:gmwf/widgets/app_feedback.dart';
+import 'package:gmwf/pages/dispensary/widgets/medicine_icon_badge.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GIcons;
 
 class InventoryUpdatePage extends StatefulWidget {
   final String branchId;
@@ -65,6 +69,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   // ── Add Stock state ───────────────────────────────────────────────────────
   final _searchCtrl = TextEditingController();
   bool _isSearching = false;
+  List<Map<String, dynamic>> _allConsolidatedMeds = [];
   List<Map<String, dynamic>> _searchResults = [];
   bool _hasSearched = false;
   Map<String, dynamic>? _selectedMed;
@@ -74,6 +79,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   late String _currentBranchId;
   String _selectedCampFilter = 'all';
   String _selectedTypeFilter = 'All';
+  String _stockStatusFilter = 'all'; // 'all', 'low', 'in_stock'
 
   String get _effectiveBranchId =>
       CampSessionService.isKarachiFamily(_currentBranchId) ? 'karachi' : _currentBranchId;
@@ -188,16 +194,11 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   /// Sends an audit entry to the cloud inventory_log (Medicine Ledger history). Stock
   /// figures themselves travel as stock-book movements, never through this.
   Future<void> _uploadInventoryLog(Map<String, dynamic> logData) async {
-    try {
-      await LocalStorageService.enqueueSync({
-        'type': 'save_inventory_log',
-        'branchId': _effectiveBranchId,
-        'data': logData,
-      });
-      SyncService().triggerUpload();
-    } catch (e) {
-      debugPrint('[InventoryUpdate] inventory log upload queue failed: $e');
-    }
+    // The entry is already saved locally (saveLocalInventoryLog gave it its id). StockLog
+    // sends it over the LAN to every PC; the LAN server / a standalone PC uploads it.
+    logData['branchId'] ??= _effectiveBranchId;
+    await StockLog.share(logData);
+    SyncService().triggerUpload();
   }
 
   /// Pool of a listed record (its own `pool`), else the pool of [camp] in this branch.
@@ -490,7 +491,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     try {
       final userInfo = await _getUserInfo();
 
-      if (widget.isAdmin || widget.isDoctor) {
+      if (!_editNeedsApproval) {
         final docId = (originalMed['_docId'] ?? originalMed['id'] ?? originalMed['medicineId'])?.toString();
         if (docId != null && docId.isNotEmpty) {
           // Stock book: details via saveDetails (never quantity); a changed quantity is
@@ -502,7 +503,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             return;
           }
           final details = Map<String, dynamic>.from(updatedFields)
-            ..removeWhere((k, _) => const {'quantity', 'stock', '_quantityDelta', 'pool', 'id', 'medicineId', '_docId', '_docIds'}.contains(k));
+            ..removeWhere((k, _) => const {'quantity', 'stock', '_quantityDelta', 'pool', 'id', 'medicineId', '_docId', '_docIds', 'reason'}.contains(k));
           await StockActions.saveDetails(pool, docId, details);
           if (updatedFields.containsKey('quantity')) {
             final newQ = updatedFields['quantity'];
@@ -518,6 +519,10 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             'action': 'edit_medicine_directly',
             'medicineName': originalMed['name'],
             'medicineId': docId,
+            'pool': pool.key,
+            'expiryBefore': originalMed['expiryDate'],
+            'quantityBefore': originalMed['quantity'],
+            'reason': updatedFields['reason'] ?? '',
             'updatedFields': updatedFields,
             'performedBy': userInfo['uid'],
             'performedByName': userInfo['username'],
@@ -525,7 +530,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             'timestamp': DateTime.now().toIso8601String(),
             'createdAt': DateTime.now().toIso8601String(),
           };
-          LocalStorageService.saveLocalInventoryLog(logData);
+          await LocalStorageService.saveLocalInventoryLog(logData);
           await _uploadInventoryLog(logData);
 
           _snack('Medicine updated successfully!');
@@ -583,6 +588,22 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       };
 
       await LocalStorageService.saveLocalEditRequest(reqMap);
+      unawaited(StockLog.record({
+        'action': 'edit_requested',
+        'requestId': requestId,
+        'medicineName': originalMed['name'],
+        'medicineType': originalMed['type'],
+        'dose': originalMed['dose'],
+        'medicineId': originalMed['_docId'] ?? originalMed['id'],
+        'pool': originalMed['pool'],
+        'expiryDate': originalMed['expiryDate'],
+        'quantityBefore': originalMed['quantity'],
+        'reason': updatedFields['reason'] ?? '',
+        'performedBy': userInfo['uid'],
+        'performedByName': userInfo['username'],
+        'branchId': widget.branchId,
+        'campId': activeCamp,
+      }));
       await LocalStorageService.enqueueSync({
         'type': 'save_inventory_edit_request',
         'branchId': widget.branchId,
@@ -646,18 +667,36 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
-  IconData _typeIcon(String t) => switch (t) {
-        'Tablet' => FontAwesomeIcons.tablets,
-        'Capsule' => FontAwesomeIcons.capsules,
-        'Syrup' => FontAwesomeIcons.bottleDroplet,
-        'Injection' => FontAwesomeIcons.syringe,
-        'Drip' => FontAwesomeIcons.bottleDroplet,
-        'Drip Set' => FontAwesomeIcons.kitMedical,
-        'Syringe' => FontAwesomeIcons.syringe,
-        'Cannula' => FontAwesomeIcons.kitMedical,
-        'Needle' => FontAwesomeIcons.syringe,
-        'Nebulization' => FontAwesomeIcons.wind,
-        _ => FontAwesomeIcons.pills,
+  static const List<String> _primaryTypeFilters = [
+    'All',
+    'Tablet',
+    'Capsule',
+    'Syrup',
+    'Injection',
+    'Infusion',
+    'Dressing Item',
+    'Nebulization',
+    'Syringe',
+    'Consumables',
+    'Others',
+  ];
+
+  IconData _typeIcon(String t) => switch (t.trim()) {
+        'All' => Icons.grid_view_rounded,
+        'Tablet' => Icons.medication_rounded,
+        'Capsule' => Icons.local_pharmacy_rounded,
+        'Syrup' => Icons.medication_liquid_rounded,
+        'Injection' => Icons.vaccines_rounded,
+        'Infusion' => Icons.water_drop_rounded,
+        'Drip' => Icons.water_drop_rounded,
+        'Drip Set' => Icons.cable_rounded,
+        'Syringe' => Icons.colorize_rounded,
+        'Cannula' => Icons.medical_information_rounded,
+        'Needle' => Icons.colorize_rounded,
+        'Nebulization' => Icons.air_rounded,
+        'Dressing Item' => Icons.healing_rounded,
+        'Consumables' => Icons.health_and_safety_rounded,
+        _ => Icons.medical_services_rounded,
       };
 
   bool _isLowStock(int qty, String? type) {
@@ -758,12 +797,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         final docId = (d['medicineId'] ?? d['id'])?.toString().trim();
         final itemCamp = (d['pool'] ?? '').toString();
 
-        // Filter by Type category if selected
-        final itemType = (d['type'] ?? '').toString();
-        if (_selectedTypeFilter != 'All' && itemType.toLowerCase() != _selectedTypeFilter.toLowerCase()) {
-          return;
-        }
-
         final expiry = (d['expiryDate'] ?? '').toString().trim();
         String monthYear = '';
         if (expiry.length == 10 && expiry[2] == '-' && expiry[5] == '-') {
@@ -796,12 +829,16 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         processItem(item);
       }
 
+      final allSorted = consolidated.values.toList()
+        ..sort((a, b) => (a['name'] ?? '')
+            .toString()
+            .toLowerCase()
+            .compareTo((b['name'] ?? '').toString().toLowerCase()));
+
       if (mounted) {
         setState(() {
-          _searchResults = consolidated.values.toList()
-            ..sort((a, b) => (a['name'] ?? '').toString()
-                .toLowerCase()
-                .compareTo((b['name'] ?? '').toString().toLowerCase()));
+          _allConsolidatedMeds = allSorted;
+          _searchResults = _filterConsolidatedMedicines(allSorted);
           _isSearching = false;
           _hasSearched = true;
         });
@@ -812,68 +849,68 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     }
   }
 
+  bool _matchesTypeCategory(String itemType, String selectedFilter) {
+    final filter = selectedFilter.trim().toLowerCase();
+    if (filter.isEmpty || filter == 'all') return true;
+    final cleanType = itemType.trim().toLowerCase();
+    if (filter == 'others') {
+      if (cleanType == 'others' || cleanType.isEmpty) return true;
+      final explicitTabs = _primaryTypeFilters
+          .where((t) => t != 'All' && t != 'Others')
+          .map((t) => t.toLowerCase())
+          .toSet();
+      return !explicitTabs.contains(cleanType);
+    }
+    if (filter == 'infusion' && (cleanType == 'infusion' || cleanType == 'drip')) {
+      return true;
+    }
+    return cleanType == filter;
+  }
+
+  List<Map<String, dynamic>> _filterConsolidatedMedicines(List<Map<String, dynamic>> source) {
+    final q = _searchCtrl.text.toLowerCase().trim();
+    final qNum = int.tryParse(q);
+
+    return source.where((item) {
+      final itemType = (item['type'] ?? 'Tablet').toString();
+      if (!_matchesTypeCategory(itemType, _selectedTypeFilter)) {
+        return false;
+      }
+
+      final qty = _safeInt(item['quantity']);
+      final lowStock = _isLowStock(qty, itemType);
+      if (_stockStatusFilter == 'low' && !lowStock) return false;
+      if (_stockStatusFilter == 'in_stock' && (qty <= 0 || lowStock)) return false;
+
+      if (q.isEmpty) return true;
+
+      final name = (item['name'] ?? '').toString().toLowerCase();
+      final formula = (item['formula'] ?? '').toString().toLowerCase();
+      final dose = (item['dose'] ?? '').toString().toLowerCase();
+      final barcode = (item['barcode'] ?? item['rollNo'] ?? item['code'] ?? '').toString().toLowerCase();
+      final packBarcode = (item['packBarcode'] ?? '').toString().toLowerCase();
+      final bNum = int.tryParse(barcode);
+      final numMatch = qNum != null && bNum != null && qNum == bNum;
+
+      return name.contains(q) ||
+          formula.contains(q) ||
+          dose.contains(q) ||
+          barcode.contains(q) ||
+          packBarcode.contains(q) ||
+          numMatch;
+    }).toList();
+  }
+
   // ── Search (filters the persistent list) ─────────────────────────────────
-  void _searchMedicine(String query) async {
-    if (_selectedMed != null) {
-      setState(() {
+  void _searchMedicine(String query) {
+    setState(() {
+      if (_selectedMed != null) {
         _selectedMed = null;
         _selectedDocId = null;
-      });
-    }
-
-    if (query.trim().isEmpty) {
-      _loadAllMedicines();
-      return;
-    }
-
-    setState(() => _isSearching = true);
-    try {
-      final Map<String, Map<String, dynamic>> seen = {};
-      final q = query.toLowerCase().trim();
-
-      void processDoc(Map<String, dynamic> d, String docId) {
-        final itemCamp = (d['pool'] ?? '').toString();
-
-        final itemType = (d['type'] ?? '').toString();
-        if (_selectedTypeFilter != 'All' && itemType.toLowerCase() != _selectedTypeFilter.toLowerCase()) {
-          return;
-        }
-
-        final key = '${d['name']}|${d['type']}|${d['dose']}|$itemCamp';
-        if (!seen.containsKey(key)) {
-          seen[key] = {...d, '_docId': docId};
-        } else {
-          seen[key]!['quantity'] =
-              (seen[key]!['quantity'] ?? 0) + (d['quantity'] ?? 0);
-        }
       }
-
-      // Stock book batches of the selected pool(s) (works offline immediately)
-      final localItems = _ledgerItems();
-      for (final item in localItems) {
-        final name = (item['name'] ?? '').toString().toLowerCase();
-        final barcode = (item['barcode'] ?? item['code'] ?? '').toString().toLowerCase();
-        final packBarcode = (item['packBarcode'] ?? '').toString().toLowerCase();
-        final formula = (item['formula'] ?? '').toString().toLowerCase();
-        final qNum = int.tryParse(q);
-        final bNum = int.tryParse(barcode);
-        final numMatch = qNum != null && bNum != null && qNum == bNum;
-        if (name.contains(q) || barcode.contains(q) || packBarcode.contains(q) || formula.contains(q) || numMatch) {
-          final docId = (item['medicineId'] ?? item['id'])?.toString() ?? '';
-          processDoc(item, docId);
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _searchResults = seen.values.toList();
-          _isSearching = false;
-          _hasSearched = true;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _isSearching = false);
-    }
+      _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+      _hasSearched = true;
+    });
   }
 
   void _selectMedForStock(Map<String, dynamic> med) {
@@ -981,7 +1018,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'The medicine formula "${profFormula.isNotEmpty ? profFormula : profName}" ($type) is already registered in our Universal  Catalog!',
+                'The medicine formula "${profFormula.isNotEmpty ? profFormula : profName}" ($type) is already registered in our Medicine Catalog!',
                 style: TextStyle(fontWeight: FontWeight.bold, color: context.adapt(_textDark)),
               ),
               const SizedBox(height: 8),
@@ -989,7 +1026,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 Text('Catalog Code: $profCode', style: TextStyle(fontSize: 13, color: context.adapt(_textMid))),
               const SizedBox(height: 12),
               const Text(
-                'Duplicate registration is blocked. Please select this medicine from the Universal  Sheet instead.',
+                'Duplicate registration is blocked. Please select this medicine from Add Medicine instead.',
                 style: TextStyle(fontSize: 13, color: _red, fontWeight: FontWeight.w500),
               ),
             ],
@@ -1009,7 +1046,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => UniversalProformaSheetPage(
+                    builder: (context) => AddMedicinePage(
                       branchId: widget.branchId,
                       isDispenser: widget.isDispenser,
                       isAdmin: widget.isAdmin,
@@ -1017,8 +1054,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                   ),
                 );
               },
-              icon: const Icon(FontAwesomeIcons.fileExcel, size: 14, color: SoftPalette.gray50),
-              label: const Text('Open  Sheet', style: TextStyle(color: SoftPalette.gray50)),
+              icon: const Icon(Icons.playlist_add_rounded, size: 16, color: SoftPalette.gray50),
+              label: const Text('Open Add Medicine', style: TextStyle(color: SoftPalette.gray50)),
             ),
           ],
         ),
@@ -1147,7 +1184,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final name = _regNameCtrl.text.trim();
     final reason = _regReasonCtrl.text.trim();
     if (reason.isEmpty) {
-      _snack('A mandatory reason is required to register a medicine into Master Proforma!', err: true);
+      _snack('A mandatory reason is required to register a medicine into the Medicine Catalog!', err: true);
       return;
     }
 
@@ -1156,11 +1193,11 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         ? MasterProformaService.getNextRollNumber()
         : MasterProformaService.normalizeProformaBarcode(rawProformaBarcode);
     if (proformaBarcode == null) {
-      _snack('Proforma Barcode must be a 3-digit number from 001 to 999', err: true);
+      _snack('Barcode must be a 3-digit number from 001 to 999', err: true);
       return;
     }
     if (MasterProformaService.findExactBarcodeMatch(proformaBarcode) != null) {
-      _snack('Proforma Barcode $proformaBarcode is already assigned to another medicine', err: true);
+      _snack('Barcode $proformaBarcode is already assigned to another medicine', err: true);
       return;
     }
     final packBarcode = _regPackBarcodeCtrl.text.trim();
@@ -1194,6 +1231,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'dose': dose,
         'defaultPrice': 0.0,
         'expiryDate': '2099-12-31',
+        // Legacy 'proforma' field name kept for Hive/Firestore catalog compatibility.
         'isProformaMaster': true,
         'createdAt': DateTime.now().toIso8601String(),
         'createdBy': userInfo['uid'] ?? '',
@@ -1202,6 +1240,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
 
       final auditLog = {
         'id': 'audit_${DateTime.now().millisecondsSinceEpoch}',
+        // Legacy 'proforma' audit action name kept for audit log compatibility.
         'action': 'register_proforma_medicine',
         'medicineCode': code,
         'barcode': proformaBarcode,
@@ -1227,7 +1266,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'logData': auditLog,
       });
 
-      _snack('"$cleanFormula" registered permanently into Master Proforma Catalog with Audit Trail!');
+      _snack('"$cleanFormula" registered permanently into Medicine Catalog with Audit Trail!');
       _resetRegForm();
       _loadAllMedicines();
     } catch (e) {
@@ -1266,7 +1305,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     return Theme.of(context).brightness == Brightness.dark;
   }
 
-  static Color _typeColor(String t) => switch (t) {
+  static Color _typeColor(String t) => switch (t.trim()) {
         'Tablet' => SoftPalette.blue550,
         'Capsule' => SoftPalette.purple600,
         'Syrup' => SoftPalette.orange350,
@@ -1278,8 +1317,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         'Cannula' => SoftPalette.red500,
         'Needle' => SoftPalette.purple550,
         'Nebulization' => SoftPalette.indigo700,
-        'Dressing Item' => SoftPalette.slate600,
-        'Consumables' => SoftPalette.teal550,
+        'Dressing Item' => SoftPalette.teal550,
+        'Consumables' => SoftPalette.green550,
         _ => SoftPalette.slate700,
       };
 
@@ -1375,61 +1414,105 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     String? value,
     Widget? valueWidget,
     required String label,
+    String? badgeText,
+    bool isActive = false,
+    VoidCallback? onTap,
   }) {
     final c = context.comfort;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-      decoration: BoxDecoration(
-        color: bgTint,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: accentColor.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: accentColor.withValues(alpha: _isDark ? 0.22 : 0.14),
-              shape: BoxShape.circle,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: isActive ? bgTint : c.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isActive ? accentColor : c.border,
+              width: isActive ? 1.4 : 1.0,
             ),
-            child: Icon(icon, color: accentColor, size: 18),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (valueWidget != null)
-                  valueWidget
-                else
-                  Text(
-                    value ?? '',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: c.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      height: 1.1,
-                    ),
-                  ),
-                const SizedBox(height: 2),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: accentColor,
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: isActive
+                      ? accentColor.withValues(alpha: _isDark ? 0.28 : 0.18)
+                      : bgTint,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: accentColor.withValues(alpha: 0.24),
                   ),
                 ),
-              ],
-            ),
+                child: Icon(icon, color: accentColor, size: 19),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        if (valueWidget != null)
+                          Expanded(child: valueWidget)
+                        else
+                          Flexible(
+                            child: Text(
+                              value ?? '',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: c.textPrimary,
+                                fontSize: 17.5,
+                                fontWeight: FontWeight.w800,
+                                height: 1.1,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ),
+                        if (badgeText != null && badgeText.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: accentColor.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              badgeText,
+                              style: TextStyle(
+                                color: accentColor,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isActive ? accentColor : c.textSecondary,
+                        fontSize: 11.5,
+                        fontWeight: isActive ? FontWeight.w700 : FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1437,33 +1520,58 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
   Widget _buildContextBanner() {
     final c = context.comfort;
     final isCompact = GBreakpoint.isCompact(context);
-    final totalCount = _searchResults.length;
-    final totalUnits = _searchResults.fold<int>(0, (s, m) => s + _safeInt(m['quantity']));
-    final lowStockCount = _searchResults
+    final baseList = _allConsolidatedMeds.isNotEmpty ? _allConsolidatedMeds : _searchResults;
+    final totalCount = baseList.length;
+    final totalUnits = baseList.fold<int>(0, (s, m) => s + _safeInt(m['quantity']));
+    final lowStockCount = baseList
         .where((m) => _isLowStock(_safeInt(m['quantity']), m['type']?.toString() ?? ''))
         .length;
+    final outOfStockCount = baseList.where((m) => _safeInt(m['quantity']) <= 0).length;
     final numberFormat = NumberFormat('#,###');
 
     final card1 = _buildKpiMetricCard(
-      icon: Icons.medication_outlined,
+      icon: GIcons.medicine,
       accentColor: c.brand,
       bgTint: c.brandSoft,
       value: '$totalCount',
-      label: 'Medicines',
+      label: 'Total Medicines',
+      isActive: _stockStatusFilter == 'all' && _selectedTypeFilter == 'All',
+      onTap: () {
+        setState(() {
+          _stockStatusFilter = 'all';
+          _selectedTypeFilter = 'All';
+          _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+        });
+      },
     );
     final card2 = _buildKpiMetricCard(
-      icon: Icons.inventory_2_outlined,
+      icon: GIcons.inventory,
       accentColor: c.info,
       bgTint: c.infoBg,
       value: numberFormat.format(totalUnits),
-      label: 'Total Units',
+      label: 'Total Units in Stock',
+      isActive: _stockStatusFilter == 'in_stock',
+      onTap: () {
+        setState(() {
+          _stockStatusFilter = _stockStatusFilter == 'in_stock' ? 'all' : 'in_stock';
+          _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+        });
+      },
     );
     final card3 = _buildKpiMetricCard(
-      icon: Icons.warning_amber_rounded,
+      icon: GIcons.lowStock,
       accentColor: c.danger,
       bgTint: c.dangerBg,
       value: '$lowStockCount',
-      label: 'Low Stock',
+      badgeText: outOfStockCount > 0 ? '$outOfStockCount OUT' : null,
+      label: 'Low / Out of Stock',
+      isActive: _stockStatusFilter == 'low',
+      onTap: () {
+        setState(() {
+          _stockStatusFilter = _stockStatusFilter == 'low' ? 'all' : 'low';
+          _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+        });
+      },
     );
 
     final activeBranchValue = _availableBranches.contains(_currentBranchId.toLowerCase().trim())
@@ -1471,10 +1579,10 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         : _availableBranches.first;
     final branchSubLabel = _hasMultiCamps && _selectedCampFilter != 'all'
         ? CampSessionService.getCampLabel(_selectedCampFilter, _effectiveBranchId)
-        : 'Active Branch';
+        : 'Active Facility';
 
     final card4 = _buildKpiMetricCard(
-      icon: Icons.business_rounded,
+      icon: GIcons.branch,
       accentColor: c.success,
       bgTint: c.successBg,
       value: (_isMultiBranchUser && _availableBranches.length > 1)
@@ -1607,22 +1715,59 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
+  Widget _stockStatusSegmentChip({
+    required String keyId,
+    required String label,
+    required IconData icon,
+    required Color activeColor,
+  }) {
+    final c = context.comfort;
+    final isSel = _stockStatusFilter == keyId;
+    return InkWell(
+      onTap: () {
+        setState(() {
+          _stockStatusFilter = keyId;
+          _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+        });
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSel ? activeColor : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 13.5,
+              color: isSel ? c.onBrand : c.textSecondary,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: isSel ? FontWeight.w700 : FontWeight.w600,
+                color: isSel ? c.onBrand : c.textSecondary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // TAB 1 — Add Stock & Inventory Manager Redesign
   // ══════════════════════════════════════════════════════════════════════════
   Widget _addStockTab() {
     final c = context.comfort;
     final isCompact = GBreakpoint.isCompact(context);
-    final types = const [
-      'All',
-      'Tablet',
-      'Syrup',
-      'Capsule',
-      'Injection',
-      'Infusion',
-      'Syringe',
-      'Others',
-    ];
+    final types = _primaryTypeFilters;
 
     final searchField = Container(
       height: 38,
@@ -1646,22 +1791,75 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                     child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
                   ),
                 )
-              : Icon(Icons.search_rounded, color: c.brand, size: 18),
-          hintText: 'Search by formula, brand name, dose, or barcode...',
+              : Icon(GIcons.search, color: c.brand, size: 17),
+          hintText: 'Search by formula, medicine name, dose, or #barcode...',
           hintStyle: TextStyle(color: c.textMuted, fontSize: 12),
           suffixIcon: _searchCtrl.text.isNotEmpty
               ? IconButton(
-                  icon: Icon(Icons.close_rounded, color: c.textSecondary, size: 16),
+                  icon: Icon(GIcons.close, color: c.textSecondary, size: 15),
                   padding: EdgeInsets.zero,
                   tooltip: 'Clear search',
                   onPressed: () {
                     _searchCtrl.clear();
-                    _loadAllMedicines();
+                    _searchMedicine('');
                   },
                 )
               : null,
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+      ),
+    );
+
+    final statusFilterBar = Container(
+      height: 38,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _stockStatusSegmentChip(
+            keyId: 'all',
+            label: 'All Stock',
+            icon: Icons.layers_rounded,
+            activeColor: c.brand,
+          ),
+          const SizedBox(width: 2),
+          _stockStatusSegmentChip(
+            keyId: 'low',
+            label: 'Low / Out',
+            icon: GIcons.lowStock,
+            activeColor: c.danger,
+          ),
+          const SizedBox(width: 2),
+          _stockStatusSegmentChip(
+            keyId: 'in_stock',
+            label: 'Healthy',
+            icon: GIcons.checkCircle,
+            activeColor: c.success,
+          ),
+        ],
+      ),
+    );
+
+    final refreshBtn = Tooltip(
+      message: 'Reload stock list',
+      child: InkWell(
+        onTap: _loadAllMedicines,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: c.surfaceSunken,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.border),
+          ),
+          child: Icon(GIcons.refresh, size: 17, color: c.brand),
         ),
       ),
     );
@@ -1674,27 +1872,41 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
           Builder(builder: (_) {
             final t = types[i];
             final isSel = _selectedTypeFilter == t;
+            final rawCol = t == 'All' ? c.brand : _typeColor(t);
+            final iconCol = isSel
+                ? c.onBrand
+                : (_isDark ? Color.lerp(rawCol, SoftPalette.gray50, 0.35)! : rawCol);
             return InkWell(
               onTap: () {
-                setState(() => _selectedTypeFilter = t);
-                _loadAllMedicines();
+                setState(() {
+                  _selectedTypeFilter = t;
+                  _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+                });
               },
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(9),
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                duration: const Duration(milliseconds: 160),
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 11),
                 decoration: BoxDecoration(
                   color: isSel ? c.brand : c.surfaceSunken,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(9),
                   border: Border.all(color: isSel ? c.brand : c.border),
                 ),
-                child: Text(
-                  t,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: isSel ? FontWeight.w700 : FontWeight.w600,
-                    color: isSel ? c.onBrand : c.textSecondary,
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    MedicineTypeIcon(type: t, size: 15, color: iconCol),
+                    const SizedBox(width: 6),
+                    Text(
+                      t,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: isSel ? FontWeight.w700 : FontWeight.w600,
+                        color: isSel ? c.onBrand : c.textPrimary,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             );
@@ -1702,6 +1914,10 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         ],
       ],
     );
+
+    final hasActiveFilters = _searchCtrl.text.trim().isNotEmpty ||
+        _selectedTypeFilter != 'All' ||
+        _stockStatusFilter != 'all';
 
     return Column(
       children: [
@@ -1724,34 +1940,46 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (isCompact) ...[
-                searchField,
+                Row(
+                  children: [
+                    Expanded(child: searchField),
+                    const SizedBox(width: 8),
+                    refreshBtn,
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: statusFilterBar,
+                ),
                 const SizedBox(height: 8),
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: typePillsRow,
                 ),
-              ] else
+              ] else ...[
                 Row(
                   children: [
-                    Expanded(flex: 2, child: searchField),
+                    Expanded(child: searchField),
                     const SizedBox(width: 10),
-                    Expanded(
-                      flex: 3,
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: typePillsRow,
-                        ),
-                      ),
-                    ),
+                    statusFilterBar,
+                    const SizedBox(width: 8),
+                    refreshBtn,
                   ],
                 ),
+                const SizedBox(height: 8),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: typePillsRow,
+                ),
+              ],
 
               if (_hasMultiCamps) ...[
                 const SizedBox(height: 8),
                 Row(
                   children: [
+                    Icon(GIcons.location, size: 14, color: c.brand),
+                    const SizedBox(width: 5),
                     Text(
                       'Target Camp:',
                       style: TextStyle(
@@ -1777,7 +2005,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                               _campPillButton(
                                 label: 'All Camps',
                                 campId: 'all',
-                                icon: Icons.holiday_village_rounded,
+                                icon: Icons.domain_rounded,
                               ),
                               for (final camp in CampSessionService.getCampsForBranch(_effectiveBranchId)) ...[
                                 const SizedBox(width: 2),
@@ -1789,7 +2017,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                                           ))
                                       .toString(),
                                   campId: (camp['id'] ?? '').toString(),
-                                  icon: Icons.location_on_rounded,
+                                  icon: GIcons.location,
                                 ),
                               ],
                             ],
@@ -1812,7 +2040,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.info_outline_rounded, size: 15, color: c.warning),
+                      Icon(GIcons.info, size: 15, color: c.warning),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -1835,20 +2063,60 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
         // ── Section header ─────────────────────────────────────────────────
         if (_hasSearched && _searchResults.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
             child: Row(
               children: [
+                Icon(Icons.playlist_add_check_circle_rounded, size: 15, color: c.brand),
+                const SizedBox(width: 6),
                 Text(
-                  _searchCtrl.text.isEmpty
+                  !hasActiveFilters
                       ? 'Available Medicines (${_searchResults.length})'
-                      : 'Search Results (${_searchResults.length})',
+                      : 'Filtered Medicines (${_searchResults.length} of ${_allConsolidatedMeds.length})',
                   style: TextStyle(
-                    color: c.textSecondary,
+                    color: c.textPrimary,
                     fontWeight: FontWeight.w700,
                     fontSize: 12.5,
                   ),
                 ),
+                if (hasActiveFilters) ...[
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: () {
+                      setState(() {
+                        _searchCtrl.clear();
+                        _selectedTypeFilter = 'All';
+                        _stockStatusFilter = 'all';
+                        _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: c.brandSoft,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(GIcons.close, size: 11, color: c.brandStrong),
+                          const SizedBox(width: 3),
+                          Text(
+                            'Reset filters',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              color: c.brandStrong,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 const Spacer(),
+                Icon(GIcons.dispensary, size: 13, color: c.textMuted),
+                const SizedBox(width: 5),
                 Text(
                   _hasMultiCamps
                       ? (_selectedCampFilter == 'all'
@@ -1874,7 +2142,11 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.search_off_rounded, size: 56, color: c.textMuted),
+                          const GEmptyIllustration(
+                            GEmptyIllustrationKind.search,
+                            size: 144,
+                            fallbackIcon: Icons.search_off_rounded,
+                          ),
                           const SizedBox(height: 12),
                           Text(
                             'No medicines found in this camp/filter',
@@ -1884,25 +2156,399 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (hasActiveFilters) ...[
+                            const SizedBox(height: 10),
+                            OutlinedButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _searchCtrl.clear();
+                                  _selectedTypeFilter = 'All';
+                                  _stockStatusFilter = 'all';
+                                  _searchResults = _filterConsolidatedMedicines(_allConsolidatedMeds);
+                                });
+                              },
+                              icon: const Icon(GIcons.close, size: 15),
+                              label: const Text('Clear Filters'),
+                            ),
+                          ],
                         ],
                       ),
                     )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(12, 2, 12, 20),
-                      itemCount: _searchResults.length,
-                      itemBuilder: (ctx, i) => _searchResultRow(_searchResults[i]),
+                  : LayoutBuilder(
+                      builder: (ctx, constraints) {
+                        final isWideTable = constraints.maxWidth >= 880;
+                        return Column(
+                          children: [
+                            if (isWideTable) _buildStructuredTableHeader(),
+                            Expanded(
+                              child: ListView.builder(
+                                padding: const EdgeInsets.fromLTRB(12, 2, 12, 20),
+                                itemCount: _searchResults.length,
+                                itemBuilder: (ctx, i) => _searchResultRow(
+                                  _searchResults[i],
+                                  index: i,
+                                  isWideTable: isWideTable,
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
         ),
       ],
     );
   }
 
-  Widget _searchResultRow(Map<String, dynamic> med) {
+  // ── Column widths for wide structured layout ──────────────────────────────
+  static const double _colTypeWidth = 136;
+  static const double _colDoseWidth = 112;
+  static const double _colExpiryWidth = 142;
+  static const double _colStockWidth = 166;
+  static const double _colActionsWidth = 154;
+
+  Widget _buildStructuredTableHeader() {
+    final c = context.comfort;
+    TextStyle colHeaderStyle() => TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.5,
+          color: c.textMuted,
+        );
+
+    return Container(
+      height: 34,
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                const SizedBox(width: 52), // Aligns past the 40px icon avatar + 12px gap
+                Text('MEDICINE & CATALOG CODE', style: colHeaderStyle()),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: _colTypeWidth,
+            child: Text('CATEGORY', style: colHeaderStyle()),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: _colDoseWidth,
+            child: Text('STRENGTH / DOSE', style: colHeaderStyle()),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: _colExpiryWidth,
+            child: Text('EXPIRY (BATCH)', style: colHeaderStyle()),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: _colStockWidth,
+            child: Text('STOCK STATUS', style: colHeaderStyle()),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: _colActionsWidth,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Text('ACTIONS', style: colHeaderStyle()),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLeadingTypeAvatar(String type, Color typeColor, bool isDark) {
+    return Container(
+      width: 40,
+      height: 40,
+      decoration: BoxDecoration(
+        color: typeColor.withValues(alpha: isDark ? 0.20 : 0.11),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: typeColor.withValues(alpha: isDark ? 0.38 : 0.25)),
+      ),
+      alignment: Alignment.center,
+      child: MedicineTypeIcon(type: type, size: 21, color: typeColor),
+    );
+  }
+
+  Widget _buildUniformBarcodeBadge(String barcode, GComfortColors c) {
+    final hasCode = barcode.isNotEmpty;
+    return Container(
+      height: 21,
+      padding: const EdgeInsets.symmetric(horizontal: 7),
+      decoration: BoxDecoration(
+        color: hasCode ? c.brandSoft : c.surfaceSunken,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: hasCode ? c.brand.withValues(alpha: 0.28) : c.border,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            GIcons.qr,
+            size: 11,
+            color: hasCode ? c.brandStrong : c.textMuted,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            hasCode ? '#$barcode' : 'No Code',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: hasCode ? c.brandStrong : c.textMuted,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUniformCategoryBadge(String type, Color typeColor, bool isDark, {double? width}) {
+    return Container(
+      width: width,
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      decoration: BoxDecoration(
+        color: typeColor.withValues(alpha: isDark ? 0.18 : 0.09),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: typeColor.withValues(alpha: isDark ? 0.34 : 0.24)),
+      ),
+      child: Row(
+        mainAxisSize: width != null ? MainAxisSize.max : MainAxisSize.min,
+        children: [
+          MedicineTypeIcon(type: type, size: 15, color: typeColor),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              type,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: typeColor,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUniformDoseBadge(String dose, GComfortColors c, {double? width}) {
+    final cleanDose = dose.trim().isNotEmpty ? dose.trim() : 'Standard';
+    final isStandard = dose.trim().isEmpty || cleanDose.toLowerCase() == 'standard';
+    return Container(
+      width: width,
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      decoration: BoxDecoration(
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: width != null ? MainAxisSize.max : MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.science_rounded,
+            size: 13,
+            color: isStandard ? c.textMuted : c.brand,
+          ),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              cleanDose,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: isStandard ? FontWeight.w600 : FontWeight.w700,
+                color: isStandard ? c.textSecondary : c.textPrimary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUniformExpiryBadge(String expiry, bool expSoon, GComfortColors c, {double? width}) {
+    final hasExpiry = expiry.isNotEmpty;
+    final fg = !hasExpiry ? c.textMuted : (expSoon ? c.danger : c.textSecondary);
+    final bg = !hasExpiry ? c.surfaceSunken : (expSoon ? c.dangerBg : c.surfaceSunken);
+    final borderCol = !hasExpiry
+        ? c.border
+        : (expSoon ? c.danger.withValues(alpha: 0.4) : c.border);
+    final icon = !hasExpiry
+        ? Icons.event_note_rounded
+        : (expSoon ? GIcons.overdue : Icons.event_available_rounded);
+
+    return Container(
+      width: width,
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: borderCol),
+      ),
+      child: Row(
+        mainAxisSize: width != null ? MainAxisSize.max : MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: fg),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              hasExpiry ? _formatExpiryDisplay(expiry) : 'No Expiry',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: expSoon ? FontWeight.w700 : FontWeight.w600,
+                color: hasExpiry ? (expSoon ? c.danger : c.textPrimary) : c.textMuted,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUniformStockStatusPill(int qty, bool lowStock, GComfortColors c, {double? width}) {
+    final isOut = qty <= 0;
+    final Color bg = isOut ? c.dangerBg : (lowStock ? c.warningBg : c.successBg);
+    final Color fg = isOut ? c.danger : (lowStock ? c.warning : c.success);
+    final IconData statusIcon = isOut
+        ? GIcons.error
+        : (lowStock ? GIcons.warning : GIcons.checkCircle);
+    final String statusTag = isOut ? 'OUT' : (lowStock ? 'LOW' : 'OK');
+
+    return Container(
+      width: width,
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: fg.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        mainAxisSize: width != null ? MainAxisSize.max : MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(statusIcon, size: 13.5, color: fg),
+              const SizedBox(width: 6),
+              Text(
+                '$qty in stock',
+                style: TextStyle(
+                  color: fg,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 11.5,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+            decoration: BoxDecoration(
+              color: fg.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              statusTag,
+              style: TextStyle(
+                color: fg,
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRowActionButtons(Map<String, dynamic> med, GComfortColors c) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        SizedBox(
+          width: 112,
+          height: 34,
+          child: ElevatedButton.icon(
+            onPressed: () => _showAddStockDialog(med),
+            icon: const Icon(Icons.add_box_rounded, size: 15),
+            label: const Text(
+              'Add Stock',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: c.brand,
+              foregroundColor: c.onBrand,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              elevation: 0,
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Tooltip(
+          message: 'Edit Batch / Request Changes',
+          child: InkWell(
+            onTap: () => _showEditRequestSheet(med),
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: c.surfaceSunken,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: c.border),
+              ),
+              child: Icon(GIcons.edit, size: 15.5, color: c.textSecondary),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _searchResultRow(
+    Map<String, dynamic> med, {
+    int index = 0,
+    bool isWideTable = true,
+  }) {
     final c = context.comfort;
     final isDark = _isDark;
     final qty = _safeInt(med['quantity']);
     final type = med['type']?.toString() ?? 'Tablet';
     final name = (med['name'] ?? med['formula'] ?? '').toString();
+    final formula = (med['formula'] ?? '').toString().trim();
+    final showFormulaSub = formula.isNotEmpty && formula.toLowerCase() != name.toLowerCase();
     final dose = (med['dose'] ?? '').toString();
     final barcode = (med['barcode'] ?? med['rollNo'] ?? '').toString().trim();
     final lowStock = _isLowStock(qty, type);
@@ -1929,62 +2575,24 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     final rawTypeColor = _typeColor(type);
     final typeColor = isDark ? Color.lerp(rawTypeColor, SoftPalette.gray50, 0.35)! : rawTypeColor;
 
-    final Color qtyBg = qty == 0 ? c.dangerBg : (lowStock ? c.warningBg : c.successBg);
-    final Color qtyFg = qty == 0 ? c.danger : (lowStock ? c.warning : c.success);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.border),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => _showAddStockDialog(med),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            child: Row(
+    return _StructuredMedicineRowCard(
+      onTap: () => _showAddStockDialog(med),
+      accentColor: qty <= 0 ? c.danger : (lowStock ? c.warning : typeColor),
+      child: isWideTable
+          ? Row(
               children: [
-                // Soft-tinted Type + Icon Badge
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: typeColor.withValues(alpha: isDark ? 0.2 : 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: typeColor.withValues(alpha: 0.28)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(_typeIcon(type), size: 13, color: typeColor),
-                      const SizedBox(width: 6),
-                      Text(
-                        type,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: typeColor,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-
-                // Medicine Name, Barcode & Metadata Pills
+                // 1. Medicine & Catalog Code (Uniform 40x40 Icon Avatar + Name + Code)
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
+                  child: Row(
                     children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(
+                      _buildLeadingTypeAvatar(type, typeColor, isDark),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
                               name,
                               style: TextStyle(
                                 color: c.textPrimary,
@@ -1994,196 +2602,179 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
-                          ),
-                          if (barcode.isNotEmpty) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: c.brandSoft,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                '#$barcode',
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: c.brandStrong,
-                                ),
-                              ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                _buildUniformBarcodeBadge(barcode, c),
+                                if (_hasMultiCamps && campTag.isNotEmpty) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    height: 21,
+                                    padding: const EdgeInsets.symmetric(horizontal: 7),
+                                    decoration: BoxDecoration(
+                                      color: c.infoBg,
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: c.info.withValues(alpha: 0.25)),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(GIcons.location, size: 10.5, color: c.info),
+                                        const SizedBox(width: 3),
+                                        Text(
+                                          campTag,
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w700,
+                                            color: c.info,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                                if (showFormulaSub) ...[
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      formula,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w500,
+                                        color: c.textMuted,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ],
-                        ],
+                        ),
                       ),
-                      if (dose.isNotEmpty || (_hasMultiCamps && campTag.isNotEmpty) || lowStock || expSoon || expiry.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Wrap(
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+
+                // 2. Uniform Category Column
+                SizedBox(
+                  width: _colTypeWidth,
+                  child: _buildUniformCategoryBadge(type, typeColor, isDark, width: _colTypeWidth),
+                ),
+                const SizedBox(width: 10),
+
+                // 3. Uniform Strength / Dose Column
+                SizedBox(
+                  width: _colDoseWidth,
+                  child: _buildUniformDoseBadge(dose, c, width: _colDoseWidth),
+                ),
+                const SizedBox(width: 10),
+
+                // 4. Uniform Expiry (Batch) Column
+                SizedBox(
+                  width: _colExpiryWidth,
+                  child: _buildUniformExpiryBadge(expiry, expSoon, c, width: _colExpiryWidth),
+                ),
+                const SizedBox(width: 10),
+
+                // 5. Uniform Stock Status Column
+                SizedBox(
+                  width: _colStockWidth,
+                  child: _buildUniformStockStatusPill(qty, lowStock, c, width: _colStockWidth),
+                ),
+                const SizedBox(width: 10),
+
+                // 6. Uniform Actions Column
+                SizedBox(
+                  width: _colActionsWidth,
+                  child: _buildRowActionButtons(med, c),
+                ),
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    _buildLeadingTypeAvatar(type, typeColor, isDark),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: TextStyle(
+                              color: c.textPrimary,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13.5,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          Wrap(
                             spacing: 6,
                             runSpacing: 4,
                             crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              if (dose.isNotEmpty)
-                                Text(
-                                  dose,
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    fontWeight: FontWeight.w500,
-                                    color: c.textSecondary,
-                                  ),
-                                ),
-                              if (expiry.isNotEmpty)
+                              _buildUniformBarcodeBadge(barcode, c),
+                              if (_hasMultiCamps && campTag.isNotEmpty)
                                 Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  height: 21,
+                                  padding: const EdgeInsets.symmetric(horizontal: 7),
                                   decoration: BoxDecoration(
-                                    color: expSoon ? c.dangerBg : c.surfaceSunken,
-                                    borderRadius: BorderRadius.circular(5),
-                                    border: Border.all(
-                                      color: (expSoon ? c.danger : c.border).withValues(alpha: 0.35),
-                                    ),
+                                    color: c.infoBg,
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: c.info.withValues(alpha: 0.25)),
                                   ),
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Icon(
-                                        Icons.calendar_today_rounded,
-                                        size: 9.5,
-                                        color: expSoon ? c.danger : c.textSecondary,
-                                      ),
-                                      const SizedBox(width: 4),
+                                      Icon(GIcons.location, size: 10.5, color: c.info),
+                                      const SizedBox(width: 3),
                                       Text(
-                                        'Exp: ${_formatExpiryDisplay(expiry)}',
+                                        campTag,
                                         style: TextStyle(
                                           fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                          color: expSoon ? c.danger : c.textSecondary,
+                                          fontWeight: FontWeight.w700,
+                                          color: c.info,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                              if (_hasMultiCamps && campTag.isNotEmpty)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: c.infoBg,
-                                    borderRadius: BorderRadius.circular(5),
-                                    border: Border.all(color: c.info.withValues(alpha: 0.25)),
-                                  ),
-                                  child: Text(
-                                    campTag,
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w600,
-                                      color: c.info,
-                                    ),
-                                  ),
-                                ),
-                              if (lowStock)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: c.warningBg,
-                                    borderRadius: BorderRadius.circular(5),
-                                    border: Border.all(color: c.warning.withValues(alpha: 0.35)),
-                                  ),
-                                  child: Text(
-                                    'LOW STOCK',
-                                    style: TextStyle(
-                                      fontSize: 9.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: c.warning,
-                                    ),
-                                  ),
-                                ),
-                              if (expSoon)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: c.dangerBg,
-                                    borderRadius: BorderRadius.circular(5),
-                                    border: Border.all(color: c.danger.withValues(alpha: 0.35)),
-                                  ),
-                                  child: Text(
-                                    'NEAR EXPIRY',
-                                    style: TextStyle(
-                                      fontSize: 9.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: c.danger,
-                                    ),
-                                  ),
-                                ),
                             ],
                           ),
-                        ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-
-                // Stock Quantity Badge
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: qtyBg,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: qtyFg.withValues(alpha: 0.35)),
-                  ),
-                  child: Text(
-                    '$qty in stock',
-                    style: TextStyle(
-                      color: qtyFg,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 11.5,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-
-                // [+ Add Stock] Button
-                SizedBox(
-                  height: 34,
-                  child: ElevatedButton.icon(
-                    onPressed: () => _showAddStockDialog(med),
-                    icon: const Icon(Icons.add_rounded, size: 15),
-                    label: const Text(
-                      'Add Stock',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: c.brand,
-                      foregroundColor: c.onBrand,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      elevation: 0,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-
-                // Outlined [Edit] Button
-                Tooltip(
-                  message: 'Edit / Request Changes',
-                  child: InkWell(
-                    onTap: () => _showEditRequestSheet(med),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: c.surfaceSunken,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: c.border),
+                        ],
                       ),
-                      child: Icon(Icons.edit_outlined, size: 16, color: c.textSecondary),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    _buildUniformStockStatusPill(qty, lowStock, c),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          _buildUniformCategoryBadge(type, typeColor, isDark),
+                          _buildUniformDoseBadge(dose, c),
+                          _buildUniformExpiryBadge(expiry, expSoon, c),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _buildRowActionButtons(med, c),
+                  ],
                 ),
               ],
             ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -2379,7 +2970,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     }
 
     // Default new expiry date: 1 year from now
-    DateTime newExpiryDate = DateTime.now().add(const Duration(days: 365));
+    DateTime newExpiryDate = DateTime(DateTime.now().year + 1, DateTime.now().month, 1); // expiry day is always 01
     final newExpiryCtrl = TextEditingController(text: DateFormat('dd-MM-yyyy').format(newExpiryDate));
 
     showDialog(
@@ -2459,77 +3050,84 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                       const SizedBox(height: 16),
 
                       // Med Info Card
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: c.surfaceSunken,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: c.border),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    medName,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 14.5,
-                                      color: c.textPrimary,
+                      Builder(builder: (_) {
+                        final rawTypeCol = _typeColor(medType);
+                        final typeCol = _isDark
+                            ? Color.lerp(rawTypeCol, SoftPalette.gray50, 0.35)!
+                            : rawTypeCol;
+                        final barcodeStr = (med['barcode'] ?? med['rollNo'] ?? '').toString().trim();
+                        return Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: c.surfaceSunken,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: c.border),
+                          ),
+                          child: Row(
+                            children: [
+                              _buildLeadingTypeAvatar(medType, typeCol, _isDark),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      medName,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 14.5,
+                                        color: c.textPrimary,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(height: 5),
-                                  Row(
-                                    children: [
-                                      _miniChip(medType, c.brand),
-                                      if (medDose.isNotEmpty) ...[
-                                        const SizedBox(width: 6),
-                                        _miniChip(medDose, c.textSecondary),
+                                    const SizedBox(height: 6),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 4,
+                                      children: [
+                                        _buildUniformBarcodeBadge(barcodeStr, c),
+                                        _buildUniformCategoryBadge(medType, typeCol, _isDark),
+                                        _buildUniformDoseBadge(medDose, c),
                                       ],
-                                      if ((med['barcode'] ?? med['rollNo'] ?? '').toString().isNotEmpty) ...[
-                                        const SizedBox(width: 6),
-                                        _miniChip('#${med['barcode'] ?? med['rollNo']}', c.brandStrong),
-                                      ],
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.dangerBg : c.successBg,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: ((isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success).withValues(alpha: 0.35),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              child: Column(
-                                children: [
-                                  Text(
-                                    isNewBatchMode ? 'New Batch' : 'Batch Stock',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w600,
-                                      color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
-                                    ),
+                              const SizedBox(width: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.dangerBg : c.successBg,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: ((isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success).withValues(alpha: 0.35),
                                   ),
-                                  Text(
-                                    isNewBatchMode ? '0' : '$batchStock',
-                                    style: TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w800,
-                                      color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
+                                ),
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      isNewBatchMode ? 'New Batch' : 'Batch Stock',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                        color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    Text(
+                                      isNewBatchMode ? '0' : '$batchStock',
+                                      style: TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w800,
+                                        color: (isNewBatchMode ? 0 : batchStock) == 0 ? c.danger : c.success,
+                                        fontFeatures: const [FontFeature.tabularFigures()],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
+                            ],
+                          ),
+                        );
+                      }),
                       const SizedBox(height: 14),
 
                       // Target Facility Camp Selector
@@ -2923,8 +3521,9 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                                         final picked = await showDatePicker(
                                           context: ctx,
                                           initialDate: newExpiryDate,
-                                          firstDate: DateTime.now(),
+                                          firstDate: DateTime(DateTime.now().year, DateTime.now().month + 1, 1),
                                           lastDate: DateTime.now().add(const Duration(days: 365 * 15)),
+                                          initialDatePickerMode: DatePickerMode.year,
                                           builder: (context, child) {
                                             return Theme(
                                               data: Theme.of(context).copyWith(
@@ -2941,8 +3540,8 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                                         );
                                         if (picked != null) {
                                           setDialogState(() {
-                                            newExpiryDate = picked;
-                                            newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(picked);
+                                            newExpiryDate = DateTime(picked.year, picked.month, 1);
+                                            newExpiryCtrl.text = DateFormat('01-MM-yyyy').format(picked);
                                           });
                                         }
                                       },
@@ -2990,21 +3589,21 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                                 runSpacing: 6,
                                 children: [
                                   _quickDateChip('+1 Year', () {
-                                    final d = DateTime(DateTime.now().year + 1, DateTime.now().month, DateTime.now().day);
+                                    final d = DateTime(DateTime.now().year + 1, DateTime.now().month, 1);
                                     setDialogState(() {
                                       newExpiryDate = d;
                                       newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
                                     });
                                   }, c),
                                   _quickDateChip('+2 Years', () {
-                                    final d = DateTime(DateTime.now().year + 2, DateTime.now().month, DateTime.now().day);
+                                    final d = DateTime(DateTime.now().year + 2, DateTime.now().month, 1);
                                     setDialogState(() {
                                       newExpiryDate = d;
                                       newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
                                     });
                                   }, c),
                                   _quickDateChip('+3 Years', () {
-                                    final d = DateTime(DateTime.now().year + 3, DateTime.now().month, DateTime.now().day);
+                                    final d = DateTime(DateTime.now().year + 3, DateTime.now().month, 1);
                                     setDialogState(() {
                                       newExpiryDate = d;
                                       newExpiryCtrl.text = DateFormat('dd-MM-yyyy').format(d);
@@ -3441,8 +4040,31 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     }
   }
 
+  /// Only the dispenser asks for approval; every other role (doctor, supervisor, managers,
+  /// executives) changes the batch directly (user rule, 2026-11-21).
+  bool get _editNeedsApproval => widget.isDispenser && !widget.isAdmin && !widget.isDoctor;
+
+  /// Every real batch (one per expiry) of the same medicine in the same pool, earliest
+  /// expiry first, so the user picks exactly which batch to edit.
+  List<Map<String, dynamic>> _batchesOf(Map<String, dynamic> med) {
+    String norm(Object? v) => (v ?? '').toString().trim().toLowerCase();
+    final pool = norm(med['pool']);
+    final out = <Map<String, dynamic>>[];
+    for (final b in _ledgerItems()) {
+      if (norm(b['pool']) != pool) continue;
+      if (norm(b['name']) != norm(med['name'])) continue;
+      if (norm(b['type']) != norm(med['type'])) continue;
+      if (norm(b['dose']).replaceAll(' ', '') != norm(med['dose']).replaceAll(' ', '')) continue;
+      final id = (b['medicineId'] ?? b['id']).toString();
+      out.add({...b, '_docId': id, '_docIds': [id], 'quantity': StockReader.qty(b).toInt()});
+    }
+    StockReader.sortFefo(out);
+    return out.isEmpty ? [med] : out;
+  }
+
   // ── Edit Request Sheet ─────────────────────────────────────────────────────
   void _showEditRequestSheet(Map<String, dynamic> med) {
+    final batches = _batchesOf(med);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3450,14 +4072,16 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       builder: (_) => _EditRequestSheet(
         branchId: widget.branchId,
         medicine: med,
+        batches: batches,
+        needsApproval: _editNeedsApproval,
         allTypes: _allTypes,
         doseOptions: _doseOptions,
         isAdmin: widget.isAdmin,
         isDoctor: widget.isDoctor,
         isDispenser: widget.isDispenser,
         isBarcodeTaken: _isBarcodeTaken,
-        onSubmit: (updatedFields) =>
-            _submitEditRequest(med, updatedFields),
+        onSubmit: (batch, updatedFields) =>
+            _submitEditRequest(batch, updatedFields),
       ),
     );
   }
@@ -3502,7 +4126,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
               ),
               const SizedBox(height: 8),
               Text(
-                'Registering permanent medicines into the Master Proforma is restricted to Chairman, HQ Managers, and Admins.\nDispensary staff and doctors can restock and add branch inventory from the Universal Proforma Sheet.',
+                'Registering permanent medicines into the Medicine Catalog is restricted to Chairman, HQ Managers, and Admins.\nDispensary staff and doctors can restock and add branch inventory from Add Medicine.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 14, color: c.textSecondary),
               ),
@@ -3522,7 +4146,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       style: TextStyle(color: c.textPrimary, fontSize: 14.5),
       cursorColor: c.brand,
       decoration: _inputDec(
-        'Proforma Barcode (001–999)',
+        'Barcode (001–999)',
         icon: Icons.qr_code_rounded,
         hint: 'e.g. ${MasterProformaService.getNextRollNumber()} (auto if blank)',
       ),
@@ -3551,13 +4175,13 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
       initialValue: _regType,
       dropdownColor: c.surface,
       style: TextStyle(color: c.textPrimary, fontSize: 14),
-      decoration: _inputDec('Type', icon: FontAwesomeIcons.capsules),
+      decoration: _inputDec('Type', icon: _typeIcon(_regType)),
       items: _allTypes
           .map((t) => DropdownMenuItem(
                 value: t,
                 child: Row(
                   children: [
-                    Icon(_typeIcon(t), size: 13, color: c.brand),
+                    MedicineTypeIcon(type: t, size: 16, color: _typeColor(t)),
                     const SizedBox(width: 8),
                     Text(t, style: TextStyle(color: c.textPrimary)),
                   ],
@@ -3617,7 +4241,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _sectionLabel('Register Medicine to Master Proforma'),
+                  _sectionLabel('Register Medicine to Catalog'),
                   const SizedBox(height: 4),
                   Padding(
                     padding: const EdgeInsets.only(left: 14),
@@ -3748,7 +4372,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                       hint: 'e.g. Approved generic formula per Chairman / HQ decision',
                     ),
                     validator: (v) => v?.trim().isEmpty ?? true
-                        ? 'Reason is required for Master Proforma audit logging'
+                        ? 'Reason is required for Medicine Catalog audit logging'
                         : null,
                   ),
                   const SizedBox(height: 22),
@@ -3770,7 +4394,7 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
                       label: Text(
                         _isSubmittingReg
                             ? 'Registering...'
-                            : 'Save Permanently to Master Proforma',
+                            : 'Save Permanently to Medicine Catalog',
                         style: const TextStyle(
                           fontSize: 14.5,
                           fontWeight: FontWeight.w700,
@@ -3836,21 +4460,6 @@ class _InventoryUpdatePageState extends State<InventoryUpdatePage>
     );
   }
 
-  Widget _miniChip(String label, Color color) => Container(
-        padding:
-            const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: color.withValues(alpha: 0.2)),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w600)),
-      );
-
   int _safeInt(dynamic val) {
     if (val == null) return 0;
     if (val is int) return val;
@@ -3871,12 +4480,18 @@ class _EditRequestSheet extends StatefulWidget {
   final bool isAdmin;
   final bool isDoctor;
   final bool isDispenser;
+  /// Real batches of this medicine (one per expiry), earliest expiry first.
+  final List<Map<String, dynamic>> batches;
+  /// true: a request a supervisor approves (dispenser). false: the change applies now.
+  final bool needsApproval;
   final Future<bool> Function(String code, {String? excludeDocId}) isBarcodeTaken;
-  final Future<void> Function(Map<String, dynamic> updatedFields) onSubmit;
+  final Future<void> Function(Map<String, dynamic> batch, Map<String, dynamic> updatedFields) onSubmit;
 
   const _EditRequestSheet({
     required this.branchId,
     required this.medicine,
+    required this.batches,
+    required this.needsApproval,
     required this.allTypes,
     required this.doseOptions,
     this.isAdmin = false,
@@ -3891,8 +4506,6 @@ class _EditRequestSheet extends StatefulWidget {
 }
 
 class _EditRequestSheetState extends State<_EditRequestSheet> {
-  static const _red = SoftPalette.red550;
-
   late TextEditingController _nameCtrl;
   late TextEditingController _doseCtrl;
   late TextEditingController _priceCtrl;
@@ -3903,7 +4516,6 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
   late TextEditingController _barcodeCtrl;
   late TextEditingController _packBarcodeCtrl;
   late String _selectedType;
-  String? _selectedDoseDropdown;
 
   bool _submitting = false;
   final _formKey = GlobalKey<FormState>();
@@ -3920,42 +4532,49 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
           ? p.toInt().toString()
           : p.toStringAsFixed(2);
 
-  bool _hasDd(String t) => widget.doseOptions.containsKey(t);
-  bool _hasFree(String t) =>
-      !widget.doseOptions.containsKey(t) &&
-      t != 'Drip Set' &&
-      t != 'Syringe';
+  /// The batch being edited (one expiry, one record).
+  late Map<String, dynamic> _batch;
 
   @override
   void initState() {
     super.initState();
-    final med = widget.medicine;
-    final price = _parsePrice(med['price']);
-    _nameCtrl =
-        TextEditingController(text: med['name']?.toString() ?? '');
-    _doseCtrl =
-        TextEditingController(text: med['dose']?.toString() ?? '');
-    _qtyCtrl =
-        TextEditingController(text: med['quantity']?.toString() ?? '0');
-    _priceCtrl = TextEditingController(text: _fmtPrice(price));
-    _expiryCtrl =
-        TextEditingController(text: med['expiryDate']?.toString() ?? '');
+    _nameCtrl = TextEditingController();
+    _doseCtrl = TextEditingController();
+    _qtyCtrl = TextEditingController();
+    _priceCtrl = TextEditingController();
+    _expiryCtrl = TextEditingController();
     _reasonCtrl = TextEditingController();
-    _codeCtrl =
-        TextEditingController(text: (med['code'] ?? med['itemCode'] ?? '').toString());
-    _barcodeCtrl =
-        TextEditingController(text: (med['barcode'] ?? med['rollNo'] ?? '').toString());
-    _packBarcodeCtrl =
-        TextEditingController(text: med['packBarcode']?.toString() ?? '');
+    _codeCtrl = TextEditingController();
+    _barcodeCtrl = TextEditingController();
+    _packBarcodeCtrl = TextEditingController();
+    final wanted = (widget.medicine['_docId'] ?? widget.medicine['id'] ?? '').toString();
+    _batch = widget.batches.firstWhere(
+      (b) => (b['_docId'] ?? b['id']).toString() == wanted,
+      orElse: () => widget.batches.first,
+    );
+    _fillFrom(_batch);
+  }
+
+  /// Loads the fields from one batch (also when the user picks another batch).
+  void _fillFrom(Map<String, dynamic> med) {
+    _nameCtrl.text = med['name']?.toString() ?? '';
+    _doseCtrl.text = med['dose']?.toString() ?? '';
+    _qtyCtrl.text = med['quantity']?.toString() ?? '0';
+    _priceCtrl.text = _fmtPrice(_parsePrice(med['price']));
+    _expiryCtrl.text = med['expiryDate']?.toString() ?? '';
+    _codeCtrl.text = (med['code'] ?? med['itemCode'] ?? '').toString();
+    _barcodeCtrl.text = (med['barcode'] ?? med['rollNo'] ?? '').toString();
+    _packBarcodeCtrl.text = med['packBarcode']?.toString() ?? '';
     _selectedType = widget.allTypes.contains(med['type'])
         ? med['type'].toString()
         : widget.allTypes.first;
+  }
 
-    final dose = (med['dose'] ?? '').toString().trim();
-    if (_hasDd(_selectedType)) {
-      final list = widget.doseOptions[_selectedType] ?? [];
-      _selectedDoseDropdown = list.contains(dose) ? dose : null;
-    }
+  void _pickBatch(Map<String, dynamic> b) {
+    setState(() {
+      _batch = b;
+      _fillFrom(b);
+    });
   }
 
   @override
@@ -3976,378 +4595,336 @@ class _EditRequestSheetState extends State<_EditRequestSheet> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
 
-    // Barcode must remain unique across the branch's inventory. Only check
-    // when it actually changed, excluding this medicine's own record.
-    final newCode = _codeCtrl.text.trim();
-    final originalCode = (widget.medicine['code'] ?? '').toString().trim();
-    if (newCode.toLowerCase() != originalCode.toLowerCase()) {
-      final excludeDocId =
-          widget.medicine['_docId'] ?? widget.medicine['id'];
-      final taken = await widget.isBarcodeTaken(newCode,
-          excludeDocId: excludeDocId?.toString());
-      if (taken) {
-        if (mounted) {
-          setState(() => _submitting = false);
-          AppToast.showSnackBar(context, 
-            const SnackBar(
-              content: Text(
-                  'This barcode is already registered to another medicine'),
-              backgroundColor: _red,
-            ),
-          );
-        }
-        return;
+    {
+      // Every user: only quantity and expiry may change here; everything else is sent
+      // exactly as the batch has it, so neither a direct save nor an approval can rename,
+      // re-type or re-code a medicine (user rule 2026-11-21).
+      final b = _batch;
+      final locked = <String, dynamic>{
+        'name': b['name'],
+        'formula': b['formula'] ?? b['name'],
+        'type': b['type'],
+        'dose': b['dose'] ?? '',
+        if ((b['code'] ?? b['itemCode']) != null) 'code': b['code'] ?? b['itemCode'],
+        if ((b['code'] ?? b['itemCode']) != null) 'itemCode': b['code'] ?? b['itemCode'],
+        if ((b['barcode'] ?? b['rollNo']) != null) 'barcode': b['barcode'] ?? b['rollNo'],
+        if ((b['barcode'] ?? b['rollNo']) != null) 'rollNo': b['barcode'] ?? b['rollNo'],
+        if (b['packBarcode'] != null) 'packBarcode': b['packBarcode'],
+        'price': (b['price'] ?? '').toString(),
+        'quantity': int.tryParse(_qtyCtrl.text.trim()) ?? 0,
+        'expiryDate': _expiryCtrl.text.trim(),
+        'reason': _reasonCtrl.text.trim(),
+      };
+      try {
+        await widget.onSubmit(_batch, locked);
+        if (!mounted) return;
+        Navigator.pop(context);
+      } finally {
+        if (mounted) setState(() => _submitting = false);
       }
     }
+  }
 
-    final dose = _hasDd(_selectedType)
-        ? (_selectedDoseDropdown ?? '')
-        : _hasFree(_selectedType)
-            ? _doseCtrl.text.trim()
-            : '';
+  // ── Compact layout (2026-11-21): current values at a glance, fields in two columns,
+  // expiry picker, quick reasons, and the Submit button always visible below the fields.
+  static const _quickReasons = [
+    'Wrong expiry',
+    'Wrong quantity',
+    'Counted again',
+    'Damaged',
+  ];
 
-    final rawBar = _barcodeCtrl.text.trim();
-    final newBarcode = MasterProformaService.normalizeProformaBarcode(rawBar) ?? rawBar;
-    final newPackBarcode = _packBarcodeCtrl.text.trim();
-
-    final updatedFormula = MasterProformaService.cleanBrandToFormula(_nameCtrl.text.trim());
-    final finalName = updatedFormula.isNotEmpty ? updatedFormula : _nameCtrl.text.trim();
-    final updatedFields = {
-      'name': finalName,
-      'formula': finalName,
-      'type': _selectedType,
-      'dose': dose,
-      'code': newCode,
-      'itemCode': newCode,
-      if (newBarcode.isNotEmpty) 'barcode': newBarcode,
-      if (newBarcode.isNotEmpty) 'rollNo': newBarcode,
-      if (newPackBarcode.isNotEmpty) 'packBarcode': newPackBarcode,
-      'quantity': int.tryParse(_qtyCtrl.text.trim()) ?? 0,
-      'price': _priceCtrl.text.trim(),
-      'expiryDate': _expiryCtrl.text.trim(),
-      'reason': _reasonCtrl.text.trim(),
-    };
-
-    try {
-      await widget.onSubmit(updatedFields);
-      if (!mounted) return;
-      Navigator.pop(context);
-    } finally {
-      if (mounted) setState(() => _submitting = false);
+  Future<void> _pickExpiry() async {
+    final now = DateTime.now();
+    final first = DateTime(now.year, now.month + 1, 1);
+    final current = parseExpiryMonth(_expiryCtrl.text);
+    final initial = (current != null && !current.isBefore(first)) ? current : first;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: first,
+      lastDate: DateTime(now.year + 10, 12, 31),
+      initialDatePickerMode: DatePickerMode.year,
+      helpText: 'Expiry month',
+    );
+    if (picked != null && mounted) {
+      setState(() => _expiryCtrl.text = DateFormat('MM-yyyy').format(picked));
     }
+  }
+
+  /// One card per batch: expiry + quantity. Tapping a card edits that batch only.
+  Widget _batchPicker() {
+    final c = context.comfort;
+    final selectedId = (_batch['_docId'] ?? _batch['id']).toString();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('${widget.batches.length} batches · pick the one to edit',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.textSecondary)),
+      const SizedBox(height: 6),
+      SizedBox(
+        height: 58,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: widget.batches.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemBuilder: (_, i) {
+            final b = widget.batches[i];
+            final id = (b['_docId'] ?? b['id']).toString();
+            final selected = id == selectedId;
+            final exp = (b['expiryDate'] ?? '').toString().trim();
+            final d = parseExpiryMonth(exp);
+            final expLabel = d == null ? (exp.isEmpty ? 'No expiry' : exp) : DateFormat('MMM yyyy').format(d);
+            return InkWell(
+              onTap: _submitting ? null : () => _pickBatch(b),
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: 132,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: selected ? c.brandSoft : c.surfaceSunken,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: selected ? c.brand : c.border, width: selected ? 1.6 : 1),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('Exp $expLabel',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.textPrimary)),
+                    const SizedBox(height: 2),
+                    Text('${b['quantity'] ?? 0} in stock${i == 0 ? ' · used first' : ''}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11, color: c.textMuted)),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  Widget _pair(Widget a, Widget b) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [Expanded(child: a), const SizedBox(width: 12), Expanded(child: b)],
+      );
+
+  Widget _currentChip(String label, String value) {
+    final c = context.comfort;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.border),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: TextStyle(fontSize: 11.5, color: c.textMuted),
+          children: [
+            TextSpan(text: '$label  '),
+            TextSpan(
+              text: value.isEmpty ? '—' : value,
+              style: TextStyle(fontWeight: FontWeight.w700, color: c.textPrimary),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final c = context.comfort;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
-    final hasDd = _hasDd(_selectedType);
-    final hasFree = _hasFree(_selectedType);
+    final med = _batch;
+    final originalExpiry = (med['expiryDate'] ?? '').toString().trim();
+    final ask = widget.needsApproval;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        border: Border(top: BorderSide(color: c.border)),
-      ),
-      padding: EdgeInsets.fromLTRB(20, 0, 20, bottom + 24),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Center(
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 12),
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: c.borderStrong,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
-
-        // Title row
-        Row(children: [
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: c.brandSoft,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(Icons.edit_rounded, color: c.brand, size: 18),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-              Text('Request Edit',
-                  style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w700,
-                      color: c.textPrimary)),
-              Text(
-                  'Changes will be sent for supervisor approval',
-                  style:
-                      TextStyle(fontSize: 11.5, color: c.textSecondary)),
-            ]),
-          ),
-          IconButton(
-            icon: Icon(Icons.close_rounded, color: c.textMuted),
-            onPressed: () => Navigator.pop(context),
-          ),
-        ]),
-
-        const SizedBox(height: 10),
-
-        Container(
-          padding: const EdgeInsets.all(10),
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680),
+        child: Container(
           decoration: BoxDecoration(
-            color: c.brandSoft,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+            color: c.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            border: Border(top: BorderSide(color: c.border)),
           ),
-          child: Row(children: [
-            Icon(Icons.info_outline_rounded, size: 15, color: c.brandStrong),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Editing: ${widget.medicine['name'] ?? ''} '
-                '(${widget.medicine['type'] ?? ''})',
-                style: TextStyle(
-                    fontSize: 12,
-                    color: c.brandStrong,
-                    fontWeight: FontWeight.w600),
+          padding: EdgeInsets.fromLTRB(20, 0, 20, bottom + 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 10),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(color: c.borderStrong, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+
+            // Title + current values
+            Row(children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(
+                    '${ask ? 'Request edit' : 'Edit batch'} · ${med['name'] ?? ''}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.textPrimary),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                      ask
+                          ? 'A supervisor approves it before anything changes.'
+                          : 'Changes apply to the selected batch right away and are logged.',
+                      style: TextStyle(fontSize: 11.5, color: c.textSecondary)),
+                ]),
+              ),
+              IconButton(
+                icon: Icon(GIcons.close, color: c.textMuted),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            if (widget.batches.length > 1) ...[
+              _batchPicker(),
+              const SizedBox(height: 10),
+            ],
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Wrap(spacing: 6, runSpacing: 6, children: [
+                _currentChip('Now', '${med['quantity'] ?? 0}'),
+                _currentChip('Expiry', originalExpiry),
+                _currentChip('Barcode', (med['barcode'] ?? med['rollNo'] ?? '').toString()),
+                _currentChip('Type', (med['type'] ?? '').toString()),
+                if ((med['dose'] ?? '').toString().trim().isNotEmpty) _currentChip('Dose', med['dose'].toString()),
+              ]),
+            ),
+            const SizedBox(height: 12),
+            Divider(height: 1, color: c.border),
+            const SizedBox(height: 12),
+
+            Flexible(
+              child: Form(
+                key: _formKey,
+                child: SingleChildScrollView(
+                  child: Column(children: [
+                    // Name, type, dose and barcodes are fixed for every user (user rule
+                    // 2026-11-21): only quantity and expiry can be changed here.
+                    ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: c.surfaceSunken,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: c.border),
+                        ),
+                        child: Row(children: [
+                          Icon(GIcons.lock, size: 16, color: c.textMuted),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Name, type, dose and barcode cannot be changed here. '
+                              '${widget.needsApproval ? 'You can ask for a new quantity or expiry.' : 'Only the quantity and expiry can be changed.'}',
+                              style: TextStyle(fontSize: 12, color: c.textSecondary),
+                            ),
+                          ),
+                        ]),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    _pair(
+                      _field(
+                        controller: _qtyCtrl,
+                        label: 'Total quantity',
+                        icon: GIcons.inventory,
+                        keyboardType: TextInputType.number,
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (int.tryParse(v.trim()) == null) return 'Invalid number';
+                          return null;
+                        },
+                      ),
+                      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                        Expanded(
+                          child: _field(
+                            controller: _expiryCtrl,
+                            label: 'Expiry (MM-YYYY)',
+                            icon: GIcons.calendar,
+                            // Only a changed expiry is checked against "after this month".
+                            validator: (v) => (v ?? '').trim() == originalExpiry
+                                ? null
+                                : expiryInputError(v ?? ''),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: IconButton.filledTonal(
+                            tooltip: 'Pick month',
+                            onPressed: _pickExpiry,
+                            icon: const Icon(GIcons.calendar, size: 18),
+                          ),
+                        ),
+                      ]),
+                    ),
+                    const SizedBox(height: 12),
+                    _field(
+                      controller: _reasonCtrl,
+                      label: 'Reason for edit',
+                      icon: GIcons.edit,
+                      validator: (v) => (v == null || v.trim().isEmpty) ? 'Reason is required' : null,
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Wrap(spacing: 6, runSpacing: 6, children: [
+                        for (final r in _quickReasons)
+                          ActionChip(
+                            label: Text(r, style: const TextStyle(fontSize: 11.5)),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => setState(() => _reasonCtrl.text = r),
+                          ),
+                      ]),
+                    ),
+                    const SizedBox(height: 8),
+                  ]),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: ElevatedButton.icon(
+                onPressed: _submitting ? null : _submit,
+                icon: _submitting
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: c.onBrand))
+                    : Icon(ask ? GIcons.send : GIcons.check, size: 18),
+                label: Text(
+                    _submitting
+                        ? (ask ? 'Submitting…' : 'Saving…')
+                        : (ask ? 'Submit for approval' : 'Save changes'),
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: c.brand,
+                  foregroundColor: c.onBrand,
+                  disabledBackgroundColor: c.brand.withValues(alpha: 0.45),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  elevation: 0,
+                ),
               ),
             ),
           ]),
         ),
-
-        const SizedBox(height: 14),
-        Divider(height: 1, color: c.border),
-        const SizedBox(height: 14),
-
-        Flexible(
-          child: Form(
-            key: _formKey,
-            child: SingleChildScrollView(
-              child: Column(children: [
-                // Formula (was Name)
-                _field(
-                  controller: _nameCtrl,
-                  label: 'Formula',
-                  icon: Icons.medication_rounded,
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty)
-                          ? 'Required'
-                          : null,
-                ),
-                const SizedBox(height: 12),
-
-                // Item Code & Proforma Barcode (001–999)
-                Builder(builder: (context) {
-                  return _field(
-                    controller: _codeCtrl,
-                    label: 'Item Code',
-                    icon: Icons.tag_rounded,
-                    enabled: true,
-                    validator: (v) => (v == null || v.trim().isEmpty)
-                        ? 'Item Code is required'
-                        : null,
-                  );
-                }),
-                const SizedBox(height: 12),
-                _field(
-                  controller: _barcodeCtrl,
-                  label: 'Proforma Barcode (001–999)',
-                  icon: Icons.qr_code_rounded,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                    LengthLimitingTextInputFormatter(3),
-                  ],
-                  enabled: true,
-                ),
-                const SizedBox(height: 12),
-                _field(
-                  controller: _packBarcodeCtrl,
-                  label: 'Pack Barcode (Optional)',
-                  icon: Icons.qr_code_scanner_rounded,
-                  enabled: true,
-                ),
-                const SizedBox(height: 12),
-
-                // Type dropdown
-                Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                    children: [
-                  Text('Type',
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: c.textSecondary)),
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14),
-                    decoration: BoxDecoration(
-                      color: c.surfaceSunken,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: c.border),
-                    ),
-                    child: DropdownButton<String>(
-                      value: _selectedType,
-                      isExpanded: true,
-                      underline: const SizedBox(),
-                      dropdownColor: c.surface,
-                      style: TextStyle(
-                          color: c.textPrimary, fontSize: 14),
-                      icon: Icon(
-                          Icons.expand_more_rounded,
-                          color: c.brand),
-                      items: widget.allTypes
-                          .map((t) => DropdownMenuItem(
-                              value: t, child: Text(t)))
-                          .toList(),
-                      onChanged: (v) => setState(() {
-                        _selectedType =
-                            v ?? _selectedType;
-                        _selectedDoseDropdown = null;
-                        _doseCtrl.clear();
-                      }),
-                    ),
-                  ),
-                ]),
-                const SizedBox(height: 12),
-
-                // Dose dropdown
-                if (hasDd) ...[
-                  Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
-                      children: [
-                    Text('Dose',
-                        style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: c.textSecondary)),
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14),
-                      decoration: BoxDecoration(
-                        color: c.surfaceSunken,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: c.border),
-                      ),
-                      child: DropdownButton<String>(
-                        value: _selectedDoseDropdown,
-                        isExpanded: true,
-                        underline: const SizedBox(),
-                        hint: Text('Select dose',
-                            style: TextStyle(
-                                color: c.textMuted)),
-                        dropdownColor: c.surface,
-                        style: TextStyle(
-                            color: c.textPrimary, fontSize: 14),
-                        icon: Icon(
-                            Icons.expand_more_rounded,
-                            color: c.brand),
-                        items: (widget.doseOptions[
-                                        _selectedType] ??
-                                    [])
-                            .map((d) => DropdownMenuItem(
-                                value: d,
-                                child: Text(d)))
-                            .toList(),
-                        onChanged: (v) => setState(
-                            () => _selectedDoseDropdown = v),
-                      ),
-                    ),
-                  ]),
-                  const SizedBox(height: 12),
-                ],
-
-                // Dose free text
-                if (hasFree) ...[
-                  _field(
-                    controller: _doseCtrl,
-                    label: 'Dose / Variant',
-                    icon: Icons.science_rounded,
-                  ),
-                  const SizedBox(height: 12),
-                ],
-
-                // Quantity Adjustment Field
-                _field(
-                  controller: _qtyCtrl,
-                  label: 'Total Quantity',
-                  icon: Icons.inventory_2_rounded,
-                  keyboardType: TextInputType.number,
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Required';
-                    if (int.tryParse(v.trim()) == null) return 'Invalid number';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
-
-                // Expiry
-                _field(
-                  controller: _expiryCtrl,
-                  label: 'Expiry',
-                  icon: Icons.calendar_today_rounded,
-                ),
-                const SizedBox(height: 12),
-
-                // Reason — mandatory
-                _field(
-                  controller: _reasonCtrl,
-                  label: 'Reason for edit',
-                  icon: Icons.comment_rounded,
-                  maxLines: 2,
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty)
-                          ? 'Reason is required'
-                          : null,
-                ),
-                const SizedBox(height: 20),
-
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton.icon(
-                    onPressed: _submitting ? null : _submit,
-                    icon: _submitting
-                        ? SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: c.onBrand))
-                        : const Icon(Icons.send_rounded, size: 18),
-                    label: Text(
-                        _submitting
-                            ? 'Submitting…'
-                            : 'Submit for Approval',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: c.brand,
-                      foregroundColor: c.onBrand,
-                      disabledBackgroundColor: c.brand.withValues(alpha: 0.45),
-                      shape: RoundedRectangleBorder(
-                          borderRadius:
-                              BorderRadius.circular(12)),
-                      elevation: 0,
-                    ),
-                  ),
-                ),
-              ]),
-            ),
-          ),
-        ),
-      ]),
+      ),
     );
   }
 
@@ -4470,5 +5047,69 @@ class ExpiryDateFormatter extends TextInputFormatter {
       return 'Invalid date';
     }
     return null;
+  }
+}
+
+class _StructuredMedicineRowCard extends StatefulWidget {
+  final VoidCallback onTap;
+  final Color accentColor;
+  final Widget child;
+
+  const _StructuredMedicineRowCard({
+    required this.onTap,
+    required this.accentColor,
+    required this.child,
+  });
+
+  @override
+  State<_StructuredMedicineRowCard> createState() => _StructuredMedicineRowCardState();
+}
+
+class _StructuredMedicineRowCardState extends State<_StructuredMedicineRowCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: _hovered ? Color.lerp(c.surface, c.brandSoft, 0.18) : c.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: _hovered ? c.brand.withValues(alpha: 0.45) : c.border,
+            width: _hovered ? 1.2 : 1.0,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: widget.onTap,
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    width: 3.5,
+                    color: widget.accentColor.withValues(alpha: _hovered ? 0.95 : 0.72),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+                      child: widget.child,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

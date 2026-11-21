@@ -172,6 +172,10 @@ class RealtimeManager {
     'migrate_patient_key',
     'save_stock_item',
     'delete_stock_item',
+    'stock_moves',
+    'stock_details',
+    'stock_wipe',
+    'patient_edit_approved',
     'token_reversal_approved',
     'save_proforma_item',
     'proforma_item_updated',
@@ -1872,6 +1876,12 @@ class RealtimeManager {
         eventType == 'prescription_created' ||
         eventType == 'save_stock_item' ||
         eventType == 'delete_stock_item' ||
+        eventType == 'stock_moves' ||
+        eventType == 'stock_details' ||
+        eventType == 'stock_wipe' ||
+        eventType == 'patient_edit_approved' ||
+        eventType == 'restock_request' ||
+        eventType == 'restock_acknowledged' ||
         eventType == 'token_reversal_approved' ||
         eventType == 'request_created' ||
         eventType == 'request_approved' ||

@@ -1768,10 +1768,10 @@ class _EmployeeManagementTabState extends State<EmployeeManagementTab> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: context.adapt(ExecTokens.rowHover), shape: BoxShape.circle),
-                          child: Icon(Icons.people_outline_rounded, size: 28, color: context.adapt(ExecTokens.textMuted)),
+                        const GEmptyIllustration(
+                          GEmptyIllustrationKind.people,
+                          size: 132,
+                          fallbackIcon: Icons.people_outline_rounded,
                         ),
                         const SizedBox(height: 10),
                         Text('No employees found', style: ExecTokens.pageTitle.copyWith(color: context.adapt(ExecTokens.textPrimary))),

@@ -7,6 +7,7 @@
 
 import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'package:gmwf/design/components/decorative_image.dart' show GDecor;
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'dart:async';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -2993,20 +2994,12 @@ class _KitchenServeQueueTabState extends State<_KitchenServeQueueTab> {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Container(
-                                width: 80,
-                                height: 80,
-                                decoration: BoxDecoration(
-                                  color: SoftPalette.emerald500.withValues(alpha: isDark ? 0.15 : 0.1),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(
-                                  Icons.check_circle_outline_rounded,
-                                  size: 48,
-                                  color: SoftPalette.emerald500,
-                                ),
+                              const GEmptyIllustration(
+                                GEmptyIllustrationKind.kitchen,
+                                size: 152,
+                                fallbackIcon: Icons.check_circle_outline_rounded,
                               ),
-                              const SizedBox(height: 18),
+                              const SizedBox(height: 16),
                               Text(
                                 _selectedSessionFilter == 'all'
                                     ? 'All Tokens Served!'
@@ -3930,8 +3923,11 @@ class _HistoryTabState extends State<_HistoryTab> {
                   child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                Icon(Icons.event_note_rounded,
-                    size: 80, color: kPurple.withValues(alpha: 0.2)),
+                const GEmptyIllustration(
+                  GEmptyIllustrationKind.kitchen,
+                  size: 148,
+                  fallbackIcon: Icons.event_note_rounded,
+                ),
                 const SizedBox(height: 16),
                 Text('No records for $displayDate',
                     style: TextStyle(

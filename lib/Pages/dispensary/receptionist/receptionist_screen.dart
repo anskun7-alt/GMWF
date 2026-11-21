@@ -16,6 +16,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:gmwf/design/components/flushbar_compat.dart';
 import 'package:gmwf/services/auth_service.dart';
 import 'package:gmwf/services/local_storage_service.dart';
+import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/services/local_storage_service.dart' as lss;
 import 'package:gmwf/services/sync_service.dart';
 import 'package:gmwf/realtime/connection_manager.dart';
@@ -226,30 +227,25 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
       // PATIENT EDIT APPROVED
       if (type == 'patient_edit_approved') {
         final eventBranch = data?['branchId'] as String?;
-        if (eventBranch != widget.branchId) return;
+        if (eventBranch != null &&
+            eventBranch.isNotEmpty &&
+            !CampSessionService.areBranchesMatching(eventBranch, widget.branchId)) {
+          return;
+        }
 
         final patientId = data?['patientId'] as String?;
         final rawChanges = data?['changes'];
         final changes = (rawChanges is Map) ? Map<String, dynamic>.from(rawChanges) : null;
 
         if (patientId != null && changes != null && changes.isNotEmpty) {
-          final allPatients = lss.LocalStorageService.getAllLocalPatients(
-              branchId: widget.branchId);
-          final existing = allPatients
-              .where((p) => p['patientId'] == patientId)
-              .firstOrNull;
-
-          if (existing != null) {
-            final updated = Map<String, dynamic>.from(existing)
-              ..addAll(lss.LocalStorageService.sanitize(changes));
-            await lss.LocalStorageService.saveLocalPatient(updated, isFromSync: true);
-          } else {
-            final newPatient = lss.LocalStorageService.sanitize(changes);
-            newPatient['patientId'] = patientId;
-            newPatient['branchId'] = widget.branchId;
-            await lss.LocalStorageService.saveLocalPatient(newPatient, isFromSync: true);
-          }
-          await lss.LocalStorageService.updateActiveEntriesForPatient(widget.branchId, patientId, changes);
+          await lss.LocalStorageService.updatePatientWithCnicMigration(
+            oldPatientId: patientId,
+            updatedPatient: {
+              ...changes,
+              'branchId': widget.branchId,
+            },
+            isFromSync: true,
+          );
 
           if (mounted) setState(() {});
         }
@@ -811,7 +807,8 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
 
       await LocalStorageService.saveLocalEditRequest(reqPayload);
 
-      await LocalStorageService.enqueueSync({
+      // On a desk linked to the LAN the server uploads it once from request_created below.
+      if (!LanFirestoreGate.isLanDesk) await LocalStorageService.enqueueSync({
         'type': 'save_token_reversal_request',
         'branchId': widget.branchId,
         'requestId': requestId,
@@ -1559,14 +1556,10 @@ class _ReceptionistScreenState extends State<ReceptionistScreen>
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Image.asset(
-                  'assets/images/doctor_empty_queue.jpg',
-                  width: 112,
-                  height: 112,
-                  fit: BoxFit.cover,
-                ),
+              const GEmptyIllustration(
+                GEmptyIllustrationKind.people,
+                size: 124,
+                fallbackIcon: Icons.people_outline_rounded,
               ),
               const SizedBox(height: 12),
               Text(

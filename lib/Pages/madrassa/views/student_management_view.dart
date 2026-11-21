@@ -680,6 +680,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   }
 
   Widget _buildStatusChip(BuildContext context, Map<String, dynamic> d, {bool isDark = false}) {
+    final c = context.comfort;
     final status = d['status'] ?? 'active';
     String statusLabel;
     Color color;
@@ -687,36 +688,36 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
     switch (status) {
       case 'active':
         statusLabel = context.l.statusActive;
-        color = context.adapt(SoftPalette.teal550); // Teal
+        color = c.success;
         break;
       case 'archived':
         statusLabel = context.l.statusArchived;
-        color = context.adapt(SoftPalette.amber300); // Amber
+        color = c.warning;
         break;
       case 'hifz_completed':
         statusLabel = context.l.statusHifzCompleted;
-        color = context.adapt(SoftPalette.indigo550); // Purple
+        color = c.brand;
         break;
       case 'nazra_completed':
         statusLabel = context.l.statusNazraCompleted;
-        color = context.adapt(SoftPalette.teal500); // Teal / Emerald
+        color = c.info;
         break;
       case 'left':
         statusLabel = context.l.statusLeft;
-        color = context.adapt(SoftPalette.red400); // Red/Rose
+        color = c.danger;
         break;
       case 'dropped':
       case 'dropped_out':
         statusLabel = context.isUrdu ? 'خارج' : 'Dropped Out';
-        color = context.adapt(SoftPalette.red500); // Dark Red
+        color = c.danger;
         break;
       case 'inactive':
         statusLabel = context.isUrdu ? 'غیر فعال' : 'Inactive';
-        color = context.adapt(SoftPalette.slate550); // Slate Gray
+        color = c.textMuted;
         break;
       default:
         statusLabel = status.toString().toUpperCase();
-        color = context.adapt(SoftPalette.slate550);
+        color = c.textMuted;
     }
 
     // Extract the latest reason for this status from auditLog

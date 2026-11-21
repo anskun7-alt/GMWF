@@ -59,6 +59,10 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
   /// Just dispensed: skipped until the queue has caught up, so it is not reloaded.
   String? _justDispensed;
 
+  /// True while the user has a dispense confirmation / save open in PatientForm,
+  /// so we never swap out the open patient mid-dispense.
+  bool _isDispenseBusy = false;
+
   final List<DebouncedBoxListenable> _boxes = [];
   Timer? _advanceDebounce;
 
@@ -111,8 +115,9 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
     _advanceDebounce = Timer(const Duration(milliseconds: 250), _advance);
   }
 
-  /// Keeps the open patient while they are still waiting (never switches away
-  /// mid-dispense); otherwise loads the waiting patient with the smallest token.
+  /// Always keeps the smallest unclaimed waiting token loaded, EXCEPT while
+  /// the dispenser is actively inside a dispense confirmation/save flow
+  /// (`_isDispenseBusy`) so we never yank a patient mid-dispense.
   void _advance() {
     if (!mounted) return;
     try {
@@ -124,17 +129,31 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
       }
 
       final current = _dispensingSerial;
-      if (current != null && current.isNotEmpty) {
-        // Still waiting (in any shift)? Keep it — e.g. the user changed the shift filter.
+      if (_isDispenseBusy && current != null && current.isNotEmpty) {
         final stillWaiting = DispenseQueue.pickNext(queue, currentSerial: current, skipSerial: _justDispensed);
         if (DispenseQueue.sameSerial(stillWaiting?['serial'], current)) return;
         final anyShift = DispenseQueue.pickNext(_queue('all'), currentSerial: current, skipSerial: _justDispensed);
         if (DispenseQueue.sameSerial(anyShift?['serial'], current)) return;
       }
 
-      final next = DispenseQueue.pickNext(queue, skipSerial: _justDispensed);
-      if (!DispenseQueue.sameSerial(next?['serial'], current) || (next == null) != (_dispensing == null)) {
-        setState(() => _dispensing = next);
+      // Always prefer the smallest unclaimed pending token in fair queue order.
+      final smallest = DispenseQueue.pickNext(queue, skipSerial: _justDispensed);
+      if (smallest != null) {
+        if (!DispenseQueue.sameSerial(smallest['serial'], current) || _dispensing == null) {
+          setState(() => _dispensing = smallest);
+        }
+        return;
+      }
+
+      // No waiting token in the selected shift filter: if the user switched shift filter
+      // while a patient from another shift is still waiting, keep them open.
+      if (current != null && current.isNotEmpty) {
+        final anyShift = DispenseQueue.pickNext(_queue('all'), currentSerial: current, skipSerial: _justDispensed);
+        if (DispenseQueue.sameSerial(anyShift?['serial'], current)) return;
+      }
+
+      if (_dispensing != null) {
+        setState(() => _dispensing = null);
       }
     } catch (e) {
       debugPrint('[Pharmacy] Could not pick the next patient: $e');
@@ -232,18 +251,10 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
-                      width: 140,
-                      height: 110,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: c.border),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: Image.asset(
-                        'assets/images/doctor_empty_medicines.jpg',
-                        fit: BoxFit.cover,
-                      ),
+                    const GEmptyIllustration(
+                      GEmptyIllustrationKind.inventory,
+                      size: 136,
+                      fallbackIcon: Icons.medication_outlined,
                     ),
                     const SizedBox(height: 14),
                     Text(
@@ -267,6 +278,10 @@ class _HybridAllInOneScreenState extends State<HybridAllInOneScreen> {
               queueEntry: entry,
               dispenserName: widget.userName,
               onDispensed: _onDispensed,
+              onDispenseBusyChanged: (busy) {
+                _isDispenseBusy = busy;
+                if (!busy) _scheduleAdvance();
+              },
               isCompactPreview: true,
             ),
     );

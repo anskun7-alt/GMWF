@@ -1641,7 +1641,11 @@ class _EmployeesTabState extends State<EmployeesTab> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.group_outlined, size: 54, color: t.textTertiary),
+          const GEmptyIllustration(
+            GEmptyIllustrationKind.people,
+            size: 148,
+            fallbackIcon: Icons.group_outlined,
+          ),
           const SizedBox(height: 14),
           Text('No employees found', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: t.textSecondary)),
           const SizedBox(height: 6),

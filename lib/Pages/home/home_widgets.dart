@@ -11,24 +11,29 @@ import 'package:gmwf_ui/gmwf_ui.dart';
 
 /// Quiet empty note for a card body.
 class HomeEmpty extends StatelessWidget {
-  const HomeEmpty(this.text, {super.key, this.icon = GIcons.inbox});
+  const HomeEmpty(
+    this.text, {
+    super.key,
+    this.icon = GIcons.inbox,
+    this.illustration,
+    this.size = 76,
+  });
 
   final String text;
   final IconData icon;
+  final GEmptyIllustrationKind? illustration;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     final c = context.comfort;
+    final kind = illustration ??
+        GEmptyIllustrationKind.infer(icon: icon, title: text);
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: Gsp.sp5),
+        padding: const EdgeInsets.symmetric(vertical: Gsp.sp4, horizontal: Gsp.sp3),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(color: c.surfaceSunken, shape: BoxShape.circle),
-            child: Icon(icon, size: GIconSize.md, color: c.textMuted),
-          ),
+          GEmptyIllustration(kind, size: size, fallbackIcon: icon),
           const SizedBox(height: Gsp.sp2),
           Text(text, style: GText.body2(c.textMuted), textAlign: TextAlign.center),
         ]),

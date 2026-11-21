@@ -3,6 +3,7 @@
 import 'package:gmwf/services/cloud/cloud_db.dart';
 import 'package:gmwf/services/cloud/lan_firestore_gate.dart';
 import 'package:gmwf/utils/debounced_box_listenable.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/pages/dispensary/widgets/tab_visibility.dart';
 import 'package:gmwf/utils/token_order.dart';
 import 'package:gmwf/utils/branch_labels.dart';
@@ -511,6 +512,11 @@ class _PatientQueueState extends State<PatientQueue> {
           }
         }
         _debouncedRebuild();
+      } else if (type == RealtimeEvents.savePatient ||
+          type == 'save_patient' ||
+          type == 'migrate_patient_key' ||
+          type == 'patient_edit_approved') {
+        _debouncedRebuild();
       } else if (type == RealtimeEvents.saveStockItem || type == 'save_stock_item' || type == 'medicine_registered' ||
           type == RealtimeEvents.deleteStockItem || type == 'delete_stock_item') {
         // RealtimeRouter already applied this to the stock box (single writer); re-saving the
@@ -788,10 +794,11 @@ class _PatientQueueState extends State<PatientQueue> {
         'approvedBy': approvedBy,
         'reviewedAt': nowIso,
       });
-      // The decision goes through the upload queue (retried until Firestore confirms it). A
-      // LAN client drops dispensary items such as approve_token_exception, so the status is
-      // also queued as a plain request update, which every PC uploads itself.
-      await LocalStorageService.enqueueSync({
+      // The decision goes through the upload queue (retried until Firestore confirms it). On a
+      // desk linked to the LAN the server uploads it once from the LAN message below; queuing
+      // it here as well uploaded it twice.
+      final uploadsHere = !LanFirestoreGate.isLanDesk;
+      if (uploadsHere) await LocalStorageService.enqueueSync({
         'type':       'update_request_status',
         'branchId':   widget.branchId,
         'collection': 'edit_requests',
@@ -806,7 +813,7 @@ class _PatientQueueState extends State<PatientQueue> {
         },
       });
 
-      await LocalStorageService.enqueueSync({
+      if (uploadsHere) await LocalStorageService.enqueueSync({
         'type':      'approve_token_exception',
         'branchId':  widget.branchId,
         'requestId': requestId,
@@ -821,6 +828,8 @@ class _PatientQueueState extends State<PatientQueue> {
       await LocalStorageService.grantTokenException(
         widget.branchId,
         patientId,
+        // The shift's date, as the token desk looks it up (night shift past midnight).
+        dateKey: CampSessionService.resolveShiftAndDateKey(null, widget.branchId).dateKey,
         reason: doctorReason,
         approvedBy: RealtimeManager().role ?? 'Doctor',
         requestId: requestId,
@@ -838,6 +847,9 @@ class _PatientQueueState extends State<PatientQueue> {
             'patientId':  patientId,
             'reason':     doctorReason,
             'approvedBy': RealtimeManager().role ?? 'Doctor',
+            'approvedAt': nowIso,
+            // The day it is for: a re-sent approval never becomes another day's exception.
+            'dateKey':    CampSessionService.resolveShiftAndDateKey(null, widget.branchId).dateKey,
           },
         ),
       });
@@ -901,7 +913,8 @@ class _PatientQueueState extends State<PatientQueue> {
         'reviewedAt':      nowIso,
       };
       await LocalStorageService.markLocalRequestDecided(requestId, 'rejected', fields: decision);
-      await LocalStorageService.enqueueSync({
+      // On a LAN desk the server uploads it from request_rejected below.
+      if (!LanFirestoreGate.isLanDesk) await LocalStorageService.enqueueSync({
         'type':       'reject_request',
         'branchId':   widget.branchId,
         'collection': 'edit_requests',
@@ -4082,14 +4095,10 @@ class _PatientQueueState extends State<PatientQueue> {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(14),
-                            child: Image.asset(
-                              'assets/images/doctor_empty_queue.jpg',
-                              width: 112,
-                              height: 112,
-                              fit: BoxFit.cover,
-                            ),
+                          const GEmptyIllustration(
+                            GEmptyIllustrationKind.people,
+                            size: 124,
+                            fallbackIcon: Icons.people_outline_rounded,
                           ),
                           const SizedBox(height: 12),
                           Text(

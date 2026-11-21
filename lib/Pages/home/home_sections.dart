@@ -14,6 +14,7 @@ import 'package:gmwf_ui/gmwf_ui.dart';
 
 import '../../models/module_registry.dart';
 import '../../services/local_storage_service.dart';
+import '../dispensary/dispensar/inventory.dart' show InventoryPage;
 import '../madrassa/madrassa_dashboard.dart' show MadrassaDashboard;
 import '../office/finance_page.dart' show FinancePage;
 import '../school/school_dashboard.dart' show SchoolDashboard;
@@ -78,6 +79,9 @@ const Map<String, (String, String)> homeFolded = {
   'school_library': ('school_module', 'library'),
   'school_grading': ('school_module', 'grading'),
   'school_audit': ('school_module', 'audit'),
+  // Legacy 'medicine_proforma' module folds into Med Inventory's "Add Medicine" tab
+  // so the sidebar never shows two duplicate "Add Medicine" entries.
+  'medicine_proforma': ('inventory', 'add_medicine'),
 };
 
 /// Where [moduleId] really opens for a user with [available] modules:
@@ -101,6 +105,14 @@ String? sectionLabel(String moduleId, String? section) {
 /// [m] with a builder that shows [section] with the screen's own navigation
 /// hidden. Modules without sections come back unchanged.
 AppModule withSection(AppModule m, String? section, {ValueChanged<String>? onSectionChanged}) {
+  if (m.id == 'inventory' && section == 'add_medicine') {
+    return m.copyWith(
+      builder: (_, d) => InventoryPage(
+        branchId: (d['branchId'] ?? 'unknown').toString(),
+        initialTabKey: 'add_medicine',
+      ),
+    );
+  }
   final secs = homeSections[m.id];
   if (secs == null) return m;
   final sec = secs.firstWhere((s) => s.key == section, orElse: () => secs.first);

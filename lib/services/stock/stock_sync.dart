@@ -41,6 +41,7 @@ class StockSync {
   static const String evDetails = 'stock_details';
   static const String evChecksum = 'stock_checksum';
   static const String evDriftReport = 'stock_drift_report';
+  static const String evWipe = 'stock_wipe';
 
   /// How long movements wait before a cloud upload (several dispenses → one write each).
   /// A PC with no LAN server uploads sooner, so other cloud-only PCs see the change soon.
@@ -60,7 +61,63 @@ class StockSync {
   static Timer? _baseFlush;
   static final Set<String> _baseChanged = <String>{};
   static final Map<String, StreamSubscription> _listeners = {};
+  static final Map<String, StreamSubscription> _wipeListeners = {};
+  static final Set<String> _wipingPools = <String>{};
   static StreamSubscription? _ledgerSub;
+
+  /// Builds a deduplication-safe `stock_wipe` LAN message. Uses `_serverPush: true` and a
+  /// unique `_messageId` so clients never drop repeated wipes as duplicates in RealtimeRouter.
+  static Map<String, dynamic> buildWipePayload(
+    StockPool pool,
+    String wipeId,
+    int wipedAtMs, {
+    String? targetClientId,
+  }) {
+    final nonce = '${wipeId.isNotEmpty ? wipeId : 'wipe'}_${DateTime.now().microsecondsSinceEpoch}';
+    return {
+      'event_type': evWipe,
+      '_messageId': 'stock_wipe_${pool.key}_$nonce',
+      '_serverPush': true,
+      '_timestamp': wipedAtMs,
+      'branchId': pool.branch,
+      if (targetClientId != null && targetClientId.isNotEmpty) '_targetClientId': targetClientId,
+      'data': {
+        'pool': pool.key,
+        'cloudBranch': pool.cloudBranch,
+        'collection': pool.collection,
+        'wipeId': wipeId,
+        'wipedAtMs': wipedAtMs,
+        'timestamp': DateTime.fromMillisecondsSinceEpoch(wipedAtMs, isUtc: true).toIso8601String(),
+      },
+    };
+  }
+
+  /// Drops any queued debounced base broadcasts for [poolKey].
+  static void clearPendingBaseBroadcasts(String poolKey) {
+    final prefix = '${poolKey.trim().toLowerCase()}|';
+    _baseChanged.removeWhere((k) => k.toLowerCase().startsWith(prefix));
+    if (_baseChanged.isEmpty) _baseFlush?.cancel();
+  }
+
+  /// Pauses cloud listeners, timers, and incoming stock traffic for [pool] while a master
+  /// wipe is executing so nothing races with or resurrects wiped records.
+  static Future<void> suspendForWipe(StockPool pool) async {
+    _wipingPools.add(pool.key);
+    _uploadTimer?.cancel();
+    clearPendingBaseBroadcasts(pool.key);
+    await _listeners.remove(pool.key)?.cancel();
+    await _wipeListeners.remove(pool.key)?.cancel();
+    // Wait briefly if a cloud upload transaction is already mid-flight.
+    for (var i = 0; i < 25 && StockCloud.isUploading; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
+  /// Re-enables stock sync and cloud listeners for [pool] after a master wipe finishes.
+  static void resumeAfterWipe(StockPool pool) {
+    _wipingPools.remove(pool.key);
+    if (_started) _followCloud(pool.branch);
+  }
 
   /// This PC is a desk linked to a LAN server (the server does the cloud work).
   static bool get isLanClient =>
@@ -73,7 +130,9 @@ class StockSync {
   /// Starts stock syncing (idempotent). Call after Hive and Firebase are ready.
   static Future<void> start({String? branchId}) async {
     await StockLedger.ensureOpen();
+    unawaited(StockLedger.sanitizeNegativesOnce());
     StockLedger.onLocalMoves = _onLocalMoves;
+    StockLedger.thisPcUploads = () => uploadsToCloud;
     if (_started) {
       if (branchId != null) _followCloud(branchId);
       return;
@@ -97,6 +156,11 @@ class StockSync {
       s.cancel();
     }
     _listeners.clear();
+    for (final s in _wipeListeners.values) {
+      s.cancel();
+    }
+    _wipeListeners.clear();
+    _wipingPools.clear();
     _started = false;
   }
 
@@ -115,10 +179,17 @@ class StockSync {
       // Chunks keep each LAN frame small.
       for (var i = 0; i < moves.length; i += 50) {
         final part = moves.sublist(i, i + 50 > moves.length ? moves.length : i + 50);
+        final wipeEpochs = <String, String>{};
+        for (final m in part) {
+          wipeEpochs[m.pool] = StockLedger.poolWipeId(m.pool) ?? '';
+        }
         RealtimeManager().sendMessage({
           'event_type': evMoves,
           'branchId': part.first.branch,
-          'data': {'moves': part.map((m) => m.toMap()).toList()},
+          'data': {
+            'moves': part.map((m) => m.toMap()).toList(),
+            'wipeEpochs': wipeEpochs,
+          },
         });
       }
     } catch (e) {
@@ -164,11 +235,46 @@ class StockSync {
   /// Handles a stock LAN message. Returns true if [eventType] was a stock event.
   static Future<bool> handle(String eventType, Map<String, dynamic> message) async {
     final data = message['data'] is Map ? Map<String, dynamic>.from(message['data'] as Map) : message;
+    final socketId = (message['_socketId'] ?? '').toString();
+    final senderClientId = (message['_clientId'] ?? data['clientId'] ?? '').toString();
     switch (eventType) {
       case evMoves:
         final moves = _movesFrom(data['moves']);
         if (moves.isEmpty) return true;
-        final applied = await StockLedger.applyRemote(moves);
+        final rawEpochs = data['wipeEpochs'] is Map ? data['wipeEpochs'] as Map : const {};
+        final allowed = <StockMovement>[];
+        final stalePools = <String>{};
+        var needDeskSync = false;
+        for (final m in moves) {
+          if (_wipingPools.contains(m.pool)) continue;
+          final myWipe = StockLedger.poolWipeId(m.pool);
+          final incomingWipe = (rawEpochs[m.pool] ?? data['wipeId'] ?? '').toString().trim();
+          if (myWipe != null && incomingWipe != myWipe) {
+            stalePools.add(m.pool);
+            continue;
+          }
+          if (!isServer && incomingWipe.isNotEmpty && incomingWipe != (myWipe ?? '')) {
+            needDeskSync = true;
+            continue;
+          }
+          allowed.add(m);
+        }
+        if (stalePools.isNotEmpty && isServer && socketId.isNotEmpty && serverSendTo != null) {
+          final nowMs = DateTime.now().millisecondsSinceEpoch;
+          for (final pk in stalePools) {
+            final p = StockPool.fromKey(pk);
+            final wid = StockLedger.poolWipeId(pk);
+            if (p != null && wid != null) {
+              serverSendTo!(socketId, buildWipePayload(p, wid, nowMs, targetClientId: senderClientId));
+            }
+          }
+        }
+        if (needDeskSync) {
+          final b = (message['branchId'] ?? moves.first.branch).toString();
+          if (b.isNotEmpty) sendChecksums(b, reason: 'wipe_sync');
+        }
+        if (allowed.isEmpty) return true;
+        final applied = await StockLedger.applyRemote(allowed);
         if (isServer && applied.any((m) => !m.inCloud)) _scheduleUpload(uploadDelayServer);
         return true;
       case evSnapshot:
@@ -178,14 +284,37 @@ class StockSync {
         await StockLedger.applySnapshot(data);
         return true;
       case evDetails:
-        final pool = (data['pool'] ?? '').toString();
+        final pool = (data['pool'] ?? '').toString().trim().toLowerCase();
         final id = (data['medicineId'] ?? '').toString();
-        if (pool.isEmpty || id.isEmpty) return true;
-        if (data['deleted'] == true) {
-          await StockLedger.markDeleted(pool, id);
-          if (isServer) {
+        if (pool.isEmpty || id.isEmpty || _wipingPools.contains(pool)) return true;
+        final myWipe = StockLedger.poolWipeId(pool);
+        final incomingWipe = (data['wipeId'] ?? '').toString().trim();
+        if (myWipe != null && incomingWipe != myWipe) {
+          if (isServer && socketId.isNotEmpty && serverSendTo != null) {
             final p = StockPool.fromKey(pool);
-            if (p != null) unawaited(StockCloud.markDeleted(p, id));
+            if (p != null) {
+              serverSendTo!(
+                socketId,
+                buildWipePayload(p, myWipe, DateTime.now().millisecondsSinceEpoch, targetClientId: senderClientId),
+              );
+            }
+          }
+          return true;
+        }
+        if (!isServer && incomingWipe.isNotEmpty && incomingWipe != (myWipe ?? '')) {
+          final b = (message['branchId'] ?? pool.split('/').first).toString();
+          if (b.isNotEmpty) sendChecksums(b, reason: 'wipe_sync');
+          return true;
+        }
+        if (data['deleted'] == true) {
+          if (data['hardDelete'] == true) {
+            await StockLedger.hardDeleteItem(pool, id);
+          } else {
+            await StockLedger.markDeleted(pool, id);
+            if (isServer) {
+              final p = StockPool.fromKey(pool);
+              if (p != null) unawaited(StockCloud.markDeleted(p, id));
+            }
           }
         } else {
           final details = data['details'] is Map ? Map<String, dynamic>.from(data['details'] as Map) : <String, dynamic>{};
@@ -210,8 +339,9 @@ class StockSync {
   /// Applies movements that arrived from another PC; the LAN server also queues them for
   /// the cloud.
   static Future<List<StockMovement>> applyIncoming(List<StockMovement> moves) async {
-    if (moves.isEmpty) return const [];
-    final applied = await StockLedger.applyRemote(moves);
+    final filtered = moves.where((m) => !_wipingPools.contains(m.pool)).toList();
+    if (filtered.isEmpty) return const [];
+    final applied = await StockLedger.applyRemote(filtered);
     if (isServer && applied.any((m) => !m.inCloud)) _scheduleUpload(uploadDelayServer);
     return applied;
   }
@@ -264,11 +394,19 @@ class StockSync {
     final id = (item['id'] ?? item['medicineId'] ?? item['docId'] ?? '').toString().trim();
     if (id.isEmpty) return;
     final pool = StockPool.ofLegacyRecord({...item, 'branchId': item['branchId'] ?? fullMessage['branchId']});
-    if (pool == null) return;
+    if (pool == null || _wipingPools.contains(pool.key)) return;
     final isReplay = fullMessage['isCatchUp'] == true || fullMessage['_isReplay'] == true || fullMessage['_serverPush'] == true;
+    // Never let a legacy replay resurrect items in a pool that has been master-wiped.
+    if (isReplay && StockLedger.poolWipeId(pool.key) != null) return;
     final rawDelta = data['_quantityDelta'] ?? item['_quantityDelta'];
     final details = Map<String, dynamic>.from(item)..remove('_quantityDelta');
-    if (StockLedger.item(pool.key, id) == null || details.containsKey('name')) {
+    final local = StockLedger.item(pool.key, id);
+    // A catch-up copy of a batch removed here (or a copy that says it is deleted) must not
+    // bring it back: saveDetails clears the deleted mark.
+    if (isReplay && (local?['deleted'] == true || item['deleted'] == true || item['status'] == 'deleted')) {
+      return;
+    }
+    if (local == null || details.containsKey('name')) {
       await StockLedger.saveDetails(pool.key, id, details);
     }
     if (rawDelta == null || isReplay) return;
@@ -307,7 +445,12 @@ class StockSync {
       RealtimeManager().sendMessage({
         'event_type': evDetails,
         'branchId': pool.branch,
-        'data': {'pool': pool.key, 'medicineId': medicineId, 'details': clean},
+        'data': {
+          'pool': pool.key,
+          'medicineId': medicineId,
+          'details': clean,
+          'wipeId': StockLedger.poolWipeId(pool.key) ?? '',
+        },
       });
     } catch (_) {}
     if (uploadsToCloud) unawaited(StockCloud.saveDetails(pool, medicineId, clean));
@@ -319,7 +462,12 @@ class StockSync {
       RealtimeManager().sendMessage({
         'event_type': evDetails,
         'branchId': pool.branch,
-        'data': {'pool': pool.key, 'medicineId': medicineId, 'deleted': true},
+        'data': {
+          'pool': pool.key,
+          'medicineId': medicineId,
+          'deleted': true,
+          'wipeId': StockLedger.poolWipeId(pool.key) ?? '',
+        },
       });
     } catch (_) {}
     if (uploadsToCloud) unawaited(StockCloud.markDeleted(pool, medicineId));
@@ -330,28 +478,73 @@ class StockSync {
   static void _followCloud(String branchId) {
     if (!uploadsToCloud) return;
     for (final pool in StockPool.allFor(branchId)) {
-      if (_listeners.containsKey(pool.key)) continue;
-      try {
-        final last = LocalStorageService.getLastSyncedServerTimestamp('stock_v2_${pool.key.replaceAll('/', '_')}');
-        final since = last == null ? null : DateTime.tryParse(last);
-        Query<Map<String, dynamic>> q = FirebaseFirestore.instance
-            .collection('branches')
-            .doc(pool.cloudBranch)
-            .collection(pool.collection);
-        if (since != null) q = q.where('updatedAt', isGreaterThan: Timestamp.fromDate(since));
-        _listeners[pool.key] = q.snapshots().listen((snap) async {
-          for (final ch in snap.docChanges) {
-            if (ch.type == DocumentChangeType.removed) continue;
-            final d = ch.doc.data();
-            if (d == null) continue;
-            await StockCloud.applyCloudDoc(pool, ch.doc.id, d);
-          }
-        }, onError: (Object e) {
-          debugPrint('[StockSync] cloud listener ${pool.key} stopped: $e');
-          _listeners.remove(pool.key);
-        });
-      } catch (e) {
-        debugPrint('[StockSync] cannot follow ${pool.key}: $e');
+      if (_wipingPools.contains(pool.key)) continue;
+      if (!_listeners.containsKey(pool.key)) {
+        try {
+          final last = LocalStorageService.getLastSyncedServerTimestamp('stock_v2_${pool.key.replaceAll('/', '_')}');
+          final since = last == null ? null : DateTime.tryParse(last);
+          Query<Map<String, dynamic>> q = FirebaseFirestore.instance
+              .collection('branches')
+              .doc(pool.cloudBranch)
+              .collection(pool.collection);
+          if (since != null) q = q.where('updatedAt', isGreaterThan: Timestamp.fromDate(since));
+          _listeners[pool.key] = q.snapshots().listen((snap) async {
+            // Never let stale local Firestore SDK cache resurrect REST-deleted docs.
+            if (snap.metadata.isFromCache || _wipingPools.contains(pool.key)) return;
+            for (final ch in snap.docChanges) {
+              if (ch.type == DocumentChangeType.removed) {
+                final removed = await StockLedger.removeItemLocally(pool.key, ch.doc.id);
+                if (removed && isServer && serverBroadcast != null) {
+                  serverBroadcast!({
+                    'event_type': evDetails,
+                    '_messageId': 'hard_del_${pool.key}_${ch.doc.id}_${DateTime.now().microsecondsSinceEpoch}',
+                    '_serverPush': true,
+                    'branchId': pool.branch,
+                    'data': {
+                      'pool': pool.key,
+                      'medicineId': ch.doc.id,
+                      'deleted': true,
+                      'hardDelete': true,
+                      'wipeId': StockLedger.poolWipeId(pool.key) ?? '',
+                    },
+                  });
+                }
+                continue;
+              }
+              final d = ch.doc.data();
+              if (d == null) continue;
+              await StockCloud.applyCloudDoc(pool, ch.doc.id, d);
+            }
+          }, onError: (Object e) {
+            debugPrint('[StockSync] cloud listener ${pool.key} stopped: $e');
+            _listeners.remove(pool.key);
+          });
+        } catch (e) {
+          debugPrint('[StockSync] cannot follow ${pool.key}: $e');
+        }
+      }
+
+      // Also watch the pool's cloud wipe marker (1 tiny doc; notifies Web & standalone desks
+      // immediately whenever the server executes a master wipe).
+      if (!_wipeListeners.containsKey(pool.key)) {
+        try {
+          _wipeListeners[pool.key] = StockCloud.wipeMetaRef(pool).snapshots().listen((snap) async {
+            if (snap.metadata.isFromCache || !snap.exists || _wipingPools.contains(pool.key)) return;
+            final wid = (snap.data()?['wipeId'] ?? '').toString().trim();
+            if (wid.isEmpty || StockLedger.poolWipeId(pool.key) == wid) return;
+            await StockLedger.purgePool(pool.key, wipeId: wid);
+            await StockLedger.purgeStockQueues(pool);
+            clearPendingBaseBroadcasts(pool.key);
+            await LocalStorageService.setLastSyncedServerTimestamp(
+                'stock_v2_${pool.key.replaceAll('/', '_')}', DateTime.now().toUtc().toIso8601String());
+            debugPrint('[StockSync] Applied live cloud wipe marker $wid for ${pool.key}');
+          }, onError: (Object e) {
+            debugPrint('[StockSync] wipe listener ${pool.key} stopped: $e');
+            _wipeListeners.remove(pool.key);
+          });
+        } catch (e) {
+          debugPrint('[StockSync] cannot follow wipe marker for ${pool.key}: $e');
+        }
       }
     }
   }
@@ -384,7 +577,9 @@ class StockSync {
     for (final k in keys) {
       final i = k.indexOf('|');
       if (i < 0) continue;
-      final it = StockLedger.item(k.substring(0, i), k.substring(i + 1));
+      final poolKey = k.substring(0, i).toLowerCase();
+      if (_wipingPools.contains(poolKey)) continue;
+      final it = StockLedger.item(poolKey, k.substring(i + 1));
       if (it != null) items.add(it);
     }
     if (items.isEmpty) return;
@@ -393,6 +588,12 @@ class StockSync {
       byBranch.putIfAbsent((it['branchId'] ?? '').toString(), () => []).add(it);
     }
     for (final e in byBranch.entries) {
+      final wipeEpochs = <String, String>{};
+      for (final it in e.value) {
+        final p = (it['pool'] ?? '').toString();
+        final wid = p.isEmpty ? null : StockLedger.poolWipeId(p);
+        if (wid != null) wipeEpochs[p] = wid;
+      }
       for (var i = 0; i < e.value.length; i += 100) {
         serverBroadcast!({
           'event_type': evSnapshot,
@@ -401,6 +602,7 @@ class StockSync {
           'data': {
             'items': e.value.sublist(i, i + 100 > e.value.length ? e.value.length : i + 100),
             'moves': const [],
+            if (wipeEpochs.isNotEmpty) 'wipeEpochs': wipeEpochs,
           },
         });
       }
@@ -416,6 +618,7 @@ class StockSync {
     final snap = StockLedger.snapshot(pools: poolKeys);
     final items = (snap['items'] as List).cast<Map<String, dynamic>>();
     final moves = (snap['moves'] as List);
+    final wipeEpochs = snap['wipeEpochs'] is Map ? Map<String, dynamic>.from(snap['wipeEpochs'] as Map) : const <String, dynamic>{};
     var sent = 0;
     // Movements first, then the figures.
     for (var i = 0; i < moves.length || i == 0; i += 200) {
@@ -425,7 +628,11 @@ class StockSync {
         'branchId': b,
         '_serverPush': true,
         if (targetClientId != null) '_targetClientId': targetClientId,
-        'data': {'items': const [], 'moves': moves.sublist(i, i + 200 > moves.length ? moves.length : i + 200)},
+        'data': {
+          'items': const [],
+          'moves': moves.sublist(i, i + 200 > moves.length ? moves.length : i + 200),
+          if (wipeEpochs.isNotEmpty) 'wipeEpochs': wipeEpochs,
+        },
       })) {
         sent++;
       }
@@ -436,7 +643,24 @@ class StockSync {
         'branchId': b,
         '_serverPush': true,
         if (targetClientId != null) '_targetClientId': targetClientId,
-        'data': {'items': items.sublist(i, i + 100 > items.length ? items.length : i + 100), 'moves': const []},
+        'data': {
+          'items': items.sublist(i, i + 100 > items.length ? items.length : i + 100),
+          'moves': const [],
+          if (wipeEpochs.isNotEmpty) 'wipeEpochs': wipeEpochs,
+        },
+      })) {
+        sent++;
+      }
+    }
+    // Even if a wiped pool now has 0 items and 0 moves, still deliver its wipeEpochs so the
+    // desk clears any stale records it held from before the wipe.
+    if (moves.isEmpty && items.isEmpty && wipeEpochs.isNotEmpty) {
+      if (send(socketId, {
+        'event_type': evSnapshot,
+        'branchId': b,
+        '_serverPush': true,
+        if (targetClientId != null) '_targetClientId': targetClientId,
+        'data': {'items': const [], 'moves': const [], 'wipeEpochs': wipeEpochs},
       })) {
         sent++;
       }
@@ -462,8 +686,10 @@ class StockSync {
     if (pools.isEmpty) return;
     final sums = <String, dynamic>{};
     final details = <String, dynamic>{};
+    final wipeEpochs = <String, String>{};
     for (final p in pools) {
       sums[p.key] = forceAll ? 'force' : StockLedger.checksum(p.key);
+      wipeEpochs[p.key] = StockLedger.poolWipeId(p.key) ?? '';
       // Per-medicine figures let the server say exactly what differed.
       details[p.key] = {
         for (final it in StockLedger.items(pool: p.key))
@@ -477,6 +703,7 @@ class StockSync {
         'data': {
           'pools': sums,
           'figures': details,
+          'wipeEpochs': wipeEpochs,
           'reason': reason,
           'clientId': RealtimeManager().clientId,
           'device': RealtimeManager().username ?? '',
@@ -490,9 +717,23 @@ class StockSync {
     final branch = (message['branchId'] ?? data['branchId'] ?? '').toString();
     final pools = data['pools'] is Map ? Map<String, dynamic>.from(data['pools'] as Map) : const <String, dynamic>{};
     final figures = data['figures'] is Map ? Map<String, dynamic>.from(data['figures'] as Map) : const <String, dynamic>{};
+    final deskWipes = data['wipeEpochs'] is Map ? Map<String, dynamic>.from(data['wipeEpochs'] as Map) : const <String, dynamic>{};
     final differing = <String>{};
+    final needsWipe = <String, String>{};
     for (final e in pools.entries) {
-      if (e.value == 'force' || e.value != StockLedger.checksum(e.key)) differing.add(e.key);
+      final serverWipe = StockLedger.poolWipeId(e.key);
+      final deskWipe = (deskWipes[e.key] ?? '').toString().trim();
+      final deskFigs = figures[e.key] is Map ? (figures[e.key] as Map) : const {};
+      final serverItemsEmpty = StockLedger.items(pool: e.key).isEmpty;
+      if (serverWipe != null && deskWipe != serverWipe) {
+        needsWipe[e.key] = serverWipe;
+        differing.add(e.key);
+      } else if (serverItemsEmpty && deskFigs.isNotEmpty) {
+        needsWipe[e.key] = serverWipe ?? '';
+        differing.add(e.key);
+      } else if (e.value == 'force' || e.value != StockLedger.checksum(e.key)) {
+        differing.add(e.key);
+      }
     }
     final reason = (data['reason'] ?? '').toString();
     final device = (data['device'] ?? message['_senderUsername'] ?? data['clientId'] ?? '').toString();
@@ -504,14 +745,53 @@ class StockSync {
     }
     if (differing.isEmpty) return;
     // Record what differed (shown in the weekly report) before sending the fix.
-    if (reason != 'refresh') {
+    if (reason != 'refresh' && reason != 'wipe_sync') {
       for (final pool in differing) {
         final theirs = figures[pool] is Map ? Map<String, dynamic>.from(figures[pool] as Map) : const <String, dynamic>{};
         await StockDriftLog.recordDeskDiff(pool: pool, device: device, deskFigures: theirs, reason: reason);
       }
     }
     if (socketId.isNotEmpty) {
-      pushSnapshotTo(socketId, branch, targetClientId: data['clientId']?.toString(), pools: differing);
+      final targetCid = data['clientId']?.toString();
+      if (needsWipe.isNotEmpty && serverSendTo != null) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        for (final entry in needsWipe.entries) {
+          final p = StockPool.fromKey(entry.key);
+          if (p != null) {
+            serverSendTo!(socketId, buildWipePayload(p, entry.value, nowMs, targetClientId: targetCid));
+          }
+        }
+      }
+      // For differing pools that were NOT full-wiped, explicitly hard-delete any medicine ID
+      // the desk still holds that no longer exists on the server (e.g. removed by HQ Manager).
+      if (serverSendTo != null) {
+        final extraDeletes = <Map<String, dynamic>>[];
+        for (final poolKey in differing) {
+          if (needsWipe.containsKey(poolKey)) continue;
+          final deskFigs = figures[poolKey] is Map ? (figures[poolKey] as Map) : const {};
+          if (deskFigs.isEmpty) continue;
+          final serverIds = {
+            for (final it in StockLedger.items(pool: poolKey))
+              (it['medicineId'] ?? it['id'] ?? '').toString(),
+          };
+          for (final rawId in deskFigs.keys) {
+            final id = rawId.toString().trim();
+            if (id.isNotEmpty && !serverIds.contains(id)) {
+              extraDeletes.add({'pool': poolKey, 'medicineId': id, 'deleted': true, 'hardDelete': true});
+            }
+          }
+        }
+        if (extraDeletes.isNotEmpty) {
+          serverSendTo!(socketId, {
+            'event_type': evSnapshot,
+            'branchId': StockPool.normalizeBranch(branch),
+            '_serverPush': true,
+            if (targetCid != null && targetCid.isNotEmpty) '_targetClientId': targetCid,
+            'data': {'items': extraDeletes, 'moves': const []},
+          });
+        }
+      }
+      pushSnapshotTo(socketId, branch, targetClientId: targetCid, pools: differing);
     }
   }
 

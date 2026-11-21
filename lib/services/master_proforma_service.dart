@@ -419,8 +419,8 @@ class MasterProformaService {
       'rollNo': '034',
       'itemCode': 'MED-FOL-TAB',
       'code': 'MED-FOL-TAB',
-      'name': 'Folic Acid',
-      'formula': 'Folic Acid',
+      'name': 'Vitamin B9 (Folic Acid)',
+      'formula': 'Vitamin B9 (Folic Acid)',
       'type': 'Tablet',
       'dose': '5 mg',
       'defaultPrice': 3.00,
@@ -887,8 +887,8 @@ class MasterProformaService {
       'rollNo': '073',
       'itemCode': 'MED-SDM-1G',
       'code': 'MED-SDM-1G',
-      'name': 'Sodamint',
-      'formula': 'Sodamint',
+      'name': 'Sodium Bicarbonate (Sodamint)',
+      'formula': 'Sodium Bicarbonate (Sodamint)',
       'type': 'Tablet',
       'dose': '1 g',
       'defaultPrice': 2.00,
@@ -899,8 +899,8 @@ class MasterProformaService {
       'rollNo': '074',
       'itemCode': 'MED-SDM-TAB',
       'code': 'MED-SDM-TAB',
-      'name': 'Sodamint',
-      'formula': 'Sodamint',
+      'name': 'Sodium Bicarbonate (Sodamint)',
+      'formula': 'Sodium Bicarbonate (Sodamint)',
       'type': 'Tablet',
       'dose': 'Standard',
       'defaultPrice': 2.00,
@@ -911,8 +911,8 @@ class MasterProformaService {
       'rollNo': '075',
       'itemCode': 'MED-SBC-300',
       'code': 'MED-SBC-300',
-      'name': 'Sodium Bicarbonate',
-      'formula': 'Sodium Bicarbonate',
+      'name': 'Sodium Bicarbonate (Sodamint)',
+      'formula': 'Sodium Bicarbonate (Sodamint)',
       'type': 'Tablet',
       'dose': '300 mg',
       'defaultPrice': 2.00,
@@ -952,6 +952,18 @@ class MasterProformaService {
       'type': 'Tablet',
       'dose': '1000 IU',
       'defaultPrice': 10.00,
+      'isProformaMaster': true,
+    },
+    {
+      'barcode': '079',
+      'rollNo': '079',
+      'itemCode': 'MED-FLG-200',
+      'code': 'MED-FLG-200',
+      'name': 'Metronidazole (Flagyl)',
+      'formula': 'Metronidazole (Flagyl)',
+      'type': 'Tablet',
+      'dose': '200 mg',
+      'defaultPrice': 3.50,
       'isProformaMaster': true,
     },
     {
@@ -1283,8 +1295,8 @@ class MasterProformaService {
       'rollNo': '415',
       'itemCode': 'MED-METCL-SYR',
       'code': 'MED-METCL-SYR',
-      'name': 'Metoclopramide (Metoclone)',
-      'formula': 'Metoclopramide (Metoclone)',
+      'name': 'Promethazine HCL (Metoclon Syrup)',
+      'formula': 'Promethazine HCL (Metoclon Syrup)',
       'type': 'Syrup',
       'dose': '15 ml',
       'defaultPrice': 70.00,
@@ -1403,8 +1415,8 @@ class MasterProformaService {
       'rollNo': '500',
       'itemCode': 'MED-B12-INJ',
       'code': 'MED-B12-INJ',
-      'name': 'B-12 (Cynocobalmin)',
-      'formula': 'B-12 (Cynocobalmin)',
+      'name': 'B-12 (Cyanocobalamin)',
+      'formula': 'B-12 (Cyanocobalamin)',
       'type': 'Injection',
       'dose': '1 cc',
       'defaultPrice': 40.00,
@@ -1751,8 +1763,8 @@ class MasterProformaService {
       'rollNo': '610',
       'itemCode': 'MED-RL-1000',
       'code': 'MED-RL-1000',
-      'name': 'Ringer Lactate (R/L)',
-      'formula': 'Ringer Lactate (R/L)',
+      'name': "Ringer's Lactate (R/L)",
+      'formula': "Ringer's Lactate (R/L)",
       'type': 'Infusion',
       'dose': '1000 ml',
       'defaultPrice': 135.00,
@@ -1763,8 +1775,8 @@ class MasterProformaService {
       'rollNo': '611',
       'itemCode': 'MED-RL-500',
       'code': 'MED-RL-500',
-      'name': 'Ringer Lactate (R/L)',
-      'formula': 'Ringer Lactate (R/L)',
+      'name': "Ringer's Lactate (R/L)",
+      'formula': "Ringer's Lactate (R/L)",
       'type': 'Infusion',
       'dose': '500 ml',
       'defaultPrice': 130.00,
@@ -2244,6 +2256,13 @@ class MasterProformaService {
               final formulaLower = (map['formula'] as String? ?? '').trim().toLowerCase();
               final nameLower = (map['name'] as String? ?? '').trim().toLowerCase();
 
+              // Auto-sanitize Promethazine HCL (Metoclon Syrup) for barcode 415 (MED-METCL-SYR)
+              if (itemCode == 'MED-METCL-SYR') {
+                map['name'] = 'Promethazine HCL (Metoclon Syrup)';
+                map['formula'] = 'Promethazine HCL (Metoclon Syrup)';
+                map['type'] = 'Syrup';
+              }
+
               // Auto-sanitize Injection B-Complex (Neurobion)
               if (itemCode == 'MED-CYN-INJ' || itemCode == 'MED-BCM-INJ' || formulaLower.contains('neurobion') || nameLower.contains('neurobion')) {
                 map['code'] = 'MED-BCM-INJ';
@@ -2271,16 +2290,27 @@ class MasterProformaService {
               }
 
               // Auto-sanitize Metronidazole (Flagyl) items
-              if (itemCode == 'MED-FLG-INJ' || itemCode == 'MED-FLG-400' || itemCode == 'MED-FLG-SYR' || (formulaLower.contains('metronidazole') && !formulaLower.contains('diloxanide') && !formulaLower.contains('entam')) || (nameLower.contains('flagyl') && !nameLower.contains('entam'))) {
+              if (itemCode == 'MED-FLG-INJ' || itemCode == 'MED-FLG-100' || itemCode == 'MED-FLG-200' || itemCode == 'MED-FLG-400' || itemCode == 'MED-FLG-SYR' || (formulaLower.contains('metronidazole') && !formulaLower.contains('diloxanide') && !formulaLower.contains('entam')) || (nameLower.contains('flagyl') && !nameLower.contains('entam'))) {
                 map['name'] = 'Metronidazole (Flagyl)';
                 map['formula'] = 'Metronidazole (Flagyl)';
                 final rawType = (map['type'] as String? ?? '').trim().toLowerCase();
                 if (itemCode == 'MED-FLG-INJ' || rawType == 'infusion' || rawType == 'drip' || rawType == 'injection') {
                   map['type'] = 'Infusion';
                   map['dose'] = '100 ml';
-                } else if (itemCode == 'MED-FLG-400' || rawType == 'tablet') {
+                } else if (itemCode == 'MED-FLG-100') {
+                  map['type'] = 'Tablet';
+                  map['dose'] = '100 mg';
+                } else if (itemCode == 'MED-FLG-200') {
+                  map['type'] = 'Tablet';
+                  map['dose'] = '200 mg';
+                } else if (itemCode == 'MED-FLG-400') {
                   map['type'] = 'Tablet';
                   map['dose'] = '400 mg';
+                } else if (rawType == 'tablet') {
+                  map['type'] = 'Tablet';
+                  if (map['dose'] == null || (map['dose'] as String).trim().isEmpty) {
+                    map['dose'] = '400 mg';
+                  }
                 } else if (itemCode == 'MED-FLG-SYR' || rawType == 'syrup') {
                   map['type'] = 'Syrup';
                   map['dose'] = '15 ml';
@@ -2458,6 +2488,34 @@ class MasterProformaService {
     final n = int.tryParse(trimmed);
     if (n == null || n < 1 || n > 999) return null;
     return n.toString().padLeft(3, '0');
+  }
+
+  /// Returns all official normalized 3-digit barcodes ('001'..'999') defined in the GMWF Master Proforma.
+  static Set<String> getOfficialBarcodes() {
+    final out = <String>{};
+    for (final item in getAllProformaItems()) {
+      final b = normalizeProformaBarcode((item['barcode'] ?? item['rollNo'] ?? '').toString());
+      if (b != null) out.add(b);
+    }
+    return out;
+  }
+
+  /// Resolves the official GMWF 3-digit barcode for a stock record, or returns null when the
+  /// item has no barcode or does not carry a barcode from our official Master Proforma catalog.
+  static String? resolveOfficialBarcodeForStockItem(
+    Map<String, dynamic> raw, {
+    Set<String>? officialBarcodes,
+  }) {
+    final official = officialBarcodes ?? getOfficialBarcodes();
+    final m = Map<String, dynamic>.from(raw);
+    final isCustom = m['isCustomized'] == true || m['userEdited'] == true;
+    if (!isCustom) {
+      alignStockItemWithProforma(m);
+    }
+    final norm = normalizeProformaBarcode((m['barcode'] ?? m['rollNo'] ?? '').toString());
+    if (norm == null) return null;
+    if (official.isNotEmpty && !official.contains(norm)) return null;
+    return norm;
   }
 
   /// Helper to check if a barcode/code, packBarcode, or roll number already exists in Proforma catalog
@@ -2776,12 +2834,19 @@ class MasterProformaService {
       final effectiveDose = newDose.trim().isNotEmpty ? newDose.trim() : oldDose;
       final adjustedCode = adjustBarcodeForType(code, effectiveType);
 
+      final preservedBarcode = normalizeProformaBarcode(
+            (updated['barcode'] ?? updated['rollNo'] ?? '').toString(),
+          ) ??
+          getNextRollNumber();
+
       updated['name'] = cleanNewName;
       updated['formula'] = cleanNewName;
       updated['type'] = effectiveType;
       updated['dose'] = effectiveDose;
       updated['code'] = adjustedCode;
-      updated['barcode'] = adjustedCode;
+      updated['itemCode'] = adjustedCode;
+      updated['barcode'] = preservedBarcode;
+      updated['rollNo'] = preservedBarcode;
       updated['isCustomized'] = true;
       updated['userEdited'] = true;
       updated['updatedAt'] = DateTime.now().toIso8601String();
@@ -2826,7 +2891,9 @@ class MasterProformaService {
           _defaultProformaList[i]['type'] = effectiveType;
           _defaultProformaList[i]['dose'] = effectiveDose;
           _defaultProformaList[i]['code'] = adjustedCode;
-          _defaultProformaList[i]['barcode'] = adjustedCode;
+          _defaultProformaList[i]['itemCode'] = adjustedCode;
+          _defaultProformaList[i]['barcode'] = preservedBarcode;
+          _defaultProformaList[i]['rollNo'] = preservedBarcode;
           _defaultProformaList[i]['isCustomized'] = true;
           _defaultProformaList[i]['userEdited'] = true;
           break;
@@ -2852,7 +2919,9 @@ class MasterProformaService {
               'type': effectiveType,
               'dose': effectiveDose,
               'code': adjustedCode,
-              'barcode': adjustedCode,
+              'itemCode': adjustedCode,
+              'barcode': preservedBarcode,
+              'rollNo': preservedBarcode,
             });
           }
         }
@@ -3086,6 +3155,9 @@ class MasterProformaService {
     if (lower.contains('serratiopeptidase') || lower.contains('danzen') || lower.contains('danzan')) {
       return 'Serratiopeptidase (Danzen DS)';
     }
+    if (lower.contains('promethazine') || (lower.contains('metoclon') && lower.contains('syrup'))) {
+      return 'Promethazine HCL (Metoclon Syrup)';
+    }
     if (lower.contains('metoclopramide') || lower.contains('metoclone') || lower.contains('maxolon')) {
       return 'Metoclopramide (Maxolon / Metoclone)';
     }
@@ -3132,7 +3204,10 @@ class MasterProformaService {
       return 'DexoseSaline (D/S)';
     }
     if (lower.contains('ringer') || lower.contains('(rl)') || lower.contains('(r/l)')) {
-      return 'Ringer Lactate (R/L)';
+      return "Ringer's Lactate (R/L)";
+    }
+    if (lower.contains('sodium bicarbonate') || lower.contains('sodamint') || lower.contains('sodomin')) {
+      return 'Sodium Bicarbonate (Sodamint)';
     }
     if (lower.contains('trisil')) {
       return 'Antacid (Trisil)';
@@ -3158,8 +3233,8 @@ class MasterProformaService {
     if (lower.contains('ondansetron') || lower.contains('onset')) {
       return 'Ondansetron (Onset)';
     }
-    if (lower.contains('folic acid') || lower.contains('folvite')) {
-      return 'Folic Acid';
+    if (lower.contains('folic acid') || lower.contains('folvite') || lower.contains('vitamin b9') || lower.contains('vitamin b-9')) {
+      return 'Vitamin B9 (Folic Acid)';
     }
     if (lower.contains('sunny') || lower.contains('adhesive') || lower.contains('first aid bandage')) {
       return 'Adhesive First Aid Bandage (Sunny Plast)';
@@ -3171,7 +3246,7 @@ class MasterProformaService {
       return 'Multivitamin + Zinc (Surbex-Z)';
     }
     if (lower.contains('b-12') || lower.contains('b12') || lower.contains('cynocobalmin') || (lower.contains('cyanocobalamin') && (lower.contains('1cc') || lower.contains('1 cc')))) {
-      return 'B-12 (Cynocobalmin)';
+      return 'B-12 (Cyanocobalamin)';
     }
     if (lower.contains('neurobion') || (lower.contains('cyanocobalamin') && !lower.contains('1cc')) || (lower.contains('b-complex') && (lower.contains('inj') || lower.contains('injection')))) {
       return 'B-Complex (Neurobion)';
@@ -3223,11 +3298,16 @@ class MasterProformaService {
         if (!StockLedger.isLedgerKey(key)) continue;
         final val = box.get(key);
         if (val is Map && val['deleted'] != true) {
+          final rawCode = (val['code'] ?? val['itemCode'] ?? '').toString().trim();
           final rawName = val['name']?.toString() ?? '';
           final rawFormula = val['formula']?.toString() ?? '';
 
-          final cleanName = cleanBrandToFormula(rawName);
-          final cleanFormula = cleanBrandToFormula(rawFormula);
+          final cleanName = rawCode == 'MED-METCL-SYR'
+              ? 'Promethazine HCL (Metoclon Syrup)'
+              : cleanBrandToFormula(rawName);
+          final cleanFormula = rawCode == 'MED-METCL-SYR'
+              ? 'Promethazine HCL (Metoclon Syrup)'
+              : cleanBrandToFormula(rawFormula);
 
           if (cleanName != rawName || cleanFormula != rawFormula) {
             final pool = (val['pool'] ?? '').toString();

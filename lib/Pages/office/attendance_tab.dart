@@ -292,7 +292,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Icon(Icons.filter_list_off_outlined, size: 54, color: t.textTertiary),
+                                const GEmptyIllustration(
+                                  GEmptyIllustrationKind.search,
+                                  size: 144,
+                                  fallbackIcon: Icons.filter_list_off_outlined,
+                                ),
                                 const SizedBox(height: 14),
                                 Text('No employees matching filters', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: t.textSecondary)),
                                 const SizedBox(height: 6),

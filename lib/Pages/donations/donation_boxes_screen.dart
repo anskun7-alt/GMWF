@@ -720,16 +720,12 @@ class _DonationBoxesWidgetState extends State<DonationBoxesWidget> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 100,
-              height: 100,
-              decoration: BoxDecoration(
-                color: t.accent.withValues(alpha: 0.06),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(Icons.inventory_2_rounded, size: 44, color: t.accent.withValues(alpha: 0.3)),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.finance,
+              size: 156,
+              fallbackIcon: Icons.inventory_2_rounded,
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
             Text(
               'No Donation Boxes',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: t.textPrimary, letterSpacing: -0.5),

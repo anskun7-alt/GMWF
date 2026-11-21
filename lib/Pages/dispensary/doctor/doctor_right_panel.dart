@@ -493,6 +493,40 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         if (rawFormula.isNotEmpty) {
           primary['formula'] = MasterProformaService.cleanBrandToFormula(rawFormula);
         }
+        if (MasterProformaService.normalizeProformaBarcode(
+              (primary['barcode'] ?? primary['rollNo'] ?? '').toString(),
+            ) ==
+            null) {
+          // Inherit barcode/code from any batch in the group before aligning with Master Proforma
+          for (final b in g.batches) {
+            final bBar = MasterProformaService.normalizeProformaBarcode(
+              (b['barcode'] ?? b['rollNo'] ?? '').toString(),
+            );
+            if (bBar != null) {
+              primary['barcode'] = bBar;
+              primary['rollNo'] = bBar;
+              primary['code'] ??= b['code'] ?? b['itemCode'];
+              primary['itemCode'] ??= b['itemCode'] ?? b['code'];
+              break;
+            }
+          }
+          if (MasterProformaService.normalizeProformaBarcode(
+                (primary['barcode'] ?? primary['rollNo'] ?? '').toString(),
+              ) ==
+              null) {
+            final probe = Map<String, dynamic>.from(primary);
+            MasterProformaService.alignStockItemWithProforma(probe);
+            final alignedBar = MasterProformaService.normalizeProformaBarcode(
+              (probe['barcode'] ?? probe['rollNo'] ?? '').toString(),
+            );
+            if (alignedBar != null) {
+              primary['barcode'] = alignedBar;
+              primary['rollNo'] = alignedBar;
+              primary['code'] ??= probe['code'];
+              primary['itemCode'] ??= probe['itemCode'];
+            }
+          }
+        }
       }
       final cleanName = (primary['name'] ?? primary['formula'] ?? '').toString().trim().toLowerCase();
       if (cleanName.isEmpty || cleanName == 'null') continue;
@@ -595,6 +629,20 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
       med['type'] = _getMedicineType(match);
       final invDose = _getMedicineDose(match);
       if (invDose.isNotEmpty) med['dose'] = invDose;
+      final matchBarcode = (match['barcode'] ?? match['rollNo'] ?? '').toString().trim();
+      final matchCode = (match['code'] ?? match['itemCode'] ?? '').toString().trim();
+      final matchPack = (match['packBarcode'] ?? '').toString().trim();
+      if (matchBarcode.isNotEmpty) {
+        med['barcode'] = matchBarcode;
+        med['rollNo'] = matchBarcode;
+      }
+      if (matchCode.isNotEmpty) {
+        med['code'] = matchCode;
+        med['itemCode'] = matchCode;
+      }
+      if (matchPack.isNotEmpty) {
+        med['packBarcode'] = matchPack;
+      }
 
       // Stock flags from the earlier visit no longer apply; set them from today's stock.
       med.remove('isExternal');
@@ -3128,14 +3176,10 @@ class _DoctorRightPanelState extends State<DoctorRightPanel> {
         ),
         child: Column(
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.asset(
-                'assets/images/doctor_empty_medicines.jpg',
-                width: 84,
-                height: 84,
-                fit: BoxFit.cover,
-              ),
+            const GEmptyIllustration(
+              GEmptyIllustrationKind.inventory,
+              size: 96,
+              fallbackIcon: Icons.medication_outlined,
             ),
             const SizedBox(height: 8),
             Text(

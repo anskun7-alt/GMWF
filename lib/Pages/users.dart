@@ -3,6 +3,7 @@
 import 'package:gmwf/services/cloud/cloud_db.dart';
 import 'package:flutter/material.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration;
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:gmwf/design/components/app_toast.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -951,18 +952,21 @@ class _UsersScreenState extends State<UsersScreen>
               if (_ageFilter == 'senior' && age < 61) return false;
             }
             if (_searchQuery.isNotEmpty) {
+              final resolvedName = LocalStorageService.resolveCanonicalPatientName(p).toLowerCase();
               final name = (p['name'] as String?)?.toLowerCase() ?? '';
               final phone = (p['phone'] as String?)?.toLowerCase() ?? '';
               final cnic = (p['cnic'] as String?)?.toLowerCase() ?? '';
               final gcnic = (p['guardianCnic'] as String?)?.toLowerCase() ?? '';
               final uid = (p['patientId'] as String?)?.toLowerCase() ?? '';
-              return name.contains(_searchQuery) || phone.contains(_searchQuery) ||
+              return resolvedName.contains(_searchQuery) || name.contains(_searchQuery) || phone.contains(_searchQuery) ||
                   cnic.contains(_searchQuery) || gcnic.contains(_searchQuery) || uid.contains(_searchQuery);
             }
             return true;
           }).toList();
 
-          filtered.sort((a, b) => (a['name'] as String? ?? '').compareTo(b['name'] as String? ?? ''));
+          filtered.sort((a, b) => LocalStorageService.resolveCanonicalPatientName(a)
+              .toLowerCase()
+              .compareTo(LocalStorageService.resolveCanonicalPatientName(b).toLowerCase()));
 
           if (filtered.isEmpty) {
             return _emptyState(t, Icons.person_search_rounded, 'No patients found', 'Try adjusting your search or filters');
@@ -1644,11 +1648,16 @@ class _UsersScreenState extends State<UsersScreen>
   Widget _buildCard(Map<String, dynamic> data, String branchId, RoleThemeData t) {
     final itemId = (data['uid'] ?? data['id'] ?? data['docId'] ?? data['patientId'] ?? '').toString();
     final profilePicUrl = data['profilePictureUrl'] as String?;
+    final resolvedPatientName = widget.isPatientMode
+        ? LocalStorageService.resolveCanonicalPatientName(data)
+        : '';
     final name = widget.isPatientMode
-        ? (data['name'] ?? 'Unknown').toString()
+        ? (resolvedPatientName.isNotEmpty ? resolvedPatientName : (data['name'] ?? data['patientName'] ?? 'Unknown').toString())
         : resolveUserDisplayName(data, fallback: 'Unknown');
+    final bgStr = widget.isPatientMode ? (data['bloodGroup'] ?? '').toString().trim().toUpperCase() : '';
+    final hasValidBg = bgStr.isNotEmpty && bgStr != 'N/A' && bgStr != 'NULL';
     final subtitle = widget.isPatientMode
-        ? '${data['gender'] ?? 'N/A'} · ${data['age']?.toString() ?? '?'} yrs · ${BranchLabels.text((data['status'] ?? '').toString(), branchId)}'
+        ? '${data['gender'] ?? 'N/A'} · ${data['age']?.toString() ?? '?'} yrs${hasValidBg ? ' · $bgStr' : ''} · ${BranchLabels.text((data['status'] ?? '').toString(), branchId)}'
         : ((data['role'] as String? ?? 'N/A').toLowerCase() == 'madrassa parent' ? 'GUARDIAN' : (data['role'] as String? ?? 'N/A').toUpperCase());
 
     final initials = name.trim().isEmpty ? '?' :
@@ -2570,6 +2579,16 @@ class _UsersScreenState extends State<UsersScreen>
 
   Future<void> _openDetail(String itemId, String branchId) async {
     if (_localBox == null) return;
+    if (widget.isPatientMode) {
+      await Navigator.push(context, MaterialPageRoute(builder: (_) => PatientDetailScreen(
+        patientId: itemId, isOnline: true, localBox: _localBox!,
+        branchId: branchId, doctorId: '', isAdmin: true,
+      )));
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
     String curRole = '';
     try {
       curRole = RoleThemeScope.dataOf(context).roleLabel;
@@ -3961,11 +3980,11 @@ class _UsersScreenState extends State<UsersScreen>
       child: Padding(
         padding: const EdgeInsets.all(40),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-                color: (isError ? SoftPalette.red400 : t.accent).withValues(alpha: 0.08), shape: BoxShape.circle),
-            child: Icon(icon, size: 40, color: isError ? SoftPalette.red400 : t.accent.withValues(alpha: 0.5)),
+          GEmptyIllustration.inferred(
+            icon: icon,
+            title: title,
+            subtitle: subtitle,
+            size: 148,
           ),
           const SizedBox(height: 16),
           Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: t.textPrimary)),
@@ -4044,6 +4063,9 @@ class _UsersScreenState extends State<UsersScreen>
   }
 
   Widget _familyMemberTile(Map<String, dynamic> data, IconData icon, Color color, String branchId, RoleThemeData t, {bool isGuardian = false}) {
+    final resolvedName = LocalStorageService.resolveCanonicalPatientName(data);
+    final displayName = resolvedName.isNotEmpty ? resolvedName : (data['name'] ?? data['patientName'] ?? 'N/A').toString();
+    final memberId = (data['patientId'] ?? data['id'] ?? '').toString();
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -4054,12 +4076,12 @@ class _UsersScreenState extends State<UsersScreen>
         Icon(icon, color: color, size: 16),
         const SizedBox(width: 8),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(data['name'] ?? 'N/A', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: t.textPrimary)),
+          Text(displayName, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: t.textPrimary)),
           Text('${data['gender'] ?? 'N/A'} · ${data['age']?.toString() ?? '?'} yrs',
               style: TextStyle(fontSize: 11, color: t.textSecondary)),
         ])),
         GestureDetector(
-          onTap: () => _openDetail(data['id'], branchId),
+          onTap: () => _openDetail(memberId, branchId),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8)),

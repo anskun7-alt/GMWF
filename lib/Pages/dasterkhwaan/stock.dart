@@ -2,6 +2,7 @@ import 'package:gmwf/utils/debounced_box_listenable.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GEmptyIllustration, GEmptyIllustrationKind;
 import 'package:gmwf/pages/home/home_module_host.dart';
 import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
@@ -814,9 +815,11 @@ class _DasterkhwaanStockState extends State<DasterkhwaanStock> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.inventory_2_outlined,
-                          size: 72,
-                          color: _primary.withValues(alpha: 0.2)),
+                      const GEmptyIllustration(
+                        GEmptyIllustrationKind.kitchen,
+                        size: 148,
+                        fallbackIcon: Icons.inventory_2_outlined,
+                      ),
                       const SizedBox(height: 12),
                       Text("No items found",
                           style: TextStyle(

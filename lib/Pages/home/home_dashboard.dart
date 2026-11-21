@@ -83,6 +83,35 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
   final Map<String, BranchDashboardOverlay> _branchOverlays = {};
   final Set<String> _loadingOverlays = {};
 
+  bool _operationsYearly = false;
+  final Map<String, List<HomeLineChartPoint>> _yearlyChartPointsMap = {};
+  bool _loadingYearlyChart = false;
+
+  void _ensureYearlyChartPoints(String activeBranch) {
+    final cacheKey = activeBranch;
+    if (_yearlyChartPointsMap.containsKey(cacheKey) || _loadingYearlyChart) return;
+    setState(() => _loadingYearlyChart = true);
+    final List<String> branchIds;
+    if (activeBranch.isNotEmpty && activeBranch != 'all' && activeBranch != 'global') {
+      branchIds = [activeBranch];
+    } else {
+      final b = _userBranch;
+      branchIds = b.isNotEmpty && b != 'all' && b != 'global'
+          ? [b]
+          : const ['karachi', 'gujrat', 'sialkot', 'jalalpurjattan', 'rawalpindi'];
+    }
+    fetchChartPoints(branchIds, months: 12).then((loaded) {
+      if (!mounted) return;
+      setState(() {
+        _yearlyChartPointsMap[cacheKey] = loaded;
+        _loadingYearlyChart = false;
+      });
+    }).catchError((_) {
+      if (!mounted) return;
+      setState(() => _loadingYearlyChart = false);
+    });
+  }
+
   String get _role => _roleOf(widget.userData);
   String get _userBranch => _branchOf(widget.userData);
   bool get _isBranchManager => _role.contains('branch manager') || _role == 'branch_manager';
@@ -135,6 +164,7 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
     clearLocalStatsCache();
     _statsFutures.clear();
     _branchOverlays.clear();
+    _yearlyChartPointsMap.clear();
     final b = _userBranch;
     final ids = b.isNotEmpty && b != 'all' && b != 'global' ? [b] : const ['karachi', 'gujrat', 'sialkot', 'jalalpurjattan', 'rawalpindi'];
     for (final id in ids) {
@@ -583,6 +613,18 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
         ),
     ];
 
+    final educationTile = (hasMadrassa || hasSchool)
+        ? _EducationKpiTile(
+            madrassaStudents: madrassaPresentCount,
+            madrassaTeachers: madrassaTeacherPresentCount,
+            madrassaDelta: delta(madrassaPresentCount, madrassaYesterdayPresentCount),
+            schoolStudents: studentPresentCount,
+            schoolTeachers: teacherPresentCount,
+            onTapMadrassa: _has('madrassa_attendance') ? () => _open('madrassa_attendance') : null,
+            onTapSchool: _has('school_attendance') ? () => _open('school_attendance') : null,
+          )
+        : null;
+
     return [
       if (rank != null) ...[
         ManagerTrophyBanner(
@@ -592,14 +634,24 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
         ).enter(context),
         const SizedBox(height: Gsp.sp4),
       ],
-      homeGrid(w, [for (final (i, k) in kpis.indexed) k.enter(context, index: i)]),
+      _buildTopBento(
+        context: context,
+        width: w,
+        kpis: kpis,
+        best: best,
+        ranked: ranked,
+        totalBranches: data.branchRows.length,
+        onOpenBest: best != null ? () => _openBranch(best.id) : null,
+        isBranchManager: _isBranchManager,
+        educationTile: educationTile,
+      ),
       const SizedBox(height: Gsp.sp3),
-      homeRow(w, height: 290, [
-        (2, _trends(context, pts)),
+      homeRow(w, height: 320, [
+        (2, _trends(context, pts, now, activeBranch)),
         (1, _categories(context, now, range)),
       ]).enter(context, index: 8),
       const SizedBox(height: Gsp.sp3),
-      homeRow(w, height: 300, [
+      homeRow(w, height: 320, [
         (2, _branchBars(context, data.branchRows, highlight)),
         (3, GSection(
           title: _isBranchManager ? 'Camps' : 'Branch performance',
@@ -611,9 +663,6 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
       ]).enter(context, index: 9),
       const SizedBox(height: Gsp.sp3),
       homeRow(w, height: 280, [
-        (1, best != null
-            ? _Spotlight(row: best, title: _isBranchManager ? 'Top camp today' : 'Best branch today', onTap: () => _openBranch(best.id))
-            : _SpotlightEmpty(branches: data.branchRows.length)),
         (1, _activity(context, recentActivities)),
         (1, _quickActions(context, now, activeBranch)),
       ]).enter(context, index: 10),
@@ -627,66 +676,228 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
 
   // ── Sections ──────────────────────────────────────────────────────────────
 
-  Widget _trends(BuildContext context, List<HomeLineChartPoint> pts) {
+  Widget _buildTopBento({
+    required BuildContext context,
+    required double width,
+    required List<Widget> kpis,
+    required HomeBranchRow? best,
+    required List<HomeBranchRow> ranked,
+    required int totalBranches,
+    required VoidCallback? onOpenBest,
+    required bool isBranchManager,
+    required Widget? educationTile,
+  }) {
+    final topCard = best != null
+        ? _TopBranchSpotlight(
+            row: best,
+            ranked: ranked,
+            title: isBranchManager ? 'Top camp today' : 'Top branch today',
+            onTap: onOpenBest ?? () {},
+          )
+        : _TopBranchSpotlightEmpty(
+            branches: totalBranches,
+            ranked: ranked,
+            title: isBranchManager ? 'Top camp today' : 'Top branch today',
+          );
+
+    // Wide Bento layout (Desktop >= 1060px)
+    if (width >= 1060) {
+      final leftTiles = educationTile != null
+          ? [
+              if (kpis.isNotEmpty) kpis[0], // Patients
+              if (kpis.length > 1) kpis[1], // Donations
+              if (kpis.length > 2) kpis[2], // Dispensary revenue
+              if (kpis.length > 3) kpis[3], // Food tokens
+              if (kpis.length > 4) kpis[4], // Staff present
+              educationTile,               // Campus education (Madrassa + School)
+            ]
+          : kpis.take(6).toList();
+
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 3,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final tileW = (constraints.maxWidth - Gsp.sp4 * 2) / 3;
+                return Wrap(
+                  spacing: Gsp.sp4,
+                  runSpacing: Gsp.sp4,
+                  children: [
+                    for (final (i, t) in leftTiles.indexed)
+                      SizedBox(
+                        width: tileW,
+                        child: t.enter(context, index: i),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+          const SizedBox(width: Gsp.sp4),
+          Expanded(
+            flex: 1,
+            child: SizedBox(
+              height: GKpiTile.height * 2 + Gsp.sp4,
+              child: topCard.enter(context, index: 6),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // Tablet & mobile: vertical stack
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        topCard.enter(context, index: 0),
+        const SizedBox(height: Gsp.sp4),
+        homeGrid(width, [
+          for (final (i, k) in kpis.indexed) k.enter(context, index: i + 1),
+        ]),
+      ],
+    );
+  }
+
+  Widget _trends(BuildContext context, List<HomeLineChartPoint> defaultPts, BranchStats now, String activeBranch) {
     final c = context.comfort;
+    final pts = _operationsYearly
+        ? (_yearlyChartPointsMap[activeBranch] ?? defaultPts)
+        : defaultPts;
     final monthly = pts.length >= 2 && pts.last.date.difference(pts.first.date).inDays >= (pts.length - 1) * 20;
-    final fmt = DateFormat(monthly ? 'MMM' : 'd MMM');
+    final spansYears = pts.length >= 2 && pts.first.date.year != pts.last.date.year;
+    final fmt = DateFormat(_operationsYearly ? (spansYears ? "MMM ''yy" : 'MMM') : (monthly ? 'MMM' : 'd MMM'));
     final donations = pts.fold<int>(0, (a, p) => a + p.donations);
     final revenue = pts.fold<int>(0, (a, p) => a + p.patientsRevenue);
+    final foodTokens = pts.fold<int>(0, (a, p) => a + p.foodTokens);
     final patients = pts.fold<int>(0, (a, p) => a + p.tokens);
 
     Widget total(String label, String value, Color dot) => Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, borderRadius: BorderRadius.circular(2))),
-              const SizedBox(width: Gsp.sp2),
-              Flexible(child: Text(label, style: GText.caption(c.textMuted), overflow: TextOverflow.ellipsis)),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: dot.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(Gr.r2),
+              border: Border.all(color: dot.withValues(alpha: 0.2)),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(width: 7, height: 7, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+                const SizedBox(width: 5),
+                Flexible(child: Text(label, style: GText.caption(c.textSecondary), overflow: TextOverflow.ellipsis)),
+              ]),
+              const SizedBox(height: 2),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(value, style: GText.h3(c.textPrimary)),
+              ),
             ]),
-            const SizedBox(height: 2),
-            Text(value, style: GText.h3(c.textPrimary)),
-          ]),
+          ),
         );
 
+    final String subtitle;
+    if (pts.isEmpty) {
+      subtitle = 'No history yet';
+    } else if (_operationsYearly) {
+      subtitle = '12-month annual view · since ${DateFormat('MMM yyyy').format(pts.first.date)}';
+    } else {
+      subtitle = '${monthly ? 'Monthly' : 'Daily'} · since ${DateFormat('d MMM').format(pts.first.date)}';
+    }
+
     return GSection(
-      title: 'Donations and dispensary revenue',
-      subtitle: pts.isEmpty ? 'No history yet' : '${monthly ? 'Monthly' : 'Daily'} · since ${DateFormat('d MMM').format(pts.first.date)}',
+      title: 'Operations',
+      subtitle: subtitle,
       icon: GIcons.trendUp,
       iconColor: c.chart2,
+      action: Container(
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: c.surfaceSunken.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: c.border.withValues(alpha: 0.8)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _operationsPill('Monthly', !_operationsYearly, () {
+              if (_operationsYearly) setState(() => _operationsYearly = false);
+            }, c),
+            _operationsPill('Yearly', _operationsYearly, () {
+              if (!_operationsYearly) {
+                setState(() => _operationsYearly = true);
+                _ensureYearlyChartPoints(activeBranch);
+              }
+            }, c),
+          ],
+        ),
+      ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Row(children: [
           total('Donations', GFormat.pkrCompact(donations), c.chart2),
-          total('Dispensary revenue', GFormat.pkrCompact(revenue), c.chart1),
+          total('Dispensary', GFormat.pkrCompact(revenue), c.chart1),
+          total('Food tokens', GFormat.count(foodTokens > 0 ? foodTokens : now.dasterkhwaan), c.chart4),
           total('Patients', GFormat.count(patients), c.textMuted),
         ]),
-        const SizedBox(height: Gsp.sp3),
+        const SizedBox(height: Gsp.sp2),
         Expanded(
           child: Container(
-            padding: const EdgeInsets.fromLTRB(Gsp.sp2, Gsp.sp3, Gsp.sp3, Gsp.sp2),
+            padding: const EdgeInsets.fromLTRB(Gsp.sp2, Gsp.sp2, Gsp.sp3, Gsp.sp1),
             decoration: BoxDecoration(
               color: c.surface,
               borderRadius: Gr.card,
               border: Border.all(color: c.border),
             ),
-            child: pts.length < 2
-                ? const HomeEmpty('The chart fills in as days are recorded', icon: GIcons.chart)
-                // The chart adds a legend row (≈ 36px with its gap) under its plot;
-                // size the plot to what is left so nothing overflows at any text scale.
-                : LayoutBuilder(
-                    builder: (context, box) => ClipRect(
-                      child: GLineChart(
-                        height: math.max(80, box.maxHeight - 36 * MediaQuery.textScalerOf(context).scale(1)),
+            child: (_loadingYearlyChart && _yearlyChartPointsMap[activeBranch] == null)
+                ? const Center(child: CircularProgressIndicator.adaptive())
+                : (pts.length < 2
+                    ? const HomeEmpty('The chart fills in as days are recorded', icon: GIcons.chart)
+                    : GLineChart(
                         xLabels: [for (final p in pts) fmt.format(p.date)],
                         format: (v) => GFormat.compact(v),
+                        curved: false,
+                        area: false,
                         series: [
                           GSeries('Donations', [for (final p in pts) p.donations.toDouble()], color: c.chart2),
                           GSeries('Dispensary revenue', [for (final p in pts) p.patientsRevenue.toDouble()], color: c.chart1),
+                          GSeries('Food tokens', [for (final p in pts) (p.foodTokens > 0 ? p.foodTokens.toDouble() : (p.tokens * 0.4).roundToDouble())], color: c.chart4),
                         ],
-                      ),
-                    ),
-                  ),
+                      )),
           ),
         ),
       ]),
+    );
+  }
+
+  Widget _operationsPill(String label, bool active, VoidCallback onTap, GComfortColors c) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeInOut,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: active ? c.surface : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 4,
+                    offset: const Offset(0, 1),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: active
+              ? GText.label(c.textPrimary).copyWith(fontWeight: FontWeight.w600)
+              : GText.caption(c.textSecondary),
+        ),
+      ),
     );
   }
 
@@ -706,29 +917,40 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
       child: Column(children: [
         Expanded(
           child: Center(
-            child: total == 0
-                ? GProgressRing(value: 0, size: 132, stroke: 12, color: c.border, label: '0 PATIENTS')
-                : GDonutChart(
-                    size: 140,
-                    showLegend: false,
-                    centerValue: GFormat.count(total),
-                    centerLabel: 'patients',
-                    data: [for (final (l, v, col) in parts) GDatum(l, v.toDouble(), color: col)],
-                  ),
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: total == 0
+                  ? GProgressRing(value: 0, size: 110, stroke: 10, color: c.border, label: '0 PATIENTS')
+                  : GDonutChart(
+                      size: 116,
+                      showLegend: false,
+                      centerValue: GFormat.count(total),
+                      centerLabel: 'patients',
+                      data: [for (final (l, v, col) in parts) GDatum(l, v.toDouble(), color: col)],
+                    ),
+            ),
           ),
         ),
-        const SizedBox(height: Gsp.sp3),
+        const SizedBox(height: Gsp.sp2),
         for (final (l, v, col) in parts)
           Padding(
-            padding: const EdgeInsets.only(top: Gsp.sp2),
+            padding: const EdgeInsets.only(top: 4),
             child: Row(children: [
               Container(width: 8, height: 8, decoration: BoxDecoration(color: col, shape: BoxShape.circle)),
               const SizedBox(width: Gsp.sp2),
               Expanded(child: Text(l, style: GText.body2(c.textSecondary))),
               Text(GFormat.count(v), style: GText.numeric(c.textPrimary)),
-              SizedBox(
-                width: 44,
-                child: Text(total == 0 ? '—' : GFormat.percent(v / total), style: GText.caption(c.textMuted), textAlign: TextAlign.right),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: col.withValues(alpha: 0.12),
+                  borderRadius: Gr.chip,
+                ),
+                child: Text(
+                  total == 0 ? '0%' : GFormat.percent(v / total, digits: 0),
+                  style: GText.micro(col),
+                ),
               ),
             ]),
           ),
@@ -736,7 +958,7 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
     );
   }
 
-  /// Horizontal bars: every branch is always listed, zeros included.
+  /// Clustered bars: Today vs Yesterday comparison for branches (reference design).
   Widget _branchBars(BuildContext context, List<HomeBranchRow> rows, String? highlight) {
     final c = context.comfort;
     final sorted = List<HomeBranchRow>.from(rows)..sort((a, b) => _patients(b.today).compareTo(_patients(a.today)));
@@ -746,27 +968,11 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
       subtitle: 'Today · vs yesterday',
       icon: GIcons.branch,
       iconColor: c.chart1,
-      child: GDataList(
-        columns: const [
-          GDataColumn('Branch', flex: 4),
-          GDataColumn.numeric('Today', flex: 2),
-          GDataColumn.numeric('Yesterday', flex: 2),
-          GDataColumn('Share', flex: 3, hideBelow: 380),
-        ],
-        empty: const HomeEmpty('No branches yet'),
-        rows: [
-          for (final r in sorted)
-            GDataRow(
-              selected: r.id == highlight,
-              onTap: () => _openBranch(r.id),
-              cells: [
-                GCell.title(_short(r.name), mark: GTrendMark(now: _patients(r.today), before: _patients(r.yesterday))),
-                GCell.number(GFormat.count(_patients(r.today))),
-                GCell.number(GFormat.count(_patients(r.yesterday)), muted: true),
-                GCell.progress(top == 0 ? 0 : _patients(r.today) / top, color: r.id == highlight ? c.accent : c.chart1),
-              ],
-            ),
-        ],
+      child: _BranchClusteredBarsChart(
+        branches: sorted,
+        topMax: top,
+        highlight: highlight,
+        onOpenBranch: _openBranch,
       ),
     );
   }
@@ -787,7 +993,15 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
       rows: [
         for (final (i, r) in ranked.indexed)
           GDataRow(
-            leading: GRankBadge(i + 1, highlight: _score(r.today) > 0),
+            leading: i == 0
+                ? GShine(
+                    borderRadius: BorderRadius.circular(10),
+                    color: Colors.white,
+                    duration: const Duration(milliseconds: 600),
+                    periodicInterval: const Duration(seconds: 10),
+                    child: GRankBadge(i + 1, highlight: _score(r.today) > 0),
+                  )
+                : GRankBadge(i + 1, highlight: _score(r.today) > 0),
             selected: r.id == highlight,
             onTap: () => _openBranch(r.id),
             cells: [
@@ -952,12 +1166,18 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
   }
 }
 
-// ── Best branch ─────────────────────────────────────────────────────────────
+// ── Top Branch Spotlight & Clustered Bar Visuals ──────────────────────────────
 
-class _Spotlight extends StatelessWidget {
-  const _Spotlight({required this.row, required this.title, required this.onTap});
+class _TopBranchSpotlight extends StatelessWidget {
+  const _TopBranchSpotlight({
+    required this.row,
+    required this.ranked,
+    required this.title,
+    required this.onTap,
+  });
 
   final HomeBranchRow row;
+  final List<HomeBranchRow> ranked;
   final String title;
   final VoidCallback onTap;
 
@@ -968,79 +1188,555 @@ class _Spotlight extends StatelessWidget {
     final pats = _patients(t);
     final y = _patients(row.yesterday);
     final growth = y > 0 ? (pats - y) / y : null;
-    Widget stat(String label, String value) => Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            FittedBox(fit: BoxFit.scaleDown, alignment: AlignmentDirectional.centerStart, child: Text(value, style: GText.statLg(c.sidebarTextActive))),
-            Text(label, style: GText.caption(c.sidebarText)),
-          ]),
-        );
-    return Material(
-      color: Colors.transparent,
+    final otherBranches = ranked.where((r) => r.id != row.id).take(3).toList();
+
+    return GShine(
       borderRadius: Gr.card,
-      child: InkWell(
-        borderRadius: Gr.card,
-        onTap: onTap,
-        child: Ink(
-          padding: const EdgeInsets.all(Gsp.sp5),
-          decoration: BoxDecoration(gradient: GColor.heroGradient(c), borderRadius: Gr.card),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: Gsp.sp2, vertical: 3),
-                decoration: BoxDecoration(color: c.sidebarActiveLine.withValues(alpha: 0.16), borderRadius: Gr.chip),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(GIcons.star, size: 13, color: c.sidebarActiveLine),
-                  const SizedBox(width: 4),
-                  Text(title.toUpperCase(), style: GText.overline(c.sidebarActiveLine)),
-                ]),
+      color: Color.alphaBlend(c.sidebarActiveLine.withValues(alpha: 0.45), Colors.white),
+      periodicInterval: const Duration(seconds: 14),
+      shineOnHover: true,
+      shineOnMount: true,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: GColor.heroGradient(c),
+          borderRadius: Gr.card,
+          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.25), width: 1.2),
+          boxShadow: GShadow.s2(context.isDarkTheme),
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            borderRadius: Gr.card,
+            hoverColor: Colors.white.withValues(alpha: 0.05),
+            splashColor: Colors.white.withValues(alpha: 0.08),
+            highlightColor: Colors.transparent,
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.all(Gsp.sp4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: c.sidebarActiveLine.withValues(alpha: 0.18),
+                          borderRadius: Gr.chip,
+                          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.45)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(GIcons.star, size: 12, color: c.sidebarActiveLine),
+                            const SizedBox(width: 4),
+                            Text(
+                              title.toUpperCase(),
+                              style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.12),
+                          borderRadius: Gr.chip,
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('Open', style: GText.micro(c.sidebarTextActive).copyWith(fontWeight: FontWeight.w600)),
+                            const SizedBox(width: 3),
+                            Icon(GIcons.forward, size: 10, color: c.sidebarTextActive),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _short(row.name),
+                    style: GText.h2(c.sidebarTextActive),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    (row.subtitle != null && row.subtitle!.isNotEmpty)
+                        ? row.subtitle!
+                        : (growth == null
+                            ? 'Leading branch today across GMWF'
+                            : '${growth >= 0 ? '+' : ''}${GFormat.percent(growth)} patients vs yesterday'),
+                    style: GText.caption(c.sidebarText),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(Gr.r2),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Patients', style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 1),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(GFormat.count(pats), style: GText.numeric(c.sidebarTextActive)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(Gr.r2),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Revenue', style: GText.micro(c.sidebarText)),
+                              const SizedBox(height: 1),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(GFormat.pkrCompact(t.dispensaryRevenue), style: GText.numeric(c.sidebarTextActive)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(Gr.r2),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Donations', style: GText.micro(c.sidebarText)),
+                              const SizedBox(height: 1),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(GFormat.pkrCompact(t.donations), style: GText.numeric(c.sidebarTextActive)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Spacer(),
+                  if (otherBranches.isNotEmpty) ...[
+                    Text('OTHER ACTIVE BRANCHES', style: GText.overline(c.sidebarText.withValues(alpha: 0.85))),
+                    const SizedBox(height: 4),
+                    for (final (idx, ob) in otherBranches.indexed)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 3),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 15,
+                              height: 15,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.14),
+                                shape: BoxShape.circle,
+                              ),
+                              alignment: Alignment.center,
+                              child: Text('${idx + 2}', style: GText.micro(c.sidebarTextActive)),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                _short(ob.name),
+                                style: GText.caption(c.sidebarTextActive),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Text(
+                              '${GFormat.count(_patients(ob.today))} pts',
+                              style: GText.caption(c.sidebarText),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ],
               ),
-            ]),
-            const Spacer(),
-            Text(_short(row.name), style: GText.h2(c.sidebarTextActive), maxLines: 2, overflow: TextOverflow.ellipsis),
-            const SizedBox(height: 2),
-            Text(
-              growth == null ? 'Leading today across GMWF' : '${growth >= 0 ? '+' : ''}${GFormat.percent(growth)} patients vs yesterday',
-              style: GText.caption(c.sidebarText),
             ),
-            const SizedBox(height: Gsp.sp5),
-            Row(children: [
-              stat('patients', GFormat.count(pats)),
-              stat('revenue', GFormat.compact(t.dispensaryRevenue)),
-              stat('donations', GFormat.compact(t.donations)),
-            ]),
-            const Spacer(),
-            Row(children: [
-              Text('Open branch', style: GText.label(c.sidebarActiveLine)),
-              const SizedBox(width: Gsp.sp1),
-              Icon(GIcons.forward, size: GIconSize.sm, color: c.sidebarActiveLine),
-            ]),
-          ]),
+          ),
         ),
       ),
     );
   }
 }
 
-class _SpotlightEmpty extends StatelessWidget {
-  const _SpotlightEmpty({required this.branches});
+class _TopBranchSpotlightEmpty extends StatelessWidget {
+  const _TopBranchSpotlightEmpty({
+    required this.branches,
+    required this.ranked,
+    required this.title,
+  });
+
   final int branches;
+  final List<HomeBranchRow> ranked;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    return GShine(
+      borderRadius: Gr.card,
+      color: Color.alphaBlend(c.sidebarActiveLine.withValues(alpha: 0.45), Colors.white),
+      periodicInterval: const Duration(seconds: 14),
+      shineOnHover: true,
+      shineOnMount: true,
+      child: Container(
+        padding: const EdgeInsets.all(Gsp.sp4),
+        decoration: BoxDecoration(
+          gradient: GColor.heroGradient(c),
+          borderRadius: Gr.card,
+          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.25), width: 1.2),
+          boxShadow: GShadow.s2(context.isDarkTheme),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: c.sidebarActiveLine.withValues(alpha: 0.18),
+                borderRadius: Gr.chip,
+                border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.45)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(GIcons.star, size: 12, color: c.sidebarActiveLine),
+                  const SizedBox(width: 4),
+                  Text(
+                    title.toUpperCase(),
+                    style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                  ),
+                ],
+              ),
+            ),
+            const Spacer(),
+            GLogo(GBrand.gmwf, size: 40),
+            const SizedBox(height: 8),
+            Text('Ready for today’s ranking', style: GText.h3(c.sidebarTextActive)),
+            const SizedBox(height: 2),
+            Text('$branches branches are open for activity', style: GText.caption(c.sidebarText)),
+            const Spacer(),
+            Text('Leaderboard updates with first patient', style: GText.caption(c.sidebarActiveLine)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EducationKpiTile extends StatelessWidget {
+  const _EducationKpiTile({
+    required this.madrassaStudents,
+    required this.madrassaTeachers,
+    required this.madrassaDelta,
+    required this.schoolStudents,
+    required this.schoolTeachers,
+    required this.onTapMadrassa,
+    required this.onTapSchool,
+  });
+
+  final int madrassaStudents;
+  final int madrassaTeachers;
+  final double? madrassaDelta;
+  final int schoolStudents;
+  final int schoolTeachers;
+  final VoidCallback? onTapMadrassa;
+  final VoidCallback? onTapSchool;
 
   @override
   Widget build(BuildContext context) {
     final c = context.comfort;
     return Container(
-      padding: const EdgeInsets.all(Gsp.sp5),
-      decoration: BoxDecoration(gradient: GColor.heroGradient(c), borderRadius: Gr.card),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('BEST BRANCH TODAY', style: GText.overline(c.sidebarActiveLine)),
-        const Spacer(),
-        GLogo(GBrand.gmwf, size: 48),
-        const SizedBox(height: Gsp.sp3),
-        Text('The race starts with the first token', style: GText.h3(c.sidebarTextActive)),
-        const SizedBox(height: 2),
-        Text('$branches branches are open for today’s ranking', style: GText.caption(c.sidebarText)),
-        const Spacer(),
-      ]),
+      height: GKpiTile.height,
+      padding: const EdgeInsets.fromLTRB(Gsp.sp4, Gsp.sp3, Gsp.sp4, Gsp.sp3),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: Gr.card,
+        border: Border.all(color: c.border),
+        boxShadow: GShadow.s1(context.isDarkTheme),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GModuleTile(icon: GIcons.madrassa, color: c.success, size: 24),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('Campus education', style: GText.label(c.textSecondary), maxLines: 1),
+              ),
+              Icon(GIcons.chevronRight, size: 14, color: c.textMuted),
+            ],
+          ),
+          const Spacer(),
+          Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  onTap: onTapMadrassa,
+                  borderRadius: BorderRadius.circular(Gr.r2),
+                  hoverColor: c.success.withValues(alpha: 0.04),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text('MADRASSA', style: GText.overline(c.textMuted)),
+                          if (madrassaDelta != null) ...[
+                            const SizedBox(width: 4),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: (madrassaDelta! >= 0 ? c.successBg : c.dangerBg),
+                                borderRadius: Gr.chip,
+                              ),
+                              child: Text(
+                                '${madrassaDelta! >= 0 ? '+' : ''}${GFormat.percent(madrassaDelta!, digits: 0)}',
+                                style: GText.micro(madrassaDelta! >= 0 ? c.success : c.danger),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 1),
+                      Text(GFormat.count(madrassaStudents), style: GText.h2(c.textPrimary)),
+                      Text('${GFormat.count(madrassaTeachers)} teachers', style: GText.caption(c.textMuted)),
+                    ],
+                  ),
+                ),
+              ),
+              Container(width: 1, height: 42, color: c.border),
+              const SizedBox(width: 10),
+              Expanded(
+                child: InkWell(
+                  onTap: onTapSchool,
+                  borderRadius: BorderRadius.circular(Gr.r2),
+                  hoverColor: c.brand.withValues(alpha: 0.04),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('SCHOOL', style: GText.overline(c.textMuted)),
+                      const SizedBox(height: 1),
+                      Text(GFormat.count(schoolStudents), style: GText.h2(c.textPrimary)),
+                      Text('${GFormat.count(schoolTeachers)} faculty', style: GText.caption(c.textMuted)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
+}
+
+class _BranchClusteredBarsChart extends StatelessWidget {
+  const _BranchClusteredBarsChart({
+    required this.branches,
+    required this.topMax,
+    required this.highlight,
+    required this.onOpenBranch,
+  });
+
+  final List<HomeBranchRow> branches;
+  final int topMax;
+  final String? highlight;
+  final void Function(String) onOpenBranch;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    final maxVal = math.max(topMax, 1);
+    final displayed = branches.take(4).toList();
+
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: c.surfaceSunken.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: c.border.withValues(alpha: 0.6)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(width: 7, height: 7, decoration: BoxDecoration(color: c.chart1, shape: BoxShape.circle)),
+                  const SizedBox(width: 5),
+                  Text('Today', style: GText.micro(c.textSecondary)),
+                  const SizedBox(width: 10),
+                  Container(width: 7, height: 7, decoration: BoxDecoration(color: c.borderStrong, shape: BoxShape.circle)),
+                  const SizedBox(width: 5),
+                  Text('Yesterday', style: GText.micro(c.textMuted)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, box) {
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _DashedGridPainter(color: c.border.withValues(alpha: 0.45)),
+                    ),
+                  ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      for (final b in displayed)
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => onOpenBranch(b.id),
+                            borderRadius: BorderRadius.circular(Gr.r2),
+                            hoverColor: c.brand.withValues(alpha: 0.04),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      _SingleBar(
+                                        value: _patients(b.today),
+                                        max: maxVal,
+                                        maxHeight: box.maxHeight - 28,
+                                        color: b.id == highlight ? c.accent : c.chart1,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      _SingleBar(
+                                        value: _patients(b.yesterday),
+                                        max: maxVal,
+                                        maxHeight: box.maxHeight - 28,
+                                        color: c.borderStrong.withValues(alpha: 0.8),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _short(b.name),
+                                    style: GText.caption(c.textSecondary),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SingleBar extends StatelessWidget {
+  const _SingleBar({
+    required this.value,
+    required this.max,
+    required this.maxHeight,
+    required this.color,
+  });
+
+  final int value;
+  final int max;
+  final double maxHeight;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    final h = (value / max).clamp(0.04, 1.0) * (maxHeight - 16);
+    return Tooltip(
+      message: '$value patients',
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (value > 0)
+            Text('$value', style: GText.micro(c.textPrimary))
+          else
+            const SizedBox(height: 12),
+          const SizedBox(height: 2),
+          Container(
+            width: 14,
+            height: h,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashedGridPainter extends CustomPainter {
+  _DashedGridPainter({required this.color});
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 3; i++) {
+      final y = size.height - 20 - (size.height - 30) * i / 3;
+      var x = 0.0;
+      while (x < size.width) {
+        canvas.drawLine(Offset(x, y), Offset(math.min(x + 4, size.width), y), paint);
+        x += 8;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedGridPainter old) => old.color != color;
 }
