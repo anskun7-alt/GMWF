@@ -25,6 +25,7 @@ import '../../../theme/role_theme_provider.dart';
 import '../dialogs/enrollment_dialog.dart';
 import '../dialogs/change_student_branch_dialog.dart';
 import '../madrassa_strings.dart';
+import '../widgets/madrassa_erp.dart';
 import 'student_detail_page.dart';
 import '../../../design/design_system.dart';
 
@@ -791,12 +792,13 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   }
 
   Widget _buildMobileStudentCard(dynamic s, Map<String, dynamic> d, bool isDark) {
+    final c = context.comfort;
     final studentId = s is DocumentSnapshot ? s.id : s['id'].toString();
     final isExpanded = _expandedStudentIds.contains(studentId);
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray500;
+    final cardBg = c.surface;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final textMuted = c.textMuted;
 
     final rollVal = (d['rollNumber'] ?? d['rollNo'] ?? '?').toString();
     final classValRaw = (d['class'] ?? 'Hifz').toString();
@@ -808,7 +810,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
       ),
       child: Theme(
@@ -839,15 +841,15 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: isDark ? SoftPalette.slate600 : SoftPalette.slate200,
+                  color: c.border,
                   width: 1.2,
                 ),
               ),
               child: ClipOval(
                 child: _uploadStates[studentId] == PhotoUploadStatus.uploading
                     ? Padding(
-                        padding: EdgeInsets.all(6.0),
-                        child: CircularProgressIndicator(strokeWidth: 2, color: context.adapt(SoftPalette.teal550)),
+                        padding: const EdgeInsets.all(6.0),
+                        child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
                       )
                     : _buildStudentAvatar(
                         (d['photoUrl'] ??
@@ -1188,11 +1190,12 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
     return ValueListenableBuilder(
       valueListenable: UserThemeService.listenable(widget.username),
       builder: (context, _, __) {
+        final c = context.comfort;
         final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-        final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-        final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-        final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+        final scaffoldBg = c.background;
+        final cardBg = c.surface;
+        final textPrimary = c.textPrimary;
+        final borderColor = c.border;
 
         final studentsAsync = ref.watch(madrassaStudentsProvider(_effectiveBranch));
 
@@ -1509,8 +1512,8 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                                                         height: 28,
                                                         child: _uploadStates[studentId] == PhotoUploadStatus.uploading
                                                             ? Padding(
-                                                                padding: EdgeInsets.all(4.0),
-                                                                child: CircularProgressIndicator(strokeWidth: 1.5, color: context.adapt(SoftPalette.teal550)),
+                                                                padding: const EdgeInsets.all(4.0),
+                                                                child: CircularProgressIndicator(strokeWidth: 1.5, color: c.brand),
                                                               )
                                                             : _buildStudentAvatar(d['photoUrl']?.toString(), d['name']?.toString(), size: 28),
                                                       ),
@@ -1530,7 +1533,8 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                                                               style: TextStyle(
                                                                 fontWeight: FontWeight.bold,
                                                                 fontSize: 13,
-                                                                color: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
+                                                                color: c.brand,
+                                                                fontFamilyFallback: const ['Noori'],
                                                               ),
                                                             ),
                                                           ),
@@ -1849,10 +1853,11 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   }
 
   Widget _buildHeader(BuildContext context, bool isDark) {
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
+    final c = context.comfort;
+    final cardBg = c.surface;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final textMuted = c.textMuted;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -1865,15 +1870,11 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
             alignment: WrapAlignment.spaceBetween,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              Text(
+              MadrassaUrduAwareText(
                 context.l.studentRoster,
-                style: context.urduStyle(
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: textPrimary,
-                  ),
-                ),
+                color: textPrimary,
+                size: 20,
+                bold: true,
               ),
               if (_canAddStudent)
                 Wrap(
@@ -1884,21 +1885,23 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                     if (_effectiveIsAdmin)
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: SoftPalette.teal550,
-                          foregroundColor: SoftPalette.gray50,
+                          backgroundColor: c.brand,
+                          foregroundColor: c.onBrand,
+                          shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                         ),
                         onPressed: _importStudentsFile,
-                        icon: const Icon(Icons.upload_file),
+                        icon: const Icon(Icons.upload_file, size: 16),
                         label: Text(
                           context.isUrdu ? 'درآمد کریں' : 'Import File',
-                          style: context.urduStyle(style: const TextStyle(color: SoftPalette.gray50)),
+                          style: TextStyle(color: c.onBrand, fontFamilyFallback: const ['Noori']),
                         ),
                       ),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.teal550,
-                        foregroundColor: SoftPalette.gray50,
+                        backgroundColor: c.brand,
+                        foregroundColor: c.onBrand,
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                       ),
                       onPressed: () => showAddStudentDialog(
                         context,
@@ -1906,10 +1909,10 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                         username: widget.username,
                         role: widget.role,
                       ),
-                      icon: const Icon(Icons.person_add_rounded, color: SoftPalette.gray50),
+                      icon: Icon(Icons.person_add_rounded, color: c.onBrand, size: 16),
                       label: Text(
                         context.isUrdu ? 'نیا طالب علم داخل کریں / Add Student' : '+ Add Student',
-                        style: context.urduStyle(style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold)),
+                        style: TextStyle(color: c.onBrand, fontWeight: FontWeight.bold, fontFamilyFallback: const ['Noori']),
                       ),
                     ),
                   ],
@@ -1930,16 +1933,16 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                     fillColor: cardBg,
                     contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: MadrassaErp.radius,
                       borderSide: BorderSide(color: borderColor),
                     ),
                     enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: MadrassaErp.radius,
                       borderSide: BorderSide(color: borderColor),
                     ),
                     focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: context.adapt(SoftPalette.teal550), width: 2),
+                      borderRadius: MadrassaErp.radius,
+                      borderSide: BorderSide(color: c.brand, width: 2),
                     ),
                   ),
                   onChanged: (val) {
@@ -1981,11 +1984,14 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   onSelected: (val) {
                     if (val) setState(() => _programFilter = 'all');
                   },
-                  selectedColor: SoftPalette.teal550,
+                  selectedColor: c.brandSoft,
+                  backgroundColor: c.surfaceSunken,
+                  side: BorderSide(color: _programFilter == 'all' ? c.brand : c.border),
+                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                   labelStyle: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _programFilter == 'all' ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : SoftPalette.slate600),
+                    color: _programFilter == 'all' ? c.brand : c.textSecondary,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -1995,11 +2001,14 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   onSelected: (val) {
                     if (val) setState(() => _programFilter = 'hifz');
                   },
-                  selectedColor: SoftPalette.violet550,
+                  selectedColor: c.brandSoft,
+                  backgroundColor: c.surfaceSunken,
+                  side: BorderSide(color: _programFilter == 'hifz' ? c.brand : c.border),
+                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                   labelStyle: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _programFilter == 'hifz' ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : SoftPalette.slate600),
+                    color: _programFilter == 'hifz' ? c.brand : c.textSecondary,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -2009,11 +2018,14 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   onSelected: (val) {
                     if (val) setState(() => _programFilter = 'nazra');
                   },
-                  selectedColor: SoftPalette.teal500,
+                  selectedColor: c.brandSoft,
+                  backgroundColor: c.surfaceSunken,
+                  side: BorderSide(color: _programFilter == 'nazra' ? c.brand : c.border),
+                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                   labelStyle: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.bold,
-                    color: _programFilter == 'nazra' ? SoftPalette.gray50 : (isDark ? SoftPalette.gray50A70 : SoftPalette.slate600),
+                    color: _programFilter == 'nazra' ? c.brand : c.textSecondary,
                   ),
                 ),
               ],
@@ -2029,16 +2041,16 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   value: _statusFilter,
                   decoration: InputDecoration(
                     labelText: context.isUrdu ? 'حیثیت کے لحاظ سے فلٹر کریں' : 'Filter by Status',
-                    labelStyle: context.urduStyle(style: TextStyle(fontSize: 12, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550)),
+                    labelStyle: context.urduStyle(style: TextStyle(fontSize: 12, color: c.brand)),
                     filled: true,
                     fillColor: cardBg,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: MadrassaErp.radius,
                       borderSide: BorderSide(color: borderColor),
                     ),
                     enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: MadrassaErp.radius,
                       borderSide: BorderSide(color: borderColor),
                     ),
                   ),
@@ -2066,7 +2078,7 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
                   value: _sortBy,
                   decoration: InputDecoration(
                     labelText: context.isUrdu ? 'ترتیب دیں' : 'Sort By',
-                    labelStyle: context.urduStyle(style: TextStyle(fontSize: 12, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550)),
+                    labelStyle: context.urduStyle(style: TextStyle(fontSize: 12, color: c.brand)),
                     filled: true,
                     fillColor: cardBg,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2408,99 +2420,99 @@ class _StudentManagementViewState extends ConsumerState<StudentManagementView> {
   Widget _buildPendingRejoinRequests(List<Map<String, dynamic>> allStudents) {
     final docs = allStudents.where((d) => d['rejoinRequestStatus'] == 'pending').toList();
     if (docs.isEmpty) return const SizedBox.shrink();
+    final c = context.comfort;
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: context.adapt(SoftPalette.yellow100), // Light amber
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.adapt(SoftPalette.yellow150)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.hail_rounded, color: context.adapt(SoftPalette.orange400), size: 24),
-              const SizedBox(width: 12),
-              Text(
-                'Pending Rejoining Requests (${docs.length})',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: context.adapt(SoftPalette.orange600)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: docs.length,
-            separatorBuilder: (_, _) => Divider(color: context.adapt(SoftPalette.yellow150)),
-            itemBuilder: (context, i) {
-              final d = docs[i];
-              final dynamic dateRaw = d['rejoinRequestDate'];
-              DateTime? date;
-              if (dateRaw is Timestamp) {
-                date = dateRaw.toDate();
-              } else if (dateRaw is String) {
-                date = DateTime.tryParse(dateRaw);
-              }
-              final dateStr = date != null ? DateFormat('yyyy-MM-dd HH:mm').format(date) : '';
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${d['name'] ?? ''} (Roll: ${d['rollNumber'] ?? '?'})',
-                            style: TextStyle(fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.orange700)),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Reason: "${d['rejoinRequestReason'] ?? 'No reason specified'}"',
-                            style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.orange600)),
-                          ),
-                          if (dateStr.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              'Requested on: $dateStr',
-                              style: TextStyle(fontSize: 10, color: context.adapt(SoftPalette.orange500)),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: () => _approveRejoin(d),
-                      icon: const Icon(Icons.check, size: 14),
-                      label: const Text('Approve', style: TextStyle(fontSize: 11)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.green400,
-                        foregroundColor: SoftPalette.gray50,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        minimumSize: Size.zero,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    TextButton.icon(
-                      onPressed: () => _rejectRejoin(d),
-                      icon: Icon(Icons.close, size: 14, color: context.adapt(SoftPalette.red400)),
-                      label: Text('Reject', style: TextStyle(fontSize: 11, color: context.adapt(SoftPalette.red400))),
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        minimumSize: Size.zero,
-                      ),
-                    ),
-                  ],
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      child: MadrassaCard(
+        tone: c.warning,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.hail_rounded, color: c.warning, size: 24),
+                const SizedBox(width: 12),
+                Text(
+                  'Pending Rejoining Requests (${docs.length})',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: c.warning),
                 ),
-              );
-            },
-          ),
-        ],
+              ],
+            ),
+            const SizedBox(height: 12),
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: docs.length,
+              separatorBuilder: (_, _) => Divider(color: c.border),
+              itemBuilder: (context, i) {
+                final d = docs[i];
+                final dynamic dateRaw = d['rejoinRequestDate'];
+                DateTime? date;
+                if (dateRaw is Timestamp) {
+                  date = dateRaw.toDate();
+                } else if (dateRaw is String) {
+                  date = DateTime.tryParse(dateRaw);
+                }
+                final dateStr = date != null ? DateFormat('yyyy-MM-dd HH:mm').format(date) : '';
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${d['name'] ?? ''} (Roll: ${d['rollNumber'] ?? '?'})',
+                              style: TextStyle(fontWeight: FontWeight.bold, color: c.textPrimary),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Reason: "${d['rejoinRequestReason'] ?? 'No reason specified'}"',
+                              style: TextStyle(fontSize: 12, color: c.textMuted),
+                            ),
+                            if (dateStr.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                'Requested on: $dateStr',
+                                style: TextStyle(fontSize: 10, color: c.textMuted),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: () => _approveRejoin(d),
+                        icon: const Icon(Icons.check, size: 14),
+                        label: const Text('Approve', style: TextStyle(fontSize: 11)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: c.success,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
+                          minimumSize: Size.zero,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton.icon(
+                        onPressed: () => _rejectRejoin(d),
+                        icon: Icon(Icons.close, size: 14, color: c.danger),
+                        label: Text('Reject', style: TextStyle(fontSize: 11, color: c.danger)),
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          minimumSize: Size.zero,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -79,6 +79,7 @@ scratch/
 build_output.txt
 debug_branches.txt
 .agents/
+.claude/
 tool/temp_emp_audit/
 
 # Local data dumps — real patient/user data, NEVER commit (repo is public)

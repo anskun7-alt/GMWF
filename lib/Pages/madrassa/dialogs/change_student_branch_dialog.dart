@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
+import 'package:gmwf/design/tokens/comfort_colors.dart';
 import '../utils/madrassa_local_storage.dart';
 import '../../../../widgets/app_feedback.dart';
 import '../madrassa_strings.dart';
+import '../widgets/madrassa_erp.dart';
 
 void showChangeStudentBranchDialog(
   BuildContext context, {
@@ -33,33 +34,29 @@ void showChangeStudentBranchDialog(
     barrierDismissible: !isTransferring,
     builder: (ctx) => StatefulBuilder(
       builder: (context, setDs) {
-        final isDark = Theme.of(context).brightness == Brightness.dark;
-        final bg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-        final cardBg = isDark ? SoftPalette.slate900 : SoftPalette.gray100;
-        final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-        final textMuted = isDark ? SoftPalette.slate400 : SoftPalette.slate600;
+        final c = context.comfort;
 
         return AlertDialog(
-          backgroundColor: bg,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          backgroundColor: c.surface,
+          shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.cardRadius),
           titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
           contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
           actionsPadding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
           title: Row(
             children: [
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: SoftPalette.indigo500.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
+                  color: c.brandSoft,
+                  borderRadius: MadrassaErp.radius,
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.swap_horiz_rounded,
-                  color: SoftPalette.indigo500,
-                  size: 24,
+                  color: c.brand,
+                  size: 22,
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -68,19 +65,19 @@ void showChangeStudentBranchDialog(
                       context.isUrdu ? 'طالب علم کی برانچ تبدیل کریں' : 'Change Student Branch',
                       style: context.urduStyle(
                         style: TextStyle(
-                          fontSize: 17,
+                          fontSize: 16,
                           fontWeight: FontWeight.bold,
-                          color: textPrimary,
+                          color: c.textPrimary,
                         ),
                       ),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       context.isUrdu ? 'صرف ہیڈ کوارٹر مینیجر (HQ Manager)' : 'HQ Manager Authorization',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
-                        color: SoftPalette.indigo500,
+                        color: c.brand,
                       ),
                     ),
                   ],
@@ -97,21 +94,19 @@ void showChangeStudentBranchDialog(
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: cardBg,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isDark ? SoftPalette.slate700 : SoftPalette.slate200,
-                    ),
+                    color: c.surfaceSunken,
+                    borderRadius: MadrassaErp.radius,
+                    border: Border.all(color: c.border),
                   ),
                   child: Row(
                     children: [
                       CircleAvatar(
                         radius: 20,
-                        backgroundColor: SoftPalette.teal550.withValues(alpha: 0.15),
+                        backgroundColor: c.brandSoft,
                         child: Text(
                           studentName.isNotEmpty ? studentName[0].toUpperCase() : 'S',
-                          style: const TextStyle(
-                            color: SoftPalette.teal550,
+                          style: TextStyle(
+                            color: c.brand,
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
                           ),
@@ -127,13 +122,13 @@ void showChangeStudentBranchDialog(
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 14,
-                                color: textPrimary,
+                                color: c.textPrimary,
                               ),
                             ),
                             const SizedBox(height: 2),
                             Text(
                               'Roll #: $rollNumber • ${student['class'] ?? 'Hifz'}',
-                              style: TextStyle(fontSize: 12, color: textMuted),
+                              style: TextStyle(fontSize: 12, color: c.textMuted),
                             ),
                           ],
                         ),
@@ -141,16 +136,16 @@ void showChangeStudentBranchDialog(
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
-                          color: SoftPalette.amber400.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: SoftPalette.amber400.withValues(alpha: 0.3)),
+                          color: c.warning.withValues(alpha: 0.12),
+                          borderRadius: MadrassaErp.radius,
+                          border: Border.all(color: c.warning.withValues(alpha: 0.3)),
                         ),
                         child: Text(
                           initialBranch.toUpperCase(),
                           style: TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.bold,
-                            color: isDark ? SoftPalette.amber200 : SoftPalette.amber700,
+                            color: c.warning,
                           ),
                         ),
                       ),
@@ -166,7 +161,7 @@ void showChangeStudentBranchDialog(
                     style: TextStyle(
                       fontSize: 12.5,
                       fontWeight: FontWeight.bold,
-                      color: textPrimary,
+                      color: c.textPrimary,
                     ),
                   ),
                 ),
@@ -174,11 +169,10 @@ void showChangeStudentBranchDialog(
 
                 Container(
                   decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                    borderRadius: BorderRadius.circular(12),
+                    color: c.surfaceSunken,
+                    borderRadius: MadrassaErp.radius,
                     border: Border.all(
-                      color: SoftPalette.indigo500.withValues(alpha: 0.4),
-                      width: 1.5,
+                      color: c.border,
                     ),
                   ),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -186,8 +180,8 @@ void showChangeStudentBranchDialog(
                     child: DropdownButton<String>(
                       value: selectedBranch,
                       isExpanded: true,
-                      dropdownColor: bg,
-                      icon: const Icon(Icons.arrow_drop_down_rounded, color: SoftPalette.indigo500),
+                      dropdownColor: c.surface,
+                      icon: Icon(Icons.arrow_drop_down_rounded, color: c.brand),
                       items: availableBranches.map((b) {
                         final isCurrent = b['id'] == initialBranch;
                         return DropdownMenuItem<String>(
@@ -197,7 +191,7 @@ void showChangeStudentBranchDialog(
                               Icon(
                                 Icons.apartment_rounded,
                                 size: 16,
-                                color: isCurrent ? SoftPalette.slate400 : SoftPalette.indigo500,
+                                color: isCurrent ? c.textMuted : c.brand,
                               ),
                               const SizedBox(width: 8),
                               Expanded(
@@ -206,7 +200,7 @@ void showChangeStudentBranchDialog(
                                   style: TextStyle(
                                     fontSize: 13,
                                     fontWeight: isCurrent ? FontWeight.normal : FontWeight.bold,
-                                    color: isCurrent ? textMuted : textPrimary,
+                                    color: isCurrent ? c.textMuted : c.textPrimary,
                                   ),
                                 ),
                               ),
@@ -232,14 +226,14 @@ void showChangeStudentBranchDialog(
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: SoftPalette.teal550.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: SoftPalette.teal550.withValues(alpha: 0.2)),
+                    color: c.brandSoft,
+                    borderRadius: MadrassaErp.radius,
+                    border: Border.all(color: c.brand.withValues(alpha: 0.2)),
                   ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.info_outline_rounded, size: 16, color: SoftPalette.teal550),
+                      Icon(Icons.info_outline_rounded, size: 16, color: c.brand),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -249,7 +243,7 @@ void showChangeStudentBranchDialog(
                           style: context.urduStyle(
                             style: TextStyle(
                               fontSize: 11.5,
-                              color: isDark ? SoftPalette.teal200 : SoftPalette.teal800,
+                              color: c.brand,
                             ),
                           ),
                         ),
@@ -262,7 +256,7 @@ void showChangeStudentBranchDialog(
                   const SizedBox(height: 10),
                   Text(
                     errorMessage!,
-                    style: const TextStyle(color: SoftPalette.red400, fontSize: 12, fontWeight: FontWeight.bold),
+                    style: TextStyle(color: c.danger, fontSize: 12, fontWeight: FontWeight.bold),
                   ),
                 ],
               ],
@@ -273,15 +267,16 @@ void showChangeStudentBranchDialog(
               onPressed: isTransferring ? null : () => Navigator.pop(ctx),
               child: Text(
                 context.l.cancel,
-                style: TextStyle(color: textMuted),
+                style: TextStyle(color: c.textMuted),
               ),
             ),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                backgroundColor: SoftPalette.indigo550,
-                foregroundColor: SoftPalette.gray50,
+                backgroundColor: c.brand,
+                foregroundColor: c.onBrand,
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
+                elevation: 0,
               ),
               onPressed: isTransferring
                   ? null
@@ -329,16 +324,16 @@ void showChangeStudentBranchDialog(
                       }
                     },
               icon: isTransferring
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50),
+                      child: CircularProgressIndicator(strokeWidth: 2, color: c.onBrand),
                     )
                   : const Icon(Icons.check_circle_outline_rounded, size: 18),
               label: Text(
                 context.isUrdu ? 'برانچ تبدیل کریں' : 'Transfer Student',
                 style: context.urduStyle(
-                  style: const TextStyle(fontWeight: FontWeight.bold, color: SoftPalette.gray50),
+                  style: TextStyle(fontWeight: FontWeight.bold, color: c.onBrand),
                 ),
               ),
             ),

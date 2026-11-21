@@ -155,7 +155,7 @@ class MadrassaCsvService {
     }
     if (localLogs.isEmpty) {
       final now = DateTime.now();
-      await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+      await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month, force: true);
       localLogs = MadrassaLocalStorage.getAllLogsCached(branchId);
     }
 

@@ -739,6 +739,7 @@ class _HomeDashboardState extends ConsumerState<HomeDashboard> {
           Expanded(
             flex: 1,
             child: SizedBox(
+              width: double.infinity,
               height: GKpiTile.height * 2 + Gsp.sp4,
               child: topCard.enter(context, index: 6),
             ),
@@ -1190,202 +1191,202 @@ class _TopBranchSpotlight extends StatelessWidget {
     final growth = y > 0 ? (pats - y) / y : null;
     final otherBranches = ranked.where((r) => r.id != row.id).take(3).toList();
 
-    return GShine(
-      borderRadius: Gr.card,
-      color: Color.alphaBlend(c.sidebarActiveLine.withValues(alpha: 0.45), Colors.white),
-      periodicInterval: const Duration(seconds: 14),
-      shineOnHover: true,
-      shineOnMount: true,
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: GColor.heroGradient(c),
-          borderRadius: Gr.card,
-          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.25), width: 1.2),
-          boxShadow: GShadow.s2(context.isDarkTheme),
-        ),
-        child: Material(
-          type: MaterialType.transparency,
-          child: InkWell(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final hasBoundedHeight = constraints.hasBoundedHeight;
+        return Container(
+          width: double.infinity,
+          height: hasBoundedHeight ? double.infinity : null,
+          decoration: BoxDecoration(
+            color: c.surface,
             borderRadius: Gr.card,
-            hoverColor: Colors.white.withValues(alpha: 0.05),
-            splashColor: Colors.white.withValues(alpha: 0.08),
-            highlightColor: Colors.transparent,
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.all(Gsp.sp4),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: c.sidebarActiveLine.withValues(alpha: 0.18),
-                          borderRadius: Gr.chip,
-                          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.45)),
+            border: Border.all(color: c.border),
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              borderRadius: Gr.card,
+              hoverColor: c.brand.withValues(alpha: 0.04),
+              splashColor: c.brand.withValues(alpha: 0.08),
+              highlightColor: Colors.transparent,
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.all(Gsp.sp4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: c.brand.withValues(alpha: 0.08),
+                            borderRadius: Gr.chip,
+                            border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(GIcons.star, size: 12, color: c.brand),
+                              const SizedBox(width: 4),
+                              Text(
+                                title.toUpperCase(),
+                                style: GText.micro(c.brand).copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                              ),
+                            ],
+                          ),
                         ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(GIcons.star, size: 12, color: c.sidebarActiveLine),
-                            const SizedBox(width: 4),
-                            Text(
-                              title.toUpperCase(),
-                              style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: c.surfaceSunken,
+                            borderRadius: Gr.chip,
+                            border: Border.all(color: c.border),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('Open', style: GText.micro(c.textSecondary).copyWith(fontWeight: FontWeight.w600)),
+                              const SizedBox(width: 3),
+                              Icon(GIcons.forward, size: 10, color: c.textSecondary),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      _short(row.name),
+                      style: GText.h2(c.textPrimary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      (row.subtitle != null && row.subtitle!.isNotEmpty)
+                          ? row.subtitle!
+                          : (growth == null
+                              ? 'Leading branch today across GMWF'
+                              : '${growth >= 0 ? '+' : ''}${GFormat.percent(growth)} patients vs yesterday'),
+                      style: GText.caption(c.textSecondary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: c.surfaceSunken,
+                              borderRadius: BorderRadius.circular(Gr.r2),
+                              border: Border.all(color: c.border),
                             ),
-                          ],
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Patients', style: GText.micro(c.textSecondary).copyWith(fontWeight: FontWeight.w600)),
+                                const SizedBox(height: 1),
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(GFormat.count(pats), style: GText.numeric(c.textPrimary)),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                      ),
-                      const Spacer(),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.12),
-                          borderRadius: Gr.chip,
-                          border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: c.surfaceSunken,
+                              borderRadius: BorderRadius.circular(Gr.r2),
+                              border: Border.all(color: c.border),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Revenue', style: GText.micro(c.textSecondary)),
+                                const SizedBox(height: 1),
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(GFormat.pkrCompact(t.dispensaryRevenue), style: GText.numeric(c.textPrimary)),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('Open', style: GText.micro(c.sidebarTextActive).copyWith(fontWeight: FontWeight.w600)),
-                            const SizedBox(width: 3),
-                            Icon(GIcons.forward, size: 10, color: c.sidebarTextActive),
-                          ],
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: c.surfaceSunken,
+                              borderRadius: BorderRadius.circular(Gr.r2),
+                              border: Border.all(color: c.border),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Donations', style: GText.micro(c.textSecondary)),
+                                const SizedBox(height: 1),
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(GFormat.pkrCompact(t.donations), style: GText.numeric(c.textPrimary)),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                      ),
+                      ],
+                    ),
+                    if (hasBoundedHeight) const Spacer() else const SizedBox(height: 10),
+                    if (otherBranches.isNotEmpty) ...[
+                      Text('OTHER ACTIVE BRANCHES', style: GText.overline(c.textMuted)),
+                      const SizedBox(height: 4),
+                      for (final (idx, ob) in otherBranches.indexed)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 15,
+                                height: 15,
+                                decoration: BoxDecoration(
+                                  color: c.surfaceSunken,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: c.border),
+                                ),
+                                alignment: Alignment.center,
+                                child: Text('${idx + 2}', style: GText.micro(c.textSecondary)),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _short(ob.name),
+                                  style: GText.caption(c.textPrimary),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              Text(
+                                '${GFormat.count(_patients(ob.today))} pts',
+                                style: GText.caption(c.textMuted),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _short(row.name),
-                    style: GText.h2(c.sidebarTextActive),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    (row.subtitle != null && row.subtitle!.isNotEmpty)
-                        ? row.subtitle!
-                        : (growth == null
-                            ? 'Leading branch today across GMWF'
-                            : '${growth >= 0 ? '+' : ''}${GFormat.percent(growth)} patients vs yesterday'),
-                    style: GText.caption(c.sidebarText),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(Gr.r2),
-                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('Patients', style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w600)),
-                              const SizedBox(height: 1),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(GFormat.count(pats), style: GText.numeric(c.sidebarTextActive)),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(Gr.r2),
-                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('Revenue', style: GText.micro(c.sidebarText)),
-                              const SizedBox(height: 1),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(GFormat.pkrCompact(t.dispensaryRevenue), style: GText.numeric(c.sidebarTextActive)),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(Gr.r2),
-                            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('Donations', style: GText.micro(c.sidebarText)),
-                              const SizedBox(height: 1),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(GFormat.pkrCompact(t.donations), style: GText.numeric(c.sidebarTextActive)),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  if (otherBranches.isNotEmpty) ...[
-                    Text('OTHER ACTIVE BRANCHES', style: GText.overline(c.sidebarText.withValues(alpha: 0.85))),
-                    const SizedBox(height: 4),
-                    for (final (idx, ob) in otherBranches.indexed)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 3),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 15,
-                              height: 15,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.14),
-                                shape: BoxShape.circle,
-                              ),
-                              alignment: Alignment.center,
-                              child: Text('${idx + 2}', style: GText.micro(c.sidebarTextActive)),
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                _short(ob.name),
-                                style: GText.caption(c.sidebarTextActive),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            Text(
-                              '${GFormat.count(_patients(ob.today))} pts',
-                              style: GText.caption(c.sidebarText),
-                            ),
-                          ],
-                        ),
-                      ),
                   ],
-                ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -1404,53 +1405,313 @@ class _TopBranchSpotlightEmpty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.comfort;
-    return GShine(
-      borderRadius: Gr.card,
-      color: Color.alphaBlend(c.sidebarActiveLine.withValues(alpha: 0.45), Colors.white),
-      periodicInterval: const Duration(seconds: 14),
-      shineOnHover: true,
-      shineOnMount: true,
-      child: Container(
-        padding: const EdgeInsets.all(Gsp.sp4),
-        decoration: BoxDecoration(
-          gradient: GColor.heroGradient(c),
-          borderRadius: Gr.card,
-          border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.25), width: 1.2),
-          boxShadow: GShadow.s2(context.isDarkTheme),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: c.sidebarActiveLine.withValues(alpha: 0.18),
-                borderRadius: Gr.chip,
-                border: Border.all(color: c.sidebarActiveLine.withValues(alpha: 0.45)),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isWide = constraints.maxWidth >= 540;
+        final hasBoundedHeight = constraints.hasBoundedHeight;
+
+        Widget content;
+        if (isWide) {
+          // Horizontal / Wide layout for tablet/full-width
+          content = Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Left branding & info
+              Expanded(
+                flex: 3,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: c.brand.withValues(alpha: 0.08),
+                            borderRadius: Gr.chip,
+                            border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(GIcons.star, size: 12, color: c.brand),
+                              const SizedBox(width: 4),
+                              Text(
+                                title.toUpperCase(),
+                                style: GText.micro(c.brand).copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: c.success,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          'Awaiting check-in',
+                          style: GText.micro(c.textMuted).copyWith(fontWeight: FontWeight.w500),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: c.surfaceSunken,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: c.border),
+                          ),
+                          alignment: Alignment.center,
+                          child: GLogo(GBrand.gmwf, size: 32),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Ready for today’s ranking',
+                                style: GText.h2(c.textPrimary),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                '$branches branches open for activity · updates automatically live',
+                                style: GText.caption(c.textSecondary),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+              const SizedBox(width: Gsp.sp4),
+              // Right placeholder podium preview
+              Expanded(
+                flex: 2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: c.surfaceSunken,
+                    borderRadius: BorderRadius.circular(Gr.r2),
+                    border: Border.all(color: c.border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(GIcons.chart, size: 13, color: c.brand),
+                          const SizedBox(width: 6),
+                          Text(
+                            'LEADERBOARD STANDBY',
+                            style: GText.overline(c.brand).copyWith(letterSpacing: 0.6),
+                          ),
+                          const Spacer(),
+                          Text(
+                            'Day #1 Rank',
+                            style: GText.micro(c.textMuted),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Updates with first patient or donation recorded across any branch.',
+                        style: GText.caption(c.textMuted),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          for (int i = 1; i <= 3; i++) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: c.surface,
+                                borderRadius: Gr.chip,
+                                border: Border.all(color: c.border),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    '#$i',
+                                    style: GText.micro(c.textMuted).copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Open',
+                                    style: GText.micro(c.textMuted),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (i < 3) const SizedBox(width: 6),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        } else {
+          // Narrow layout (e.g. desktop flex-1 bento column or mobile)
+          content = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: hasBoundedHeight ? MainAxisAlignment.spaceBetween : MainAxisAlignment.start,
+            children: [
+              // Top badge & status
+              Row(
                 children: [
-                  Icon(GIcons.star, size: 12, color: c.sidebarActiveLine),
-                  const SizedBox(width: 4),
-                  Text(
-                    title.toUpperCase(),
-                    style: GText.micro(c.sidebarActiveLine).copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: c.brand.withValues(alpha: 0.08),
+                      borderRadius: Gr.chip,
+                      border: Border.all(color: c.brand.withValues(alpha: 0.25)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(GIcons.star, size: 12, color: c.brand),
+                        const SizedBox(width: 4),
+                        Text(
+                          title.toUpperCase(),
+                          style: GText.micro(c.brand).copyWith(
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: c.surfaceSunken,
+                      borderRadius: Gr.chip,
+                      border: Border.all(color: c.border),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: c.success,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Standby',
+                          style: GText.micro(c.textMuted).copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
-            const Spacer(),
-            GLogo(GBrand.gmwf, size: 40),
-            const SizedBox(height: 8),
-            Text('Ready for today’s ranking', style: GText.h3(c.sidebarTextActive)),
-            const SizedBox(height: 2),
-            Text('$branches branches are open for activity', style: GText.caption(c.sidebarText)),
-            const Spacer(),
-            Text('Leaderboard updates with first patient', style: GText.caption(c.sidebarActiveLine)),
-          ],
-        ),
-      ),
+              if (!hasBoundedHeight) const SizedBox(height: 14),
+              // Center hero & text
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: c.surfaceSunken,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.border),
+                    ),
+                    alignment: Alignment.center,
+                    child: GLogo(GBrand.gmwf, size: 28),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Ready for today’s ranking',
+                    style: GText.h3(c.textPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$branches branches are open for activity',
+                    style: GText.caption(c.textSecondary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+              if (!hasBoundedHeight) const SizedBox(height: 14),
+              // Bottom status bar
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: c.surfaceSunken,
+                  borderRadius: BorderRadius.circular(Gr.r2),
+                  border: Border.all(color: c.border),
+                ),
+                child: Row(
+                  children: [
+                    Icon(GIcons.trendUp, size: 13, color: c.brand),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        'Updates with first patient or donation',
+                        style: GText.caption(c.textMuted),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        }
+
+        return Container(
+          width: double.infinity,
+          height: hasBoundedHeight ? double.infinity : null,
+          padding: const EdgeInsets.all(Gsp.sp4),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: Gr.card,
+            border: Border.all(color: c.border),
+          ),
+          child: content,
+        );
+      },
     );
   }
 }

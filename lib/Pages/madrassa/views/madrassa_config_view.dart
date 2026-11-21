@@ -9,6 +9,7 @@ import 'holiday_management_view.dart';
 import '../madrassa_strings.dart';
 import '../utils/madrassa_csv_service.dart';
 import '../utils/madrassa_local_storage.dart';
+import '../widgets/madrassa_erp.dart';
 import '../../../services/local_storage_service.dart';
 import '../../../services/user_theme_service.dart';
 import '../../../design/design_system.dart';
@@ -531,8 +532,8 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
     return ValueListenableBuilder(
       valueListenable: UserThemeService.listenable(widget.username),
       builder: (context, _, child) {
-        final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-        final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
+        final c = context.comfort;
+        final scaffoldBg = c.surfaceSunken;
 
         return Scaffold(
           backgroundColor: scaffoldBg,
@@ -586,55 +587,52 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
   }
 
   Widget _buildSaveConfigBar(BuildContext context, {required bool isMobile}) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final saveButton = ElevatedButton.icon(
+    final c = context.comfort;
+    final saveButton = FilledButton.icon(
       onPressed: _isSaving ? null : _save,
       icon: _isSaving
-          ? const SizedBox(
+          ? SizedBox(
               width: 16,
               height: 16,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                color: SoftPalette.gray50,
+                color: c.onBrand,
               ),
             )
           : const Icon(Icons.save_rounded, size: 18),
       label: Text(
         context.l.save,
-        style: context.urduStyle(
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-        ),
+        style: GText.label(c.onBrand).copyWith(fontFamilyFallback: const ['Noori']),
       ),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: SoftPalette.teal550,
-        foregroundColor: SoftPalette.gray50,
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        elevation: 2,
+      style: FilledButton.styleFrom(
+        backgroundColor: c.brand,
+        foregroundColor: c.onBrand,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
 
     if (isMobile) {
       return SizedBox(
         width: double.infinity,
-        height: 48,
+        height: 46,
         child: saveButton,
       );
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.slate50,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate200),
+        color: c.surface,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: c.border),
       ),
       child: Row(
         children: [
           Icon(
             Icons.info_outline_rounded,
             size: 18,
-            color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate500,
+            color: c.brand,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -642,12 +640,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
               context.isUrdu
                   ? 'تعلیمی سیشن اور کٹوتی کے قواعد محفوظ کرنے کے لیے کلک کریں۔'
                   : 'Changes to academic period and deduction rules will apply immediately upon saving.',
-              style: context.urduStyle(
-                style: TextStyle(
-                  fontSize: 12.5,
-                  color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate500,
-                ),
-              ),
+              style: GText.body2(c.textSecondary).copyWith(fontSize: 12.5, fontFamilyFallback: const ['Noori']),
             ),
           ),
           const SizedBox(width: 16),
@@ -658,25 +651,14 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
   }
 
   Widget _buildAccountCard(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate200;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
-    final textMuted = isDark ? SoftPalette.gray50A70 : SoftPalette.slate500;
+    final c = context.comfort;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: c.surface,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: c.border),
       ),
       child: Row(
         children: [
@@ -684,17 +666,13 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
+              color: c.brand.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
             ),
             child: Center(
               child: Text(
                 widget.username.isNotEmpty ? widget.username[0].toUpperCase() : 'U',
-                style: TextStyle(
-                  color: context.adapt(SoftPalette.teal550),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 17,
-                ),
+                style: GText.body1Bold(c.brand),
               ),
             ),
           ),
@@ -703,28 +681,18 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                MadrassaUrduAwareText(
                   widget.username,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.urduStyle(
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                      color: textPrimary,
-                    ),
-                  ),
+                  color: c.textPrimary,
+                  size: 14,
+                  bold: true,
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '${widget.branchId.toUpperCase()} • ${widget.role.toUpperCase()}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: textMuted,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: GText.caption(c.textMuted),
                 ),
               ],
             ),
@@ -737,50 +705,42 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                 builder: (ctx) => AlertDialog(
                   title: Text(
                     context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-                    style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold)),
+                    style: GText.h3(c.textPrimary).copyWith(fontFamilyFallback: const ['Noori']),
                   ),
                   content: Text(
                     context.isUrdu ? 'کیا آپ واقعی لاگ آؤٹ کرنا چاہتے ہیں؟' : 'Are you sure you want to sign out?',
-                    style: context.urduStyle(),
+                    style: GText.body2(c.textSecondary).copyWith(fontFamilyFallback: const ['Noori']),
                   ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(ctx, false),
-                      child: Text(context.l.cancel, style: context.urduStyle()),
+                      child: Text(context.l.cancel, style: TextStyle(color: c.textMuted)),
                     ),
                     ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: context.adapt(SoftPalette.red500)),
+                      style: ElevatedButton.styleFrom(backgroundColor: c.danger, foregroundColor: Colors.white),
                       onPressed: () => Navigator.pop(ctx, true),
-                      child: Text(
-                        context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-                        style: context.urduStyle(style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold)),
-                      ),
+                      child: Text(context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out'),
                     ),
                   ],
                 ),
               );
-              if (confirm != true) return;
-              if (!context.mounted) return;
-              final navigator = Navigator.of(context);
-              await FirebaseAuth.instance.signOut();
-              navigator.pushNamedAndRemoveUntil('/login', (_) => false);
+
+              if (confirm == true) {
+                if (!context.mounted) return;
+                final navigator = Navigator.of(context);
+                await FirebaseAuth.instance.signOut();
+                navigator.pushNamedAndRemoveUntil('/login', (_) => false);
+              }
             },
-            icon: Icon(Icons.logout_rounded, size: 15, color: context.adapt(SoftPalette.red500)),
+            icon: Icon(Icons.logout_rounded, size: 16, color: c.danger),
             label: Text(
               context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-              style: context.urduStyle(
-                style: TextStyle(
-                  color: context.adapt(SoftPalette.red500),
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12.5,
-                ),
-              ),
+              style: GText.caption(c.danger).copyWith(fontWeight: FontWeight.bold),
             ),
             style: OutlinedButton.styleFrom(
-              side: BorderSide(color: context.adapt(SoftPalette.red500).withValues(alpha: 0.35)),
-              backgroundColor: context.adapt(SoftPalette.red500).withValues(alpha: 0.06),
+              side: BorderSide(color: c.danger.withValues(alpha: 0.3)),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
           ),
         ],
@@ -789,64 +749,48 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
   }
 
   Widget _buildWelcomeHeader(BuildContext context) {
+    final c = context.comfort;
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [SoftPalette.teal550, SoftPalette.emerald350],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.teal550.withValues(alpha: 0.3),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
+        color: c.surface,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: c.border),
       ),
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final isMobile = constraints.maxWidth < 600;
 
           final settingsIconBadge = Container(
-            width: 54,
-            height: 54,
+            width: 48,
+            height: 48,
             decoration: BoxDecoration(
-              color: SoftPalette.gray50.withValues(alpha: 0.15),
+              color: c.brandSoft,
               shape: BoxShape.circle,
             ),
-            child: const Icon(
+            child: Icon(
               Icons.settings_suggest_rounded,
-              color: SoftPalette.gray50,
-              size: 28,
+              color: c.brand,
+              size: 24,
             ),
           );
 
-          final titleText = Text(
+          final titleText = MadrassaUrduAwareText(
             context.l.configTitle,
-            style: context.urduStyle(
-              style: const TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-                color: SoftPalette.gray50,
-              ),
-            ),
+            color: c.textPrimary,
+            size: 18,
+            bold: true,
           );
 
-          final subtitleText = Text(
+          final subtitleText = MadrassaUrduAwareText(
             'Set active month and rules',
-            style: context.urduStyle(
-              style: TextStyle(
-                fontSize: 14,
-                color: SoftPalette.gray50.withValues(alpha: 0.85),
-              ),
-            ),
+            color: c.textMuted,
+            size: 13,
+            bold: false,
           );
 
-          final manageHolidaysBtn = ElevatedButton.icon(
+          final manageHolidaysBtn = OutlinedButton.icon(
             onPressed: () {
               Navigator.push(
                 context,
@@ -855,19 +799,17 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                 ),
               );
             },
-            icon: const Icon(Icons.calendar_today_rounded, size: 16),
-            label: const Text(
+            icon: Icon(Icons.calendar_today_rounded, size: 15, color: c.brand),
+            label: Text(
               'Manage Holidays',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: c.brand),
             ),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: SoftPalette.gray50.withValues(alpha: 0.15),
-              foregroundColor: SoftPalette.gray50,
-              shadowColor: Colors.transparent,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(30),
-                side: BorderSide(color: SoftPalette.gray50.withValues(alpha: 0.2)),
+            style: OutlinedButton.styleFrom(
+              backgroundColor: c.brandSoft,
+              side: BorderSide(color: c.brand.withValues(alpha: 0.25)),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              shape: const RoundedRectangleBorder(
+                borderRadius: MadrassaErp.radius,
               ),
             ),
           );
@@ -879,7 +821,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                 Row(
                   children: [
                     settingsIconBadge,
-                    const SizedBox(width: 16),
+                    const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -892,7 +834,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 16),
                 SizedBox(
                   width: double.infinity,
                   child: manageHolidaysBtn,
@@ -907,13 +849,13 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                   child: Row(
                     children: [
                       settingsIconBadge,
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             titleText,
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             subtitleText,
                           ],
                         ),
@@ -1053,8 +995,8 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
   }
 
   Widget _buildDataImportExportCard(BuildContext context) {
+    final c = context.comfort;
     final busy = _isExporting || _isImporting;
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
 
     return _configCard(
       context: context,
@@ -1141,16 +1083,14 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: busy ? null : _importCsv,
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: MadrassaErp.radius,
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                     decoration: BoxDecoration(
-                      color: isDark
-                          ? SoftPalette.slate900.withValues(alpha: 0.6)
-                          : context.adapt(SoftPalette.teal550).withValues(alpha: 0.04),
-                      borderRadius: BorderRadius.circular(14),
+                      color: c.surfaceSunken,
+                      borderRadius: MadrassaErp.radius,
                       border: Border.all(
-                        color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.3),
+                        color: c.border,
                       ),
                     ),
                     child: Row(
@@ -1159,20 +1099,20 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                           width: 40,
                           height: 40,
                           decoration: BoxDecoration(
-                            color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(10),
+                            color: c.brandSoft,
+                            borderRadius: BorderRadius.circular(8),
                           ),
                           child: _isImporting
-                              ? const Center(
+                              ? Center(
                                   child: SizedBox(
                                     width: 18,
                                     height: 18,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
                                   ),
                                 )
                               : Icon(
                                   Icons.upload_file_rounded,
-                                  color: context.adapt(SoftPalette.teal550),
+                                  color: c.brand,
                                   size: 22,
                                 ),
                         ),
@@ -1187,7 +1127,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                                   style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     fontSize: 13.5,
-                                    color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                                    color: c.textPrimary,
                                   ),
                                 ),
                               ),
@@ -1200,7 +1140,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate500,
+                                  color: c.textMuted,
                                 ),
                               ),
                             ],
@@ -1210,7 +1150,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                         Icon(
                           Icons.arrow_forward_ios_rounded,
                           size: 13,
-                          color: context.adapt(SoftPalette.teal550),
+                          color: c.brand,
                         ),
                       ],
                     ),
@@ -1219,7 +1159,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
               ),
               if (_isExporting) ...[
                 const SizedBox(height: 12),
-                LinearProgressIndicator(color: context.adapt(SoftPalette.teal550)),
+                LinearProgressIndicator(color: c.brand),
               ],
             ],
           );
@@ -1237,27 +1177,23 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
     required VoidCallback? onPressed,
     bool isPrimary = false,
   }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final cardBg = isDark
-        ? (isPrimary ? context.adapt(SoftPalette.teal550).withValues(alpha: 0.16) : SoftPalette.slate900.withValues(alpha: 0.6))
-        : (isPrimary ? context.adapt(SoftPalette.teal550).withValues(alpha: 0.08) : SoftPalette.gray50);
-    final borderColor = isPrimary
-        ? context.adapt(SoftPalette.teal550).withValues(alpha: 0.45)
-        : (isDark ? SoftPalette.slate700 : SoftPalette.slate200);
-    final textColor = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
-    final subColor = isDark ? SoftPalette.gray50A70 : SoftPalette.slate500;
+    final c = context.comfort;
+    final cardBg = isPrimary ? c.brandSoft : c.surface;
+    final borderColor = isPrimary ? c.brand.withValues(alpha: 0.35) : c.border;
+    final textColor = c.textPrimary;
+    final subColor = c.textMuted;
 
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onPressed,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: MadrassaErp.radius,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
             color: cardBg,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: borderColor, width: isPrimary ? 1.2 : 1),
+            borderRadius: MadrassaErp.radius,
+            border: Border.all(color: borderColor, width: 1),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1271,14 +1207,14 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                     height: 32,
                     decoration: BoxDecoration(
                       color: iconColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(6),
                     ),
                     child: Icon(icon, size: 17, color: iconColor),
                   ),
                   Icon(
                     Icons.arrow_downward_rounded,
                     size: 15,
-                    color: isPrimary ? context.adapt(SoftPalette.teal550) : subColor,
+                    color: isPrimary ? c.brand : subColor,
                   ),
                 ],
               ),
@@ -1315,8 +1251,8 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
   }
 
   Widget _buildDeductionsCard(BuildContext context) {
+    final c = context.comfort;
     final bool isFeeEnabled = LocalStorageService.isMadrassaFeeEnabled(widget.branchId);
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
 
     return _configCard(
       context: context,
@@ -1332,18 +1268,18 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
               margin: const EdgeInsets.only(bottom: 16),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: isDark ? SoftPalette.orange800.withValues(alpha: 0.5) : SoftPalette.yellow50m,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: isDark ? SoftPalette.orange700 : SoftPalette.amber300),
+                color: c.warning.withValues(alpha: 0.12),
+                borderRadius: MadrassaErp.radius,
+                border: Border.all(color: c.warning.withValues(alpha: 0.35)),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.info_outline_rounded, color: isDark ? SoftPalette.amber200 : SoftPalette.orange400, size: 20),
+                  Icon(Icons.info_outline_rounded, color: c.warning, size: 20),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       'Money Factor is disabled for this branch in Branch Facilities. Fee dues and deduction savings are turned off and hidden across all Parent, Teacher, and Principal screens.',
-                      style: TextStyle(fontSize: 12, color: isDark ? SoftPalette.yellow150 : SoftPalette.orange600, fontWeight: FontWeight.w500),
+                      style: TextStyle(fontSize: 12, color: c.warning, fontWeight: FontWeight.w500),
                     ),
                   ),
                 ],
@@ -1439,29 +1375,12 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
     required double hue,
     Widget? trailing,
   }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.gray350.withValues(alpha: 0.12);
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray350;
+    final c = context.comfort;
+    final accentColor = c.brand;
+    final bgTint = c.brandSoft;
 
-    final accentColor = HSLColor.fromAHSL(1.0, hue, 0.65, isDark ? 0.60 : 0.45).toColor();
-    final bgTint = HSLColor.fromAHSL(1.0, hue, 0.65, isDark ? 0.20 : 0.94).toColor();
-
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
+    return MadrassaCard(
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1469,33 +1388,30 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(9),
                 decoration: BoxDecoration(
                   color: bgTint,
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: MadrassaErp.radius,
                 ),
-                child: Icon(icon, color: accentColor, size: 22),
+                child: Icon(icon, color: accentColor, size: 20),
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    MadrassaUrduAwareText(
                       title,
-                      style: context.urduStyle(
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                          color: textPrimary,
-                        ),
-                      ),
+                      color: c.textPrimary,
+                      size: 16,
+                      bold: true,
                     ),
-                    Text(
+                    const SizedBox(height: 2),
+                    MadrassaUrduAwareText(
                       subtitle,
-                      style: context.urduStyle(
-                        style: TextStyle(fontSize: 12, color: textMuted),
-                      ),
+                      color: c.textMuted,
+                      size: 12,
+                      bold: false,
                     ),
                   ],
                 ),
@@ -1503,7 +1419,7 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
               if (trailing != null) trailing,
             ],
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
           child,
         ],
       ),
@@ -1519,11 +1435,11 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
     ValueChanged<String>? onChanged,
     IconData? prefixIcon,
   }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final inputBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final labelColor = isDark ? SoftPalette.gray50A70 : SoftPalette.slate700;
+    final c = context.comfort;
+    final inputBg = c.surfaceSunken;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final labelColor = c.textPrimary;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1544,20 +1460,16 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
                     ),
                     TextSpan(
                       text: ' *',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.red500)),
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: c.danger),
                     ),
                   ],
                 ),
               )
-            : Text(
+            : MadrassaUrduAwareText(
                 label,
-                style: context.urduStyle(
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: labelColor,
-                  ),
-                ),
+                color: labelColor,
+                size: 13,
+                bold: true,
               ),
         const SizedBox(height: 8),
         TextFormField(
@@ -1567,21 +1479,21 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: textPrimary),
           decoration: InputDecoration(
             errorText: errorText,
-            prefixIcon: prefixIcon != null ? Icon(prefixIcon, size: 20, color: isDark ? SoftPalette.slate350 : null) : null,
+            prefixIcon: prefixIcon != null ? Icon(prefixIcon, size: 20, color: c.textMuted) : null,
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               borderSide: BorderSide(color: borderColor),
             ),
             enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               borderSide: BorderSide(
-                color: errorText != null ? context.adapt(SoftPalette.red500) : borderColor,
+                color: errorText != null ? c.danger : borderColor,
               ),
             ),
             focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: context.adapt(SoftPalette.teal550), width: 2),
+              borderRadius: MadrassaErp.radius,
+              borderSide: BorderSide(color: c.brand, width: 2),
             ),
             filled: true,
             fillColor: inputBg,
@@ -1601,25 +1513,21 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
     bool isPtmDay = false,
     IconData? prefixIcon,
   }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final inputBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900A87;
-    final labelColor = isDark ? SoftPalette.gray50A70 : SoftPalette.slate700;
+    final c = context.comfort;
+    final cardBg = c.surface;
+    final inputBg = c.surfaceSunken;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final labelColor = c.textPrimary;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        MadrassaUrduAwareText(
           label,
-          style: context.urduStyle(
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: labelColor,
-            ),
-          ),
+          color: labelColor,
+          size: 13,
+          bold: true,
         ),
         const SizedBox(height: 8),
         DropdownButtonFormField<int>(
@@ -1638,19 +1546,19 @@ if (importResult.type == MadrassaCsvType.dailyLogs) {
             color: textPrimary,
           ),
           decoration: InputDecoration(
-            prefixIcon: prefixIcon != null ? Icon(prefixIcon, size: 20, color: isDark ? SoftPalette.slate350 : null) : null,
+            prefixIcon: prefixIcon != null ? Icon(prefixIcon, size: 20, color: c.textMuted) : null,
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               borderSide: BorderSide(color: borderColor),
             ),
             enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               borderSide: BorderSide(color: borderColor),
             ),
             focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: context.adapt(SoftPalette.teal550), width: 2),
+              borderRadius: MadrassaErp.radius,
+              borderSide: BorderSide(color: c.brand, width: 2),
             ),
             filled: true,
             fillColor: inputBg,

@@ -9,6 +9,7 @@ import '../widgets/madrassa_common_widgets.dart';
 import '../utils/madrassa_report_helper.dart';
 import '../madrassa_strings.dart';
 import '../student_fee_ledger.dart';
+import '../widgets/madrassa_erp.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -190,82 +191,75 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                 _feeCache.clear();
                 final payments = feePaymentsAsyncValue.value ?? {};
 
-                return ValueListenableBuilder(
-                  valueListenable: UserThemeService.listenable(widget.username),
-                  builder: (context, _, __) {
-                    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
-                    final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-                    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-                    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-                    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray700;
-                    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+                final c = context.comfort;
+                final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.username);
 
-                    return Scaffold(
-                      backgroundColor: scaffoldBg,
-                      body: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final bool showDetail = _userShowDetailOverride ?? (constraints.maxWidth >= 1100);
-                          final isMobile = constraints.maxWidth < GBreakpoint.mobile;
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _buildHeader(context, displayConfig, students, monthLogs, currentYear, currentMonth, holidays, workingDays, showDetail, isDark),
+                return Scaffold(
+                  backgroundColor: c.surfaceSunken,
+                  body: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final bool showDetail = _userShowDetailOverride ?? (constraints.maxWidth >= 1100);
+                      final bool isMobile = constraints.maxWidth < GBreakpoint.mobile;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildHeader(context, displayConfig, students, monthLogs, currentYear, currentMonth, holidays, workingDays, showDetail, isDark),
 
-                              // Warning Banner
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  decoration: BoxDecoration(
-                                    color: isDark ? SoftPalette.orange800.withValues(alpha: 0.5) : SoftPalette.yellow50,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: isDark ? SoftPalette.orange700 : SoftPalette.yellow150),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.warning_amber_rounded, color: isDark ? SoftPalette.amber200 : SoftPalette.orange350, size: 16),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          context.isUrdu
-                                              ? 'آرکائیو اور مکمل شدہ طلباء کو بلک ڈاؤن لوڈ سے خارج کر دیا گیا ہے۔ ان کی رپورٹس دستی طور پر ڈاؤن لوڈ کریں۔'
-                                              : 'Archived and Completed students are excluded from bulk downloads and must be downloaded manually.',
-                                          style: TextStyle(
-                                            color: isDark ? SoftPalette.amber200 : SoftPalette.orange350,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                            fontFamily: context.isUrdu ? 'Noori' : null,
-                                          ),
-                                        ),
+                          // Warning Banner
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: c.warning.withValues(alpha: 0.1),
+                                borderRadius: MadrassaErp.radius,
+                                border: Border.all(color: c.warning.withValues(alpha: 0.3)),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.warning_amber_rounded, color: c.warning, size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      context.isUrdu
+                                          ? 'آرکائیو اور مکمل شدہ طلباء کو بلک ڈاؤن لوڈ سے خارج کر دیا گیا ہے۔ ان کی رپورٹس دستی طور پر ڈاؤن لوڈ کریں۔'
+                                          : 'Archived and Completed students are excluded from bulk downloads and must be downloaded manually.',
+                                      style: TextStyle(
+                                        color: c.warning,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        fontFamilyFallback: const ['Noori'],
                                       ),
-                                    ],
+                                    ),
                                   ),
+                                ],
+                              ),
+                            ),
+                          ),
+
+                          // Search Bar
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            child: TextField(
+                              style: TextStyle(color: c.textPrimary),
+                              decoration: InputDecoration(
+                                hintText: context.isUrdu ? 'طالب علم تلاش کریں (نام یا رول نمبر)...' : 'Search student by name or roll number...',
+                                hintStyle: TextStyle(fontFamilyFallback: const ['Noori'], color: c.textMuted),
+                                prefixIcon: Icon(Icons.search, color: c.textMuted),
+                                filled: true,
+                                fillColor: c.surface,
+                                isDense: true,
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: MadrassaErp.radius,
+                                  borderSide: BorderSide(color: c.border),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: MadrassaErp.radius,
+                                  borderSide: BorderSide(color: c.brand, width: 2),
                                 ),
                               ),
-
-                              // Search Bar
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                child: TextField(
-                                  style: TextStyle(color: textPrimary),
-                                  decoration: InputDecoration(
-                                    hintText: context.isUrdu ? 'طالب علم تلاش کریں (نام یا رول نمبر)...' : 'Search student by name or roll number...',
-                                    hintStyle: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null, color: textMuted),
-                                    prefixIcon: Icon(Icons.search, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550),
-                                    filled: true,
-                                    fillColor: cardBg,
-                                    isDense: true,
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: borderColor)),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(color: borderColor),
-                                    ),
-                                    focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(color: context.adapt(SoftPalette.teal550), width: 2),
-                                    ),
-                                  ),
                                   onChanged: (val) {
                                     setState(() {
                                       _searchQuery = val.trim().toLowerCase();
@@ -331,8 +325,6 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                     );
                   },
                 );
-              },
-            );
           },
         );
       },
@@ -340,14 +332,15 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
   }
 
   Widget _buildEmptyState(BuildContext context, bool isDark) {
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray500;
+    final c = context.comfort;
+    final cardBg = c.surface;
+    final borderColor = c.border;
+    final textMuted = c.textMuted;
 
     return Container(
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
       ),
       padding: const EdgeInsets.symmetric(vertical: 48),
@@ -355,7 +348,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.search_off_rounded, size: 36, color: isDark ? SoftPalette.slate550 : SoftPalette.gray300),
+          Icon(Icons.search_off_rounded, size: 36, color: c.textMuted),
           const SizedBox(height: 10),
           Text('No students match your search', style: TextStyle(color: textMuted, fontSize: 13)),
         ],
@@ -376,8 +369,9 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     bool showDetail,
     bool isDark,
   ) {
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+    final c = context.comfort;
+    final cardBg = c.surface;
+    final borderColor = c.border;
 
     final rows = List.generate(filteredStudents.length, (i) {
       final s = filteredStudents[i];
@@ -398,11 +392,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     return Container(
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4)),
-        ],
       ),
       clipBehavior: Clip.antiAlias,
       child: LayoutBuilder(
@@ -420,9 +411,6 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                 Container(
                   decoration: BoxDecoration(
                     border: Border(right: BorderSide(color: borderColor, width: 1)),
-                    boxShadow: [
-                      BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.05), blurRadius: 6, offset: const Offset(2, 0)),
-                    ],
                   ),
                   child: Column(
                     children: [
@@ -471,20 +459,19 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
   }
 
   Map<String, double> _calculateColWidths(double availableScrollableWidth, bool showDetail, bool isFeeEnabled) {
-    final double baseDays = 90;
-    final double baseP = 60;
-    final double baseL = 60;
-    final double baseA = 60;
-    final double baseAtt = (showDetail && isFeeEnabled) ? 75 : 0;
-    final double baseUni = 65;
-    final double baseUniRs = (showDetail && isFeeEnabled) ? 85 : 0;
+    final double baseDays = 95;
+    final double baseP = 50;
+    final double baseL = 50;
+    final double baseA = 50;
+    final double baseAtt = (showDetail && isFeeEnabled) ? 95 : 0;
+    final double baseUni = 50;
+    final double baseUniRs = (showDetail && isFeeEnabled) ? 95 : 0;
     final double baseMsg = 65;
     final double basePtm = 55;
-    final double baseSavings = isFeeEnabled ? 80 : 0;
-    final double baseDue = isFeeEnabled ? 110 : 0;
-    final double baseActions = 130;
+    final double baseSavings = isFeeEnabled ? 95 : 0;
+    final double baseActions = isFeeEnabled ? 180 : 70;
 
-    final double totalBase = baseDays + baseP + baseL + baseA + baseAtt + baseUni + baseUniRs + baseMsg + basePtm + baseSavings + baseDue + baseActions;
+    final double totalBase = baseDays + baseP + baseL + baseA + baseAtt + baseUni + baseUniRs + baseMsg + basePtm + baseSavings + baseActions;
 
     double scale = 1.0;
     if (availableScrollableWidth > totalBase) {
@@ -502,14 +489,14 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       'msg': baseMsg * scale,
       'ptm': basePtm * scale,
       'savings': baseSavings * scale,
-      'due': baseDue * scale,
       'actions': baseActions * scale,
     };
   }
 
   Widget _frozenHeaderRow(BuildContext context, bool isDark) {
-    final headingBg = isDark ? SoftPalette.slate900 : SoftPalette.slate100;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+    final c = context.comfort;
+    final headingBg = c.surfaceSunken;
+    final borderColor = c.border;
 
     return Container(
       height: _kHeaderHeight,
@@ -519,26 +506,24 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       ),
       child: Row(
         children: [
-          _colCell(Text('#', style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 32.0, center: true),
-          _colCell(Text(context.l.studentName, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 170.0),
-          _colCell(Text(context.l.rollNumber, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), 95.0),
+          _colCell(Text('#', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: c.textPrimary))), 32.0, center: true),
+          _colCell(Text(context.l.studentName, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: c.textPrimary))), 170.0),
+          _colCell(Text(context.l.rollNumber, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: c.textPrimary))), 95.0),
         ],
       ),
     );
   }
 
   Widget _frozenDataRow(BuildContext context, int index, Map<String, dynamic> data, bool isDark) {
-    final isEven = index.isEven;
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final altBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate100;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray500;
+    final c = context.comfort;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final textMuted = c.textMuted;
 
     return Container(
       height: _kRowHeight,
       decoration: BoxDecoration(
-        color: isEven ? cardBg : altBg,
+        color: c.surface,
         border: Border(bottom: BorderSide(color: borderColor, width: 0.75)),
       ),
       child: Row(
@@ -548,7 +533,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           _colCell(
             Text(
               data['name'] ?? '',
-              style: TextStyle(fontWeight: FontWeight.w600, color: textPrimary, fontSize: 13),
+              style: TextStyle(fontWeight: FontWeight.w600, color: textPrimary, fontSize: 13, fontFamilyFallback: const ['Noori']),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -558,15 +543,16 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: BoxDecoration(
-                color: isDark ? SoftPalette.teal500.withValues(alpha: 0.2) : SoftPalette.teal50t,
+                color: c.surfaceSunken,
                 borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: c.border),
               ),
               child: Text(
                 '${data['rollNumber'] ?? '?'}',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 12,
-                  color: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
+                  color: c.brand,
                 ),
               ),
             ),
@@ -584,8 +570,9 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     Map<String, double> widths,
     bool isDark,
   ) {
-    final headingBg = isDark ? SoftPalette.slate900 : SoftPalette.slate100;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+    final c = context.comfort;
+    final headingBg = c.surfaceSunken;
+    final borderColor = c.border;
 
     return Container(
       height: _kHeaderHeight,
@@ -595,22 +582,120 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       ),
       child: Row(
         children: [
-          _colCell(Text(context.l.activeWorkingDays, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['days']!, center: true),
-          _colCell(Text(context.l.present[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.green550), fontSize: 13))), widths['p']!, center: true),
-          _colCell(Text(context.l.leave[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.orange400), fontSize: 13))), widths['l']!, center: true),
-          _colCell(Text(context.l.absent[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.red500), fontSize: 13))), widths['a']!, center: true),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'ماہ کے کل تعلیمی دن' : 'Academic / Working Days',
+              child: Text(
+                context.l.workingDays,
+                style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: c.textPrimary)),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            widths['days']!,
+            center: true,
+          ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'حاضر دن' : 'Present Days',
+              child: Text('P', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w700, color: c.success, fontSize: 13))),
+            ),
+            widths['p']!,
+            center: true,
+          ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'رخصت کے دن' : 'Leave Days',
+              child: Text('L', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w700, color: c.warning, fontSize: 13))),
+            ),
+            widths['l']!,
+            center: true,
+          ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'غیر حاضر دن' : 'Absent Days',
+              child: Text('A', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w700, color: c.danger, fontSize: 13))),
+            ),
+            widths['a']!,
+            center: true,
+          ),
           if (showDetail && isFeeEnabled)
-            _colCell(Text(context.l.attendanceSavings, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['att']!, center: true),
-          _colCell(Text(context.l.uniform[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550, fontSize: 13))), widths['uni']!, center: true),
+            _colCell(
+              Tooltip(
+                message: context.isUrdu ? 'حاضری پر رعایت' : 'Attendance Savings',
+                child: Text(
+                  context.l.attSavingsShort,
+                  style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: c.textPrimary)),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              widths['att']!,
+              center: true,
+            ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'یونیفارم کے دن' : 'Uniform Days',
+              child: Text('U', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w700, color: c.brand, fontSize: 13))),
+            ),
+            widths['uni']!,
+            center: true,
+          ),
           if (showDetail && isFeeEnabled)
-            _colCell(Text(context.l.uniformSavings, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['uniRs']!, center: true),
-          _colCell(Text(context.l.message[0], style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.orange400), fontSize: 13))), widths['msg']!, center: true),
-          _colCell(Text(context.l.ptm, style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))), widths['ptm']!, center: true),
-          if (isFeeEnabled) ...[
-            _colCell(Text(context.l.savings, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.green550), fontSize: 13))), widths['savings']!, center: true),
-            _colCell(Text(context.l.due, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: context.adapt(SoftPalette.red500), fontSize: 13))), widths['due']!, center: true),
-          ],
-          _colCell(Text(context.l.legendPresent, style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550, fontSize: 13))), widths['actions']!, center: true),
+            _colCell(
+              Tooltip(
+                message: context.isUrdu ? 'یونیفارم پر رعایت' : 'Uniform Savings',
+                child: Text(
+                  context.l.uniSavingsShort,
+                  style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: c.textPrimary)),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              widths['uniRs']!,
+              center: true,
+            ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'پیغامات / روزانہ رپورٹ' : 'Parent Messages / Hadith Followup',
+              child: Text(
+                context.l.msgShort,
+                style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.w700, color: c.warning, fontSize: 13)),
+              ),
+            ),
+            widths['msg']!,
+            center: true,
+          ),
+          _colCell(
+            Tooltip(
+              message: context.isUrdu ? 'پی ٹی ایم میٹنگ (شریک / غیر حاضر)' : 'Parent-Teacher Meeting (Joined / Missed)',
+              child: Text('PTM', style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: c.textPrimary))),
+            ),
+            widths['ptm']!,
+            center: true,
+          ),
+          if (isFeeEnabled)
+            _colCell(
+              Tooltip(
+                message: context.isUrdu ? 'کل رعایت (حاضری + یونیفارم + میسج + پی ٹی ایم)' : 'Total Monthly Fee Savings / Discount',
+                child: Text(
+                  context.l.totalSavings,
+                  style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, color: c.success, fontSize: 12.5)),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              widths['savings']!,
+              center: true,
+            ),
+          _colCell(
+            Text(
+              context.l.actions,
+              style: context.urduStyle(style: TextStyle(fontWeight: FontWeight.bold, color: c.brand, fontSize: 13)),
+            ),
+            widths['actions']!,
+            center: true,
+          ),
         ],
       ),
     );
@@ -633,18 +718,16 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     Map<String, double> widths,
     bool isDark,
   ) {
+    final c = context.comfort;
     final sId = s is DocumentSnapshot ? s.id : s['id'].toString();
-    final isEven = index.isEven;
     final due = ((fee['amountDue'] as num?) ?? 0.0).toDouble();
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final altBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate100;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
 
     return Container(
       height: _kRowHeight,
       decoration: BoxDecoration(
-        color: isEven ? cardBg : altBg,
+        color: c.surface,
         border: Border(bottom: BorderSide(color: borderColor, width: 0.75)),
       ),
       child: Row(
@@ -665,39 +748,47 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
             isDark ? (fee['ptm'] ? SoftPalette.emerald700 : SoftPalette.red700) : (fee['ptm'] ? SoftPalette.green100m : SoftPalette.pink100m),
             isDark ? (fee['ptm'] ? SoftPalette.emerald200 : SoftPalette.red300) : (fee['ptm'] ? SoftPalette.green550 : SoftPalette.red500),
           ), widths['ptm']!, center: true),
-          if (isFeeEnabled) ...[
-            _colCell(Text(((fee['totalSavings'] as num?) ?? 0).toStringAsFixed(0), style: TextStyle(color: context.adapt(SoftPalette.green550), fontWeight: FontWeight.bold, fontSize: 12)), widths['savings']!, center: true),
+          if (isFeeEnabled)
             _colCell(
-              _buildDuesCell(
-                context: context,
-                studentId: sId,
-                studentName: data['name']?.toString() ?? 'Student',
-                rollNumber: data['rollNumber']?.toString() ?? '?',
-                studentData: data,
-                config: config,
-                due: due,
-                payment: payment,
-                year: year,
-                month: month,
-                isDark: isDark,
-              ),
-              widths['due']!,
+              Text(((fee['totalSavings'] as num?) ?? 0).toStringAsFixed(0), style: TextStyle(color: context.adapt(SoftPalette.green550), fontWeight: FontWeight.bold, fontSize: 12)),
+              widths['savings']!,
               center: true,
             ),
-          ],
           _colCell(
-            StudentExportMenu(
-              onPdf: () {
-                AppToast.showSnackBar(context, SnackBar(content: Text('Preparing report for ${data['name'] ?? 'student'}...')));
-                MadrassaReportHelper.exportIndividualPdf(config: config, studentId: sId, studentData: data, logs: logs, holidays: holidays);
-              },
-              onExcel: () {
-                AppToast.showSnackBar(context, SnackBar(content: Text('Preparing Excel report for ${data['name'] ?? 'student'}...')));
-                MadrassaReportHelper.exportIndividualExcel(config: config, studentId: sId, studentData: data, logs: logs, holidays: holidays);
-              },
-              onWhatsApp: () {
-                _sendMonthlyWhatsApp(s, fee, logs);
-              },
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (isFeeEnabled) ...[
+                  _buildDuesCell(
+                    context: context,
+                    studentId: sId,
+                    studentName: data['name']?.toString() ?? 'Student',
+                    rollNumber: data['rollNumber']?.toString() ?? '?',
+                    studentData: data,
+                    config: config,
+                    due: due,
+                    payment: payment,
+                    year: year,
+                    month: month,
+                    isDark: isDark,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                StudentExportMenu(
+                  onPdf: () {
+                    AppToast.showSnackBar(context, SnackBar(content: Text('Preparing report for ${data['name'] ?? 'student'}...')));
+                    MadrassaReportHelper.exportIndividualPdf(config: config, studentId: sId, studentData: data, logs: logs, holidays: holidays);
+                  },
+                  onExcel: () {
+                    AppToast.showSnackBar(context, SnackBar(content: Text('Preparing Excel report for ${data['name'] ?? 'student'}...')));
+                    MadrassaReportHelper.exportIndividualExcel(config: config, studentId: sId, studentData: data, logs: logs, holidays: holidays);
+                  },
+                  onWhatsApp: () {
+                    _sendMonthlyWhatsApp(s, fee, logs);
+                  },
+                ),
+              ],
             ),
             widths['actions']!,
             center: true,
@@ -1942,6 +2033,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     int month,
     bool isDark,
   ) {
+    final c = context.comfort;
     final data = s is DocumentSnapshot ? (_asStringMap(s.data()) ?? <String, dynamic>{}) : Map<String, dynamic>.from(s as Map);
     final sId = s is DocumentSnapshot ? s.id : s['id'].toString();
     final due = ((fee['amountDue'] as num?) ?? 0.0).toDouble();
@@ -1949,10 +2041,10 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     final p = fee['present'];
     final l = fee['leave'];
     final a = fee['absent'];
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray500;
+    final cardBg = c.surface;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final textMuted = c.textMuted;
 
     final status = payment?['status']?.toString().toLowerCase();
     final amountPaid = (payment?['amountPaid'] as num?)?.toDouble() ?? 0.0;
@@ -1967,15 +2059,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: 0.02),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2132,7 +2217,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: MadrassaErp.radius,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2162,12 +2247,13 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
     bool showDetail,
     bool isDark,
   ) {
+    final c = context.comfort;
     final monthName = DateFormat('MMMM yyyy').format(DateTime(year, month));
     final isMobile = GBreakpoint.isMobile(context);
-    final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.gray900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.gray700;
+    final cardBg = c.surface;
+    final borderColor = c.border;
+    final textPrimary = c.textPrimary;
+    final textMuted = c.textMuted;
 
     final headerInfo = Row(
       children: [
@@ -2175,10 +2261,10 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           width: 44,
           height: 44,
           decoration: BoxDecoration(
-            color: isDark ? SoftPalette.teal500.withValues(alpha: 0.2) : SoftPalette.teal100m,
-            borderRadius: BorderRadius.circular(12),
+            color: c.brandSoft,
+            borderRadius: MadrassaErp.radius,
           ),
-          child: Icon(Icons.analytics_rounded, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550, size: 24),
+          child: Icon(Icons.analytics_rounded, color: c.brand, size: 24),
         ),
         const SizedBox(width: 12),
         Column(
@@ -2207,15 +2293,15 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
 
     final monthPicker = Container(
       decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate900 : SoftPalette.slate100,
-        borderRadius: BorderRadius.circular(10),
+        color: c.surfaceSunken,
+        borderRadius: MadrassaErp.radius,
         border: Border.all(color: borderColor),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
-            icon: const Icon(Icons.chevron_left, size: 20),
+            icon: Icon(Icons.chevron_left, size: 20, color: c.textPrimary),
             tooltip: 'Previous Month',
             onPressed: () {
               setState(() {
@@ -2234,7 +2320,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
           ),
           IconButton(
-            icon: const Icon(Icons.chevron_right, size: 20),
+            icon: Icon(Icons.chevron_right, size: 20, color: c.textPrimary),
             tooltip: 'Next Month',
             onPressed: () {
               setState(() {
@@ -2257,8 +2343,8 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
       children: [
         PopupMenuButton<String>(
           tooltip: 'Export Report',
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
+          shape: RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
+          color: c.surface,
           elevation: 4,
           onSelected: (val) {
             if (val == 'pdf') {
@@ -2281,10 +2367,10 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                   Container(
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
-                      color: ctx.adapt(SoftPalette.red400).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(8),
+                      color: c.danger.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
                     ),
-                    child: Icon(Icons.picture_as_pdf_rounded, color: ctx.adapt(SoftPalette.red400), size: 18),
+                    child: Icon(Icons.picture_as_pdf_rounded, color: c.danger, size: 18),
                   ),
                   const SizedBox(width: 10),
                   Text(
@@ -2292,7 +2378,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
-                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                      color: c.textPrimary,
                     ),
                   ),
                 ],
@@ -2305,10 +2391,10 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                   Container(
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
-                      color: ctx.adapt(SoftPalette.emerald350).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(8),
+                      color: c.success.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
                     ),
-                    child: Icon(Icons.table_chart_rounded, color: ctx.adapt(SoftPalette.emerald350), size: 18),
+                    child: Icon(Icons.table_chart_rounded, color: c.success, size: 18),
                   ),
                   const SizedBox(width: 10),
                   Text(
@@ -2316,7 +2402,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
-                      color: isDark ? SoftPalette.gray50 : SoftPalette.slate800,
+                      color: c.textPrimary,
                     ),
                   ),
                 ],
@@ -2326,35 +2412,24 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [SoftPalette.teal550, SoftPalette.teal500],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(10),
-              boxShadow: [
-                BoxShadow(
-                  color: SoftPalette.teal550.withValues(alpha: 0.25),
-                  blurRadius: 8,
-                  offset: const Offset(0, 3),
-                ),
-              ],
+              color: c.brand,
+              borderRadius: MadrassaErp.radius,
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.file_download_outlined, color: SoftPalette.gray50, size: 18),
+                Icon(Icons.file_download_outlined, color: c.onBrand, size: 18),
                 const SizedBox(width: 6),
                 Text(
                   context.isUrdu ? 'رپورٹ برآمد کریں' : 'Export',
-                  style: const TextStyle(
-                    color: SoftPalette.gray50,
+                  style: TextStyle(
+                    color: c.onBrand,
                     fontWeight: FontWeight.bold,
                     fontSize: 13,
                   ),
                 ),
                 const SizedBox(width: 4),
-                const Icon(Icons.keyboard_arrow_down_rounded, color: SoftPalette.gray50A70, size: 16),
+                Icon(Icons.keyboard_arrow_down_rounded, color: c.onBrand.withValues(alpha: 0.7), size: 16),
               ],
             ),
           ),
@@ -2364,7 +2439,7 @@ class _MonthlyReportViewState extends ConsumerState<MonthlyReportView> {
           IconButton(
             icon: Icon(
               showDetail ? Icons.unfold_less_rounded : Icons.unfold_more_rounded,
-              color: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
+              color: c.brand,
               size: 20,
             ),
             tooltip: showDetail ? 'Compact View' : 'Detailed View',

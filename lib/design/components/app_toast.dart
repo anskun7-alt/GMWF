@@ -32,6 +32,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../tokens/breakpoints.dart';
+import '../../services/busy_status.dart';
+import '../../widgets/busy_status_host.dart';
 
 enum GToastKind { success, error, warning, info }
 
@@ -377,11 +379,18 @@ class AppToastHost extends StatelessWidget {
         if (isPhone) {
           return Positioned(top: padding.top + 8, left: 12, right: 12, child: column);
         }
-        return Positioned(
-          right: 20,
-          bottom: padding.bottom + 20,
-          width: math.min(372.0, size.width - 40),
-          child: column,
+        // The sync pill ("Syncing offline data…") shares this corner and always
+        // stays at the very bottom: while it shows, the cards sit above it.
+        return ValueListenableBuilder<int>(
+          valueListenable: BusyStatus.revision,
+          builder: (context, _, _) => AnimatedPositioned(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            right: 20,
+            bottom: padding.bottom + 20 + BusyStatusHost.pillLift(context),
+            width: math.min(372.0, size.width - 40),
+            child: column,
+          ),
         );
       },
     );

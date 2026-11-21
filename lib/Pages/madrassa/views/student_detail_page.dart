@@ -15,6 +15,7 @@ import '../student_fee_ledger.dart';
 import '../dialogs/enrollment_dialog.dart';
 import '../dialogs/change_student_branch_dialog.dart';
 import '../widgets/madrassa_status_menu.dart';
+import '../widgets/madrassa_erp.dart';
 import 'dart:async';
 import '../../../services/sync_service.dart';
 import '../../../realtime/realtime_manager.dart';
@@ -282,17 +283,18 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
   }
 
   Widget _buildDetailRow(IconData icon, String label, String value) {
+    final c = context.comfort;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: context.adapt(SoftPalette.teal550)),
+          Icon(icon, size: 18, color: c.brand),
           const SizedBox(width: 12),
           Text(
             label,
             style: TextStyle(
               fontSize: 13,
-              color: context.adapt(SoftPalette.gray500),
+              color: c.textMuted,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -302,7 +304,7 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
             style: TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.bold,
-              color: context.adapt(SoftPalette.slate800),
+              color: c.textPrimary,
             ),
           ),
         ],
@@ -366,11 +368,12 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
         final String? guardianCnicUrl = _data['guardianCnicUrl'] ?? _data['guardianCnicBase64'];
         final String? hifzCertificateUrl = _data['hifzCertificateUrl'] ?? _data['hifzCertificateBase64'];
 
+        final c = context.comfort;
         final isDark = UserThemeService.isDarkMode(widget.username);
-        final scaffoldBg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-        final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
-        final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+        final scaffoldBg = c.surfaceSunken;
+        final cardBg = c.surface;
+        final textPrimary = c.textPrimary;
+        final borderColor = c.border;
 
         return Scaffold(
           backgroundColor: scaffoldBg,
@@ -460,30 +463,20 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                     // Header card
                     Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [SoftPalette.teal600, SoftPalette.teal550],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(24),
-                        boxShadow: [
-                          BoxShadow(
-                            color: SoftPalette.teal550.withValues(alpha: 0.25),
-                            blurRadius: 16,
-                            offset: const Offset(0, 6),
-                          ),
-                        ],
+                        color: cardBg,
+                        borderRadius: MadrassaErp.cardRadius,
+                        border: Border.all(color: borderColor),
                       ),
                       child: Row(
                         children: [
                           Container(
-                            width: 72,
-                            height: 72,
+                            width: 64,
+                            height: 64,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.4), width: 2.5),
+                              border: Border.all(color: borderColor, width: 2),
                             ),
                             child: ClipOval(
                               child: () {
@@ -493,16 +486,16 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                                   return Image.memory(
                                     bytes,
                                     fit: BoxFit.cover,
-                                    width: 72,
-                                    height: 72,
+                                    width: 64,
+                                    height: 64,
                                     errorBuilder: (_, __, ___) => _buildAvatarFallback(name),
                                   );
                                 } else if (str != null && str.startsWith('http')) {
                                   return Image.network(
                                     str,
                                     fit: BoxFit.cover,
-                                    width: 72,
-                                    height: 72,
+                                    width: 64,
+                                    height: 64,
                                     errorBuilder: (_, __, ___) => _buildAvatarFallback(name),
                                   );
                                 }
@@ -510,38 +503,36 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                               }(),
                             ),
                           ),
-                          const SizedBox(width: 18),
+                          const SizedBox(width: 16),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
+                                MadrassaUrduAwareText(
                                   name,
-                                  style: const TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: SoftPalette.gray50,
-                                  ),
+                                  color: textPrimary,
+                                  size: 20,
+                                  bold: true,
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
                                   'Roll #: $rollNumber • Class: $className',
                                   style: TextStyle(
-                                    color: SoftPalette.gray50.withValues(alpha: 0.9),
+                                    color: c.textMuted,
                                     fontSize: 13,
                                   ),
                                 ),
-                                const SizedBox(height: 10),
+                                const SizedBox(height: 8),
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: SoftPalette.gray50.withValues(alpha: 0.2),
-                                    borderRadius: BorderRadius.circular(8),
+                                    color: c.brandSoft,
+                                    borderRadius: MadrassaErp.radius,
                                   ),
                                   child: Text(
                                     'Status: ${status.toUpperCase()}',
-                                    style: const TextStyle(
-                                      color: SoftPalette.gray50,
+                                    style: TextStyle(
+                                      color: c.brand,
                                       fontWeight: FontWeight.bold,
                                       fontSize: 11,
                                     ),
@@ -560,7 +551,7 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
                         color: cardBg,
-                        borderRadius: BorderRadius.circular(20),
+                        borderRadius: MadrassaErp.cardRadius,
                         border: Border.all(color: borderColor),
                       ),
                       child: Column(
@@ -729,29 +720,29 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.gray50),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: context.adapt(SoftPalette.slate150)),
+                        color: cardBg,
+                        borderRadius: MadrassaErp.cardRadius,
+                        border: Border.all(color: borderColor),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Icon(Icons.person_outline_rounded, color: context.adapt(SoftPalette.teal550)),
-                              SizedBox(width: 10),
+                              Icon(Icons.person_outline_rounded, color: c.brand),
+                              const SizedBox(width: 10),
                               Text(
                                 'Student Personal Details',
                                 style: TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.bold,
-                                  color: context.adapt(SoftPalette.slate800),
+                                  color: textPrimary,
                                 ),
                               ),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          const Divider(),
+                          Divider(color: borderColor),
                           _buildDetailRow(
                             Icons.credit_card_rounded,
                             'Student CNIC / B-Form #',
@@ -799,29 +790,29 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.gray50),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: context.adapt(SoftPalette.slate150)),
+                        color: cardBg,
+                        borderRadius: MadrassaErp.cardRadius,
+                        border: Border.all(color: borderColor),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Icon(Icons.family_restroom_rounded, color: context.adapt(SoftPalette.teal550)),
-                              SizedBox(width: 10),
+                              Icon(Icons.family_restroom_rounded, color: c.brand),
+                              const SizedBox(width: 10),
                               Text(
                                 'Guardian / Parent Details',
                                 style: TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.bold,
-                                  color: context.adapt(SoftPalette.slate800),
+                                  color: textPrimary,
                                 ),
                               ),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          const Divider(),
+                          Divider(color: borderColor),
                           _buildDetailRow(
                             Icons.badge_outlined,
                             'Guardian Name',
@@ -846,41 +837,41 @@ class _StudentDetailPageState extends State<StudentDetailPage> {
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.gray50),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: context.adapt(SoftPalette.slate150)),
+                        color: cardBg,
+                        borderRadius: MadrassaErp.cardRadius,
+                        border: Border.all(color: borderColor),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Icon(Icons.folder_shared_outlined, color: context.adapt(SoftPalette.teal550)),
+                              Icon(Icons.folder_shared_outlined, color: c.brand),
                               const SizedBox(width: 10),
                               Text(
                                 'Student & Guardian Documents',
                                 style: TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.bold,
-                                  color: context.adapt(SoftPalette.slate800),
+                                  color: textPrimary,
                                 ),
                               ),
                               const Spacer(),
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                 decoration: BoxDecoration(
-                                  color: context.adapt(SoftPalette.gray100),
-                                  borderRadius: BorderRadius.circular(6),
+                                  color: c.surfaceSunken,
+                                  borderRadius: MadrassaErp.radius,
                                 ),
                                 child: Text(
                                   'Read Only',
-                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.gray350)),
+                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: c.textMuted),
                                 ),
                               ),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          const Divider(),
+                          Divider(color: borderColor),
                           const SizedBox(height: 8),
                           ReadOnlyDocumentTile(
                             label: 'Guardian CNIC Document',

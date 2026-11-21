@@ -29,6 +29,30 @@ import '../design/design_system.dart';
 import '../utils/branch_labels.dart';
 
 class RequestUtils {
+  /// HQ Manager, admins (incl. global/super), chairman and CEO: approve or deny anything.
+  static bool isHigherAuthorityRole(String role) {
+    final r = role.toLowerCase().trim();
+    return r.contains('hq') ||
+        r.contains('head office') ||
+        r.contains('admin') ||
+        r.contains('chairman') ||
+        r.contains('ceo');
+  }
+
+  static IconData iconFor(String type) {
+    final t = type.toLowerCase();
+    if (t.contains('token_exception')) return Icons.event_busy_rounded;
+    if (t.contains('reversal')) return Icons.undo_rounded;
+    if (t.contains('patient')) return Icons.person_search_rounded;
+    if (t.contains('delete')) return Icons.delete_outline_rounded;
+    if (t.contains('edit')) return Icons.edit_note_rounded;
+    if (t.contains('stock') || t.contains('restock') || t.contains('medicine') || t.contains('register')) {
+      return Icons.inventory_2_outlined;
+    }
+    if (t.contains('prescription') || t.contains('dispense')) return Icons.medication_outlined;
+    return Icons.assignment_outlined;
+  }
+
   static String getTitle(String type, String patient) {
     return switch (type) {
       'dispense'            => 'Patient: $patient',
@@ -807,7 +831,24 @@ class _StableRequestTabState extends State<_StableRequestTab>
       return 'Unknown';
     }
 
-    return requesterId;
+    // A user id (e.g. "n3R9Scw…") is not readable: look the person up on this PC.
+    for (final k in const ['requestedByName', 'createdByName', 'userName', 'username', 'doctorName']) {
+      final v = (data[k]?.toString() ?? '').trim();
+      if (v.isNotEmpty) {
+        _nameCache[docId] = v;
+        return v;
+      }
+    }
+    try {
+      final u = LocalStorageService.getLocalUserByUid(requesterId) ?? LocalStorageService.findLocalUser(requesterId);
+      final n = (u?['username'] ?? u?['name'] ?? u?['displayName'] ?? u?['fullName'])?.toString().trim() ?? '';
+      if (n.isNotEmpty) {
+        _nameCache[docId] = n;
+        return n;
+      }
+    } catch (_) {}
+    final looksLikeId = requesterId.length >= 20 && !requesterId.contains(' ');
+    return looksLikeId ? 'Staff (${requesterId.substring(0, 6)}…)' : requesterId;
   }
 
   static Map<String, dynamic> _deepConvertMap(dynamic source) {
@@ -946,13 +987,15 @@ class _StableRequestTabState extends State<_StableRequestTab>
             role.contains('chairman') ||
             role.contains('ceo');
         final isDoctor = role.contains('doctor');
-        final canApproveAny = isSupervisorRole || isDoctor;
+        final isHigherAuthority = RequestUtils.isHigherAuthorityRole(role);
+        final canApproveAny = isSupervisorRole || isDoctor || isHigherAuthority;
 
         final eligibleDocs = allDocs.where((doc) {
           final data = doc.data();
           final requestType = data['requestType']?.toString() ??
               data['type']?.toString() ??
               'unknown';
+          if (isHigherAuthority) return true;
           if (isSupervisorRole && requestType != 'token_exception') return true;
           if (isDoctor &&
               (requestType == 'token_exception' ||
@@ -1164,8 +1207,12 @@ class _StableRequestTabState extends State<_StableRequestTab>
       final isBranchManager = role.contains('branch manager') || role.contains('branch_manager') || role == 'bm' || role.contains('manager');
       final isSupervisorRole = widget.isSupervisor || role.contains('supervisor') || isBranchManager || role.contains('admin') || role.contains('chairman') || role.contains('ceo');
       final isDoctor = role.contains('doctor');
+      // HQ Manager, admins, chairman, CEO: may approve or deny EVERY request, token
+      // exceptions included (those used to be doctor-only, so HQ only saw "Pending approval").
+      final isHigherAuthority = RequestUtils.isHigherAuthorityRole(role);
 
-      final canApproveAsSupervisor = isSupervisorRole && requestType != 'token_exception';
+      final canApproveAsSupervisor =
+          isSupervisorRole && (requestType != 'token_exception' || isHigherAuthority);
       final canApproveAsDoctor = isDoctor &&
           (requestType == 'token_exception' ||
               requestType == 'patient_edit' ||
@@ -1180,223 +1227,167 @@ class _StableRequestTabState extends State<_StableRequestTab>
               data['requestId']?.toString() == activeFocusId ||
               data['id']?.toString() == activeFocusId);
 
-      return Card(
-        color: isFocusedCard
-            ? (isDark
-                ? Color.alphaBlend(SoftPalette.teal500.withValues(alpha: 0.14), SoftPalette.slate800)
-                : Color.alphaBlend(SoftPalette.teal300.withValues(alpha: 0.12), SoftPalette.gray50))
-            : (isDark ? SoftPalette.slate800 : SoftPalette.gray50),
-        elevation: isFocusedCard ? 8 : (widget.status == 'pending' ? (isDark ? 3 : 5) : 1),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(
-            color: isFocusedCard
-                ? (isDark ? SoftPalette.amber300 : SoftPalette.teal550)
-                : (isDark ? SoftPalette.slate700 : SoftPalette.teal100),
-            width: isFocusedCard ? 2.2 : 1,
-          ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+      // ── Redesigned request card (2026-11-21): accent stripe by type, one clear title
+      // line, one compact info line, the details, then large Approve / Reject buttons.
+      final c = context.comfort;
+      final accent = RequestUtils.getTextColor(requestType, isDark: isDark);
+      final typeLabel = requestType
+          .split('_')
+          .where((w) => w.isNotEmpty)
+          .map((w) => '${w[0].toUpperCase()}${w.substring(1)}')
+          .join(' ');
+      final branchLabel = (data['branchId'] ?? widget.branchId).toString();
+      final when = ts?.toDate();
+      String ago() {
+        if (when == null) return '';
+        final d = DateTime.now().difference(when);
+        if (d.inMinutes < 1) return 'just now';
+        if (d.inMinutes < 60) return '${d.inMinutes} min ago';
+        if (d.inHours < 24) return '${d.inHours} h ago';
+        if (d.inDays < 31) return '${d.inDays} day${d.inDays == 1 ? '' : 's'} ago';
+        return DateFormat('dd MMM yyyy').format(when);
+      }
+
+      Widget metaItem(IconData icon, String text, {bool strong = false}) => Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              if (isFocusedCard) ...[
-                Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? SoftPalette.amber300.withValues(alpha: 0.18)
-                        : SoftPalette.teal550.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: isDark ? SoftPalette.amber300 : SoftPalette.teal550,
-                    ),
+              Icon(icon, size: 15, color: c.textMuted),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  text,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: strong ? FontWeight.w700 : FontWeight.w500,
+                    color: strong ? c.textPrimary : c.textSecondary,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                ),
+              ),
+            ],
+          );
+
+      return Container(
+        decoration: BoxDecoration(
+          color: isFocusedCard ? Color.alphaBlend(c.brand.withValues(alpha: 0.06), c.surface) : c.surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isFocusedCard ? c.brand : c.border,
+            width: isFocusedCard ? 2 : 1,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(width: 5, color: accent),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(
-                        Icons.notifications_active_rounded,
-                        size: 14,
-                        color: isDark ? SoftPalette.amber200 : SoftPalette.teal600,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'SELECTED FROM NOTIFICATIONS',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.4,
-                          color: isDark ? SoftPalette.amber200 : SoftPalette.teal700,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      InkWell(
-                        onTap: () => RequestPage.focusRequest(null),
-                        child: Icon(
-                          Icons.close_rounded,
-                          size: 14,
-                          color: isDark ? SoftPalette.amber200 : SoftPalette.teal700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              Row(children: [
-                Expanded(
-                  child: Text(
-                    RequestUtils.getTitle(requestType, patientName),
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      color: isDark ? SoftPalette.teal200 : SoftPalette.teal600,
-                    ),
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: isDark ? SoftPalette.sky500.withValues(alpha: 0.25) : SoftPalette.slate100,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: isDark ? SoftPalette.sky350.withValues(alpha: 0.4) : SoftPalette.slate150,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.holiday_village_rounded, size: 14, color: isDark ? SoftPalette.sky350 : SoftPalette.sky550),
-                      const SizedBox(width: 5),
-                      Text(
-                        campLabel.toUpperCase(),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? SoftPalette.sky350 : SoftPalette.sky550,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: RequestUtils.getBadgeColor(requestType, isDark: isDark),
-                    borderRadius: BorderRadius.circular(20),
-                    border: isDark
-                        ? Border.all(
-                            color: RequestUtils.getTextColor(requestType, isDark: isDark).withValues(alpha: 0.4),
-                            width: 1,
-                          )
-                        : null,
-                  ),
-                  child: Text(
-                    requestType.replaceAll('_', ' ').toUpperCase(),
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: RequestUtils.getTextColor(requestType, isDark: isDark),
-                    ),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Icon(Icons.person_rounded, size: 16, color: isDark ? SoftPalette.teal300 : SoftPalette.teal600),
-                const SizedBox(width: 8),
-                Text(
-                  'By: $name',
-                  style: TextStyle(fontSize: 13.5, color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87),
-                ),
-              ]),
-              const SizedBox(height: 4),
-              Row(children: [
-                Icon(Icons.location_on_rounded, size: 16, color: isDark ? SoftPalette.sky350 : SoftPalette.teal600),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: RichText(
-                    text: TextSpan(
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87,
-                      ),
-                      children: [
-                        const TextSpan(text: 'Facility Camp: '),
-                        TextSpan(
-                          text: campLabel,
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: isDark ? SoftPalette.sky350 : SoftPalette.teal700,
+                      if (isFocusedCard) ...[
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: c.brand.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.notifications_active_rounded, size: 14, color: c.brandStrong),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Opened from notifications',
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.brandStrong),
+                              ),
+                              const SizedBox(width: 6),
+                              InkWell(
+                                onTap: () => RequestPage.focusRequest(null),
+                                child: Icon(Icons.close_rounded, size: 15, color: c.brandStrong),
+                              ),
+                            ],
                           ),
                         ),
-                        TextSpan(
-                          text: ' (${(data['branchId'] ?? widget.branchId).toString().toUpperCase()})',
-                          style: TextStyle(fontSize: 11.5, color: isDark ? SoftPalette.gray50A38 : SoftPalette.gray500),
-                        ),
                       ],
-                    ),
-                  ),
-                ),
-              ]),
-              if (ts != null) ...[
-                const SizedBox(height: 4),
-                Row(children: [
-                  Icon(Icons.schedule_rounded, size: 14, color: isDark ? SoftPalette.gray50A38 : SoftPalette.gray900A38),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Requested: ${DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate())}',
-                    style: TextStyle(fontSize: 12, color: isDark ? SoftPalette.gray50A54 : SoftPalette.gray900A54),
-                  ),
-                ]),
-              ],
-              if (widget.status == 'approved') ...[
-                const SizedBox(height: 6),
-                Row(children: [
-                  Icon(Icons.verified_user_rounded, size: 14, color: isDark ? SoftPalette.emerald300 : SoftPalette.teal550),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Approved by: ${approverName ?? 'Doctor'}',
-                    style: TextStyle(
-                      fontSize: 12, 
-                      color: isDark ? SoftPalette.emerald300 : SoftPalette.teal550, 
-                      fontWeight: FontWeight.bold
-                    ),
-                  ),
-                ]),
-              ],
-              if (widget.status == 'rejected') ...[
-                const SizedBox(height: 6),
-                Row(children: [
-                  Icon(Icons.remove_circle_rounded, size: 14, color: isDark ? SoftPalette.red350 : SoftPalette.red500),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Rejected by: ${approverName ?? 'Doctor'}',
-                    style: TextStyle(
-                      fontSize: 12, 
-                      color: isDark ? SoftPalette.red350 : SoftPalette.red500, 
-                      fontWeight: FontWeight.bold
-                    ),
-                  ),
-                ]),
-              ],
-              if (amountText.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  'Amount: $amountText',
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.teal300 : SoftPalette.teal600,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 12),
+                      // Title row: type icon, title + type, time.
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: accent.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(RequestUtils.iconFor(requestType), size: 22, color: accent),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  RequestUtils.getTitle(requestType, patientName),
+                                  style: TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w800,
+                                    color: c.textPrimary,
+                                    height: 1.2,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  typeLabel,
+                                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: accent),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (when != null)
+                            Tooltip(
+                              message: DateFormat('dd MMM yyyy, hh:mm a').format(when),
+                              child: Padding(
+                                padding: const EdgeInsets.only(left: 8, top: 2),
+                                child: Text(
+                                  ago(),
+                                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: c.textMuted),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      // One compact info line.
+                      Wrap(
+                        spacing: 18,
+                        runSpacing: 6,
+                        children: [
+                          metaItem(Icons.person_outline_rounded, name, strong: true),
+                          metaItem(Icons.location_on_outlined,
+                              '$campLabel${campLabel.toLowerCase() == branchLabel.toLowerCase() ? '' : ' · ${branchLabel[0].toUpperCase()}${branchLabel.substring(1)}'}'),
+                          if (when != null)
+                            metaItem(Icons.schedule_rounded, DateFormat('dd MMM, hh:mm a').format(when)),
+                          if (amountText.isNotEmpty) metaItem(Icons.payments_outlined, amountText, strong: true),
+                          if (widget.status == 'approved')
+                            metaItem(Icons.verified_rounded, 'Approved by ${approverName ?? '—'}', strong: true),
+                          if (widget.status == 'rejected')
+                            metaItem(Icons.block_rounded, 'Rejected by ${approverName ?? '—'}', strong: true),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
               if (requestType == 'patient_edit')
                 _buildPatientChanges(data, doc.id, collection)
               else if (requestType == 'edit_medicine')
@@ -1475,67 +1466,77 @@ class _StableRequestTabState extends State<_StableRequestTab>
                   ),
                 ),
               ],
-              const SizedBox(height: 14),
-              if (widget.status == 'pending')
-                if (canApproveAsSupervisor || canApproveAsDoctor)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      OutlinedButton(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: SoftPalette.red400,
-                          side: BorderSide(color: SoftPalette.red400),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      const SizedBox(height: 14),
+                      Divider(height: 1, color: c.border),
+                      const SizedBox(height: 12),
+                      if (widget.status == 'pending' && (canApproveAsSupervisor || canApproveAsDoctor))
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Your decision is needed',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: c.textSecondary),
+                              ),
+                            ),
+                            OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: c.danger,
+                                side: BorderSide(color: c.danger.withValues(alpha: 0.6)),
+                                minimumSize: const Size(110, 44),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                              onPressed: () => _updateStatus(context, doc.id, 'rejected', requestType, collection),
+                              icon: const Icon(Icons.close_rounded, size: 18),
+                              label: const Text('Reject', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: c.brand,
+                                foregroundColor: c.onBrand,
+                                elevation: 0,
+                                minimumSize: const Size(130, 44),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              ),
+                              onPressed: () => _updateStatus(context, doc.id, 'approved', requestType, collection),
+                              icon: const Icon(Icons.check_rounded, size: 18),
+                              label: const Text('Approve', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                            ),
+                          ],
+                        )
+                      else if (widget.status == 'pending' && isSupervisorRole && requestType == 'token_exception')
+                        _buildDoctorOnlyNotice()
+                      else
+                        Row(
+                          children: [
+                            Icon(
+                              widget.status == 'approved'
+                                  ? Icons.check_circle_rounded
+                                  : (widget.status == 'rejected' ? Icons.cancel_rounded : Icons.hourglass_top_rounded),
+                              size: 18,
+                              color: widget.status == 'approved'
+                                  ? c.brand
+                                  : (widget.status == 'rejected' ? c.danger : c.warning),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              widget.status == 'approved'
+                                  ? 'Approved'
+                                  : (widget.status == 'rejected' ? 'Rejected' : 'Waiting for another role to decide'),
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w700,
+                                color: widget.status == 'approved'
+                                    ? c.brandStrong
+                                    : (widget.status == 'rejected' ? c.danger : c.warning),
+                              ),
+                            ),
+                          ],
                         ),
-                        onPressed: () => _updateStatus(context, doc.id,
-                            'rejected', requestType, collection),
-                        child: const Text('Reject', style: TextStyle(fontWeight: FontWeight.bold)),
-                      ),
-                      const SizedBox(width: 12),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: isDark ? SoftPalette.teal550 : SoftPalette.teal550,
-                          foregroundColor: SoftPalette.gray50,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                          elevation: 1,
-                        ),
-                        onPressed: () => _updateStatus(context, doc.id,
-                            'approved', requestType, collection),
-                        child: const Text('Approve', style: TextStyle(fontWeight: FontWeight.bold)),
-                      ),
                     ],
-                  )
-                else if (isSupervisorRole && requestType == 'token_exception')
-                  _buildDoctorOnlyNotice()
-                else
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Chip(
-                      label: const Text('PENDING APPROVAL'),
-                      backgroundColor: isDark ? SoftPalette.orange700.withValues(alpha: 0.4) : SoftPalette.amber300.withValues(alpha: 0.1),
-                      labelStyle: TextStyle(
-                          color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 10),
-                    ),
-                  )
-              else
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Chip(
-                    label: Text(widget.status.toUpperCase()),
-                    backgroundColor: widget.status == 'approved' 
-                        ? (isDark ? SoftPalette.emerald700 : SoftPalette.teal500.withValues(alpha: 0.15))
-                        : (isDark ? SoftPalette.red700 : SoftPalette.red400.withValues(alpha: 0.1)),
-                    labelStyle: TextStyle(
-                        color: widget.status == 'approved' 
-                            ? (isDark ? SoftPalette.emerald200 : SoftPalette.teal600)
-                            : (isDark ? SoftPalette.red300 : SoftPalette.red550),
-                        fontWeight: FontWeight.bold),
                   ),
                 ),
+              ),
             ],
           ),
         ),
@@ -2192,10 +2193,14 @@ class _StableRequestTabState extends State<_StableRequestTab>
           Text("Restriction Details:", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? SoftPalette.amber150 : SoftPalette.orange400)),
         ]),
         const SizedBox(height: 8),
+        // Plain wording: the patient still has medicine from an earlier visit, so a new token
+        // needs approval. 0 days left means the earlier course ends today.
         Text("Patient ID: $patientId", style: TextStyle(color: isDark ? SoftPalette.gray50A70 : SoftPalette.gray900A87)),
-        Text(isLastDay 
-          ? "Status: Medicine expires TODAY"
-          : "Status: Medicine expires in $remDays days",
+        const SizedBox(height: 2),
+        Text(
+          (isLastDay || remDays.toString() == '0')
+              ? "Earlier medicine ends today — patient is asking for a new token before it runs out"
+              : "Earlier medicine still lasts $remDays more day${remDays.toString() == '1' ? '' : 's'} — patient is asking for a new token early",
           style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? SoftPalette.amber200 : SoftPalette.orange400)),
       ]),
     );
@@ -2680,6 +2685,7 @@ class _StableRequestTabState extends State<_StableRequestTab>
       final requestType = data['requestType']?.toString() ??
           data['type']?.toString() ??
           'unknown';
+      if (RequestUtils.isHigherAuthorityRole(role)) return true;
       if (isSupervisorRole && requestType != 'token_exception') return true;
       if (isDoctor && requestType == 'token_exception') return true;
       return false;

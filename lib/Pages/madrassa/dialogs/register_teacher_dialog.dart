@@ -16,6 +16,7 @@ import 'package:hive/hive.dart';
 
 import '../../../services/auth_service.dart';
 import '../../../services/image_upload_service.dart';
+import '../widgets/madrassa_erp.dart';
 
 /// Opens the Register-Teacher dialog and returns `true` if a teacher
 /// was successfully registered, `false`/`null` otherwise.
@@ -113,11 +114,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
 
   // ── Theme helpers ─────────────────────────────────────────────────────────
   bool   _isDark(BuildContext ctx) => Theme.of(ctx).brightness == Brightness.dark;
-  Color  _bg(BuildContext ctx)     => _isDark(ctx) ? SoftPalette.slate900 : SoftPalette.gray50;
-  Color  _card(BuildContext ctx)   => _isDark(ctx) ? SoftPalette.slate800 : SoftPalette.gray50;
-  Color  _bord(BuildContext ctx)   => _isDark(ctx) ? SoftPalette.slate700 : SoftPalette.slate150;
-  Color  _text(BuildContext ctx)   => _isDark(ctx) ? SoftPalette.slate100 : SoftPalette.slate900;
-  Color  _muted(BuildContext ctx)  => _isDark(ctx) ? SoftPalette.slate350 : SoftPalette.slate550;
+  Color  _bg(BuildContext ctx)     => ctx.comfort.surfaceSunken;
+  Color  _card(BuildContext ctx)   => ctx.comfort.surface;
+  Color  _bord(BuildContext ctx)   => ctx.comfort.border;
+  Color  _text(BuildContext ctx)   => ctx.comfort.textPrimary;
+  Color  _muted(BuildContext ctx)  => ctx.comfort.textMuted;
 
   // ── Pickers ───────────────────────────────────────────────────────────────
   Future<void> _pickPhoto() async {
@@ -268,6 +269,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final c    = context.comfort;
     final dark = _isDark(context);
     final bg   = _bg(context);
     final card = _card(context);
@@ -279,7 +281,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
       opacity: _fade,
       child: Dialog(
         backgroundColor: bg,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.cardRadius),
         insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 540, maxHeight: 790),
@@ -288,7 +290,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildHeader(dark, bord),
+                  _buildHeader(dark, bord, c),
                   Flexible(
                     child: SingleChildScrollView(
                       physics: const BouncingScrollPhysics(),
@@ -303,7 +305,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                             const SizedBox(height: 16),
                             _buildSection(
                               dark: dark, card: card, bord: bord, text: text, muted: muted,
-                              icon: Icons.badge_outlined, accent: _emerald,
+                              icon: Icons.badge_outlined, accent: c.brand,
                               title: 'Account Credentials',
                               child: Column(children: [
                                 _field(dark: dark, bord: bord, text: text, muted: muted,
@@ -334,7 +336,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                             const SizedBox(height: 14),
                             _buildSection(
                               dark: dark, card: card, bord: bord, text: text, muted: muted,
-                              icon: Icons.person_outline_rounded, accent: context.adapt(SoftPalette.violet550),
+                              icon: Icons.person_outline_rounded, accent: c.brand,
                               title: 'Personal Details',
                               child: Column(children: [
                                 _field(dark: dark, bord: bord, text: text, muted: muted,
@@ -363,34 +365,33 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                             const SizedBox(height: 14),
                             _buildSection(
                               dark: dark, card: card, bord: bord, text: text, muted: muted,
-                              icon: Icons.menu_book_rounded, accent: context.adapt(SoftPalette.violet550),
+                              icon: Icons.menu_book_rounded, accent: c.brand,
                               title: 'Teaching Specialization',
                               child: _teachingTypeSelector(dark, bord, text, muted),
                             ),
                             const SizedBox(height: 14),
                             _buildSection(
                               dark: dark, card: card, bord: bord, text: text, muted: muted,
-                              icon: Icons.access_time_rounded, accent: context.adapt(SoftPalette.sky550),
+                              icon: Icons.access_time_rounded, accent: c.brand,
                               title: 'Teaching Shift',
                               child: _sessionSelector(dark, bord, text, muted),
                             ),
                             const SizedBox(height: 14),
                             _buildSection(
                               dark: dark, card: card, bord: bord, text: text, muted: muted,
-                              icon: Icons.folder_outlined, accent: context.adapt(SoftPalette.orange400),
+                              icon: Icons.folder_outlined, accent: c.warning,
                               title: 'Documents (Optional)',
                               child: _docTile(dark, bord, text, muted),
                             ),
                             const SizedBox(height: 24),
                             SizedBox(
-                              height: 50,
+                              height: 48,
                               child: ElevatedButton.icon(
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: _emerald,
-                                  foregroundColor: SoftPalette.gray50,
-                                  elevation: 3,
-                                  shadowColor: _emerald.withValues(alpha: 0.4),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                  backgroundColor: c.brand,
+                                  foregroundColor: c.onBrand,
+                                  elevation: 0,
+                                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                                 ),
                                 icon: const Icon(Icons.how_to_reg_rounded, size: 20),
                                 label: const Text(
@@ -414,22 +415,22 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                   child: Container(
                     decoration: BoxDecoration(
                       color: SoftPalette.gray900.withValues(alpha: 0.45),
-                      borderRadius: BorderRadius.circular(24),
+                      borderRadius: MadrassaErp.cardRadius,
                     ),
                     child: Center(
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
                         decoration: BoxDecoration(
                           color: bg,
-                          borderRadius: BorderRadius.circular(18),
-                          boxShadow: const [BoxShadow(color: SoftPalette.gray900A26, blurRadius: 24)],
+                          borderRadius: MadrassaErp.cardRadius,
+                          border: Border.all(color: bord),
                         ),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const SizedBox(
+                            SizedBox(
                               width: 48, height: 48,
-                              child: CircularProgressIndicator(color: _emerald, strokeWidth: 3.5),
+                              child: CircularProgressIndicator(color: c.brand, strokeWidth: 3.5),
                             ),
                             const SizedBox(height: 16),
                             Text('Creating Account…',
@@ -449,48 +450,39 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
     );
   }
 
-  Widget _buildHeader(bool dark, Color bord) {
+  Widget _buildHeader(bool dark, Color bord, GComfortColors c) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 20, 12, 16),
+      padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: dark
-              ? [_emerald.withValues(alpha: 0.3), _emeraldLt.withValues(alpha: 0.1)]
-              : [_emerald.withValues(alpha: 0.08), _emeraldLt.withValues(alpha: 0.04)],
-          begin: Alignment.topLeft, end: Alignment.bottomRight,
-        ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        color: c.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
         border: Border(bottom: BorderSide(color: bord, width: 1)),
       ),
       child: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(9),
+            padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [_emerald, _emeraldLt],
-                begin: Alignment.topLeft, end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [BoxShadow(color: _emerald.withValues(alpha: 0.35), blurRadius: 10, offset: const Offset(0, 3))],
+              color: c.brandSoft,
+              borderRadius: MadrassaErp.radius,
             ),
-            child: const Icon(Icons.school_rounded, color: SoftPalette.gray50, size: 22),
+            child: Icon(Icons.school_rounded, color: c.brand, size: 22),
           ),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Register Teacher',
-                    style: TextStyle(color: _emerald, fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: -0.3)),
+                Text('Register Teacher',
+                    style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: -0.3)),
                 const SizedBox(height: 2),
                 Text('Madrassa Teacher • ${widget.branchName}',
-                    style: const TextStyle(color: _emeraldLt, fontSize: 12, fontWeight: FontWeight.w500)),
+                    style: TextStyle(color: c.textMuted, fontSize: 12, fontWeight: FontWeight.w500)),
               ],
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.close_rounded, size: 20),
+            icon: Icon(Icons.close_rounded, size: 20, color: c.textMuted),
             onPressed: _loading ? null : () => Navigator.of(context).pop(false),
             splashRadius: 18,
           ),
@@ -514,10 +506,6 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                   color: _profileBytes != null ? _emerald : bord,
                   width: 2.5,
                 ),
-                boxShadow: [BoxShadow(
-                  color: _emerald.withValues(alpha: _profileBytes != null ? 0.25 : 0.06),
-                  blurRadius: 12,
-                )],
               ),
               child: ClipOval(
                 child: _profileBytes != null
@@ -547,7 +535,6 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                     color: _profileBytes != null ? _danger : _emerald,
                     shape: BoxShape.circle,
                     border: Border.all(color: SoftPalette.gray50, width: 2),
-                    boxShadow: [BoxShadow(color: SoftPalette.gray900.withValues(alpha: 0.15), blurRadius: 4)],
                   ),
                   child: Icon(
                     _profileBytes != null ? Icons.close_rounded : Icons.camera_alt_rounded,
@@ -571,12 +558,8 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
     return Container(
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: bord),
-        boxShadow: [BoxShadow(
-          color: SoftPalette.gray900.withValues(alpha: dark ? 0.12 : 0.04),
-          blurRadius: 10, offset: const Offset(0, 3),
-        )],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,7 +572,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
                     color: accent.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: MadrassaErp.radius,
                   ),
                   child: Icon(icon, color: accent, size: 16),
                 ),
@@ -630,11 +613,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
         filled: true,
         fillColor: dark ? SoftPalette.slate900 : SoftPalette.gray50,
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: bord)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: bord)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _emerald, width: 1.8)),
-        errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _danger)),
-        focusedErrorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _danger, width: 1.8)),
+        border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: bord)),
+        enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: bord)),
+        focusedBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _emerald, width: 1.8)),
+        errorBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _danger)),
+        focusedErrorBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _danger, width: 1.8)),
         errorStyle: const TextStyle(fontSize: 11),
       ),
     );
@@ -660,11 +643,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
         filled: true,
         fillColor: dark ? SoftPalette.slate900 : SoftPalette.gray50,
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: bord)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: bord)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _emerald, width: 1.8)),
-        errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _danger)),
-        focusedErrorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: _danger, width: 1.8)),
+        border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: bord)),
+        enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: bord)),
+        focusedBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _emerald, width: 1.8)),
+        errorBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _danger)),
+        focusedErrorBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: const BorderSide(color: _danger, width: 1.8)),
         errorStyle: const TextStyle(fontSize: 11),
       ),
     );
@@ -711,14 +694,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
               color: isSelected
                   ? purple.withValues(alpha: dark ? 0.22 : 0.08)
                   : (dark ? SoftPalette.slate900 : SoftPalette.gray50),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               border: Border.all(
                 color: isSelected ? purple : bord,
                 width: isSelected ? 1.8 : 1,
               ),
-              boxShadow: isSelected
-                  ? [BoxShadow(color: purple.withValues(alpha: 0.18), blurRadius: 6)]
-                  : null,
             ),
             child: Row(
               children: [
@@ -726,7 +706,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
                   padding: const EdgeInsets.all(7),
                   decoration: BoxDecoration(
                     color: (isSelected ? purple : muted).withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(9),
+                    borderRadius: MadrassaErp.radius,
                   ),
                   child: Icon(
                     t['icon'] as IconData,
@@ -796,7 +776,6 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
   }
 
   Widget _sessionSelector(bool dark, Color bord, Color text, Color muted) {
-
     const sessions = [
       {'value': 'morning', 'label': 'Morning',    'icon': Icons.wb_sunny_outlined,    'sub': '8:00 AM – 2:00 PM'},
       {'value': 'evening', 'label': 'Evening',    'icon': Icons.wb_twilight_outlined,  'sub': '2:00 PM – 8:00 PM'},
@@ -816,14 +795,11 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
               color: isSelected
                   ? _emerald.withValues(alpha: dark ? 0.22 : 0.09)
                   : (dark ? SoftPalette.slate900 : SoftPalette.gray50),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: MadrassaErp.radius,
               border: Border.all(
                 color: isSelected ? _emerald : bord,
                 width: isSelected ? 1.8 : 1,
               ),
-              boxShadow: isSelected
-                  ? [BoxShadow(color: _emerald.withValues(alpha: 0.18), blurRadius: 6)]
-                  : null,
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -862,7 +838,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
           color: attached
               ? _emerald.withValues(alpha: dark ? 0.15 : 0.07)
               : (dark ? SoftPalette.slate900 : SoftPalette.gray50),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: MadrassaErp.radius,
           border: Border.all(color: attached ? _emerald : bord, width: attached ? 1.5 : 1),
         ),
         child: Row(
@@ -871,7 +847,7 @@ class _RegisterTeacherDialogState extends State<RegisterTeacherDialog>
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 color: (attached ? _emerald : context.adapt(SoftPalette.orange400)).withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: MadrassaErp.radius,
               ),
               child: Icon(
                 attached ? Icons.check_circle_rounded : Icons.upload_file_rounded,

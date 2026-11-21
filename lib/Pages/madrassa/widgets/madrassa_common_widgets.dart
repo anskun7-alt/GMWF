@@ -110,6 +110,8 @@ Widget sectionLabel(String label, BuildContext context) {
   );
 }
 
+/// Download (PDF / Excel) button. Theme colours only: an outlined button the
+/// same height as the month bar, brand icon; the menu icons use status tones.
 class ExportButton extends StatelessWidget {
   final VoidCallback onExcel;
   final VoidCallback onPdf;
@@ -119,46 +121,56 @@ class ExportButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
     return PopupMenuButton<String>(
+      tooltip: urdu ? 'رپورٹ ڈاؤن لوڈ کریں' : 'Download report',
       onSelected: (val) {
         if (val == 'excel') onExcel();
         if (val == 'pdf') onPdf();
       },
       itemBuilder: (ctx) => [
-        _menuItem('Export PDF', Icons.picture_as_pdf_outlined, ctx.adapt(SoftPalette.red400), 'pdf'),
-        _menuItem('Export Excel', Icons.file_download_outlined, ctx.adapt(SoftPalette.green400), 'excel'),
+        _exportMenuItem(ctx, urdu ? 'پی ڈی ایف' : 'PDF', Icons.picture_as_pdf_outlined, c.danger, 'pdf'),
+        _exportMenuItem(ctx, urdu ? 'ایکسل' : 'Excel', Icons.table_chart_outlined, c.success, 'excel'),
       ],
       child: Container(
-        padding: EdgeInsets.symmetric(horizontal: isSmall ? 12 : 16, vertical: isSmall ? 8 : 10),
+        height: 46,
+        constraints: const BoxConstraints(minWidth: 46),
+        padding: EdgeInsets.symmetric(horizontal: isSmall ? 0 : 14),
         decoration: BoxDecoration(
-          color: SoftPalette.indigo550,
+          color: c.surface,
           borderRadius: BorderRadius.circular(12),
-          boxShadow: isSmall ? null : [BoxShadow(color: SoftPalette.indigo550.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 4))],
+          border: Border.all(color: c.border),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.download_rounded, color: SoftPalette.gray50, size: isSmall ? 16 : 18),
-            if (!isSmall) const SizedBox(width: 8),
-            if (!isSmall) const Text('Download Reports', style: TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 13)),
+            Icon(Icons.download_rounded, color: c.brand, size: 20),
+            if (!isSmall) ...[
+              const SizedBox(width: 8),
+              Text(urdu ? 'رپورٹ ڈاؤن لوڈ' : 'Download report',
+                  style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w600, fontSize: 13, fontFamily: urdu ? 'Noori' : null)),
+            ],
           ],
         ),
       ),
     );
   }
+}
 
-  PopupMenuItem<String> _menuItem(String en, IconData icon, Color color, String value) {
-    return PopupMenuItem(
-      value: value,
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 12),
-          Text(en, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-        ],
-      ),
-    );
-  }
+PopupMenuItem<String> _exportMenuItem(BuildContext context, String label, IconData icon, Color color, String value) {
+  return PopupMenuItem(
+    value: value,
+    height: 42,
+    child: Row(
+      children: [
+        Icon(icon, color: color, size: 20),
+        const SizedBox(width: 12),
+        Text(label, style: TextStyle(fontSize: 13.5, color: context.comfort.textPrimary, fontFamily: context.isUrdu ? 'Noori' : null)),
+      ],
+    ),
+  );
 }
 
 class StudentExportMenu extends StatelessWidget {
@@ -175,42 +187,28 @@ class StudentExportMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
     return PopupMenuButton<String>(
+      tooltip: urdu ? 'ڈاؤن لوڈ' : 'Download',
       onSelected: (val) {
         if (val == 'excel') onExcel();
         if (val == 'pdf') onPdf();
         if (val == 'whatsapp' && onWhatsApp != null) onWhatsApp!();
       },
-      icon: Icon(Icons.download_rounded, color: context.adapt(SoftPalette.indigo550), size: 20),
+      icon: Icon(Icons.download_rounded, color: c.brand, size: 20),
       itemBuilder: (ctx) => [
-        PopupMenuItem(
-          value: 'pdf',
-          child: Row(
-            children: [
-              Icon(Icons.picture_as_pdf_outlined, color: ctx.adapt(SoftPalette.red400), size: 18),
-              const SizedBox(width: 8),
-              const Text('PDF', style: TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'excel',
-          child: Row(
-            children: [
-              Icon(Icons.file_download_outlined, color: ctx.adapt(SoftPalette.green350), size: 18),
-              const SizedBox(width: 8),
-              const Text('Excel', style: TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
+        _exportMenuItem(ctx, urdu ? 'پی ڈی ایف' : 'PDF', Icons.picture_as_pdf_outlined, c.danger, 'pdf'),
+        _exportMenuItem(ctx, urdu ? 'ایکسل' : 'Excel', Icons.table_chart_outlined, c.success, 'excel'),
         if (onWhatsApp != null)
           PopupMenuItem(
             value: 'whatsapp',
+            height: 42,
             child: Row(
               children: [
-                FaIcon(FontAwesomeIcons.whatsapp, color: ctx.adapt(SoftPalette.green350), size: 18),
-                const SizedBox(width: 8),
-                const Text('WhatsApp', style: TextStyle(fontSize: 12)),
+                FaIcon(FontAwesomeIcons.whatsapp, color: c.success, size: 18),
+                const SizedBox(width: 12),
+                Text('WhatsApp', style: TextStyle(fontSize: 13.5, color: c.textPrimary)),
               ],
             ),
           ),

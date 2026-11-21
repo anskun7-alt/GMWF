@@ -13,6 +13,9 @@ import 'views/madrassa_teachers_view.dart';
 import 'dialogs/enrollment_dialog.dart';
 import 'dialogs/madrassa_profile_dialog.dart';
 import 'dialogs/register_teacher_dialog.dart';
+import 'widgets/madrassa_erp.dart' show MadrassaHubSlot;
+import 'theme/madrassa_theme_scope.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GThemeChoice;
 import 'madrassa_strings.dart';
 import 'utils/madrassa_local_storage.dart';
 import '../../services/local_storage_service.dart';
@@ -333,7 +336,8 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
 
           return RoleThemeScope(
             role: RoleTheme.madrassa,
-            child: ValueListenableBuilder(
+            // The user's Settings theme (GMWF by default) for the hub and every screen in it.
+            child: MadrassaThemeScope(userKey: widget.username, role: widget.role, child: ValueListenableBuilder(
               valueListenable: UserThemeService.listenable(widget.username),
               builder: (context, Box box, _) {
                 final isDark = UserThemeService.isDarkMode(widget.username);
@@ -508,7 +512,8 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                                               duration: const Duration(milliseconds: 250),
                                               child: KeyedSubtree(
                                                 key: ValueKey(_selectedIndex),
-                                                child: views[_selectedIndex],
+                                                // Screens put their own controls in the top bar's slot.
+                                                child: MadrassaHubSlot(child: views[_selectedIndex]),
                                               ),
                                             ),
                                           ),
@@ -526,7 +531,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                   },
                 );
                 },
-              ),
+              )),
             );
           },
         ),
@@ -684,128 +689,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                 // Modern Action Buttons on Mobile: Sync, Language, and consolidated More Menu
                 _buildSyncBtn(context, isDark),
                 const SizedBox(width: 6),
-                _buildLanguageToggleBtn(context, isDark),
-                const SizedBox(width: 4),
-                PopupMenuButton<String>(
-                  icon: Icon(Icons.more_vert_rounded, size: 20, color: textMuted),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                  color: cardBg,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    side: BorderSide(color: borderColor),
-                  ),
-                  onSelected: (val) async {
-                    if (val == 'register_teacher') {
-                      _openRegisterTeacherDialog();
-                    } else if (val == 'profile') {
-                      _openProfileDialog();
-                    } else if (val == 'theme') {
-                      await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
-                    } else if (val == 'logout') {
-                      final navigator = Navigator.of(context);
-                      final confirm = await showDialog<bool>(
-                        context: context,
-                        builder: (dCtx) => AlertDialog(
-                          title: Text(
-                            context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-                            style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold)),
-                          ),
-                          content: Text(
-                            context.isUrdu ? 'کیا آپ واقعی لاگ آؤٹ کرنا چاہتے ہیں؟' : 'Are you sure you want to sign out?',
-                            style: context.urduStyle(),
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(dCtx, false),
-                              child: Text(context.l.cancel, style: context.urduStyle()),
-                            ),
-                            ElevatedButton(
-                              style: ElevatedButton.styleFrom(backgroundColor: context.adapt(SoftPalette.red500)),
-                              onPressed: () => Navigator.pop(dCtx, true),
-                              child: Text(
-                                context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-                                style: context.urduStyle(style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold)),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                      if (confirm == true && mounted) {
-                        await FirebaseAuth.instance.signOut();
-                        navigator.pushNamedAndRemoveUntil('/login', (_) => false);
-                      }
-                    }
-                  },
-                  itemBuilder: (ctx) => [
-                    if (_effectiveIsAdmin)
-                      PopupMenuItem(
-                        value: 'register_teacher',
-                        child: Row(
-                          children: [
-                            Icon(Icons.person_add_rounded, size: 18, color: ctx.adapt(SoftPalette.teal550)),
-                            const SizedBox(width: 10),
-                            Text(
-                              context.isUrdu ? 'نیا استاد درج کریں' : 'Register Teacher',
-                              style: context.urduStyle(style: const TextStyle(fontSize: 13)),
-                            ),
-                          ],
-                        ),
-                      ),
-                    PopupMenuItem(
-                      value: 'profile',
-                      child: Row(
-                        children: [
-                          Icon(Icons.manage_accounts_rounded, size: 18, color: ctx.adapt(SoftPalette.teal550)),
-                          const SizedBox(width: 10),
-                          Text(
-                            context.isUrdu ? 'پروفائل اور پاس ورڈ' : 'Profile & Password',
-                            style: context.urduStyle(style: const TextStyle(fontSize: 13)),
-                          ),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'theme',
-                      child: Row(
-                        children: [
-                          Icon(
-                            isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                            size: 18,
-                            color: ctx.adapt(SoftPalette.amber300),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            isDark
-                                ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode')
-                                : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                            style: context.urduStyle(style: const TextStyle(fontSize: 13)),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const PopupMenuDivider(),
-                    PopupMenuItem(
-                      value: 'logout',
-                      child: Row(
-                        children: [
-                          Icon(Icons.logout_rounded, size: 18, color: ctx.adapt(SoftPalette.red500)),
-                          const SizedBox(width: 10),
-                          Text(
-                            context.isUrdu ? 'لاگ آؤٹ' : 'Sign Out',
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: ctx.adapt(SoftPalette.red500),
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+                _buildMoreMenu(context, isDark: isDark, cardBg: cardBg, borderColor: borderColor, textMuted: textMuted),
               ],
             ),
           ),
@@ -879,21 +763,9 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                IconButton(
-                  icon: Icon(Icons.manage_accounts_rounded, size: 22, color: context.adapt(SoftPalette.teal550)),
-                  tooltip: 'Profile & Password',
-                  onPressed: _openProfileDialog,
-                ),
-                const SizedBox(width: 6),
-                if (_effectiveIsAdmin) ...[
-                  _buildRegisterTeacherBtn(compact: true),
-                  const SizedBox(width: 6),
-                ],
                 _buildSyncBtn(context, isDark),
-                const SizedBox(width: 6),
-                _buildThemeToggleBtn(isDark),
-                const SizedBox(width: 6),
-                _buildLanguageToggleBtn(context, isDark),
+                const SizedBox(width: 4),
+                _buildMoreMenu(context, isDark: isDark, cardBg: cardBg, borderColor: borderColor, textMuted: textMuted),
               ],
             ),
           ),
@@ -995,7 +867,15 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
               );
             },
           ),
-          const Spacer(),
+          const SizedBox(width: 16),
+          // The active screen's own controls (e.g. Daily Log date and leave bell).
+          Expanded(
+            child: ValueListenableBuilder<Widget?>(
+              valueListenable: MadrassaHubSlot.toolbar,
+              builder: (context, slot, _) => slot ?? const SizedBox.shrink(),
+            ),
+          ),
+          const SizedBox(width: 12),
           // Branch info pill
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -1021,21 +901,10 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
             ),
           ),
           const SizedBox(width: 12),
-          // Profile & Password Button
-          IconButton(
-            icon: Icon(Icons.manage_accounts_rounded, size: 22, color: context.adapt(SoftPalette.teal550)),
-            tooltip: 'Profile & Password',
-            onPressed: _openProfileDialog,
-          ),
-          const SizedBox(width: 8),
-          // Sync button
+          // Sync stays visible; language, theme, dark mode and account are in ⋮.
           _buildSyncBtn(context, isDark),
-          const SizedBox(width: 8),
-          // Theme Toggle
-          _buildThemeToggleBtn(isDark),
-          const SizedBox(width: 8),
-          // Language Toggle
-          _buildLanguageToggleBtn(context, isDark),
+          const SizedBox(width: 4),
+          _buildMoreMenu(context, isDark: isDark, cardBg: cardBg, borderColor: borderColor, textMuted: textMuted),
         ],
       ),
     );
@@ -1318,71 +1187,105 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
     );
   }
 
-  // --- Theme Toggle Button ---
-  Widget _buildThemeToggleBtn(bool isDark) {
-    return Container(
-      width: 36,
-      height: 36,
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: isDark ? SoftPalette.gray50A12 : SoftPalette.slate150,
-          width: 1,
-        ),
-      ),
-      child: IconButton(
-        padding: EdgeInsets.zero,
-        icon: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: Icon(
-            isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-            key: ValueKey(isDark),
-            color: isDark ? SoftPalette.yellow150 : SoftPalette.teal550,
-            size: 18,
-          ),
-        ),
-        tooltip: isDark ? 'Light Mode' : 'Dark Mode',
-        onPressed: () async {
+
+  // --- The one ⋮ menu (phone, tablet, desktop) ---
+  // Language, theme and dark mode live here with the account items, so the top
+  // bar keeps only Sync beside it (user request, 2026-11-21).
+  Widget _buildMoreMenu(
+    BuildContext context, {
+    required bool isDark,
+    required Color cardBg,
+    required Color borderColor,
+    required Color textMuted,
+  }) {
+    final urdu = context.isUrdu;
+    final choice = UserThemeService.getThemeChoice(widget.username, widget.role);
+    TextStyle label([Color? color, FontWeight? weight]) =>
+        context.urduStyle(style: TextStyle(fontSize: 13, color: color, fontWeight: weight));
+    PopupMenuItem<String> item(String value, IconData icon, Color iconColor, String text, {Widget? trailing, Color? textColor}) =>
+        PopupMenuItem<String>(
+          value: value,
+          height: 42,
+          child: Row(children: [
+            Icon(icon, size: 18, color: iconColor),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text, style: label(textColor, textColor == null ? null : FontWeight.w600))),
+            ?trailing,
+          ]),
+        );
+    Widget check(bool on) => on ? Icon(Icons.check_rounded, size: 18, color: context.adapt(SoftPalette.teal550)) : const SizedBox(width: 18);
+    PopupMenuItem<String> header(String text) => PopupMenuItem<String>(
+          enabled: false,
+          height: 26,
+          child: Text(text, style: context.urduStyle(style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: textMuted))),
+        );
+
+    return PopupMenuButton<String>(
+      tooltip: urdu ? 'مزید' : 'Menu',
+      icon: Icon(Icons.more_vert_rounded, size: 20, color: textMuted),
+      color: cardBg,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: borderColor)),
+      onSelected: (val) async {
+        if (val == 'register_teacher') {
+          _openRegisterTeacherDialog();
+        } else if (val == 'profile') {
+          _openProfileDialog();
+        } else if (val == 'dark') {
           await UserThemeService.toggleDarkMode(explicitUserKey: widget.username);
-        },
-      ),
+        } else if (val.startsWith('lang:')) {
+          final provider = Provider.of<MadrassaLanguageProvider>(context, listen: false);
+          await provider.setLanguage(val.substring(5));
+        } else if (val.startsWith('theme:')) {
+          final picked = GThemeChoice.values.firstWhere((t) => t.name == val.substring(6), orElse: () => choice);
+          await UserThemeService.setThemeChoice(picked, explicitUserKey: widget.username);
+        } else if (val == 'logout') {
+          final navigator = Navigator.of(context);
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dCtx) => AlertDialog(
+              title: Text(urdu ? 'لاگ آؤٹ' : 'Sign Out', style: context.urduStyle(style: const TextStyle(fontWeight: FontWeight.bold))),
+              content: Text(urdu ? 'کیا آپ واقعی لاگ آؤٹ کرنا چاہتے ہیں؟' : 'Are you sure you want to sign out?', style: context.urduStyle()),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(dCtx, false), child: Text(context.l.cancel, style: context.urduStyle())),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: context.adapt(SoftPalette.red500)),
+                  onPressed: () => Navigator.pop(dCtx, true),
+                  child: Text(urdu ? 'لاگ آؤٹ' : 'Sign Out',
+                      style: context.urduStyle(style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold))),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true && mounted) {
+            await FirebaseAuth.instance.signOut();
+            navigator.pushNamedAndRemoveUntil('/login', (_) => false);
+          }
+        }
+      },
+      itemBuilder: (ctx) => [
+        header(urdu ? 'زبان' : 'LANGUAGE'),
+        item('lang:ur', Icons.translate_rounded, ctx.adapt(SoftPalette.teal550), 'اردو', trailing: check(urdu)),
+        item('lang:en', Icons.translate_rounded, ctx.adapt(SoftPalette.teal550), 'English', trailing: check(!urdu)),
+        const PopupMenuDivider(),
+        header(urdu ? 'تھیم' : 'THEME'),
+        for (final t in GThemeChoice.values)
+          item('theme:${t.name}', Icons.palette_rounded, ctx.adapt(SoftPalette.teal550), t.label, trailing: check(t == choice)),
+        item(
+          'dark',
+          isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+          ctx.adapt(SoftPalette.amber300),
+          isDark ? (urdu ? 'لائٹ موڈ' : 'Light mode') : (urdu ? 'ڈارک موڈ' : 'Dark mode'),
+        ),
+        const PopupMenuDivider(),
+        if (_effectiveIsAdmin)
+          item('register_teacher', Icons.person_add_rounded, ctx.adapt(SoftPalette.teal550), urdu ? 'نیا استاد درج کریں' : 'Register Teacher'),
+        item('profile', Icons.manage_accounts_rounded, ctx.adapt(SoftPalette.teal550), urdu ? 'پروفائل اور پاس ورڈ' : 'Profile & Password'),
+        item('logout', Icons.logout_rounded, ctx.adapt(SoftPalette.red500), urdu ? 'لاگ آؤٹ' : 'Sign Out',
+            textColor: ctx.adapt(SoftPalette.red500)),
+      ],
     );
   }
 
-  // --- Language Toggle Button ---
-  Widget _buildLanguageToggleBtn(BuildContext context, bool isDark) {
-    return Container(
-      height: 36,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.slate100,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: isDark ? SoftPalette.gray50A12 : SoftPalette.slate150,
-          width: 1,
-        ),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: () {
-          Provider.of<MadrassaLanguageProvider>(context, listen: false).toggleLanguage();
-        },
-        child: Center(
-          child: Text(
-            context.isUrdu ? 'EN' : 'اردو',
-            style: context.urduStyle(
-              style: TextStyle(
-                color: isDark ? SoftPalette.teal300 : SoftPalette.teal550,
-                fontWeight: FontWeight.bold,
-                fontSize: context.isUrdu ? 12 : 13,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
   // --- Sync Cloud Data Button ---
   Widget _buildSyncBtn(BuildContext context, bool isDark) {
@@ -1417,7 +1320,7 @@ class _MadrassaDashboardState extends State<MadrassaDashboard> {
           final uploadFuture = SyncService().triggerUpload(urgent: true);
           final downloadResults = await Future.wait([
             MadrassaLocalStorage.downloadStudents(widget.branchId, force: true),
-            MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month),
+            MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month, force: true),
             MadrassaLocalStorage.downloadHolidays(widget.branchId),
             uploadFuture.timeout(const Duration(seconds: 30), onTimeout: () => null),
           ]);
@@ -1641,30 +1544,24 @@ class _MadrassaMotionBottomBarState extends State<MadrassaMotionBottomBar> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-    final borderColor = widget.isDark ? SoftPalette.slate800 : SoftPalette.slate150;
-    const emeraldPrimary = SoftPalette.teal550;
-    const emeraldLight = SoftPalette.teal350;
-    final inactiveColor = widget.isDark ? SoftPalette.slate350 : SoftPalette.slate550;
+    // Theme colours (the user's GMWF / Nexus / Twilight choice, light or dark):
+    // flat surface, a soft brand pill behind the selected icon, no gradient.
+    final c = context.comfort;
+    final bg = c.surface;
+    final borderColor = c.border;
+    final brand = c.brand;
+    final brandSoft = c.brandSoft;
+    final inactiveColor = c.textMuted;
 
     return Container(
       decoration: BoxDecoration(
         color: bg,
-        border: Border(
-          top: BorderSide(color: borderColor, width: 1.0),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: widget.isDark ? 0.35 : 0.05),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
-          ),
-        ],
+        border: Border(top: BorderSide(color: borderColor)),
       ),
       child: SafeArea(
         top: false,
         child: SizedBox(
-          height: 60,
+          height: 62,
           child: LayoutBuilder(
             builder: (context, constraints) {
               final totalItems = widget.titles.length;
@@ -1693,31 +1590,16 @@ class _MadrassaMotionBottomBarState extends State<MadrassaMotionBottomBar> {
                           AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
                             curve: Curves.easeOutCubic,
-                            height: 28,
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            height: 30,
+                            width: 56,
                             decoration: BoxDecoration(
-                              gradient: isSelected
-                                  ? const LinearGradient(
-                                      colors: [emeraldPrimary, emeraldLight],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    )
-                                  : null,
-                              borderRadius: BorderRadius.circular(14),
-                              boxShadow: isSelected
-                                  ? [
-                                      BoxShadow(
-                                        color: emeraldPrimary.withValues(alpha: 0.35),
-                                        blurRadius: 6,
-                                        offset: const Offset(0, 2),
-                                      ),
-                                    ]
-                                  : null,
+                              color: isSelected ? brandSoft : Colors.transparent,
+                              borderRadius: BorderRadius.circular(15),
                             ),
                             child: Icon(
                               isSelected ? widget.activeIcons[i] : widget.icons[i],
-                              size: 18,
-                              color: isSelected ? SoftPalette.gray50 : inactiveColor,
+                              size: 20,
+                              color: isSelected ? brand : inactiveColor,
                             ),
                           ),
                           const SizedBox(height: 3),
@@ -1727,9 +1609,9 @@ class _MadrassaMotionBottomBarState extends State<MadrassaMotionBottomBar> {
                             overflow: TextOverflow.ellipsis,
                             style: context.urduStyle(
                               style: TextStyle(
-                                color: isSelected ? (widget.isDark ? emeraldLight : emeraldPrimary) : inactiveColor,
-                                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
-                                fontSize: 10,
+                                color: isSelected ? brand : inactiveColor,
+                                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                                fontSize: 11,
                               ),
                             ),
                           ),

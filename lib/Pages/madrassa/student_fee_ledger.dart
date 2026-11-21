@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +7,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import '../../services/local_storage_service.dart';
 import 'utils/madrassa_local_storage.dart';
+import 'widgets/madrassa_erp.dart';
 
 class StudentFeeLedgerScreen extends StatefulWidget {
   final String branchId;
@@ -132,13 +132,23 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
           final remaining = (total - priorPaid - amount - discount).clamp(0.0, double.infinity);
           final isCleared = remaining <= 0.0;
 
+          final c = ctx.comfort;
+
           return AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            backgroundColor: c.surface,
+            shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.cardRadius),
             title: Row(
               children: [
-                Icon(Icons.payment, color: ctx.adapt(SoftPalette.blue500)),
-                const SizedBox(width: 8),
-                const Text('Collect / Deduct Fee Payment', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: c.brandSoft,
+                    borderRadius: MadrassaErp.radius,
+                  ),
+                  child: Icon(Icons.payment, color: c.brand, size: 20),
+                ),
+                const SizedBox(width: 10),
+                Text('Collect / Deduct Fee Payment', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: c.textPrimary)),
               ],
             ),
             content: SingleChildScrollView(
@@ -151,8 +161,16 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                       Expanded(
                         child: DropdownButtonFormField<int>(
                           value: selectedMonth,
-                          decoration: const InputDecoration(labelText: 'Month', border: OutlineInputBorder()),
-                          items: List.generate(12, (i) => DropdownMenuItem(value: i + 1, child: Text(_getMonthName(i + 1)))),
+                          decoration: InputDecoration(
+                            labelText: 'Month',
+                            labelStyle: TextStyle(color: c.textMuted),
+                            filled: true,
+                            fillColor: c.surfaceSunken,
+                            border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                            enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                          ),
+                          dropdownColor: c.surface,
+                          items: List.generate(12, (i) => DropdownMenuItem(value: i + 1, child: Text(_getMonthName(i + 1), style: TextStyle(color: c.textPrimary)))),
                           onChanged: (v) {
                             if (v != null) setDlgState(() => selectedMonth = v);
                           },
@@ -162,9 +180,17 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                       Expanded(
                         child: DropdownButtonFormField<int>(
                           value: selectedYear,
-                          decoration: const InputDecoration(labelText: 'Year', border: OutlineInputBorder()),
+                          decoration: InputDecoration(
+                            labelText: 'Year',
+                            labelStyle: TextStyle(color: c.textMuted),
+                            filled: true,
+                            fillColor: c.surfaceSunken,
+                            border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                            enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                          ),
+                          dropdownColor: c.surface,
                           items: [selectedYear - 1, selectedYear, selectedYear + 1]
-                              .map((y) => DropdownMenuItem(value: y, child: Text('$y')))
+                              .map((y) => DropdownMenuItem(value: y, child: Text('$y', style: TextStyle(color: c.textPrimary))))
                               .toList(),
                           onChanged: (v) {
                             if (v != null) setDlgState(() => selectedYear = v);
@@ -177,33 +203,51 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                   TextField(
                     controller: totalFeeCtrl,
                     keyboardType: TextInputType.number,
+                    style: TextStyle(color: c.textPrimary),
                     onChanged: (_) => setDlgState(() {}),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Total Monthly Fee (PKR)',
+                      labelStyle: TextStyle(color: c.textMuted),
                       prefixText: 'Rs. ',
-                      border: OutlineInputBorder(),
+                      prefixStyle: TextStyle(color: c.textPrimary),
+                      filled: true,
+                      fillColor: c.surfaceSunken,
+                      border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
                     ),
                   ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: amountCtrl,
                     keyboardType: TextInputType.number,
+                    style: TextStyle(color: c.textPrimary),
                     onChanged: (_) => setDlgState(() {}),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Amount Paid by Parent (Deducted) (PKR)',
+                      labelStyle: TextStyle(color: c.textMuted),
                       prefixText: 'Rs. ',
-                      border: OutlineInputBorder(),
+                      prefixStyle: TextStyle(color: c.textPrimary),
+                      filled: true,
+                      fillColor: c.surfaceSunken,
+                      border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
                     ),
                   ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: discountCtrl,
                     keyboardType: TextInputType.number,
+                    style: TextStyle(color: c.textPrimary),
                     onChanged: (_) => setDlgState(() {}),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Discount / Concession (PKR)',
+                      labelStyle: TextStyle(color: c.textMuted),
                       prefixText: 'Rs. ',
-                      border: OutlineInputBorder(),
+                      prefixStyle: TextStyle(color: c.textPrimary),
+                      filled: true,
+                      fillColor: c.surfaceSunken,
+                      border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -212,12 +256,10 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: isCleared
-                          ? SoftPalette.green550.withValues(alpha: 0.1)
-                          : SoftPalette.red500.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(10),
+                      color: (isCleared ? c.success : c.danger).withValues(alpha: 0.08),
+                      borderRadius: MadrassaErp.radius,
                       border: Border.all(
-                        color: isCleared ? SoftPalette.green550 : SoftPalette.red500,
+                        color: isCleared ? c.success : c.danger,
                         width: 1.2,
                       ),
                     ),
@@ -227,16 +269,16 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            const Text('Total Monthly Fee:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                            Text('Rs. ${total.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                            Text('Total Monthly Fee:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: c.textPrimary)),
+                            Text('Rs. ${total.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: c.textPrimary)),
                           ],
                         ),
                         const SizedBox(height: 4),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            const Text('Amount Paid (Deducted):', style: TextStyle(fontSize: 12, color: SoftPalette.green550, fontWeight: FontWeight.w600)),
-                            Text('- Rs. ${amount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: SoftPalette.green550)),
+                            Text('Amount Paid (Deducted):', style: TextStyle(fontSize: 12, color: c.success, fontWeight: FontWeight.w600)),
+                            Text('- Rs. ${amount.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: c.success)),
                           ],
                         ),
                         if (discount > 0) ...[
@@ -244,12 +286,12 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              const Text('Concession / Discount:', style: TextStyle(fontSize: 12, color: SoftPalette.orange400, fontWeight: FontWeight.w600)),
-                              Text('- Rs. ${discount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: SoftPalette.orange400)),
+                              Text('Concession / Discount:', style: TextStyle(fontSize: 12, color: c.warning, fontWeight: FontWeight.w600)),
+                              Text('- Rs. ${discount.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: c.warning)),
                             ],
                           ),
                         ],
-                        const Divider(height: 12),
+                        Divider(height: 12, color: c.border),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
@@ -258,7 +300,7 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13,
-                                color: isCleared ? SoftPalette.green550 : SoftPalette.red500,
+                                color: isCleared ? c.success : c.danger,
                               ),
                             ),
                             Text(
@@ -266,7 +308,7 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 16,
-                                color: isCleared ? SoftPalette.green550 : SoftPalette.red500,
+                                color: isCleared ? c.success : c.danger,
                               ),
                             ),
                           ],
@@ -277,7 +319,15 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: paymentMethod,
-                    decoration: const InputDecoration(labelText: 'Payment Method', border: OutlineInputBorder()),
+                    decoration: InputDecoration(
+                      labelText: 'Payment Method',
+                      labelStyle: TextStyle(color: c.textMuted),
+                      filled: true,
+                      fillColor: c.surfaceSunken,
+                      border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                    ),
+                    dropdownColor: c.surface,
                     items: const [
                       DropdownMenuItem(value: 'Cash', child: Text('Cash')),
                       DropdownMenuItem(value: 'Bank Transfer', child: Text('Bank Transfer')),
@@ -291,9 +341,14 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                   const SizedBox(height: 12),
                   TextField(
                     controller: noteCtrl,
-                    decoration: const InputDecoration(
+                    style: TextStyle(color: c.textPrimary),
+                    decoration: InputDecoration(
                       labelText: 'Notes / Remarks',
-                      border: OutlineInputBorder(),
+                      labelStyle: TextStyle(color: c.textMuted),
+                      filled: true,
+                      fillColor: c.surfaceSunken,
+                      border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
                     ),
                   ),
                 ],
@@ -302,13 +357,14 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
+                child: Text('Cancel', style: TextStyle(color: c.textMuted)),
               ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: SoftPalette.blue500,
-                  foregroundColor: SoftPalette.gray50,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  backgroundColor: c.brand,
+                  foregroundColor: c.onBrand,
+                  elevation: 0,
+                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                 ),
                 onPressed: () async {
                   final receiptId = 'REC-${DateTime.now().millisecondsSinceEpoch.toString().substring(6)}';
@@ -449,19 +505,19 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final c = context.comfort;
     final stdName = widget.studentName ?? _studentData?['name'] ?? 'Student';
     final fName = widget.fatherName ?? _studentData?['fatherName'] ?? '';
 
     return Scaffold(
+      backgroundColor: c.surfaceSunken,
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('$stdName - Fee Ledger', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text('$stdName - Fee Ledger', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: c.textPrimary)),
             if (fName.isNotEmpty)
-              Text('S/O $fName | ID: ${widget.studentId}', style: const TextStyle(fontSize: 12)),
+              Text('S/O $fName | ID: ${widget.studentId}', style: TextStyle(fontSize: 12, color: c.textMuted)),
           ],
         ),
         actions: [
@@ -484,14 +540,14 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                 // Summary cards
                 Container(
                   padding: const EdgeInsets.all(16),
-                  color: isDark ? SoftPalette.slate900 : SoftPalette.slate100,
+                  color: c.surfaceSunken,
                   child: Row(
                     children: [
-                      _buildSummaryCard('Total Paid', 'Rs. ${_totalPaid.toStringAsFixed(0)}', context.adapt(SoftPalette.green400), Icons.check_circle_outline),
+                      _buildSummaryCard('Total Paid', 'Rs. ${_totalPaid.toStringAsFixed(0)}', c.success, Icons.check_circle_outline),
                       const SizedBox(width: 8),
-                      _buildSummaryCard('Total Concession', 'Rs. ${_totalDiscount.toStringAsFixed(0)}', context.adapt(SoftPalette.amber300), Icons.discount_outlined),
+                      _buildSummaryCard('Total Concession', 'Rs. ${_totalDiscount.toStringAsFixed(0)}', c.warning, Icons.discount_outlined),
                       const SizedBox(width: 8),
-                      _buildSummaryCard('Outstanding Due', 'Rs. ${_totalDue.toStringAsFixed(0)}', context.adapt(SoftPalette.red400), Icons.pending_actions),
+                      _buildSummaryCard('Outstanding Due', 'Rs. ${_totalDue.toStringAsFixed(0)}', c.danger, Icons.pending_actions),
                     ],
                   ),
                 ),
@@ -500,22 +556,23 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Row(
                     children: [
-                      const Text('Fee History', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text('Fee History', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: c.textPrimary)),
                       const Spacer(),
                       ElevatedButton.icon(
                         icon: const Icon(Icons.add, size: 16),
                         label: const Text('Record Payment'),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: SoftPalette.blue500,
-                          foregroundColor: SoftPalette.gray50,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          backgroundColor: c.brand,
+                          foregroundColor: c.onBrand,
+                          elevation: 0,
+                          shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                         ),
                         onPressed: _recordPaymentDialog,
                       ),
                     ],
                   ),
                 ),
-                const Divider(height: 1),
+                Divider(height: 1, color: c.border),
                 // Ledger List
                 Expanded(
                   child: _feeRecords.isEmpty
@@ -523,11 +580,17 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.receipt_long_outlined, size: 64, color: context.adapt(SoftPalette.gray300)),
+                              Icon(Icons.receipt_long_outlined, size: 64, color: c.textMuted.withValues(alpha: 0.5)),
                               const SizedBox(height: 12),
-                              Text('No fee records found for this student', style: TextStyle(fontSize: 16, color: context.adapt(SoftPalette.gray500))),
-                              const SizedBox(height: 8),
+                              Text('No fee records found for this student', style: TextStyle(fontSize: 15, color: c.textMuted)),
+                              const SizedBox(height: 12),
                               ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: c.brand,
+                                  foregroundColor: c.onBrand,
+                                  elevation: 0,
+                                  shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
+                                ),
                                 onPressed: _recordPaymentDialog,
                                 child: const Text('Collect First Payment'),
                               ),
@@ -554,35 +617,45 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
                             final isPaid = status.toString().toLowerCase() == 'paid';
                             final isPartial = status.toString().toLowerCase() == 'partial';
 
-                            return Card(
-                              elevation: 1,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: c.surface,
+                                borderRadius: MadrassaErp.cardRadius,
+                                border: Border.all(color: c.border),
+                              ),
                               child: ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: isPaid
-                                      ? SoftPalette.green200
-                                      : (isPartial ? SoftPalette.yellow150 : SoftPalette.pink100m),
+                                leading: Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: isPaid
+                                        ? c.success.withValues(alpha: 0.12)
+                                        : (isPartial ? c.warning.withValues(alpha: 0.12) : c.danger.withValues(alpha: 0.12)),
+                                    borderRadius: MadrassaErp.radius,
+                                  ),
                                   child: Icon(
                                     isPaid
                                         ? Icons.check
                                         : (isPartial ? Icons.pie_chart_outline_rounded : Icons.pending_actions_rounded),
-                                    color: isPaid
-                                        ? SoftPalette.green550
-                                        : (isPartial ? SoftPalette.orange350 : SoftPalette.red500),
+                                    color: isPaid ? c.success : (isPartial ? c.warning : c.danger),
+                                    size: 20,
                                   ),
                                 ),
-                                title: Text('$monthName $year', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                subtitle: Text('Receipt: $receiptId • Date: $paidDate\nMethod: ${r['paymentMethod'] ?? 'Cash'} ${discount > 0 ? '• Concession: Rs. $discount' : ''}'),
+                                title: Text('$monthName $year', style: TextStyle(fontWeight: FontWeight.bold, color: c.textPrimary, fontSize: 14)),
+                                subtitle: Text(
+                                  'Receipt: $receiptId • Date: $paidDate\nMethod: ${r['paymentMethod'] ?? 'Cash'} ${discount > 0 ? '• Concession: Rs. $discount' : ''}',
+                                  style: TextStyle(color: c.textMuted, fontSize: 12),
+                                ),
                                 isThreeLine: true,
                                 trailing: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.end,
                                   children: [
-                                    Text('Paid: Rs. $amount', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: ctx.adapt(SoftPalette.green400))),
+                                    Text('Paid: Rs. $amount', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: c.success)),
                                     if (due > 0)
-                                      Text('Remains: Rs. $due', style: TextStyle(fontSize: 11, color: ctx.adapt(SoftPalette.red400), fontWeight: FontWeight.bold))
+                                      Text('Remains: Rs. $due', style: TextStyle(fontSize: 11, color: c.danger, fontWeight: FontWeight.bold))
                                     else
-                                      Text('Cleared', style: TextStyle(fontSize: 11, color: ctx.adapt(SoftPalette.green550), fontWeight: FontWeight.w600)),
+                                      Text('Cleared', style: TextStyle(fontSize: 11, color: c.success, fontWeight: FontWeight.w600)),
                                   ],
                                 ),
                                 onTap: () => _printReceipt(r),
@@ -599,26 +672,37 @@ class _StudentFeeLedgerScreenState extends State<StudentFeeLedgerScreen> {
   Widget _buildSummaryCard(String title, String value, Color color, IconData icon) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.12),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.3)),
+          color: color.withValues(alpha: 0.08),
+          borderRadius: MadrassaErp.cardRadius,
+          border: Border.all(color: color.withValues(alpha: 0.25)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(icon, size: 16, color: color),
-                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.14),
+                    borderRadius: MadrassaErp.radius,
+                  ),
+                  child: Icon(icon, size: 14, color: color),
+                ),
+                const SizedBox(width: 6),
                 Expanded(
-                  child: Text(title, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+                  child: Text(
+                    title,
+                    style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            Text(value, style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: color)),
+            const SizedBox(height: 8),
+            Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color)),
           ],
         ),
       ),

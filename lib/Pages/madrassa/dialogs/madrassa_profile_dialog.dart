@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:gmwf/design/tokens/comfort_colors.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -8,6 +7,7 @@ import '../../../services/local_storage_service.dart';
 import '../../../widgets/app_feedback.dart';
 import '../madrassa_strings.dart';
 import '../widgets/madrassa_common_widgets.dart';
+import '../widgets/madrassa_erp.dart';
 
 class MadrassaProfileDialog extends StatefulWidget {
   final String branchId;
@@ -181,16 +181,11 @@ class _MadrassaProfileDialogState extends State<MadrassaProfileDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final bg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-    final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate900;
-    final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-    final borderColor = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+    final c = context.comfort;
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      backgroundColor: bg,
+      shape: RoundedRectangleBorder(borderRadius: MadrassaErp.cardRadius),
+      backgroundColor: c.surface,
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 500),
@@ -206,60 +201,61 @@ class _MadrassaProfileDialogState extends State<MadrassaProfileDialog> {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
+                      color: c.brandSoft,
+                      borderRadius: MadrassaErp.radius,
                     ),
-                    child: Icon(Icons.manage_accounts_rounded, color: context.adapt(SoftPalette.teal550), size: 24),
+                    child: Icon(Icons.manage_accounts_rounded, color: c.brand, size: 24),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
+                        MadrassaUrduAwareText(
                           context.isUrdu ? 'پروفائل اور سیکیورٹی سیٹنگز' : 'Profile & Account Security',
-                          style: context.urduStyle(
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: textPrimary),
-                          ),
+                          color: c.textPrimary,
+                          size: 16,
+                          bold: true,
                         ),
                         Text(
                           '${widget.branchId.toUpperCase()} • ${widget.userRole}',
-                          style: TextStyle(fontSize: 11.5, color: textMuted),
+                          style: TextStyle(fontSize: 11.5, color: c.textMuted),
                         ),
                       ],
                     ),
                   ),
                   IconButton(
                     onPressed: _isSaving ? null : () => Navigator.pop(context),
-                    icon: Icon(Icons.close_rounded, color: textMuted),
+                    icon: Icon(Icons.close_rounded, color: c.textMuted),
                   ),
                 ],
               ),
               const SizedBox(height: 18),
-              Divider(height: 1, color: borderColor),
+              Divider(height: 1, color: c.border),
               const SizedBox(height: 18),
 
               // Section 1: Edit Name
-              Text(
+              MadrassaUrduAwareText(
                 context.isUrdu ? 'آپ کا مکمل نام' : 'Your Full / Display Name',
-                style: context.urduStyle(
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textPrimary),
-                ),
+                color: c.textPrimary,
+                size: 13,
+                bold: true,
               ),
               const SizedBox(height: 6),
               TextField(
                 controller: _nameController,
                 enabled: !_isSaving,
-                style: TextStyle(color: textPrimary, fontSize: 14),
+                style: TextStyle(color: c.textPrimary, fontSize: 14),
                 decoration: InputDecoration(
                   hintText: context.isUrdu ? 'اپنا نام درج کریں' : 'Enter your name',
                   errorText: _nameError,
-                  prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: context.adapt(SoftPalette.teal550)),
+                  prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: c.brand),
                   filled: true,
-                  fillColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
+                  fillColor: c.surfaceSunken,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                  border: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.border)),
+                  focusedBorder: OutlineInputBorder(borderRadius: MadrassaErp.radius, borderSide: BorderSide(color: c.brand, width: 2)),
                 ),
               ),
               const SizedBox(height: 20),
@@ -268,33 +264,33 @@ class _MadrassaProfileDialogState extends State<MadrassaProfileDialog> {
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: borderColor),
+                  color: c.surfaceSunken,
+                  borderRadius: MadrassaErp.radius,
+                  border: Border.all(color: c.border),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Icon(Icons.lock_reset_rounded, size: 18, color: context.adapt(SoftPalette.teal550)),
+                        Icon(Icons.lock_reset_rounded, size: 18, color: c.brand),
                         const SizedBox(width: 8),
-                        Text(
+                        MadrassaUrduAwareText(
                           context.isUrdu ? 'پاس ورڈ تبدیل کریں (اختیاری)' : 'Change Password (Optional)',
-                          style: context.urduStyle(
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textPrimary),
-                          ),
+                          color: c.textPrimary,
+                          size: 13,
+                          bold: true,
                         ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    Text(
+                    MadrassaUrduAwareText(
                       context.isUrdu
                           ? 'اگر آپ پاس ورڈ تبدیل نہیں کرنا چاہتے تو ان خانوں کو خالی چھوڑ دیں۔'
                           : 'Leave these blank if you only wish to update your name.',
-                      style: context.urduStyle(
-                        style: TextStyle(fontSize: 11, color: textMuted),
-                      ),
+                      color: c.textMuted,
+                      size: 11,
+                      bold: false,
                     ),
                     const SizedBox(height: 12),
 
@@ -346,14 +342,14 @@ class _MadrassaProfileDialogState extends State<MadrassaProfileDialog> {
                     onPressed: _isSaving ? null : () => Navigator.pop(context),
                     child: Text(
                       context.isUrdu ? 'منسوخ کریں' : 'Cancel',
-                      style: TextStyle(color: textMuted),
+                      style: TextStyle(color: c.textMuted),
                     ),
                   ),
                   const SizedBox(width: 10),
                   ElevatedButton.icon(
                     onPressed: _isSaving ? null : _handleSave,
                     icon: _isSaving
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50))
+                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                         : const Icon(Icons.check_circle_rounded, size: 16),
                     label: Text(
                       _isSaving
@@ -362,10 +358,10 @@ class _MadrassaProfileDialogState extends State<MadrassaProfileDialog> {
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: SoftPalette.teal550,
-                      foregroundColor: SoftPalette.gray50,
+                      backgroundColor: c.brand,
+                      foregroundColor: c.onBrand,
                       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      shape: RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                     ),
                   ),
                 ],

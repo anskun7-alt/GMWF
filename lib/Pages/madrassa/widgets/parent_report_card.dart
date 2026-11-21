@@ -23,10 +23,14 @@ import '../../../services/image_upload_service.dart';
 import '../../../widgets/read_only_document_tile.dart';
 import 'package:lottie/lottie.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../../../widgets/appearance_dialog.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' as ui show GTheme, GThemeChoice;
 import '../../../services/user_theme_service.dart';
 import '../../../services/sync_service.dart';
 import '../utils/islamic_calendar_helper.dart';
 import '../../../design/design_system.dart';
+import '../theme/madrassa_theme_scope.dart';
+import 'madrassa_erp.dart';
 
 
 Map<String, dynamic>? _asStringMap(dynamic raw) {
@@ -138,9 +142,9 @@ class _ParentReportCardState extends State<ParentReportCard> {
           await MadrassaLocalStorage.downloadStudentsForGuardian(widget.branchId, [widget.studentId])
               .timeout(const Duration(seconds: 5), onTimeout: () {});
         }
-        await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, _selectedYear, _selectedMonth)
+        await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, _selectedYear, _selectedMonth, force: true)
             .timeout(const Duration(seconds: 5), onTimeout: () {});
-        await MadrassaLocalStorage.downloadHolidays(widget.branchId)
+        await MadrassaLocalStorage.downloadHolidays(widget.branchId, force: true)
             .timeout(const Duration(seconds: 5), onTimeout: () {});
         await MadrassaLocalStorage.downloadConfig(widget.branchId)
             .timeout(const Duration(seconds: 5), onTimeout: () {});
@@ -169,13 +173,18 @@ class _ParentReportCardState extends State<ParentReportCard> {
 
   final Set<String> _dismissedCongratsMonths = {};
 
+  /// Signed-in Firebase user, or null when Firebase is not set up (offline preview / tests).
+  static User? get _fbUser => Firebase.apps.isEmpty ? null : FirebaseAuth.instance.currentUser;
+
   String get _currentUserKey {
-    final email = FirebaseAuth.instance.currentUser?.email;
+    final email = _fbUser?.email;
     if (email != null && email.isNotEmpty) return email;
     final gEmail = studentData['guardianEmail']?.toString();
     if (gEmail != null && gEmail.isNotEmpty) return gEmail;
     final phone = studentData['contactPhone']?.toString();
     if (phone != null && phone.isNotEmpty) return phone;
+    final gName = studentData['guardianName']?.toString();
+    if (gName != null && gName.isNotEmpty) return gName;
     return widget.studentId;
   }
 
@@ -192,12 +201,13 @@ class _ParentReportCardState extends State<ParentReportCard> {
 
   bool get isDarkMode => UserThemeService.isDarkMode(_currentUserKey);
 
-  Color get cardBg => isDarkMode ? SoftPalette.slate800 : SoftPalette.gray50;
-  Color get surfaceBg => isDarkMode ? SoftPalette.slate900 : ParentReportCard.surfaceColor;
-  Color get textPrimary => isDarkMode ? SoftPalette.gray50 : ParentReportCard.textPrimaryColor;
-  Color get textMuted => isDarkMode ? SoftPalette.slate350 : ParentReportCard.textMutedColor;
-  Color get borderColor => isDarkMode ? SoftPalette.slate700 : SoftPalette.slate150;
-  Color get dividerColor => isDarkMode ? SoftPalette.slate700 : SoftPalette.slate100;
+  // Theme colours (GMWF / Nexus / Twilight, light or dark) for every card on this screen.
+  Color get cardBg => context.comfort.surface;
+  Color get surfaceBg => context.comfort.background;
+  Color get textPrimary => context.comfort.textPrimary;
+  Color get textMuted => context.comfort.textMuted;
+  Color get borderColor => context.comfort.border;
+  Color get dividerColor => context.comfort.border;
 
   bool _isCongratsDismissedForCurrentMonth() {
     try {
@@ -266,8 +276,14 @@ class _ParentReportCardState extends State<ParentReportCard> {
     _holidaysStream = MadrassaLocalStorage.streamHolidaysCached(effBranch);
 
     // Refresh current month daily logs from cloud in background so parent sees latest dates
+    // (the read is skipped when this phone read the month recently — see the read budget
+    // in MadrassaLocalStorage). Today and tomorrow are watched live (2 documents), so a
+    // teacher's leave decision or reply check still shows at once.
     if (effBranch.isNotEmpty) {
       final now = DateTime.now();
+      for (final d in [now, now.add(const Duration(days: 1))]) {
+        MadrassaLocalStorage.listenToLogsRealtime(effBranch, DateFormat('yyyy-MM-dd').format(d));
+      }
       final isCurrent = _selectedYear == now.year && _selectedMonth == now.month;
       final cached = MadrassaLocalStorage.getLogsForMonthCached(effBranch, _selectedYear, _selectedMonth);
       if (cached.isEmpty || isCurrent) {
@@ -432,11 +448,11 @@ class _ParentReportCardState extends State<ParentReportCard> {
                       decoration: BoxDecoration(
                         color: context.adapt(SoftPalette.gray50),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: context.adapt(ParentReportCard.primaryColor), width: 1.5),
+                        border: Border.all(color: context.comfort.brand, width: 1.5),
                       ),
                       child: Row(
                         children: [
-                          Icon(Icons.calendar_month_rounded, color: context.adapt(ParentReportCard.primaryColor), size: 20),
+                          Icon(Icons.calendar_month_rounded, color: context.comfort.brand, size: 20),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Column(
@@ -444,7 +460,7 @@ class _ParentReportCardState extends State<ParentReportCard> {
                               children: [
                                 Text(
                                   dateRangeLabel,
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: context.adapt(ParentReportCard.primaryColor)),
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: context.comfort.brand),
                                 ),
                                 Text(
                                   context.isUrdu ? 'تاریخ تبدیل کرنے کے لیے ٹیپ کریں' : 'Tap to change date or select multiple dates',
@@ -1109,7 +1125,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
             title: Row(
               children: [
-                Icon(Icons.reply_rounded, color: context.adapt(ParentReportCard.primaryColor)),
+                Icon(Icons.reply_rounded, color: context.comfort.brand),
                 const SizedBox(width: 8),
                 Text(
                   context.isUrdu ? 'استاد کو جواب بھیجیں' : 'Reply to Teacher',
@@ -1328,7 +1344,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
             title: Row(
               children: [
-                Icon(Icons.edit_note_rounded, color: context.adapt(ParentReportCard.primaryColor)),
+                Icon(Icons.edit_note_rounded, color: context.comfort.brand),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -2589,7 +2605,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor),
+          Icon(icon, size: 18, color: context.comfort.brand),
           const SizedBox(width: 12),
           Text(
             '$label: ',
@@ -2625,7 +2641,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
         label = 'Archived';
         break;
       case 'hifz_completed':
-        color = isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor;
+        color = context.comfort.brand;
         label = 'Hifz Completed';
         break;
       case 'nazra_completed':
@@ -2832,7 +2848,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               dotColor = SoftPalette.amber300;
               icon = Icons.archive_outlined;
             } else if (logStatus == 'hifz_completed') {
-              dotColor = isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor;
+              dotColor = context.comfort.brand;
               icon = Icons.stars_outlined;
             } else if (logStatus == 'nazra_completed') {
               dotColor = isDarkMode ? SoftPalette.teal300 : SoftPalette.teal500;
@@ -2915,18 +2931,21 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
   Widget _buildMonthSelector() {
     final date = DateTime(_selectedYear, _selectedMonth);
+    final c = context.comfort;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      height: 46,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       decoration: BoxDecoration(
-        color: isDarkMode ? SoftPalette.slate800 : ParentReportCard.primaryColor.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: borderColor),
+        color: c.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
-            icon: Icon(Icons.chevron_left_rounded, color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor),
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.chevron_left_rounded, color: c.textSecondary),
             onPressed: () {
               setState(() {
                 if (_selectedMonth == 1) {
@@ -2941,21 +2960,22 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           ),
           Row(
             children: [
-              Icon(Icons.calendar_month, color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor),
-              const SizedBox(width: 12),
+              Icon(Icons.calendar_month_rounded, size: 18, color: c.brand),
+              const SizedBox(width: 8),
               Text(
                 _formatMonthYear(date),
                 style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                  color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: c.textPrimary,
                   fontFamily: context.isUrdu ? 'Noori' : null,
                 ),
               ),
             ],
           ),
           IconButton(
-            icon: Icon(Icons.chevron_right_rounded, color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor),
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.chevron_right_rounded, color: c.textSecondary),
             onPressed: () {
               setState(() {
                 if (_selectedMonth == 12) {
@@ -3324,9 +3344,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                   width: double.infinity,
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: context.adapt(ParentReportCard.primaryColor).withValues(alpha: 0.05),
+                    color: context.comfort.brand.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: context.adapt(ParentReportCard.primaryColor).withValues(alpha: 0.12)),
+                    border: Border.all(color: context.comfort.brand.withValues(alpha: 0.12)),
                   ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3334,10 +3354,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                       Container(
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: context.adapt(ParentReportCard.primaryColor).withValues(alpha: 0.1),
+                          color: context.comfort.brand.withValues(alpha: 0.1),
                           shape: BoxShape.circle,
                         ),
-                        child: Icon(Icons.menu_book_rounded, color: context.adapt(ParentReportCard.primaryColor), size: 22),
+                        child: Icon(Icons.menu_book_rounded, color: context.comfort.brand, size: 22),
                       ),
                       const SizedBox(width: 14),
                       Expanded(
@@ -3346,7 +3366,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                           children: [
                             Text(
                               context.t("Lesson Progress"),
-                              style: TextStyle(fontSize: 12, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                              style: TextStyle(fontSize: 12, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                             ),
                             const SizedBox(height: 8),
                             // Sabak
@@ -3356,14 +3376,14 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                   isNazraStudent
                                       ? (context.isUrdu ? 'سبق (ناظرہ): ' : 'Sabak (Nazra): ')
                                       : '${context.t('Sabak')}: ',
-                                  style: TextStyle(fontSize: 13, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                  style: TextStyle(fontSize: 13, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                                 ),
                                 Expanded(
                                   child: Text(
                                     linesRead > 0
                                         ? (context.isUrdu ? "$linesRead لائنیں" : "$linesRead lines")
                                         : context.t("No lines recorded"),
-                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: context.adapt(ParentReportCard.primaryColor), fontFamily: context.isUrdu ? 'Noori' : null),
+                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: context.comfort.brand, fontFamily: context.isUrdu ? 'Noori' : null),
                                   ),
                                 ),
                               ],
@@ -3375,7 +3395,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 children: [
                                   Text(
                                     '${context.t('Sabki')}: ',
-                                    style: TextStyle(fontSize: 13, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                    style: TextStyle(fontSize: 13, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                                   ),
                                   Expanded(
                                     child: Text(
@@ -3391,7 +3411,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 children: [
                                   Text(
                                     '${context.t('Manzil')}: ',
-                                    style: TextStyle(fontSize: 13, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                    style: TextStyle(fontSize: 13, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                                   ),
                                   Expanded(
                                     child: Text(
@@ -3408,7 +3428,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 children: [
                                   Text(
                                     context.isUrdu ? 'رُكوع: ' : 'Ruku (رُكوع): ',
-                                    style: TextStyle(fontSize: 13, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                    style: TextStyle(fontSize: 13, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                                   ),
                                   Expanded(
                                     child: Text(
@@ -3424,7 +3444,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 children: [
                                   Text(
                                     context.isUrdu ? 'قاعدہ سبق: ' : 'Qaida Sabak: ',
-                                    style: TextStyle(fontSize: 13, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
+                                    style: TextStyle(fontSize: 13, color: context.comfort.textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
                                   ),
                                   Expanded(
                                     child: Text(
@@ -3440,10 +3460,10 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             const SizedBox(height: 6),
                             Text(
                               context.isUrdu ? "مجموعی: لائن $currentLines" : "Cumulative: Line $currentLines",
-                              style: TextStyle(fontSize: 11, color: context.adapt(ParentReportCard.textMutedColor), fontFamily: context.isUrdu ? 'Noori' : null),
+                              style: TextStyle(fontSize: 11, color: context.comfort.textMuted, fontFamily: context.isUrdu ? 'Noori' : null),
                             ),
                             const SizedBox(height: 12),
-                            Divider(color: context.adapt(ParentReportCard.primaryColor).withValues(alpha: 0.15)),
+                            Divider(color: context.comfort.brand.withValues(alpha: 0.15)),
                             const SizedBox(height: 8),
                             _buildParentReplyStatusRow(context, dateStr, statusData),
                           ],
@@ -3592,50 +3612,13 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       }
     }
     
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDarkMode ? 0.2 : 0.04), blurRadius: 16, offset: const Offset(0, 4))],
-        border: Border.all(color: borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.info_outline_rounded, color: context.adapt(ParentReportCard.primaryColor), size: 20),
-              const SizedBox(width: 8),
-              Text(
-                context.t("Daily Details"),
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: textPrimary, fontFamily: context.isUrdu ? 'Noori' : null),
-              ),
-              const Spacer(),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    context.isUrdu
-                        ? '${_selectedDate.day} ${_formatMonth(_selectedDate)}'
-                        : DateFormat('MMM d').format(_selectedDate),
-                    style: TextStyle(fontSize: 13, color: textMuted, fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '🌙 ${IslamicCalendarHelper.fromGregorian(_selectedDate).format(isUrdu: context.isUrdu)}',
-                    style: TextStyle(fontSize: 10.5, color: context.adapt(SoftPalette.yellow300), fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Divider(height: 1, color: dividerColor),
-          const SizedBox(height: 20),
-          content,
-        ],
-      ),
+    final hijri = IslamicCalendarHelper.fromGregorian(_selectedDate).format(isUrdu: context.isUrdu);
+    final dayText = context.isUrdu ? '${_selectedDate.day} ${_formatMonth(_selectedDate)}' : DateFormat('EEE d MMM').format(_selectedDate);
+    return MadrassaCard(
+      icon: Icons.event_note_rounded,
+      title: context.t('Daily Details'),
+      subtitle: '$dayText  ·  $hijri',
+      child: content,
     );
   }
 
@@ -3799,91 +3782,33 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     String? actionLabel,
     VoidCallback? onAction,
   }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: isDarkMode ? color.withValues(alpha: 0.12) : color.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: color.withValues(alpha: isUrgent ? 0.45 : 0.25),
-          width: isUrgent ? 1.8 : 1.0,
-        ),
-        boxShadow: isUrgent
-            ? [
-                BoxShadow(
-                  color: color.withValues(alpha: isDarkMode ? 0.2 : 0.08),
-                  blurRadius: 10,
-                  offset: const Offset(0, 2),
-                ),
-              ]
-            : null,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.18),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(icon, color: color, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: color,
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      body,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        color: isDarkMode ? SoftPalette.gray50.withValues(alpha: 0.9) : SoftPalette.slate700,
-                        height: 1.35,
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+    // Theme tone instead of the caller's fixed palette colour: red-ish means a
+    // problem, urgent means needs action, anything else is information.
+    final c = context.comfort;
+    final hsv = HSVColor.fromColor(color);
+    final redHue = hsv.hue < 20 || hsv.hue > 340;
+    final tone = redHue ? c.danger : (isUrgent ? c.warning : c.brand);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: MadrassaCard(
+        tone: tone,
+        icon: icon,
+        title: title,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+          Text(body, style: TextStyle(fontSize: 13, height: 1.45, color: c.textSecondary, fontFamily: context.isUrdu ? 'Noori' : null)),
           if (actionLabel != null && onAction != null) ...[
             const SizedBox(height: 10),
             Align(
-              alignment: Alignment.centerRight,
-              child: ElevatedButton.icon(
+              alignment: AlignmentDirectional.centerEnd,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: tone, foregroundColor: c.onBrand, visualDensity: VisualDensity.compact),
                 onPressed: onAction,
-                icon: const Icon(Icons.reply_rounded, size: 14),
-                label: Text(
-                  actionLabel,
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: color,
-                  foregroundColor: SoftPalette.gray50,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  elevation: 0,
-                ),
+                icon: const Icon(Icons.reply_rounded, size: 16),
+                label: Text(actionLabel, style: TextStyle(fontFamily: context.isUrdu ? 'Noori' : null)),
               ),
             ),
           ],
-        ],
+        ]),
       ),
     );
   }
@@ -4298,7 +4223,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     List<dynamic>? monthLogs,
     List<DateTime>? holidays,
   }) {
-    final name = studentData['name'] ?? studentData['fullName'] ?? 'Student';
+    final c = context.comfort;
+    final name = (studentData['name'] ?? studentData['fullName'] ?? 'Student').toString().trim();
     final photoUrl = (studentData['photoBase64'] ??
             studentData['photoUrl'] ??
             studentData['photo'] ??
@@ -4316,51 +4242,24 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     return Container(
       width: double.infinity,
-      padding: EdgeInsets.all(isDesktop ? 20 : 16),
+      padding: EdgeInsets.symmetric(horizontal: isDesktop ? 16 : 14, vertical: isDesktop ? 14 : 12),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        gradient: LinearGradient(
-          colors: isDarkMode
-              ? [
-                  SoftPalette.emerald800,
-                  SoftPalette.emerald700,
-                  SoftPalette.teal500,
-                ]
-              : [
-                  SoftPalette.teal550,
-                  SoftPalette.green550,
-                  SoftPalette.emerald600,
-                ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(
-          color: isDarkMode
-              ? SoftPalette.teal300.withValues(alpha: 0.25)
-              : SoftPalette.gray50.withValues(alpha: 0.2),
-          width: 1.2,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.teal550.withValues(alpha: isDarkMode ? 0.35 : 0.22),
-            blurRadius: 20,
-            offset: const Offset(0, 8),
-          ),
-        ],
+        color: c.surface,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: c.border, width: 1),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           GestureDetector(
             onTap: () => _showEnlargedPhotoDialog(context, photoUrl, name),
             child: Container(
-              width: 58,
-              height: 58,
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: SoftPalette.yellow300, width: 2.2),
-                boxShadow: const [
-                  BoxShadow(color: SoftPalette.gray900A26, blurRadius: 8, offset: Offset(0, 3)),
-                ],
+                color: c.brandSoft,
+                border: Border.all(color: c.border, width: 1.5),
               ),
               child: ClipOval(
                 child: () {
@@ -4370,14 +4269,14 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     return Image.memory(
                       bytes,
                       fit: BoxFit.cover,
-                      width: 58,
-                      height: 58,
+                      width: 48,
+                      height: 48,
                       errorBuilder: (_, __, ___) => Container(
-                        color: SoftPalette.emerald100,
+                        color: c.brandSoft,
                         alignment: Alignment.center,
                         child: Text(
                           name.isNotEmpty ? name[0] : '?',
-                          style: const TextStyle(color: SoftPalette.emerald600, fontSize: 22, fontWeight: FontWeight.bold),
+                          style: TextStyle(color: c.brand, fontSize: 20, fontWeight: FontWeight.bold),
                         ),
                       ),
                     );
@@ -4386,57 +4285,81 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                       fit: StackFit.expand,
                       children: [
                         Container(
-                          color: SoftPalette.emerald100,
+                          color: c.brandSoft,
                           alignment: Alignment.center,
                           child: Text(
                             name.isNotEmpty ? name[0] : '?',
-                            style: const TextStyle(color: SoftPalette.emerald600, fontSize: 22, fontWeight: FontWeight.bold),
+                            style: TextStyle(color: c.brand, fontSize: 20, fontWeight: FontWeight.bold),
                           ),
                         ),
                         Image.network(
                           str,
                           fit: BoxFit.cover,
-                          width: 58,
-                          height: 58,
+                          width: 48,
+                          height: 48,
                           errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                         ),
                       ],
                     );
                   }
                   return Container(
-                    color: SoftPalette.emerald100,
+                    color: c.brandSoft,
                     alignment: Alignment.center,
                     child: Text(
                       name.isNotEmpty ? name[0] : '?',
-                      style: const TextStyle(color: SoftPalette.emerald600, fontSize: 22, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: c.brand, fontSize: 20, fontWeight: FontWeight.bold),
                     ),
                   );
                 }(),
               ),
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: context.isUrdu ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Text(
-                    name,
-                    style: TextStyle(
-                      color: SoftPalette.gray50,
-                      fontSize: isDesktop ? 18 : 15,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.2,
-                      fontFamily: context.isUrdu ? 'Noori' : null,
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        name,
+                        style: TextStyle(
+                          color: c.textPrimary,
+                          fontSize: isDesktop ? 17 : 15,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.2,
+                          fontFamily: context.isUrdu ? 'Noori' : null,
+                          fontFamilyFallback: const ['Noori'],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                    maxLines: 1,
-                  ),
+                    if (rollNo.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: c.surfaceSunken,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: c.border),
+                        ),
+                        child: Text(
+                          '#$rollNo',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: c.textSecondary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 5),
                 Wrap(
                   crossAxisAlignment: WrapCrossAlignment.center,
                   spacing: 6,
@@ -4445,78 +4368,85 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                       decoration: BoxDecoration(
-                        color: isNazraStudent ? SoftPalette.teal500.withValues(alpha: 0.35) : SoftPalette.gray50.withValues(alpha: 0.2),
+                        color: c.brandSoft,
                         borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: isNazraStudent ? SoftPalette.teal300.withValues(alpha: 0.5) : SoftPalette.gray50.withValues(alpha: 0.3)),
+                        border: Border.all(color: c.brand.withValues(alpha: 0.25)),
                       ),
                       child: Text(
                         isNazraStudent ? (context.isUrdu ? '📖 ناظرہ' : '📖 Nazra') : (context.isUrdu ? '🕋 حفظ' : '🕋 Hifz'),
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
-                          color: SoftPalette.gray50,
+                          color: c.brand,
                           fontWeight: FontWeight.bold,
+                          fontFamily: context.isUrdu ? 'Noori' : null,
+                          fontFamilyFallback: const ['Noori'],
                         ),
                       ),
                     ),
-                    if (rollNo.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: SoftPalette.gray50.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.3)),
-                        ),
-                        child: Text(
-                          '#$rollNo',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: SoftPalette.gray50,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    if (guardianDisplay.isNotEmpty)
+                    if (guardianDisplay.isNotEmpty) ...[
                       Text(
-                        context.isUrdu ? 'سرپرست: $guardianDisplay' : 'Guardian: $guardianDisplay',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: SoftPalette.gray50.withValues(alpha: 0.9),
-                          fontWeight: FontWeight.w500,
-                          fontFamily: context.isUrdu ? 'Noori' : null,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                        '·',
+                        style: TextStyle(color: c.textMuted, fontSize: 13, fontWeight: FontWeight.bold),
                       ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.person_outline_rounded, size: 14, color: c.textMuted),
+                          const SizedBox(width: 4),
+                          Text(
+                            context.isUrdu ? 'سرپرست: $guardianDisplay' : 'Guardian: $guardianDisplay',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: c.textSecondary,
+                              fontWeight: FontWeight.w500,
+                              fontFamily: context.isUrdu ? 'Noori' : null,
+                              fontFamilyFallback: const ['Noori'],
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           if (isAccountView) ...[
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                backgroundColor: SoftPalette.gray50,
-                foregroundColor: SoftPalette.teal550,
-                elevation: 2,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                backgroundColor: c.brandSoft,
+                foregroundColor: c.brand,
+                elevation: 0,
+                shadowColor: Colors.transparent,
+                side: BorderSide(color: c.brand.withValues(alpha: 0.35)),
+                padding: EdgeInsets.symmetric(horizontal: isDesktop ? 14 : 10, vertical: isDesktop ? 10 : 8),
+                shape: RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
               ),
               onPressed: () => _showEditGuardianInfoDialog(context),
-              icon: const Icon(Icons.edit_note_rounded, size: 18),
+              icon: Icon(Icons.edit_note_rounded, size: 17, color: c.brand),
               label: Text(
                 context.isUrdu ? 'پروفائل' : 'Edit Profile',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                  color: c.brand,
+                  fontFamily: context.isUrdu ? 'Noori' : null,
+                  fontFamilyFallback: const ['Noori'],
+                ),
               ),
             ),
           ] else ...[
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                backgroundColor: SoftPalette.gray50.withValues(alpha: 0.18),
-                foregroundColor: SoftPalette.gray50,
+                backgroundColor: c.surfaceSunken,
+                foregroundColor: c.textPrimary,
+                elevation: 0,
                 shadowColor: Colors.transparent,
-                side: BorderSide(color: SoftPalette.gray50.withValues(alpha: 0.45)),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                side: BorderSide(color: c.border),
+                padding: EdgeInsets.symmetric(horizontal: isDesktop ? 12 : 9, vertical: isDesktop ? 9 : 7),
+                shape: RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
               ),
               onPressed: () {
                 _showDownloadReportDialog(
@@ -4527,10 +4457,16 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                   holidays ?? [],
                 );
               },
-              icon: const Icon(Icons.file_download_rounded, size: 17, color: SoftPalette.gray50),
+              icon: Icon(Icons.file_download_rounded, size: 17, color: c.textSecondary),
               label: Text(
                 context.isUrdu ? 'رپورٹ' : 'Report',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: SoftPalette.gray50, fontFamily: context.isUrdu ? 'Noori' : null),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: c.textPrimary,
+                  fontFamily: context.isUrdu ? 'Noori' : null,
+                  fontFamilyFallback: const ['Noori'],
+                ),
               ),
             ),
           ],
@@ -4890,314 +4826,111 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
   }
 
   Widget _buildFeeSummaryCompact({required double due, required double totalSavings, required double baseFee, required Map<String, dynamic> fee}) {
-    // Celebrate full waiver, notify if high
-    String feeMessage;
-    Color feeMessageColor;
-    IconData feeIcon;
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    String rs(double v) => urdu ? 'روپے ${v.toStringAsFixed(0)}' : 'Rs ${v.toStringAsFixed(0)}';
+
+    final attSavings = (fee['attSavings'] as num?)?.toDouble() ?? 0.0;
+    final uniSavings = (fee['uniSavings'] as num?)?.toDouble() ?? 0.0;
+    final msgSavings = (fee['msgSavings'] as num?)?.toDouble() ?? 0.0;
+    final ptmSavings = (fee['ptmSavings'] as num?)?.toDouble() ?? 0.0;
+    final proRatedBaseFee = (fee['proRatedBaseFee'] as num?)?.toDouble() ?? 0.0;
+    final isProRated = proRatedBaseFee > 0 && proRatedBaseFee < baseFee;
+    final monthText = DateFormat('MMMM yyyy').format(DateTime(_selectedYear, _selectedMonth));
+
+    final payment = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, _selectedYear, _selectedMonth, widget.studentId);
+    final status = payment?['status']?.toString().toLowerCase();
+    final amountPaid = (payment?['amountPaid'] as num?)?.toDouble() ?? 0.0;
+    final discount = (payment?['discount'] as num?)?.toDouble() ?? 0.0;
+    final balance = (payment?['balanceDue'] as num?)?.toDouble() ??
+        ((status == 'paid' || due <= 0) ? 0.0 : (due - amountPaid - discount).clamp(0.0, double.infinity));
+    final isPaid = status == 'paid' || (payment != null && balance <= 0) || due <= 0;
+    final isPartial = !isPaid && (status == 'partial' || amountPaid > 0 || discount > 0);
+
+    final Color tone = isPaid ? c.success : (isPartial ? c.warning : c.danger);
+    final String statusText = due <= 0
+        ? (urdu ? 'معاف' : 'Waived')
+        : isPaid
+            ? (urdu ? 'ادا شدہ' : 'Paid')
+            : (isPartial ? (urdu ? 'جزوی ادا' : 'Part paid') : (urdu ? 'باقی' : 'Unpaid'));
+
+    final String tip;
     if (due <= 0) {
-      feeMessage = context.isUrdu ? 'ماشاء اللہ! اس مہینے فیس مکمل طور پر معاف ہے! 🎉' : 'MashaAllah! Fee is fully waived this month! 🎉';
-      feeMessageColor = ParentReportCard.successColor;
-      feeIcon = Icons.celebration_rounded;
-    } else if (due >= 3000) {
-      feeMessage = context.isUrdu 
-          ? 'توجہ: فیس زیادہ ہے۔ روزانہ حاضری، یونیفارم اور جوابات سے اسے 0 روپے تک کم کیا جا سکتا ہے!' 
-          : 'Notice: Fee is high. Daily attendance, uniform, and replies can reduce this to Rs. 0!';
-      feeMessageColor = ParentReportCard.errorColor;
-      feeIcon = Icons.warning_amber_rounded;
-    } else if (totalSavings > baseFee * 0.5) {
-      feeMessage = context.isUrdu ? 'بہت اچھا! آپ نے ${totalSavings.toStringAsFixed(0)} روپے بچائے 🌟' : 'Great! You saved Rs. ${totalSavings.toStringAsFixed(0)} 🌟';
-      feeMessageColor = ParentReportCard.successColor;
-      feeIcon = Icons.thumb_up_alt_rounded;
+      tip = urdu ? 'ماشاء اللہ! اس مہینے فیس مکمل معاف ہے۔' : 'MashaAllah! The fee is fully waived this month.';
     } else if (totalSavings > 0) {
-      feeMessage = context.isUrdu ? 'آپ نے ${totalSavings.toStringAsFixed(0)} روپے بچائے — حاضری و جواب سے مزید بچت ممکن ہے' : 'You saved Rs. ${totalSavings.toStringAsFixed(0)} — more attendance & replies = more savings';
-      feeMessageColor = SoftPalette.orange350;
-      feeIcon = Icons.trending_up_rounded;
+      tip = urdu
+          ? 'آپ نے ${rs(totalSavings)} بچائے۔ حاضری، یونیفارم اور جواب سے مزید بچت ہوتی ہے۔'
+          : 'You saved ${rs(totalSavings)}. Attendance, uniform and replies save more.';
     } else {
-      feeMessage = context.isUrdu ? 'حاضری، یونیفارم اور جواب سے فیس میں چھوٹ حاصل کریں' : 'Attendance, uniform & replies earn fee discounts';
-      feeMessageColor = context.adapt(SoftPalette.gray350);
-      feeIcon = Icons.info_outline;
+      tip = urdu ? 'روزانہ حاضری، صاف یونیفارم اور جواب سے فیس کم ہوتی ہے۔' : 'Daily attendance, a clean uniform and replies lower the fee.';
     }
 
-    final String monthYearStr = DateFormat('MMMM yyyy').format(DateTime(_selectedYear, _selectedMonth));
-
-    final double attSavings = (fee['attSavings'] as num?)?.toDouble() ?? 0.0;
-    final double uniSavings = (fee['uniSavings'] as num?)?.toDouble() ?? 0.0;
-    final double msgSavings = (fee['msgSavings'] as num?)?.toDouble() ?? 0.0;
-    final double ptmSavings = (fee['ptmSavings'] as num?)?.toDouble() ?? 0.0;
-    final double proRatedBaseFee = (fee['proRatedBaseFee'] as num?)?.toDouble() ?? 0.0;
-    final bool isProRated = proRatedBaseFee < baseFee;
-    final bool showFeeNotice = due > 0;
-
-    return Column(
-      children: [
-        if (showFeeNotice) ...[
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-            decoration: BoxDecoration(
-              color: feeMessageColor.withValues(alpha: isDarkMode ? 0.12 : 0.08),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: feeMessageColor.withValues(alpha: isDarkMode ? 0.35 : 0.22)),
+    Widget row(String label, String value, {Color? color, bool bold = false}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(children: [
+            Expanded(
+              child: Text(label,
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: bold ? c.textPrimary : c.textSecondary,
+                      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+                      fontFamily: urdu ? 'Noori' : null)),
             ),
-            child: Row(
-              children: [
-                Icon(feeIcon, color: feeMessageColor, size: 20),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    feeMessage,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: feeMessageColor,
-                      fontFamily: context.isUrdu ? 'Noori' : null,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-        ],
-        _buildPdfFormFeeBreakdown(
-          baseFee: baseFee,
-          proRatedBaseFee: proRatedBaseFee,
-          attSavings: attSavings,
-          uniSavings: uniSavings,
-          msgSavings: msgSavings,
-          ptmSavings: ptmSavings,
-          totalSavings: totalSavings,
-          due: due,
-          isProRated: isProRated,
-          monthYearStr: monthYearStr,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPdfFormFeeBreakdown({
-    required double due,
-    required double totalSavings,
-    required double baseFee,
-    required double proRatedBaseFee,
-    required bool isProRated,
-    required double attSavings,
-    required double uniSavings,
-    required double msgSavings,
-    required double ptmSavings,
-    required String monthYearStr,
-  }) {
-    final paymentRecord = MadrassaLocalStorage.getFeePaymentCached(widget.branchId, _selectedYear, _selectedMonth, widget.studentId);
-    final status = paymentRecord?['status']?.toString().toLowerCase();
-    final amountPaid = (paymentRecord?['amountPaid'] as num?)?.toDouble() ?? 0.0;
-    final discount = (paymentRecord?['discount'] as num?)?.toDouble() ?? 0.0;
-    final balanceDue = (paymentRecord?['balanceDue'] as num?)?.toDouble() ??
-        ((status == 'paid' || due <= 0) ? 0.0 : (due - amountPaid - discount).clamp(0.0, double.infinity));
-    final isPaid = status == 'paid' || (paymentRecord != null && balanceDue <= 0.0);
-    final isPartial = status == 'partial' || (paymentRecord != null && !isPaid && (amountPaid > 0.0 || discount > 0.0));
-
-    return Container(
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.slate800A8, blurRadius: 16, offset: const Offset(0, 4)),
-        ],
-      ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                context.isUrdu ? 'فیس کی تفصیل اور بچت فارم' : 'Fee Statement Breakdown Form',
+            Text(value,
                 style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: isDarkMode ? SoftPalette.teal300 : SoftPalette.emerald600,
-                  fontFamily: context.isUrdu ? 'Noori' : null,
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDarkMode ? SoftPalette.emerald750 : SoftPalette.emerald100,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  monthYearStr,
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isDarkMode ? SoftPalette.green300 : SoftPalette.emerald600),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Divider(height: 1, color: dividerColor),
-          const SizedBox(height: 12),
-          _formFeeRow(context.t('Standard Monthly Base Fee'), 'Rs. ${baseFee.toStringAsFixed(0)}', isHeader: true),
-          if (isProRated)
-            _formFeeRow(context.t('Pro-Rated Base Fee'), 'Rs. ${proRatedBaseFee.toStringAsFixed(0)}', isInfo: true),
-          const SizedBox(height: 8),
-          Text(
-            context.isUrdu ? 'رعایات و بچت (Deductions & Rewards):' : 'Itemized Discounts & Rewards:',
-            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: textMuted),
-          ),
-          const SizedBox(height: 6),
-          _formFeeRow(context.t('Attendance Reward'), '- Rs. ${attSavings.toStringAsFixed(0)}', color: SoftPalette.green400),
-          _formFeeRow(context.t('Uniform Cleanliness Reward'), '- Rs. ${uniSavings.toStringAsFixed(0)}', color: SoftPalette.blue400),
-          _formFeeRow(context.t('Teacher Reply Response Reward'), '- Rs. ${msgSavings.toStringAsFixed(0)}', color: SoftPalette.purple550),
-          _formFeeRow(context.t('PTM Meeting Reward'), '- Rs. ${ptmSavings.toStringAsFixed(0)}', color: SoftPalette.amber300),
-          Divider(height: 20, thickness: 1, color: dividerColor),
-          _formFeeRow(context.t('Total Discounts & Savings'), '- Rs. ${totalSavings.toStringAsFixed(0)}', isBold: true, color: SoftPalette.green400),
-          if (amountPaid > 0) ...[
-            const SizedBox(height: 4),
-            _formFeeRow(
-              context.isUrdu ? 'والدین کی طرف سے ادا شدہ رقم (منہا شدہ)' : 'Amount Paid by Parent (Deducted)',
-              '- Rs. ${amountPaid.toStringAsFixed(0)}',
-              isBold: true,
-              color: SoftPalette.green550,
-            ),
-          ],
-          if (discount > 0) ...[
-            const SizedBox(height: 4),
-            _formFeeRow(
-              context.isUrdu ? 'خصوصی رعایت / چھوٹ' : 'Special Concession / Discount',
-              '- Rs. ${discount.toStringAsFixed(0)}',
-              isBold: true,
-              color: SoftPalette.orange400,
-            ),
-          ],
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: isPaid || balanceDue <= 0
-                  ? (isDarkMode ? SoftPalette.emerald750 : SoftPalette.emerald100)
-                  : (isPartial
-                      ? (isDarkMode ? SoftPalette.orange800.withValues(alpha: 0.3) : SoftPalette.yellow150)
-                      : (isDarkMode ? SoftPalette.red800 : SoftPalette.red100m)),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: isPaid || balanceDue <= 0
-                    ? SoftPalette.green400
-                    : (isPartial ? SoftPalette.orange400 : SoftPalette.red400),
-              ),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      context.isUrdu ? 'باقی واجب الادا رقم (WHAT REMAINS DUE)' : 'REMAINING BALANCE DUE',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: isPaid || balanceDue <= 0
-                            ? (isDarkMode ? SoftPalette.green300 : SoftPalette.emerald600)
-                            : (isPartial
-                                ? (isDarkMode ? SoftPalette.amber200 : SoftPalette.orange400)
-                                : (isDarkMode ? SoftPalette.red350 : SoftPalette.red400)),
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                    Text(
-                      context.isUrdu ? 'روپے ${balanceDue.toStringAsFixed(0)}' : 'Rs. ${balanceDue.toStringAsFixed(0)}',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: isPaid || balanceDue <= 0
-                            ? (isDarkMode ? SoftPalette.green300 : SoftPalette.emerald600)
-                            : (isPartial
-                                ? (isDarkMode ? SoftPalette.amber200 : SoftPalette.orange400)
-                                : (isDarkMode ? SoftPalette.red350 : SoftPalette.red400)),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      context.isUrdu ? 'ادائیگی کی صورتحال (Payment Status)' : 'Payment Status',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: isDarkMode ? SoftPalette.gray50A70 : SoftPalette.gray900A87,
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: isPaid || balanceDue <= 0
-                            ? (isDarkMode ? SoftPalette.emerald600 : SoftPalette.emerald100)
-                            : (isPartial
-                                ? (isDarkMode ? SoftPalette.orange350.withValues(alpha: 0.2) : SoftPalette.yellow200)
-                                : (isDarkMode ? SoftPalette.red700 : SoftPalette.red150m)),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        isPaid
-                            ? (context.isUrdu ? 'مکمل ادا شدہ (روپے ${amountPaid.toStringAsFixed(0)})' : 'FULLY PAID (Rs. ${amountPaid.toStringAsFixed(0)})')
-                            : (isPartial
-                                ? (context.isUrdu
-                                    ? 'جزوی ادائیگی (ادا: روپے ${amountPaid.toStringAsFixed(0)} • باقی: روپے ${balanceDue.toStringAsFixed(0)})'
-                                    : 'PARTIAL (Paid: Rs. ${amountPaid.toStringAsFixed(0)} • Rem: Rs. ${balanceDue.toStringAsFixed(0)})')
-                                : (due <= 0
-                                    ? (context.isUrdu ? 'معاف شدہ (روپے 0)' : 'WAIVED (Rs. 0)')
-                                    : (context.isUrdu ? 'غیر ادا شدہ (بقایا روپے ${due.toStringAsFixed(0)})' : 'UNPAID (Pending Rs. ${due.toStringAsFixed(0)})'))),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: isPaid || balanceDue <= 0
-                              ? (isDarkMode ? SoftPalette.emerald300 : SoftPalette.emerald550)
-                              : (isPartial
-                                  ? (isDarkMode ? SoftPalette.amber200 : SoftPalette.orange400)
-                                  : (isDarkMode ? SoftPalette.red350 : SoftPalette.red550)),
-                          fontFamily: context.isUrdu ? 'Noori' : null,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+                    fontSize: 13,
+                    fontWeight: bold ? FontWeight.w700 : FontWeight.w600,
+                    color: color ?? c.textPrimary,
+                    fontFeatures: const [FontFeature.tabularFigures()])),
+          ]),
+        );
 
-  Widget _formFeeRow(String label, String value, {bool isHeader = false, bool isInfo = false, bool isBold = false, Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: (isHeader || isBold) ? FontWeight.bold : FontWeight.w500,
-              color: isInfo ? (isDarkMode ? SoftPalette.slate350 : SoftPalette.slate500) : (color ?? (isDarkMode ? textPrimary : SoftPalette.gray900A87)),
-              fontFamily: context.isUrdu ? 'Noori' : null,
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: (isHeader || isBold) ? FontWeight.bold : FontWeight.w600,
-              color: color ?? (isInfo ? (isDarkMode ? SoftPalette.slate350 : SoftPalette.slate500) : (isDarkMode ? textPrimary : SoftPalette.gray900A87)),
-            ),
-          ),
-        ],
+    return MadrassaCard(
+      icon: Icons.account_balance_wallet_rounded,
+      title: urdu ? 'فیس' : 'Fees',
+      subtitle: monthText,
+      trailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(color: tone.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(12)),
+        child: Text(statusText, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: tone, fontFamily: urdu ? 'Noori' : null)),
       ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(urdu ? 'باقی رقم' : 'Still to pay', style: TextStyle(fontSize: 12, color: c.textMuted, fontFamily: urdu ? 'Noori' : null)),
+              Text(rs(balance),
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: tone, fontFeatures: const [FontFeature.tabularFigures()])),
+            ]),
+          ),
+          if (totalSavings > 0)
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text(urdu ? 'بچت' : 'Saved', style: TextStyle(fontSize: 12, color: c.textMuted, fontFamily: urdu ? 'Noori' : null)),
+              Text(rs(totalSavings), style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.success)),
+            ]),
+        ]),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(color: c.surfaceSunken, borderRadius: BorderRadius.circular(10)),
+          child: Row(children: [
+            Icon(due <= 0 ? Icons.celebration_rounded : Icons.lightbulb_outline_rounded, size: 16, color: c.brand),
+            const SizedBox(width: 8),
+            Expanded(child: Text(tip, style: TextStyle(fontSize: 12.5, color: c.textSecondary, fontFamily: urdu ? 'Noori' : null))),
+          ]),
+        ),
+        const SizedBox(height: 10),
+        row(context.t('Standard Monthly Base Fee'), rs(baseFee), bold: true),
+        if (isProRated) row(urdu ? 'داخلے کے دن سے فیس' : 'Fee from joining date', rs(proRatedBaseFee)),
+        row(context.t('Attendance Reward'), '− ${rs(attSavings)}', color: c.success),
+        row(context.t('Uniform Cleanliness Reward'), '− ${rs(uniSavings)}', color: c.success),
+        row(context.t('Teacher Reply Response Reward'), '− ${rs(msgSavings)}', color: c.success),
+        row(context.t('PTM Meeting Reward'), '− ${rs(ptmSavings)}', color: c.success),
+        if (amountPaid > 0) row(urdu ? 'ادا کر دیا' : 'Paid', '− ${rs(amountPaid)}', color: c.success),
+        if (discount > 0) row(urdu ? 'خصوصی رعایت' : 'Special concession', '− ${rs(discount)}', color: c.success),
+        Divider(height: 16, color: c.border),
+        row(urdu ? 'اس مہینے کی فیس' : 'Fee for this month', rs(due), bold: true),
+      ]),
     );
   }
 
@@ -5210,281 +4943,470 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     required String estCompletionStr,
     required Map<String, dynamic> selectedDateLog,
   }) {
-    final currentPara = (currentTotalLines / 288).floor() + 1;
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final currentPara = math.min(30, (currentTotalLines / 288).floor() + 1);
     final linesInPara = currentTotalLines % 288;
     final pageInPara = math.min(16, (linesInPara / 18).floor() + 1);
-    final juzPercentage = ((currentTotalLines / 8640) * 100).clamp(0.0, 100.0);
+    final pct = ((currentTotalLines / 8640) * 100).clamp(0.0, 100.0);
+    final onLeave = selectedDateLog['attendance'] == 'leave' || selectedDateLog['attendance'] == 'leave_requested';
 
-    final sabkiPara = selectedDateLog['sabkiPara'] ?? 0;
-    final sabkiRatio = selectedDateLog['sabkiRatio']?.toString() ?? '—';
-    final manzilPara = selectedDateLog['manzilPara'] ?? 0;
-    final manzilRatio = selectedDateLog['manzilRatio']?.toString() ?? '—';
+    final paceValue = onLeave
+        ? (urdu ? 'رکی ہوئی' : 'Paused')
+        : (paceWeekly > 0
+            ? (urdu ? '${paceWeekly.toStringAsFixed(1)} لائنیں / ہفتہ' : '${paceWeekly.toStringAsFixed(1)} lines / week')
+            : (urdu ? 'ابھی شروع' : 'Just starting'));
+    final paceNote = onLeave
+        ? (urdu ? 'رخصت پر' : 'On leave')
+        : (overallPace > 0 ? (urdu ? 'اوسط ${overallPace.toStringAsFixed(1)} لائنیں روزانہ' : 'Avg ${overallPace.toStringAsFixed(1)} lines a day') : null);
+    final String etaValue;
+    if (onLeave) {
+      etaValue = urdu ? 'رکی ہوئی' : 'Paused';
+    } else if (daysRemaining <= 0 || overallPace < 0.1) {
+      etaValue = urdu ? 'ابھی معلوم نہیں' : 'Not known yet';
+    } else if (daysRemaining < 365) {
+      etaValue = urdu ? '${(daysRemaining / 30).toStringAsFixed(1)} مہینے' : '${(daysRemaining / 30).toStringAsFixed(1)} months';
+    } else {
+      final yrs = math.min(3.0, daysRemaining / 365);
+      etaValue = urdu ? '${yrs.toStringAsFixed(1)} سال' : '${yrs.toStringAsFixed(1)} years';
+    }
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: isDarkMode ? borderColor : ParentReportCard.accentColor.withValues(alpha: 0.2)),
-        boxShadow: [
-          BoxShadow(
-            color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    context.isUrdu ? 'قرآن مجید (Quran Majeed)' : 'Quran Majeed',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: textPrimary,
-                      fontFamily: context.isUrdu ? 'Noori' : null,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    isNazraStudent
-                        ? (context.isUrdu ? 'ناظرہ اور سبق کی پیشرفت' : 'Nazra & Lesson Progress')
-                        : (context.isUrdu ? 'حفظ اور سبق کی پیشرفت' : 'Hifz & Lesson Progress'),
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      color: textMuted,
-                      fontFamily: context.isUrdu ? 'Noori' : null,
-                    ),
-                  ),
-                ],
+    return MadrassaCard(
+      icon: Icons.menu_book_rounded,
+      title: urdu ? 'قرآن مجید' : 'Quran Majeed',
+      subtitle: isNazraStudent ? (urdu ? 'ناظرہ کی پیش رفت' : 'Nazra progress') : (urdu ? 'حفظ کی پیش رفت' : 'Hifz progress'),
+      onTap: () => _changeTab(2),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Row(children: [
+          SizedBox(
+            width: 64,
+            height: 64,
+            child: Stack(alignment: Alignment.center, children: [
+              SizedBox(
+                width: 64,
+                height: 64,
+                child: CircularProgressIndicator(value: pct / 100, strokeWidth: 6, backgroundColor: c.surfaceSunken, color: c.brand),
               ),
-              Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textMuted),
-            ],
+              Text('${pct.toStringAsFixed(0)}%', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: c.textPrimary)),
+            ]),
           ),
-          const SizedBox(height: 14),
-
-          Container(
-            width: double.infinity,
-            height: 180,
-            decoration: BoxDecoration(
-              color: isDarkMode ? SoftPalette.slate750 : ParentReportCard.accentColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isDarkMode ? SoftPalette.teal300.withValues(alpha: 0.3) : ParentReportCard.accentColor.withValues(alpha: 0.3),
-                width: 1.5,
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                urdu ? '$currentTotalLines / 8640 لائنیں' : '$currentTotalLines / 8640 lines',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: c.textPrimary, fontFamily: urdu ? 'Noori' : null),
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: (isDarkMode ? SoftPalette.teal300 : ParentReportCard.accentColor).withValues(alpha: 0.12),
-                  blurRadius: 14,
-                  offset: const Offset(0, 4),
+              Text(
+                urdu ? 'پارہ $currentPara  ·  صفحہ $pageInPara' : 'Para $currentPara  ·  Page $pageInPara',
+                style: TextStyle(fontSize: 12.5, color: c.textMuted, fontFamily: urdu ? 'Noori' : null),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(color: c.successBg, borderRadius: BorderRadius.circular(10)),
+                child: Text(
+                  urdu ? '+$monthGain لائنیں اس مہینے' : '+$monthGain lines this month',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c.success, fontFamily: urdu ? 'Noori' : null),
                 ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Lottie.asset(
-                'assets/animations/lesson.json',
-                width: double.infinity,
-                height: 180,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) {
-                  return Center(
-                    child: Icon(
-                      Icons.menu_book_rounded,
-                      color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.accentColor,
-                      size: 64,
-                    ),
-                  );
-                },
               ),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: MadrassaMetric(icon: Icons.speed_rounded, label: context.t('Weekly Pace'), value: paceValue, note: paceNote)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: MadrassaMetric(
+              icon: Icons.flag_rounded,
+              label: context.t('Est. Completion'),
+              value: etaValue,
+              note: onLeave ? null : estCompletionStr,
             ),
           ),
-          const SizedBox(height: 16),
-
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Stack(
-                alignment: Alignment.center,
-                children: [
-                  SizedBox(
-                    width: 72,
-                    height: 72,
-                    child: CircularProgressIndicator(
-                      value: juzPercentage / 100,
-                      strokeWidth: 8,
-                      backgroundColor: isDarkMode ? SoftPalette.slate700 : SoftPalette.gray100,
-                      color: ParentReportCard.accentColor,
-                    ),
-                  ),
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '${juzPercentage.toStringAsFixed(0)}%',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 16,
-                          color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor,
-                        ),
-                      ),
-                      Text(
-                        'Juz $currentPara',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: textMuted,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      context.isUrdu
-                          ? (isNazraStudent
-                              ? 'کل ناظرہ شدہ: $currentTotalLines / 8640 لائنیں'
-                              : 'کل محفوظ شدہ: $currentTotalLines / 8640 لائنیں')
-                          : (isNazraStudent
-                              ? 'Total Nazra Lines: $currentTotalLines / 8640 lines'
-                              : 'Total Memorized: $currentTotalLines / 8640 lines'),
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 14.5,
-                        color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor,
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      context.isUrdu
-                          ? 'موجودہ پارہ: $currentPara • صفحہ: $pageInPara'
-                          : 'Current Juz: Para $currentPara • Page $pageInPara',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        color: textMuted,
-                        fontFamily: context.isUrdu ? 'Noori' : null,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: ParentReportCard.accentColor.withValues(alpha: isDarkMode ? 0.2 : 0.12),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: ParentReportCard.accentColor.withValues(alpha: 0.25),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.trending_up_rounded, size: 14, color: ParentReportCard.accentColor),
-                          const SizedBox(width: 4),
-                          Text(
-                            context.isUrdu
-                                ? (isNazraStudent ? '+$monthGain لائنیں رواں ماہ ناظرہ' : '+$monthGain لائنیں رواں ماہ')
-                                : (isNazraStudent ? '+$monthGain Nazra lines read this month' : '+$monthGain lines gained this month'),
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: ParentReportCard.accentColor,
-                              fontFamily: context.isUrdu ? 'Noori' : null,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          Divider(height: 24, thickness: 1, color: dividerColor),
-          Row(
-            children: [
-              Expanded(
-                child: _quranTile(
-                  icon: Icons.speed_rounded,
-                  label: context.t('Weekly Pace'),
-                  value: (selectedDateLog['attendance'] == 'leave' || selectedDateLog['attendance'] == 'leave_requested')
-                      ? (context.isUrdu ? 'ترقی رکی ہوئی' : 'Paused')
-                      : (paceWeekly > 0 ? '${paceWeekly.toStringAsFixed(1)} lines/wk' : (context.isUrdu ? 'شروعاتی رفتار' : 'Building Pace')),
-                  sub: (selectedDateLog['attendance'] == 'leave' || selectedDateLog['attendance'] == 'leave_requested')
-                      ? (context.isUrdu ? 'رخصت پر مطلع' : 'On Leave')
-                      : (overallPace > 0 ? '${overallPace.toStringAsFixed(1)} lines/day avg' : (context.isUrdu ? 'روزانہ کارکردگی' : 'Daily Progress')),
-                  color: isDarkMode ? SoftPalette.teal300 : ParentReportCard.primaryColor,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _quranTile(
-                  icon: Icons.event_repeat_rounded,
-                  label: context.t('Est. Completion'),
-                  value: (selectedDateLog['attendance'] == 'leave' || selectedDateLog['attendance'] == 'leave_requested')
-                      ? (context.isUrdu ? 'روک دیا گیا' : 'Paused')
-                      : (daysRemaining <= 0 || overallPace < 0.1
-                          ? (context.isUrdu ? 'ابتدائی کارکردگی' : 'Building Pace')
-                          : (daysRemaining > 1095
-                              ? '~3.0 yrs'
-                              : (daysRemaining < 365 ? '${(daysRemaining / 30).toStringAsFixed(1)} mos' : '${(daysRemaining / 365).toStringAsFixed(1)} yrs'))),
-                  sub: (selectedDateLog['attendance'] == 'leave' || selectedDateLog['attendance'] == 'leave_requested')
-                      ? (context.isUrdu ? 'رخصت (رفتار رکی ہوئی ہے)' : 'Paused (On Leave)')
-                      : estCompletionStr,
-                  color: ParentReportCard.accentColor,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+        ]),
+      ]),
     );
   }
 
-  Widget _quranTile({required IconData icon, required String label, required String value, required String sub, required Color color}) {
+  // ── Parents' home (reimagined 2026-11-21) ─────────────────────────────────
+  // Same look as the teacher screens: theme colours (GMWF / Nexus / Twilight,
+  // light or dark), flat bordered cards, small radius, no heavy gradients.
+  // A parent sees at once how the child did today and what to do next.
+
+  BoxDecoration _homeCard(BuildContext context) {
+    final c = context.comfort;
+    return BoxDecoration(color: c.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: c.border));
+  }
+
+  Widget _homeTitle(BuildContext context, String text, {IconData? icon, Widget? trailing}) {
+    final c = context.comfort;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(children: [
+        if (icon != null) ...[Icon(icon, size: 18, color: c.brand), const SizedBox(width: 8)],
+        Expanded(
+          child: Text(text,
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: c.textPrimary, fontFamily: context.isUrdu ? 'Noori' : null)),
+        ),
+        ?trailing,
+      ]),
+    );
+  }
+
+  Widget _homeAvatar(BuildContext context, Map<String, dynamic> data, double size) {
+    final c = context.comfort;
+    final name = (data['name'] ?? data['fullName'] ?? '').toString();
+    final raw = (data['photoBase64'] ?? data['photoUrl'] ?? data['photo'] ?? data['image'] ?? data['studentPhotoBase64'])?.toString().trim();
+    final bytes = ImageUploadService.decodeBase64ToBytes(raw);
+    final urduName = RegExp(r'[\u0600-\u06FF]').hasMatch(name);
+    final letter = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.brandSoft, shape: BoxShape.circle),
+      // A Nastaliq letter sits low in a circle: Urdu names get a person icon.
+      child: urduName || name.isEmpty
+          ? Icon(Icons.person_rounded, size: size * 0.55, color: c.brand)
+          : Text(name.characters.first,
+          textAlign: TextAlign.center,
+          strutStyle: StrutStyle(fontSize: size * 0.42, height: 1, forceStrutHeight: true),
+          style: TextStyle(color: c.brand, fontWeight: FontWeight.w700, fontSize: size * 0.42, height: 1, fontFamilyFallback: const ['Noori'])),
+    );
+    if (bytes != null) {
+      return ClipOval(child: Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, cacheWidth: (size * 3).round(), errorBuilder: (_, _, _) => letter));
+    }
+    if (raw != null && raw.startsWith('http')) {
+      return ClipOval(child: Image.network(raw, width: size, height: size, fit: BoxFit.cover, errorBuilder: (_, _, _) => letter));
+    }
+    return letter;
+  }
+
+  /// Child header: photo, name, program and roll, the child switcher (when there
+  /// are several children) and the monthly report button.
+  Widget _buildParentHeader(
+    BuildContext context, {
+    required MadrassaConfig displayConfig,
+    required List<dynamic> monthLogs,
+    required List<DateTime> holidays,
+  }) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final name = (studentData['name'] ?? studentData['fullName'] ?? '').toString();
+    final roll = (studentData['rollNumber'] ?? studentData['rollNo'] ?? '').toString().trim();
+    final session = (studentData['session'] ?? '').toString().toLowerCase();
+    final sessionText = session == 'evening' ? (urdu ? 'شام' : 'Evening') : (session == 'night' ? (urdu ? 'رات' : 'Night') : (urdu ? 'صبح' : 'Morning'));
+    final sub = [
+      isNazraStudent ? (urdu ? 'ناظرہ' : 'Nazra') : (urdu ? 'حفظ' : 'Hifz'),
+      if (roll.isNotEmpty) '${urdu ? 'رول' : 'Roll'} $roll',
+      sessionText,
+    ].join('  ·  ');
+
+    Map<String, dynamic> docData(dynamic d) =>
+        d is Map ? Map<String, dynamic>.from(d) : (d is DocumentSnapshot ? (d.data() as Map<String, dynamic>?) ?? {} : <String, dynamic>{});
+
     return Container(
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: isDarkMode ? SoftPalette.slate900 : color.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: isDarkMode ? borderColor : color.withValues(alpha: 0.15)),
-        boxShadow: [
-          BoxShadow(color: color.withValues(alpha: 0.03), blurRadius: 6, offset: const Offset(0, 2)),
-        ],
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 8),
+      decoration: _homeCard(context),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          GestureDetector(
+            onTap: () => _showEnlargedPhotoDialog(context, (studentData['photoBase64'] ?? studentData['photoUrl'])?.toString(), name),
+            child: _homeAvatar(context, studentData, 52),
+          ),
+          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: TextStyle(fontSize: 10, color: context.adapt(ParentReportCard.textMutedColor), fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null)),
-                const SizedBox(height: 2),
-                Text(value, style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: color, fontFamily: context.isUrdu ? 'Noori' : null)),
-                Text(sub, style: TextStyle(fontSize: 10, color: context.adapt(ParentReportCard.textMutedColor), fontFamily: context.isUrdu ? 'Noori' : null)),
-              ],
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text(name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  strutStyle: const StrutStyle(fontSize: 17, height: 1.4, forceStrutHeight: true),
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: c.textPrimary, fontFamilyFallback: const ['Noori'])),
+              const SizedBox(height: 2),
+              Text(sub, style: TextStyle(fontSize: 12, color: c.textMuted, fontFamily: urdu ? 'Noori' : null)),
+            ]),
+          ),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: c.brand,
+              side: BorderSide(color: c.border),
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+            onPressed: () => _showDownloadReportDialog(context, displayConfig, studentData, monthLogs, holidays),
+            icon: const Icon(Icons.download_rounded, size: 16),
+            label: Text(urdu ? 'رپورٹ' : 'Report', style: TextStyle(fontFamily: urdu ? 'Noori' : null)),
+          ),
+        ]),
+        if (widget.allDocs.length > 1) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 36,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: widget.allDocs.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final d = docData(widget.allDocs[i]);
+                final on = i == widget.selectedIndex;
+                return InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: on ? null : () => widget.onStudentChanged(i),
+                  child: Container(
+                    padding: const EdgeInsetsDirectional.fromSTEB(4, 4, 12, 4),
+                    decoration: BoxDecoration(
+                      color: on ? c.brandSoft : c.surface,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: on ? c.brand : c.border),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      _homeAvatar(context, d, 26),
+                      const SizedBox(width: 6),
+                      Text((d['name'] ?? '').toString(),
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                              color: on ? c.brand : c.textSecondary, fontFamilyFallback: const ['Noori'])),
+                    ]),
+                  ),
+                );
+              },
             ),
           ),
         ],
-      ),
+      ]),
+    );
+  }
+
+  String _ratioText(String? r) {
+    final urdu = context.isUrdu;
+    switch (r) {
+      case '1/4':
+        return urdu ? 'پاؤ' : 'Pao';
+      case '1/2':
+        return urdu ? 'نصف' : 'Nisf';
+      case '3/4':
+        return urdu ? 'ثلاثہ' : 'Salasa';
+      case '1':
+        return urdu ? 'پورا پارہ' : 'Full para';
+      case 'nahi_sunaya':
+        return urdu ? 'نہیں سنایا' : 'Not heard';
+    }
+    return '';
+  }
+
+  /// The day at a glance: attendance, the marks, today's lesson and the actions
+  /// a parent may need (reply, request leave, PTM).
+  Widget _buildTodayCard(
+    BuildContext context, {
+    required Map<String, dynamic> log,
+    required bool isHoliday,
+    required bool isBeforeJoin,
+    required bool isFuture,
+    required bool isPtmDay,
+  }) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final isToday = DateUtils.isSameDay(_selectedDate, DateTime.now());
+    final dateText = isToday
+        ? (urdu ? 'آج' : 'Today')
+        : DateFormat(urdu ? 'd MMM' : 'EEE d MMM').format(_selectedDate);
+    final att = (log['attendance'] ?? '').toString().toLowerCase().trim();
+    final late = log['isLate'] == true || log['timing'] == 'late';
+    final arrival = log['arrivalTime']?.toString();
+    final rawLeave = (log['leaveStatus'] ?? '').toString().toLowerCase().trim();
+    final leavePending = att == 'leave_requested' && (rawLeave.isEmpty || rawLeave == 'pending');
+    final leaveDenied = rawLeave == 'denied' || rawLeave == 'declined';
+    final replied = log['parentReplied'] == true;
+    final uniform = log['uniform'] == true || log['uniform'] == 'leave';
+    final isSunday = _selectedDate.weekday == DateTime.sunday;
+
+    final studentStatus = (studentData['status']?.toString() ?? 'active').toLowerCase().trim();
+    final readOnly = !const {'active', ''}.contains(studentStatus);
+
+    // 1. The main line
+    late final IconData mainIcon;
+    late final Color mainColor;
+    late final String mainText;
+    String? mainSub;
+    if (isBeforeJoin) {
+      mainIcon = Icons.info_outline_rounded;
+      mainColor = c.textMuted;
+      mainText = urdu ? 'اس دن داخلہ نہیں ہوا تھا' : 'Not enrolled yet on this day';
+    } else if (isHoliday || isSunday) {
+      mainIcon = Icons.beach_access_rounded;
+      mainColor = c.info;
+      mainText = urdu ? 'چھٹی' : 'Holiday';
+      mainSub = isSunday ? (urdu ? 'اتوار' : 'Sunday') : null;
+    } else if (att == 'present') {
+      mainIcon = Icons.check_circle_rounded;
+      mainColor = late ? c.warning : c.success;
+      mainText = late ? (urdu ? 'حاضر — دیر سے آئے' : 'Present — came late') : (urdu ? 'حاضر — وقت پر' : 'Present — on time');
+      mainSub = late && arrival != null && arrival.isNotEmpty ? (urdu ? 'آمد: $arrival' : 'Arrived $arrival') : null;
+    } else if (att == 'leave') {
+      mainIcon = Icons.event_available_rounded;
+      mainColor = c.info;
+      mainText = urdu ? 'رخصت (منظور شدہ)' : 'On leave (approved)';
+    } else if (leavePending) {
+      mainIcon = Icons.hourglass_top_rounded;
+      mainColor = c.warning;
+      mainText = urdu ? 'رخصت کی درخواست — منظوری کا انتظار' : 'Leave requested — waiting for the teacher';
+    } else if (att == 'absent') {
+      mainIcon = Icons.cancel_rounded;
+      mainColor = c.danger;
+      mainText = leaveDenied ? (urdu ? 'غیر حاضر — رخصت منظور نہیں ہوئی' : 'Absent — leave not approved') : (urdu ? 'غیر حاضر' : 'Absent');
+    } else if (isFuture) {
+      mainIcon = Icons.schedule_rounded;
+      mainColor = c.textMuted;
+      mainText = urdu ? 'آنے والا دن' : 'Upcoming day';
+    } else {
+      mainIcon = Icons.schedule_rounded;
+      mainColor = c.textMuted;
+      mainText = urdu ? 'ابھی حاضری نہیں لگی' : 'Attendance not marked yet';
+    }
+
+    Widget chip(IconData icon, String text, Color color, {bool on = true}) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: on ? color.withValues(alpha: 0.12) : c.surfaceSunken,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 15, color: on ? color : c.textMuted),
+            const SizedBox(width: 6),
+            Text(text, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: on ? color : c.textMuted, fontFamily: urdu ? 'Noori' : null)),
+          ]),
+        );
+
+    // 2. Today's lesson
+    final lessonLines = <String>[];
+    if (att == 'present') {
+      final sabak = (log['sabakLines'] as num?)?.toInt() ?? int.tryParse(log['sabakLines']?.toString() ?? '') ?? 0;
+      if (sabak > 0) lessonLines.add(urdu ? 'سبق: $sabak لائنیں' : 'Sabak: $sabak lines');
+      if (isNazraStudent) {
+        final rp = int.tryParse(log['rukuPara']?.toString() ?? '') ?? 0;
+        final r = log['ruku']?.toString();
+        if (rp > 0 && r != null && r != '-') lessonLines.add(urdu ? 'رکوع: پارہ $rp، $r' : 'Ruku: Para $rp, $r');
+        final q = log['qaidaSabak']?.toString();
+        if (q != null && q.isNotEmpty && q != '-' && q != '0') {
+          lessonLines.add(q == 'completed' ? (urdu ? 'قاعدہ مکمل' : 'Qaida complete') : (urdu ? 'قاعدہ: تختی $q' : 'Qaida: lesson $q'));
+        }
+      } else {
+        for (final (label, pk, rk) in [
+          (urdu ? 'سبقی' : 'Sabqi', 'sabkiPara', 'sabkiRatio'),
+          (urdu ? 'منزل' : 'Manzil', 'manzilPara', 'manzilRatio'),
+        ]) {
+          final p = int.tryParse(log[pk]?.toString() ?? '') ?? 0;
+          final r = log[rk]?.toString();
+          if (r == 'nahi_sunaya') {
+            lessonLines.add('$label: ${_ratioText(r)}');
+          } else if (p > 0) {
+            lessonLines.add('$label: ${urdu ? 'پارہ' : 'Para'} $p ${_ratioText(r)}');
+          }
+        }
+      }
+    }
+
+    // 3. Actions
+    final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final canAct = !readOnly && widget.isParentView && !isBeforeJoin;
+    final actions = <Widget>[
+      if (canAct && !replied && (att == 'present' || att == 'absent'))
+        FilledButton.icon(
+          style: FilledButton.styleFrom(backgroundColor: c.brand, foregroundColor: c.onBrand),
+          onPressed: () => _showSendReplyDialog(context, dateStr),
+          icon: const Icon(Icons.reply_rounded, size: 18),
+          label: Text(urdu ? 'استاد کو جواب دیں' : 'Reply to teacher', style: TextStyle(fontFamily: urdu ? 'Noori' : null)),
+        ),
+      if (canAct && att != 'present' && att != 'leave' && att != 'leave_requested' && !isHoliday && !isSunday)
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(foregroundColor: c.brand, side: BorderSide(color: c.brand.withValues(alpha: 0.5))),
+          onPressed: () {
+            final now = DateTime.now();
+            final today = DateTime(now.year, now.month, now.day);
+            final target = _selectedDate.isBefore(today) ? today : _selectedDate;
+            _showLeaveReasonDialog(context, widget.branchId, DateFormat('yyyy-MM-dd').format(target), widget.studentId);
+          },
+          icon: const Icon(Icons.event_busy_rounded, size: 18),
+          label: Text(urdu ? 'رخصت کی درخواست' : 'Request leave', style: TextStyle(fontFamily: urdu ? 'Noori' : null)),
+        ),
+      if (canAct && isPtmDay && log['ptm'] == null && log['ptmRequestStatus'] == null)
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(foregroundColor: c.info, side: BorderSide(color: c.info.withValues(alpha: 0.5))),
+          onPressed: () => _claimPtmJoin(context),
+          icon: const Icon(Icons.people_rounded, size: 18),
+          label: Text(urdu ? 'پی ٹی ایم میں شرکت کی' : 'I attended the PTM', style: TextStyle(fontFamily: urdu ? 'Noori' : null)),
+        ),
+    ];
+
+    final showMarks = att == 'present' || att == 'absent';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: _homeCard(context),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        _homeTitle(context, dateText, icon: Icons.today_rounded, trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(
+            tooltip: urdu ? 'پچھلا دن' : 'Previous day',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => setState(() => _selectedDate = _selectedDate.subtract(const Duration(days: 1))),
+            icon: Icon(Icons.chevron_left_rounded, color: c.textSecondary),
+          ),
+          IconButton(
+            tooltip: urdu ? 'اگلا دن' : 'Next day',
+            visualDensity: VisualDensity.compact,
+            onPressed: isToday ? null : () => setState(() => _selectedDate = _selectedDate.add(const Duration(days: 1))),
+            icon: Icon(Icons.chevron_right_rounded, color: isToday ? c.textMuted.withValues(alpha: 0.3) : c.textSecondary),
+          ),
+        ])),
+        Row(children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(color: mainColor.withValues(alpha: 0.14), shape: BoxShape.circle),
+            child: Icon(mainIcon, color: mainColor, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(mainText, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.textPrimary, fontFamily: urdu ? 'Noori' : null)),
+              if (mainSub != null) Text(mainSub, style: TextStyle(fontSize: 12.5, color: c.textMuted, fontFamily: urdu ? 'Noori' : null)),
+            ]),
+          ),
+        ]),
+        if (showMarks) ...[
+          const SizedBox(height: 12),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            if (att == 'present')
+              chip(Icons.checkroom_rounded, uniform ? (urdu ? 'یونیفارم صاف' : 'Uniform clean') : (urdu ? 'یونیفارم صاف نہیں' : 'Uniform not clean'),
+                  uniform ? c.success : c.danger),
+            chip(Icons.chat_rounded, replied ? (urdu ? 'جواب بھیج دیا' : 'Reply sent') : (urdu ? 'جواب باقی ہے' : 'Reply pending'),
+                replied ? c.success : c.warning),
+            if (isPtmDay)
+              chip(Icons.people_rounded,
+                  log['ptm'] == true ? (urdu ? 'پی ٹی ایم: شریک' : 'PTM: attended') : (urdu ? 'آج پی ٹی ایم ہے' : 'PTM today'),
+                  c.info),
+          ]),
+        ],
+        if (lessonLines.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: c.surfaceSunken, borderRadius: BorderRadius.circular(10)),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Icon(Icons.menu_book_rounded, size: 18, color: c.brand),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(lessonLines.join('\n'),
+                    style: TextStyle(fontSize: 13.5, height: 1.5, color: c.textPrimary, fontFamily: urdu ? 'Noori' : null)),
+              ),
+            ]),
+          ),
+        ],
+        if (actions.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Wrap(spacing: 8, runSpacing: 8, children: actions),
+        ],
+      ]),
     );
   }
 
@@ -5568,7 +5490,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             children: [
               Text(
                 context.isUrdu ? 'مکمل فیس کی تفصیلات دیکھیں ←' : 'View Detailed Fee Statement →',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(ParentReportCard.primaryColor), fontFamily: context.isUrdu ? 'Noori' : null),
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.comfort.brand, fontFamily: context.isUrdu ? 'Noori' : null),
               ),
             ],
           ),
@@ -5625,7 +5547,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               context.isUrdu
                   ? (isNazraStudent ? 'اس مہینے کی پیش رفت: +$monthGain لائنیں ناظرہ پڑھیں' : 'اس مہینے کی پیش رفت: +$monthGain لائنیں حفظ کیں')
                   : (isNazraStudent ? 'Progress this month: +$monthGain lines read' : 'Progress this month: +$monthGain lines memorized'),
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(ParentReportCard.primaryColor), fontFamily: context.isUrdu ? 'Noori' : null),
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.comfort.brand, fontFamily: context.isUrdu ? 'Noori' : null),
             ),
           ),
         ],
@@ -5640,7 +5562,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             label: context.t('Weekly Pace'),
             value: context.isUrdu ? '${paceWeekly.toStringAsFixed(1)} لائنیں' : '${paceWeekly.toStringAsFixed(1)} lines',
             sub: context.isUrdu ? '${overallPace.toStringAsFixed(1)} لائنیں/دن' : '${overallPace.toStringAsFixed(1)} lines/day',
-            color: context.adapt(ParentReportCard.primaryColor),
+            color: context.comfort.brand,
           ),
         ),
         const SizedBox(width: 12),
@@ -5672,7 +5594,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final remindersWidget = _buildReminders(
       isPtm: isPtmForSelectedDate,
-      needsReply: selectedDateNeedsReply && !selectedDateReplied,
+      needsReply: false, // the Today card has the reply button; no second prompt
       leaveStatus: selectedDateLeaveStatus,
       attendanceStatus: selectedDateStatus,
       holidaysData: holidaysData,
@@ -5680,7 +5602,6 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
 
     final bool hasActiveReminders = isPtmForSelectedDate ||
-        (selectedDateNeedsReply && !selectedDateReplied) ||
         showDeniedReminder ||
         holidaysData.any((h) {
           final rawDate = h['date'];
@@ -5764,19 +5685,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
 
     final embeddedCalendarCard = Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDarkMode ? 0.2 : 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.all(14),
+      decoration: _homeCard(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -5805,6 +5715,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
             holidaysData: holidaysData,
             joinDate: _studentJoinDate,
             branchId: widget.branchId,
+            framed: false,
           ),
         ],
       ),
@@ -5822,202 +5733,72 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       child: feeSummary,
     );
 
-    if (isDesktop) {
-      final squareStatusPills = _buildStatusPills(
-        currentStatus: selectedDateStatus,
-        uniformOk: selectedDateUniform,
-        replied: selectedDateReplied,
-        ptmJoined: selectedDatePtmJoined,
-        ptmClaimed: selectedDatePtmClaimed,
-        isPtmToday: isPtmForSelectedDate,
-        hasPtmStatus: selectedDatePtmRecorded,
-        isLate: selectedDateIsLate,
-        arrivalTime: selectedDateArrivalTime,
-        isBeforeJoin: isSelectedBeforeJoin,
-        forceSquare: true,
-        isToday: isSelectedToday,
-        isHoliday: selectedDateIsHoliday,
-        isPast: isSelectedPast,
-      );
+    // Reimagined home: header → today → reminders → calendar → Quran → fees →
+    // day details. One column on phones, columns on wider screens.
+    final header = _buildParentHeader(
+      context,
+      displayConfig: config,
+      monthLogs: monthLogs,
+      holidays: holidaysData.map((h) => h['date'] as DateTime).toList(),
+    );
+    final today = _buildTodayCard(
+      context,
+      log: selectedDateLog,
+      isHoliday: selectedDateIsHoliday,
+      isBeforeJoin: isSelectedBeforeJoin,
+      isFuture: selectedZero.isAfter(nowZero),
+      isPtmDay: isPtmForSelectedDate,
+    );
+    final details = _buildDailyDetailsCard(allLogs, holidaysData, config);
+    final fees = (config.enableFees && !isNazraStudent) ? clickableFeeSummary : null;
+    const gap = SizedBox(height: 12);
 
-      final dailyDetailsWidget = _buildDailyDetailsCard(allLogs, holidaysData, config);
-
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          heroBanner,
-          const SizedBox(height: 16),
-          newsWidget,
-          const SizedBox(height: 20),
-          nearingBanner,
-          if (congratsCard != null) congratsCard,
-          // UNIFORM 3-COLUMN BALANCED DESKTOP GRID
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // COLUMN 1: Daily Activity & Actions
-              Expanded(
-                flex: 34,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: cardBg,
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: borderColor),
-                        boxShadow: [
-                          BoxShadow(
-                            color: SoftPalette.gray900.withValues(alpha: isDarkMode ? 0.2 : 0.04),
-                            blurRadius: 16,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(Icons.dashboard_outlined, color: context.adapt(ParentReportCard.primaryColor), size: 18),
-                              const SizedBox(width: 8),
-                              Text(
-                                context.t("Daily Status Overview"),
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 15,
-                                  color: textPrimary,
-                                  fontFamily: context.isUrdu ? 'Noori' : null,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          squareStatusPills,
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    dailyDetailsWidget,
-                    const SizedBox(height: 16),
-                    quickActions,
-                  ],
-                ),
-              ),
-              const SizedBox(width: 16),
-              // COLUMN 2: Attendance Calendar
-              Expanded(
-                flex: 38,
-                child: embeddedCalendarCard,
-              ),
-              const SizedBox(width: 16),
-              // COLUMN 3: Academic & Financial Progress
-              Expanded(
-                flex: 38,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    clickableQuranCard,
-                    if (config.enableFees && !isNazraStudent) ...[
-                      const SizedBox(height: 16),
-                      clickableFeeSummary,
-                    ],
-                  ],
-                ),
-              ),
-            ],
+    if (isDesktop || isTablet) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        header,
+        gap,
+        nearingBanner,
+        ?congratsCard,
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            flex: 5,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              today,
+              gap,
+              newsWidget,
+              gap,
+              details,
+            ]),
           ),
-        ],
-      );
-    } else if (isTablet) {
-      final squareStatusPills = _buildStatusPills(
-        currentStatus: selectedDateStatus,
-        uniformOk: selectedDateUniform,
-        replied: selectedDateReplied,
-        ptmJoined: selectedDatePtmJoined,
-        ptmClaimed: selectedDatePtmClaimed,
-        isPtmToday: isPtmForSelectedDate,
-        hasPtmStatus: selectedDatePtmRecorded,
-        isLate: selectedDateIsLate,
-        arrivalTime: selectedDateArrivalTime,
-        isBeforeJoin: isSelectedBeforeJoin,
-        forceSquare: true,
-        isToday: isSelectedToday,
-        isHoliday: selectedDateIsHoliday,
-        isPast: isSelectedPast,
-      );
-
-      final dailyDetailsWidget = _buildDailyDetailsCard(allLogs, holidaysData, config);
-
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          heroBanner,
-          const SizedBox(height: 16),
-          newsWidget,
-          const SizedBox(height: 20),
-          nearingBanner,
-          if (congratsCard != null) congratsCard,
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    squareStatusPills,
-                    const SizedBox(height: 16),
-                    dailyDetailsWidget,
-                    const SizedBox(height: 16),
-                    quickActions,
-                    const SizedBox(height: 16),
-                    embeddedCalendarCard,
-                  ],
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    clickableQuranCard,
-                    if (config.enableFees && !isNazraStudent) ...[
-                      const SizedBox(height: 16),
-                      clickableFeeSummary,
-                    ],
-                  ],
-                ),
-              ),
-            ],
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 5,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              embeddedCalendarCard,
+              gap,
+              clickableQuranCard,
+              if (fees != null) ...[gap, fees],
+            ]),
           ),
-        ],
-      );
-    } else {
-      return Column(
-        children: [
-          heroBanner,
-          const SizedBox(height: 16),
-          newsWidget,
-          const SizedBox(height: 12),
-          statusPills,
-          const SizedBox(height: 16),
-          _buildDailyDetailsCard(allLogs, holidaysData, config),
-          const SizedBox(height: 16),
-          quickActions,
-          const SizedBox(height: 16),
-          clickableQuranCard,
-          const SizedBox(height: 16),
-          embeddedCalendarCard,
-          if (config.enableFees && !isNazraStudent) ...[
-            const SizedBox(height: 16),
-            clickableFeeSummary,
-          ],
-          nearingBanner,
-          if (congratsCard != null) congratsCard,
-        ],
-      );
+        ]),
+      ]);
     }
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      header,
+      gap,
+      today,
+      gap,
+      newsWidget,
+      gap,
+      embeddedCalendarCard,
+      gap,
+      clickableQuranCard,
+      if (fees != null) ...[gap, fees],
+      gap,
+      details,
+      nearingBanner,
+      ?congratsCard,
+    ]);
   }
   Widget _buildCombinedProgressTab({
     required bool isDesktop,
@@ -6381,7 +6162,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               context.isUrdu
                   ? (isNazraStudent ? 'اس مہینے کی پیش رفت: +$monthGain لائنیں ناظرہ پڑھیں' : 'اس مہینے کی پیش رفت: +$monthGain لائنیں حفظ کیں')
                   : (isNazraStudent ? 'Progress this month: +$monthGain lines read' : 'Progress this month: +$monthGain lines memorized'),
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.adapt(ParentReportCard.primaryColor), fontFamily: context.isUrdu ? 'Noori' : null),
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: context.comfort.brand, fontFamily: context.isUrdu ? 'Noori' : null),
             ),
           ),
         ],
@@ -6871,14 +6652,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final studentInfoCard = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -6943,14 +6721,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final guardianInfoCard = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -6970,12 +6745,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               ),
               InkWell(
                 onTap: () => _showEditGuardianInfoDialog(context),
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: MadrassaErp.radius,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
                     color: (isDarkMode ? SoftPalette.teal300 : SoftPalette.green700).withValues(alpha: isDarkMode ? 0.15 : 0.08),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: MadrassaErp.radius,
                     border: Border.all(color: (isDarkMode ? SoftPalette.teal300 : SoftPalette.green700).withValues(alpha: isDarkMode ? 0.35 : 0.2)),
                   ),
                   child: Row(
@@ -7008,14 +6783,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final documentsCard = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -7041,7 +6813,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: isDarkMode ? SoftPalette.slate700 : SoftPalette.gray100,
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: MadrassaErp.radius,
                 ),
                 child: Text(
                   'Read Only',
@@ -7068,16 +6840,170 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       ),
     );
 
-    final languageInfoCard = Container(
+    final currentThemeChoice = UserThemeService.getThemeChoice(_currentUserKey);
+
+    final themeSelectionCard = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.palette_outlined, color: isDarkMode ? SoftPalette.teal300 : SoftPalette.green700),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  context.isUrdu ? 'تھیم اور ظاہری شکل' : 'Theme & Appearance',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: textPrimary,
+                    fontFamily: context.isUrdu ? 'Noori' : null,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: () => AppearanceDialog.show(context, userKey: _currentUserKey),
+                borderRadius: MadrassaErp.radius,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: (isDarkMode ? SoftPalette.teal300 : SoftPalette.green700).withValues(alpha: isDarkMode ? 0.15 : 0.08),
+                    borderRadius: MadrassaErp.radius,
+                    border: Border.all(color: (isDarkMode ? SoftPalette.teal300 : SoftPalette.green700).withValues(alpha: isDarkMode ? 0.35 : 0.2)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.tune_rounded, size: 14, color: isDarkMode ? SoftPalette.teal300 : SoftPalette.green700),
+                      const SizedBox(width: 4),
+                      Text(
+                        context.isUrdu ? 'ترمیم' : 'Customize',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: isDarkMode ? SoftPalette.teal300 : SoftPalette.green700,
+                          fontFamily: context.isUrdu ? 'Noori' : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Divider(color: dividerColor),
+          const SizedBox(height: 12),
+          Text(
+            context.isUrdu ? 'تھیم منتخب کریں (3 تھیمز دستیاب ہیں):' : 'Select Theme (3 themes available):',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: textMuted,
+              fontFamily: context.isUrdu ? 'Noori' : null,
+            ),
+          ),
+          const SizedBox(height: 10),
+          for (final choice in ui.GThemeChoice.values)
+            Builder(builder: (ctx) {
+              final selected = choice == currentThemeChoice;
+              final b = isDarkMode ? Brightness.dark : Brightness.light;
+              final c = ui.GTheme.colors(b, family: choice.family);
+              final label = choice.label;
+              final subtitle = context.isUrdu
+                  ? (choice == ui.GThemeChoice.gmwf
+                      ? 'زمرد اور سنہرا (اصل تھیم)'
+                      : (choice == ui.GThemeChoice.nexus
+                          ? 'سرمئی اور نیلا'
+                          : 'جامنی اور بنفشی'))
+                  : (choice == ui.GThemeChoice.gmwf
+                      ? 'Emerald & Gold (Default)'
+                      : (choice == ui.GThemeChoice.nexus
+                          ? 'Graphite & Cobalt Blue'
+                          : 'Plum & Violet'));
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: InkWell(
+                  borderRadius: MadrassaErp.radius,
+                  onTap: () async {
+                    await UserThemeService.setThemeChoice(choice, explicitUserKey: _currentUserKey);
+                    if (mounted) setState(() {});
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      borderRadius: MadrassaErp.radius,
+                      color: selected
+                          ? c.brand.withValues(alpha: isDarkMode ? 0.16 : 0.08)
+                          : (isDarkMode ? SoftPalette.slate800 : SoftPalette.gray50),
+                      border: Border.all(
+                        color: selected ? c.brand : borderColor,
+                        width: selected ? 1.6 : 1,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        for (final s in [c.background, c.surface, c.brand, c.accent])
+                          Container(
+                            width: 14,
+                            height: 14,
+                            margin: const EdgeInsetsDirectional.only(end: 5),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: s,
+                              border: Border.all(color: dividerColor),
+                            ),
+                          ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                label,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: textPrimary,
+                                ),
+                              ),
+                              Text(
+                                subtitle,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: textMuted,
+                                  fontFamily: context.isUrdu ? 'Noori' : null,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (selected)
+                          Icon(Icons.check_circle_rounded, size: 20, color: c.brand),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }),
         ],
+      ),
+    );
+
+    final languageInfoCard = Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: borderColor),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -7134,14 +7060,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final changePasswordCard = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -7189,7 +7112,8 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                 backgroundColor: isDarkMode ? SoftPalette.teal600 : SoftPalette.green700,
                 foregroundColor: SoftPalette.gray50,
                 padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 0,
+                shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
               ),
             ),
           ),
@@ -7201,14 +7125,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
 
     final timelineWidget = Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: MadrassaErp.cardRadius,
         border: Border.all(color: borderColor),
-        boxShadow: [
-          BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-        ],
       ),
       child: _buildTimeline(auditList),
     );
@@ -7224,7 +7145,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           style: OutlinedButton.styleFrom(
             side: const BorderSide(color: ParentReportCard.errorColor),
             padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
           ),
         ),
       );
@@ -7258,7 +7179,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
               Expanded(
                 child: Column(
                   children: [
+                    themeSelectionCard,
+                    const SizedBox(height: 16),
                     languageInfoCard,
+                    const SizedBox(height: 16),
+                    changePasswordCard,
                     const SizedBox(height: 16),
                     timelineWidget,
                     if (logoutBtn != null) ...[
@@ -7287,7 +7212,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
           const SizedBox(height: 16),
           documentsCard,
           const SizedBox(height: 16),
+          themeSelectionCard,
+          const SizedBox(height: 16),
           languageInfoCard,
+          const SizedBox(height: 16),
+          changePasswordCard,
           const SizedBox(height: 24),
           timelineWidget,
           if (logoutBtn != null) ...[
@@ -7727,32 +7656,24 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
       ],
     );
 
-    Widget buildBackBar(String pageTitle) => Container(
-      margin: const EdgeInsets.only(bottom: 20),
+    // Slim page header for the inner pages: back arrow + page title (no big button).
+    Widget buildBackBar(String pageTitle) => Padding(
+      padding: const EdgeInsets.only(bottom: 12),
       child: Row(
         children: [
-          ElevatedButton.icon(
+          IconButton(
+            tooltip: context.isUrdu ? 'واپس' : 'Back',
             onPressed: () => setState(() => _selectedTab = 0),
-            icon: const Icon(Icons.arrow_back_rounded, size: 20),
-            label: Text(
-              context.isUrdu ? 'ہوم اسکرین پر واپس جائیں' : 'Back to Home Screen',
-              style: TextStyle(fontWeight: FontWeight.bold, fontFamily: context.isUrdu ? 'Noori' : null),
-            ),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isDarkMode ? SoftPalette.teal600 : ParentReportCard.primaryColor,
-              foregroundColor: SoftPalette.gray50,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
+            icon: Icon(Icons.arrow_back_rounded, color: context.comfort.textPrimary),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 4),
           Expanded(
             child: Text(
               pageTitle,
               style: TextStyle(
                 fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: textPrimary,
+                fontWeight: FontWeight.w700,
+                color: context.comfort.textPrimary,
                 fontFamily: context.isUrdu ? 'Noori' : null,
               ),
               overflow: TextOverflow.ellipsis,
@@ -8004,7 +7925,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                         decoration: BoxDecoration(
                           color: cardBg,
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: isSelected ? context.adapt(ParentReportCard.primaryColor) : badgeColor.withValues(alpha: isDarkMode ? 0.35 : 0.25), width: isSelected ? 2 : 1),
+                          border: Border.all(color: isSelected ? context.comfort.brand : badgeColor.withValues(alpha: isDarkMode ? 0.35 : 0.25), width: isSelected ? 2 : 1),
                           boxShadow: [BoxShadow(color: isDarkMode ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.02), blurRadius: 6, offset: const Offset(0, 2))],
                         ),
                         child: Row(
@@ -8508,42 +8429,40 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
     );
   }
 
-  Widget _filterChip(String filterVal, String label) {
-    final selected = _requestStatusFilter == filterVal;
-    return ChoiceChip(
-      selected: selected,
-      selectedColor: isDarkMode ? SoftPalette.teal600 : ParentReportCard.primaryColor,
-      backgroundColor: isDarkMode ? SoftPalette.slate800 : null,
-      side: BorderSide(color: isDarkMode ? borderColor : SoftPalette.gray150),
-      label: Text(
+  Widget _filterChip(String filterVal, String label) => _buildTabFilterChip(
+        filterVal,
         label,
-        style: TextStyle(
-          color: selected ? SoftPalette.gray50 : textPrimary,
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
-        ),
-      ),
-      onSelected: (_) => setState(() => _requestStatusFilter = filterVal),
-    );
-  }
+        _requestStatusFilter == filterVal,
+        (v) => setState(() => _requestStatusFilter = v),
+      );
 
+  /// One chip style for every filter row: calm outline when off, soft brand
+  /// tint with brand text when on (no solid green / red / amber blocks).
   Widget _buildTabFilterChip(String filterVal, String label, bool isSelected, ValueChanged<String> onSelected, {Color? activeColor}) {
-    final effectiveColor = activeColor ?? (isDarkMode ? SoftPalette.teal600 : ParentReportCard.primaryColor);
-    return ChoiceChip(
-      selected: isSelected,
-      selectedColor: effectiveColor,
-      backgroundColor: isDarkMode ? SoftPalette.slate800 : SoftPalette.gray50,
-      side: BorderSide(color: isSelected ? effectiveColor : (isDarkMode ? borderColor : SoftPalette.gray150)),
-      label: Text(
-        label,
-        style: TextStyle(
-          color: isSelected ? SoftPalette.gray50 : (isDarkMode ? SoftPalette.slate150 : textPrimary),
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
-          fontFamily: context.isUrdu ? 'Noori' : null,
+    final c = context.comfort;
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => onSelected(filterVal),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: isSelected ? c.brandSoft : c.surface,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: isSelected ? c.brand.withValues(alpha: 0.6) : c.border),
         ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (isSelected) ...[Icon(Icons.check_rounded, size: 15, color: c.brand), const SizedBox(width: 4)],
+          Text(
+            label,
+            style: TextStyle(
+              color: isSelected ? c.brand : c.textSecondary,
+              fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+              fontSize: 12.5,
+              fontFamily: context.isUrdu ? 'Noori' : null,
+            ),
+          ),
+        ]),
       ),
-      onSelected: (_) => onSelected(filterVal),
     );
   }
 
@@ -8703,7 +8622,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                   auditListRaw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)),
                 );
 
-                final currentUser = FirebaseAuth.instance.currentUser;
+                final currentUser = _fbUser;
                 final guardianUsername = currentUser?.email ??
                     studentData['guardianEmail']?.toString() ??
                     studentData['contactPhone']?.toString() ??
@@ -8716,13 +8635,19 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                   builder: (context, Box box, _) {
                     final isDark = UserThemeService.isDarkMode(userThemeKey);
                     final scaffoldBg = isDark ? SoftPalette.slate900 : ParentReportCard.surfaceColor;
-                    final appBarBg = isDark ? SoftPalette.slate800 : ParentReportCard.primaryColor;
+                    final appBarBg = context.comfort.surface;
+                    final barFg = context.comfort.textPrimary;
 
                     // Inside the executive shell its header already shows the
                     // title, sync and dark mode. Keep only what is unique here
                     // (back to family, child switcher, Accounts) in a slim bar.
                     final hosted = HomeModuleHost.isModuleRoot(context);
 
+                    return MadrassaThemeScope(userKey: userThemeKey, child: _urduSafe(Builder(builder: (context) {
+                    // Read inside the theme scope so the chosen theme / dark mode applies.
+                    final appBarBg = context.comfort.surface;
+                    final barFg = context.comfort.textPrimary;
+                    final scaffoldBg = context.comfort.background;
                     return Scaffold(
                       backgroundColor: scaffoldBg,
                       appBar: AppBar(
@@ -8730,10 +8655,12 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                         elevation: 0,
                         toolbarHeight: hosted ? 44 : null,
                         automaticallyImplyLeading: false,
-                        iconTheme: const IconThemeData(color: SoftPalette.gray50),
+                        iconTheme: IconThemeData(color: context.comfort.textSecondary),
+                        surfaceTintColor: Colors.transparent,
+                        shape: Border(bottom: BorderSide(color: context.comfort.border)),
                         leading: widget.onBackToSummary != null
                             ? IconButton(
-                                icon: const Icon(Icons.arrow_back, color: SoftPalette.gray50),
+                                icon: Icon(Icons.arrow_back, color: barFg),
                                 tooltip: context.t('Back to Family Summary'),
                                 onPressed: widget.onBackToSummary,
                               )
@@ -8754,11 +8681,11 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                     fit: BoxFit.scaleDown,
                                     alignment: Alignment.centerLeft,
                                     child: Text(
-                                      'Gulzar Madina Madrassa',
+                                      context.isUrdu ? 'گلزار مدینہ مدرسہ' : 'Gulzar Madina Madrassa',
                                       style: TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.bold,
-                                        color: SoftPalette.gray50,
+                                        color: barFg,
                                         fontFamily: context.isUrdu ? 'Noori' : null,
                                       ),
                                     ),
@@ -8774,9 +8701,9 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                       }
                                       return context.isUrdu ? 'پورٹل سرپرست' : 'Guardian Portal';
                                     }(),
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       fontSize: 11,
-                                      color: SoftPalette.gray50A70,
+                                      color: context.comfort.textMuted,
                                       fontWeight: FontWeight.w500,
                                     ),
                                     overflow: TextOverflow.ellipsis,
@@ -8786,17 +8713,17 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                             : DropdownButtonHideUnderline(
                                 child: DropdownButton<int>(
                                   value: widget.selectedIndex,
-                                  dropdownColor: isDark ? SoftPalette.slate800 : ParentReportCard.primaryColor,
-                                  icon: const Icon(Icons.arrow_drop_down, color: SoftPalette.gray50),
+                                  dropdownColor: context.comfort.surfaceRaised,
+                                  icon: Icon(Icons.arrow_drop_down, color: barFg),
                                   isExpanded: true,
-                                  style: const TextStyle(color: SoftPalette.gray50, fontWeight: FontWeight.bold, fontSize: 15),
+                                  style: TextStyle(color: barFg, fontWeight: FontWeight.bold, fontSize: 15),
                                   selectedItemBuilder: (BuildContext context) {
                                     return widget.allDocs.map<Widget>((doc) {
                                       final d = doc is Map ? Map<String, dynamic>.from(doc) : (doc is DocumentSnapshot ? (doc.data() as Map<String, dynamic>?) ?? {} : <String, dynamic>{});
                                       final name = d['name'] ?? 'Student';
                                       return Text(
                                         name,
-                                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: SoftPalette.gray50, fontFamily: context.isUrdu ? 'Noori' : null),
+                                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: barFg, fontFamily: context.isUrdu ? 'Noori' : null, fontFamilyFallback: const ['Noori']),
                                         overflow: TextOverflow.ellipsis,
                                       );
                                     }).toList();
@@ -8807,7 +8734,7 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                     final name = dData['name'] ?? 'Student';
                                     return DropdownMenuItem<int>(
                                       value: index,
-                                      child: Text(name, style: const TextStyle(color: SoftPalette.gray50)),
+                                      child: Text(name, style: TextStyle(color: barFg, fontFamilyFallback: const ['Noori'])),
                                     );
                                   }),
                                   onChanged: (val) {
@@ -8818,58 +8745,129 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                                 ),
                               ),
                         actions: [
-                          // Cloud Sync / Download Latest Data Button
-                          if (!hosted) IconButton(
-                            icon: _isSyncing
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: SoftPalette.gray50),
-                                  )
-                                : const Icon(Icons.sync_rounded, color: SoftPalette.gray50, size: 20),
-                            tooltip: context.isUrdu ? 'تازہ کاری کریں (کلاؤڈ سے حاصل کریں)' : 'Sync / Refresh (Download latest from Cloud)',
-                            onPressed: _isSyncing ? null : () => _syncLatestData(context),
-                          ),
-                          // Dark Mode Toggle
-                          if (!hosted) IconButton(
-                            icon: Icon(
-                              isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                              color: isDark ? SoftPalette.yellow150 : SoftPalette.gray50,
-                              size: 20,
-                            ),
-                            tooltip: isDark ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode') : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                            onPressed: () async {
-                              await UserThemeService.toggleDarkMode(explicitUserKey: userThemeKey);
-                            },
-                          ),
-                          ElevatedButton.icon(
-                            onPressed: () {
-                              setState(() {
-                                _selectedTab = _selectedTab == 4 ? 0 : 4;
-                              });
-                            },
-                            icon: Icon(
-                              _selectedTab == 4 ? Icons.home_rounded : Icons.account_circle_rounded,
-                              size: 18,
-                            ),
-                            label: Text(
-                              _selectedTab == 4
-                                   ? (context.isUrdu ? 'ہوم' : 'Home')
-                                  : (context.isUrdu ? 'اکاؤنٹ' : 'Accounts'),
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, fontFamily: context.isUrdu ? 'Noori' : null),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _selectedTab == 4 ? ParentReportCard.accentColor : SoftPalette.gray50.withValues(alpha: 0.2),
-                              foregroundColor: SoftPalette.gray50,
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
+                          // One ⋮ menu: refresh, language, theme, account, sign out.
+                          _parentMenu(context, userThemeKey: userThemeKey),
+                          const SizedBox(width: 4),
                         ],
                       ),
-                      body: Stack(
+                      body: _parentBody(
+                        context,
+                        isDark: isDark,
+                        todaySLog: todaySLog,
+                        selectedDateLog: selectedDateLog,
+                        isPtmForSelectedDate: isPtmForSelectedDate,
+                        currentStatus: currentStatus,
+                        leaveStatus: leaveStatus,
+                        isPtmToday: isPtmToday,
+                        needsReply: needsReply,
+                        allLogs: allLogs,
+                        holidaysData: holidaysData,
+                        config: config,
+                        displayConfig: displayConfig,
+                        monthLogs: monthLogs,
+                        holidays: holidays,
+                        fee: fee,
+                        currentTotalLines: currentTotalLines,
+                        paceWeekly: paceWeekly,
+                        overallPace: overallPace,
+                        daysRemaining: daysRemaining,
+                        estCompletionStr: estCompletionStr,
+                        status: status,
+                        rejoinRequestStatus: rejoinRequestStatus,
+                        rejoinReason: rejoinReason,
+                        rejoinDate: rejoinDate,
+                        auditList: auditList,
+                      ),
+                    );
+                    })));
+                  },
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// The parents' one ⋮ menu: refresh, language, theme, account, sign out.
+  Widget _parentMenu(BuildContext context, {required String userThemeKey}) {
+    final urdu = context.isUrdu;
+    PopupMenuItem<String> item(String v, IconData icon, String text, {Color? color, bool checked = false}) => PopupMenuItem<String>(
+          value: v,
+          height: 42,
+          child: Row(children: [
+            Icon(icon, size: 18, color: color ?? context.comfort.brand),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text, style: TextStyle(fontSize: 13.5, color: color, fontFamily: urdu ? 'Noori' : null))),
+            if (checked) Icon(Icons.check_rounded, size: 18, color: context.comfort.brand),
+          ]),
+        );
+    return PopupMenuButton<String>(
+      tooltip: urdu ? 'مزید' : 'Menu',
+      icon: _isSyncing
+          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+          : const Icon(Icons.more_vert_rounded),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      onSelected: (v) async {
+        if (v == 'refresh') {
+          await _syncLatestData(context);
+        } else if (v.startsWith('lang:')) {
+          try {
+            await Provider.of<MadrassaLanguageProvider>(context, listen: false).setLanguage(v.substring(5));
+          } catch (_) {}
+        } else if (v == 'appearance') {
+          await AppearanceDialog.show(context, userKey: userThemeKey);
+        } else if (v == 'account') {
+          setState(() => _selectedTab = _selectedTab == 4 ? 0 : 4);
+        } else if (v == 'logout') {
+          widget.onLogout?.call();
+        }
+      },
+      itemBuilder: (_) => [
+        item('refresh', Icons.sync_rounded, urdu ? 'تازہ معلومات لائیں' : 'Refresh data'),
+        const PopupMenuDivider(),
+        item('lang:ur', Icons.translate_rounded, 'اردو', checked: urdu),
+        item('lang:en', Icons.translate_rounded, 'English', checked: !urdu),
+        item('appearance', Icons.palette_outlined, urdu ? 'تھیم اور ظاہری شکل' : 'Theme & Appearance'),
+        const PopupMenuDivider(),
+        item('account', _selectedTab == 4 ? Icons.home_rounded : Icons.account_circle_rounded,
+            _selectedTab == 4 ? (urdu ? 'ہوم' : 'Home') : (urdu ? 'میرا اکاؤنٹ' : 'My account')),
+        if (widget.onLogout != null)
+          item('logout', Icons.logout_rounded, urdu ? 'لاگ آؤٹ' : 'Sign out', color: context.adapt(SoftPalette.red500)),
+      ],
+    );
+  }
+
+  Widget _parentBody(
+    BuildContext context, {
+    required bool isDark,
+    required Map<String, dynamic> todaySLog,
+    required Map<String, dynamic> selectedDateLog,
+    required bool isPtmForSelectedDate,
+    required String currentStatus,
+    required String leaveStatus,
+    required bool isPtmToday,
+    required bool needsReply,
+    required List<dynamic> allLogs,
+    required List<Map<String, dynamic>> holidaysData,
+    required MadrassaConfig config,
+    required MadrassaConfig displayConfig,
+    required List<dynamic> monthLogs,
+    required List<DateTime> holidays,
+    required Map<String, dynamic> fee,
+    required int currentTotalLines,
+    required double paceWeekly,
+    required double overallPace,
+    required double daysRemaining,
+    required String estCompletionStr,
+    required String status,
+    required String? rejoinRequestStatus,
+    required String? rejoinReason,
+    required DateTime? rejoinDate,
+    required List<Map<String, dynamic>> auditList,
+  }) {
+                      return Stack(
                         fit: StackFit.expand,
                         children: [
                           // ── Islamic Pattern Background ──
@@ -8938,18 +8936,19 @@ Future<void> _showChangePasswordDialog(BuildContext context) async {
                           },
                           ),
                         ],
-                      ),
-                    );
-                  },
-                );
-              },
-            );
-          },
-        );
-      },
-    );
+                      );
   }
 }
+
+/// The UI font has no Urdu letters: every text on this screen falls back to
+/// Noori Nastaliq for them (also titles and buttons, which take theme styles).
+Widget _urduSafe(Widget child) => Builder(builder: (context) {
+      final theme = Theme.of(context);
+      return Theme(
+        data: theme.copyWith(textTheme: theme.textTheme.apply(fontFamilyFallback: const ['Noori'])),
+        child: DefaultTextStyle.merge(style: const TextStyle(fontFamilyFallback: ['Noori']), child: child),
+      );
+    });
 
 class _ErrorView extends StatelessWidget {
   final String message;
@@ -9070,53 +9069,60 @@ class _CalendarLegend extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = UserThemeService.isDarkMode();
-    final items = [
-      (isDark ? SoftPalette.emerald750 : SoftPalette.green100m, 'Present', null, false, false),
-      (isDark ? SoftPalette.red800 : SoftPalette.pink100m, 'Absent', null, false, false),
-      (isDark ? SoftPalette.slate800 : SoftPalette.gray100, 'Sunday', null, false, false),
-      (isDark ? SoftPalette.slate750 : SoftPalette.teal100m, 'Holiday', Icons.flag_rounded, false, false),
-      (isDark ? SoftPalette.amber750m : SoftPalette.yellow100, 'Islamic Holiday', Icons.nightlight_round, false, false),
-      (isDark ? SoftPalette.emerald350 : SoftPalette.emerald750, 'PTM Joined', null, true, true),
-      (SoftPalette.red500, 'PTM Missed', null, true, false),
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // Refined non-neon theme colours for both light and dark modes.
+    final presentBg = isDark ? const Color(0xFF142B24) : c.successBg;
+    final presentBorder = isDark ? const Color(0xFF234B3D) : c.success.withValues(alpha: 0.4);
+    final presentFg = isDark ? const Color(0xFFCBD5E1) : c.success;
+
+    final absentBg = isDark ? const Color(0xFF2C191B) : c.dangerBg;
+    final absentBorder = isDark ? const Color(0xFF4A2529) : c.danger.withValues(alpha: 0.4);
+    final absentFg = isDark ? const Color(0xFFFCA5A5) : c.danger;
+
+    final leaveBg = isDark ? const Color(0xFF152338) : c.infoBg;
+    final leaveBorder = isDark ? const Color(0xFF223859) : c.info.withValues(alpha: 0.4);
+    final leaveFg = isDark ? const Color(0xFF93C5FD) : c.info;
+
+    final holidayBg = isDark ? const Color(0xFF2A2318) : c.brandSoft;
+    final holidayBorder = isDark ? const Color(0xFF483A24) : c.brand.withValues(alpha: 0.4);
+    final holidayFg = isDark ? const Color(0xFFFDE68A) : c.brand;
+
+    final islamicBg = isDark ? const Color(0xFF2D2416) : c.warningBg;
+    final islamicBorder = isDark ? const Color(0xFF4E3D1F) : c.warning.withValues(alpha: 0.4);
+    final islamicFg = isDark ? const Color(0xFFFDE68A) : c.warning;
+
+    final ptmPresentDot = isDark ? const Color(0xFF4ADE80) : c.success;
+    final ptmMissedDot = isDark ? const Color(0xFFF87171) : c.danger;
+
+    final items = <(Color, Color, Color, String, bool)>[
+      (presentBg, presentBorder, presentFg, urdu ? 'حاضر' : 'Present', false),
+      (absentBg, absentBorder, absentFg, urdu ? 'غیر حاضر' : 'Absent', false),
+      (leaveBg, leaveBorder, leaveFg, urdu ? 'رخصت' : 'Leave', false),
+      (holidayBg, holidayBorder, holidayFg, urdu ? 'چھٹی' : 'Holiday', false),
+      (islamicBg, islamicBorder, islamicFg, urdu ? 'اسلامی تہوار' : 'Islamic holiday', false),
+      (ptmPresentDot, ptmPresentDot, ptmPresentDot, urdu ? 'پی ٹی ایم: شریک' : 'PTM attended', true),
+      (ptmMissedDot, ptmMissedDot, ptmMissedDot, urdu ? 'پی ٹی ایم: غیر حاضر' : 'PTM missed', true),
     ];
     return Wrap(
       spacing: 12,
       runSpacing: 8,
-      children: items.map((t) {
-        final isPtm = t.$4;
-        final ptmJoined = t.$5;
-        Widget indicator;
-        if (isPtm) {
-          indicator = Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-            decoration: BoxDecoration(
-              color: t.$1,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              ptmJoined ? (context.isUrdu ? 'شامل' : 'JOINED') : (context.isUrdu ? 'شامل نہیں' : 'MISSED'),
-              style: const TextStyle(fontSize: 6.5, fontWeight: FontWeight.bold, color: SoftPalette.gray50),
-            ),
-          );
-        } else {
-          indicator = Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(color: t.$1, borderRadius: BorderRadius.circular(3)),
-            alignment: Alignment.center,
-            child: t.$3 != null ? Icon(t.$3, size: 6, color: isDark ? SoftPalette.teal300 : SoftPalette.teal550) : null,
-          );
-        }
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            indicator,
-            const SizedBox(width: 4),
-            Text(context.t(t.$2), style: TextStyle(fontSize: 10, color: isDark ? SoftPalette.slate350 : SoftPalette.gray350, fontWeight: FontWeight.bold)),
-          ],
-        );
-      }).toList(),
+      children: [
+        for (final (bg, borderCol, fg, label, isDot) in items)
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            isDot
+                ? Container(width: 7, height: 7, decoration: BoxDecoration(color: fg, shape: BoxShape.circle))
+                : Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(4), border: Border.all(color: borderCol)),
+                  ),
+            const SizedBox(width: 5),
+            Text(label, style: TextStyle(fontSize: 11.5, color: c.textSecondary, fontFamily: urdu ? 'Noori' : null)),
+          ]),
+      ],
     );
   }
 }
@@ -9133,8 +9139,12 @@ class _AttendanceCalendar extends StatelessWidget {
   final DateTime? joinDate;
   final String? branchId;
 
+  /// False inside a card that already has a frame (no box inside a box).
+  final bool framed;
+
   const _AttendanceCalendar({
     super.key,
+    this.framed = true,
     required this.studentId,
     required this.logs,
     required this.year,
@@ -9149,7 +9159,7 @@ class _AttendanceCalendar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = UserThemeService.isDarkMode();
+    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode();
     final now = DateTime.now();
     final firstDay = DateTime(year, month, 1);
     final daysInMonth = DateTime(year, month + 1, 0).day;
@@ -9160,54 +9170,48 @@ class _AttendanceCalendar extends StatelessWidget {
     final activeHijri = IslamicCalendarHelper.fromGregorian(selectedDate);
     final hijriDateStr = activeHijri.format(isUrdu: context.isUrdu);
 
+    final c = context.comfort;
     return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-        boxShadow: [BoxShadow(color: isDark ? SoftPalette.gray900A26 : SoftPalette.gray900.withValues(alpha: 0.04), blurRadius: 12)],
-      ),
+      padding: framed ? const EdgeInsets.all(12) : EdgeInsets.zero,
+      decoration: framed
+          ? BoxDecoration(
+              color: c.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: c.border),
+            )
+          : null,
       child: Column(
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            margin: const EdgeInsets.only(bottom: 14),
-            decoration: BoxDecoration(
-              color: SoftPalette.yellow300.withValues(alpha: isDark ? 0.16 : 0.10),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: SoftPalette.yellow300.withValues(alpha: 0.35)),
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(color: c.surfaceSunken, borderRadius: BorderRadius.circular(14)),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('🌙', style: TextStyle(fontSize: 13)),
-                const SizedBox(width: 8),
+                Icon(Icons.nightlight_round, size: 14, color: c.textMuted),
+                const SizedBox(width: 6),
                 Text(
                   hijriDateStr,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? SoftPalette.yellow150 : SoftPalette.orange600,
-                    fontFamily: context.isUrdu ? 'Noori' : null,
-                  ),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c.textSecondary, fontFamily: context.isUrdu ? 'Noori' : null),
                 ),
               ],
             ),
           ),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: dayHeaders.map((d) => Text(d, style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.slate350 : SoftPalette.gray350, fontWeight: FontWeight.bold))).toList(),
+            children: dayHeaders
+                .map((d) => Expanded(child: Center(child: Text(d, style: TextStyle(fontSize: 11, color: c.textMuted, fontWeight: FontWeight.w700)))))
+                .toList(),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 8),
           GridView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 7,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              childAspectRatio: 0.78,
+              mainAxisSpacing: 6,
+              crossAxisSpacing: 6,
+              childAspectRatio: 1,
             ),
             itemCount: daysInMonth + (firstWeekday - 1),
             itemBuilder: (context, index) {
@@ -9258,12 +9262,9 @@ class _AttendanceCalendar extends StatelessWidget {
                 }
               } catch (_) {}
 
-              Color bg = isDark ? SoftPalette.slate900 : SoftPalette.slate100;
-              Color textCol = isDark ? SoftPalette.slate350 : SoftPalette.gray300;
-              bool ptmAttended = statusData?['ptm'] == true;
+              final c = context.comfort;
+              final ptmAttended = statusData?['ptm'] == true;
               final isSunday = date.weekday == DateTime.sunday;
-              bool isAbsent = false;
-
               final att = statusData?['attendance']?.toString().toLowerCase().trim();
               final leaveStatus = statusData?['leaveStatus']?.toString().toLowerCase().trim();
               final isLeave = att == 'leave' ||
@@ -9275,187 +9276,87 @@ class _AttendanceCalendar extends StatelessWidget {
                               leaveStatus != 'declined' &&
                               leaveStatus != 'cancelled')));
 
-              if (isHoliday) {
-                bg = isIslamicHoliday && holidayDoc == null
-                    ? (isDark ? SoftPalette.amber750m : SoftPalette.yellow100)
-                    : (isDark ? SoftPalette.slate750 : SoftPalette.teal100m);
-                textCol = isIslamicHoliday && holidayDoc == null
-                    ? (isDark ? SoftPalette.amber200 : SoftPalette.orange500)
-                    : (isDark ? SoftPalette.teal300 : SoftPalette.teal550);
-              } else if (isBeforeJoin) {
-                bg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-                textCol = isDark ? SoftPalette.slate600 : SoftPalette.gray300;
-                isAbsent = false;
-              } else if (att == 'present') {
-                bg = isDark ? SoftPalette.emerald750 : SoftPalette.green100m;
-                textCol = isDark ? SoftPalette.green300 : SoftPalette.green550;
-              } else if (isLeave) {
-                bg = isDark ? SoftPalette.amber800 : SoftPalette.amber100m;
-                textCol = isDark ? SoftPalette.amber200 : SoftPalette.orange400;
-                isAbsent = false;
-              } else if (att == 'absent') {
-                bg = isDark ? SoftPalette.red800 : SoftPalette.pink100m;
-                textCol = isDark ? SoftPalette.red350 : SoftPalette.red500;
-                isAbsent = true;
-              } else if (isPast && !isSunday) {
-                bg = isDark ? SoftPalette.red800 : SoftPalette.pink100m;
-                textCol = isDark ? SoftPalette.red350 : SoftPalette.red500;
-                isAbsent = true;
-              } else if (isSunday) {
-                bg = isDark ? SoftPalette.slate800 : SoftPalette.gray100;
-                textCol = isDark ? SoftPalette.slate550 : SoftPalette.gray350;
-              }
+              // Calm, elegant theme colours without any harsh neon glare in dark mode.
+              Color bg = c.surfaceSunken;
+              Color fg = c.textMuted;
+              Color? cellBorder;
+              String? hint;
 
-              BoxDecoration decoration = BoxDecoration(
-                color: bg,
-                borderRadius: BorderRadius.circular(12),
-                border: isSelectedDate
-                    ? Border.all(color: isDark ? SoftPalette.teal300 : ParentReportCard.primaryColor, width: 2.5)
-                    : (isLeave
-                        ? Border.all(color: SoftPalette.amber300.withValues(alpha: 0.5), width: 1.2)
-                        : (isAbsent
-                            ? Border.all(color: SoftPalette.red500.withValues(alpha: 0.5), width: 1.2)
-                            : (isToday ? Border.all(color: ParentReportCard.accentColor.withValues(alpha: 0.5), width: 1.5) : (isDark ? Border.all(color: SoftPalette.slate700, width: 0.8) : null)))),
-              );
-              
-              if (isHoliday) {
-                final isIslamicSpecial = holidayDoc == null && isIslamicHoliday;
-                final holidayColor = isIslamicSpecial
-                    ? (isDark ? SoftPalette.amber200 : SoftPalette.orange500)
-                    : (isDark ? SoftPalette.teal300 : SoftPalette.teal550);
-                final holidayLabel = isIslamicSpecial
+              if (isBeforeJoin) {
+                bg = Colors.transparent;
+                fg = c.textMuted.withValues(alpha: 0.4);
+              } else if (isHoliday) {
+                final islamicOnly = isIslamicHoliday && holidayDoc == null;
+                bg = isDark
+                    ? (islamicOnly ? const Color(0xFF2D2416) : const Color(0xFF2A2318))
+                    : (islamicOnly ? c.warningBg : c.brandSoft);
+                cellBorder = isDark
+                    ? (islamicOnly ? const Color(0xFF4E3D1F) : const Color(0xFF483A24))
+                    : null;
+                fg = isDark
+                    ? const Color(0xFFFDE68A)
+                    : (islamicOnly ? c.warning : c.brand);
+                hint = islamicOnly
                     ? (context.isUrdu ? islamicEvent.titleUr : islamicEvent.titleEn)
-                    : (context.isUrdu ? 'تعطیل' : 'Holiday');
-
-                return GestureDetector(
-                  onTap: () => onDateSelected(date),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: bg,
-                      borderRadius: BorderRadius.circular(12),
-                      border: isSelectedDate
-                          ? Border.all(color: isDark ? SoftPalette.teal300 : ParentReportCard.primaryColor, width: 2.5)
-                          : Border.all(color: holidayColor.withValues(alpha: 0.35), width: 1.0),
-                    ),
-                    child: Stack(
-                      children: [
-                        Positioned(
-                          top: 2,
-                          right: 2,
-                          child: isIslamicSpecial
-                              ? Text(islamicEvent.emoji, style: const TextStyle(fontSize: 8.5))
-                              : Icon(Icons.flag_rounded, size: 10, color: holidayColor),
-                        ),
-                        Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text('$day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: holidayColor)),
-                              const SizedBox(height: 2),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(
-                                  holidayLabel,
-                                  style: TextStyle(fontSize: 6, fontWeight: FontWeight.w900, color: holidayColor, fontFamily: context.isUrdu ? 'Noori' : null),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
+                    : (holidayDoc?['name']?.toString() ?? (context.isUrdu ? 'چھٹی' : 'Holiday'));
+              } else if (att == 'present') {
+                bg = isDark ? const Color(0xFF142B24) : c.successBg;
+                cellBorder = isDark ? const Color(0xFF234B3D) : null;
+                fg = isDark ? const Color(0xFFE2E8F0) : c.success;
+              } else if (isLeave) {
+                bg = isDark ? const Color(0xFF152338) : c.infoBg;
+                cellBorder = isDark ? const Color(0xFF223859) : null;
+                fg = isDark ? const Color(0xFF93C5FD) : c.info;
+              } else if (att == 'absent' || (isPast && !isSunday)) {
+                bg = isDark ? const Color(0xFF2C191B) : c.dangerBg;
+                cellBorder = isDark ? const Color(0xFF4A2529) : null;
+                fg = isDark ? const Color(0xFFFCA5A5) : c.danger;
+              } else if (isSunday) {
+                bg = Colors.transparent;
+                fg = c.textMuted;
               }
 
-              if (isPtm && isPast && !isBeforeJoin) {
-                return GestureDetector(
-                  onTap: () => onDateSelected(date),
-                  child: Container(
-                    decoration: decoration,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(height: 4),
-                        Text('$day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textCol)),
-                        const SizedBox(height: 4),
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                            margin: const EdgeInsets.only(bottom: 2),
-                            decoration: BoxDecoration(
-                              color: ptmAttended ? (isDark ? SoftPalette.emerald350 : SoftPalette.emerald750) : SoftPalette.red500,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              ptmAttended ? (context.isUrdu ? 'شامل' : 'JOINED') : (context.isUrdu ? 'شامل نہیں' : 'MISSED'),
-                              style: const TextStyle(fontSize: 7.5, fontWeight: FontWeight.bold, color: SoftPalette.gray50),
-                            ),
-                          ),
-                        ),
-                      ],
+              Color? dot;
+              if (isPtm && !isBeforeJoin) {
+                dot = isPast
+                    ? (ptmAttended
+                        ? (isDark ? const Color(0xFF4ADE80) : c.success)
+                        : (isDark ? const Color(0xFFF87171) : c.danger))
+                    : (isDark ? const Color(0xFF60A5FA) : c.info);
+                hint = isPast
+                    ? (ptmAttended ? (context.isUrdu ? 'پی ٹی ایم: شریک' : 'PTM: attended') : (context.isUrdu ? 'پی ٹی ایم: شریک نہیں' : 'PTM: missed'))
+                    : (context.isUrdu ? 'پی ٹی ایم' : 'PTM');
+              }
+
+              final cell = Container(
+                decoration: BoxDecoration(
+                  color: bg,
+                  borderRadius: BorderRadius.circular(8),
+                  border: isSelectedDate
+                      ? Border.all(color: isDark ? const Color(0xFFE2E8F0) : c.brand, width: 1.8)
+                      : (isToday
+                          ? Border.all(color: (isDark ? const Color(0xFF94A3B8) : c.brand).withValues(alpha: 0.6), width: 1.2)
+                          : (cellBorder != null ? Border.all(color: cellBorder, width: 1) : null)),
+                ),
+                child: Stack(alignment: Alignment.center, children: [
+                  Text(
+                    '$day',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: isSelectedDate || isToday ? FontWeight.w700 : FontWeight.w500,
+                      color: fg,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
-                );
-              }
-
-              if (isPtm && !isPast && !isBeforeJoin) {
-                return GestureDetector(
-                  onTap: () => onDateSelected(date),
-                  child: _PulsingPtmCell(
-                    day: day,
-                    textCol: isToday ? (isDark ? SoftPalette.teal300 : ParentReportCard.primaryColor) : (isDark ? SoftPalette.slate350 : SoftPalette.gray500),
-                    isSelected: isSelectedDate,
-                  ),
-                );
-              }
-
+                  if (dot != null)
+                    Positioned(bottom: 4, child: Container(width: 5, height: 5, decoration: BoxDecoration(color: dot, shape: BoxShape.circle))),
+                  if (isHoliday && dot == null)
+                    Positioned(top: 3, right: 3, child: Icon(Icons.flag_rounded, size: 9, color: fg)),
+                ]),
+              );
               return GestureDetector(
                 onTap: () => onDateSelected(date),
-                child: Container(
-                  decoration: decoration,
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('$day', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textCol)),
-                            if (isLeave) ...[
-                              const SizedBox(height: 1),
-                              Text(
-                                context.isUrdu ? 'رخصت' : 'LEAVE',
-                                style: TextStyle(
-                                  fontSize: 6.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: isDark ? SoftPalette.amber200 : SoftPalette.orange400,
-                                  fontFamily: context.isUrdu ? 'Noori' : null,
-                                ),
-                              ),
-                            ] else if (isAbsent) ...[
-                              const SizedBox(height: 1),
-                              Text(
-                                context.isUrdu ? 'غائب' : 'ABSENT',
-                                style: TextStyle(
-                                  fontSize: 6.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: context.adapt(SoftPalette.red500),
-                                  fontFamily: context.isUrdu ? 'Noori' : null,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                child: hint == null ? cell : Tooltip(message: hint, child: cell),
               );
             },
           ),

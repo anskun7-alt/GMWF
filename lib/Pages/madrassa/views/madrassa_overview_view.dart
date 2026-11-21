@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:gmwf/design/tokens/soft_palette.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:gmwf_ui/gmwf_ui.dart' show GIcons;
 import '../../../services/local_storage_service.dart';
 import '../widgets/student_progress_dialog.dart';
+import '../widgets/madrassa_erp.dart';
 import 'audit_log_view.dart';
 import '../madrassa_strings.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -156,9 +157,6 @@ class MadrassaOverviewView extends ConsumerWidget {
   }
 
   Widget _buildDailyProgressSummary(BuildContext context, List<Map<String, dynamic>> activeStudents, Map<String, dynamic> logData) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-
     int present = 0;
     int lateCount = 0;
     int absent = 0;
@@ -216,128 +214,34 @@ class MadrassaOverviewView extends ConsumerWidget {
         ? (context.isUrdu ? 'حاضر: $present ($lateCount تاخیر)' : 'Present: $present ($lateCount Late)')
         : (context.isUrdu ? 'حاضر: $present' : 'Present: $present');
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: theme.cardColor,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: theme.dividerColor.withValues(alpha: isDark ? 0.5 : 0.7)),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
+    return MadrassaCard(
+      icon: Icons.auto_graph_rounded,
+      title: context.isUrdu ? 'روزانہ کی کارکردگی کا خلاصہ' : 'Daily Progress Summary',
+      subtitle: context.isUrdu ? 'حاضری اور آج کے اسباق کی تازہ ترین تفصیلات' : 'Live attendance & memorization progress for today',
+      trailing: totalLinesToday > 0
+          ? Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: c.success.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: c.success.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.bolt_rounded, color: c.success, size: 14),
+                  const SizedBox(width: 4),
+                  Text(
+                    context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines today',
+                    style: GText.caption(c.success).copyWith(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            )
+          : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final isNarrow = constraints.maxWidth < 420;
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(Icons.auto_graph_rounded, color: Theme.of(context).colorScheme.primary, size: 20),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              context.isUrdu ? 'روزانہ کی کارکردگی کا خلاصہ' : 'Daily Progress Summary',
-                              overflow: TextOverflow.ellipsis,
-                              style: context.urduStyle(
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              context.isUrdu ? 'حاضری اور آج کے اسباق کی تازہ ترین تفصیلات' : 'Live attendance & memorization progress for today',
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                color: isDark ? SoftPalette.gray50A60 : SoftPalette.slate550,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (totalLinesToday > 0 && !isNarrow) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.3)),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.bolt_rounded, color: context.adapt(SoftPalette.emerald350), size: 14),
-                              const SizedBox(width: 4),
-                              Text(
-                                context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: context.adapt(SoftPalette.emerald550),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  if (totalLinesToday > 0 && isNarrow) ...[
-                    const SizedBox(height: 10),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: context.adapt(SoftPalette.emerald350).withValues(alpha: 0.3)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.bolt_rounded, color: context.adapt(SoftPalette.emerald350), size: 14),
-                          const SizedBox(width: 4),
-                          Text(
-                            context.isUrdu ? '+$totalLinesToday لائنیں' : '+$totalLinesToday lines today',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: context.adapt(SoftPalette.emerald550),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: 16),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -355,9 +259,9 @@ class MadrassaOverviewView extends ConsumerWidget {
                 ),
             ],
           ),
-          const SizedBox(height: 20),
-          Divider(height: 1, color: context.adapt(SoftPalette.slate150)),
           const SizedBox(height: 16),
+          Divider(height: 1, color: c.border),
+          const SizedBox(height: 14),
           Text(
             context.isUrdu
                 ? (LocalStorageService.isMadrassaNazraOnly(branchId)
@@ -366,15 +270,9 @@ class MadrassaOverviewView extends ConsumerWidget {
                 : (LocalStorageService.isMadrassaNazraOnly(branchId)
                     ? 'Today\'s Nazra Reading Updates'
                     : (nazraStudentsCount > 0 ? 'Today\'s Lesson & Progress Updates' : 'Today\'s Memorization Updates')),
-            style: context.urduStyle(
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate700,
-              ),
-            ),
+            style: GText.body2Bold(c.textPrimary).copyWith(fontFamilyFallback: const ['Noori']),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           if (progressList.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 14.0),
@@ -382,13 +280,13 @@ class MadrassaOverviewView extends ConsumerWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.history_toggle_off_rounded, color: context.adapt(SoftPalette.gray300), size: 18),
+                    Icon(Icons.history_toggle_off_rounded, color: c.textMuted, size: 18),
                     const SizedBox(width: 8),
                     Flexible(
                       child: Text(
                         context.isUrdu ? 'آج ابھی تک کوئی کارکردگی درج نہیں ہوئی۔' : 'No daily progress updates recorded yet today.',
                         textAlign: TextAlign.center,
-                        style: context.urduStyle(style: TextStyle(color: context.adapt(SoftPalette.gray350), fontSize: 12.5)),
+                        style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
                       ),
                     ),
                   ],
@@ -400,7 +298,7 @@ class MadrassaOverviewView extends ConsumerWidget {
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
               itemCount: progressList.length,
-              separatorBuilder: (_, __) => Divider(height: 1, color: context.adapt(SoftPalette.slate100)),
+              separatorBuilder: (_, __) => Divider(height: 1, color: c.border),
               itemBuilder: (context, idx) {
                 final p = progressList[idx];
                 return Padding(
@@ -414,13 +312,13 @@ class MadrassaOverviewView extends ConsumerWidget {
                             width: 32,
                             height: 32,
                             decoration: BoxDecoration(
-                              color: context.adapt(SoftPalette.teal550).withValues(alpha: 0.1),
+                              color: c.brandSoft,
                               shape: BoxShape.circle,
                             ),
                             child: Center(
                               child: Text(
                                 (p['name'] as String).isNotEmpty ? (p['name'] as String)[0].toUpperCase() : '?',
-                                style: TextStyle(fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.teal550), fontSize: 13),
+                                style: GText.body2Bold(c.brand),
                               ),
                             ),
                           ),
@@ -430,11 +328,11 @@ class MadrassaOverviewView extends ConsumerWidget {
                             children: [
                               Text(
                                 '${p['name']}',
-                                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: isDark ? SoftPalette.gray50 : SoftPalette.slate900),
+                                style: GText.body2Bold(c.textPrimary).copyWith(fontFamilyFallback: const ['Noori']),
                               ),
                               Text(
                                 'Roll #${p['rollNumber']}${p['isNazra'] == true ? (context.isUrdu ? ' • ناظرہ' : ' • Nazra') : (context.isUrdu ? ' • حفظ' : ' • Hifz')}',
-                                style: TextStyle(fontSize: 11, color: isDark ? SoftPalette.gray50A54 : SoftPalette.slate550),
+                                style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
                               ),
                             ],
                           ),
@@ -445,18 +343,19 @@ class MadrassaOverviewView extends ConsumerWidget {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                             decoration: BoxDecoration(
-                              color: context.adapt(SoftPalette.emerald100),
+                              color: c.successBg,
                               borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: c.success.withValues(alpha: 0.3)),
                             ),
                             child: Text(
                               '+${p['diff']} lines',
-                              style: TextStyle(color: context.adapt(SoftPalette.emerald600), fontWeight: FontWeight.bold, fontSize: 11.5),
+                              style: GText.caption(c.success).copyWith(fontWeight: FontWeight.bold, fontFeatures: const [FontFeature.tabularFigures()]),
                             ),
                           ),
                           const SizedBox(width: 10),
                           Text(
                             'Total: ${p['currentLines']}',
-                            style: TextStyle(fontSize: 11.5, color: isDark ? SoftPalette.gray50A60 : SoftPalette.gray500, fontWeight: FontWeight.w500),
+                            style: GText.caption(c.textMuted).copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
                           ),
                         ],
                       ),
@@ -631,7 +530,6 @@ class MadrassaOverviewView extends ConsumerWidget {
           subtitle: context.isUrdu ? 'ہفتہ وار سب سے زیادہ حفظ کرنے والے' : 'Highest weekly memorization gain',
           students: topPerformers,
           isGood: true,
-          gradient: [Theme.of(context).colorScheme.primary, Color.lerp(Theme.of(context).colorScheme.primary, Colors.black, 0.18)!],
         );
 
         final worstCard = _buildInsightsCard(
@@ -640,7 +538,6 @@ class MadrassaOverviewView extends ConsumerWidget {
           subtitle: context.isUrdu ? 'کم رفتار یا اضافی مدد کے ضرورت مند' : 'Slow pace or requiring teacher support',
           students: struggling,
           isGood: false,
-          gradient: const [SoftPalette.red600, SoftPalette.red550],
         );
 
         if (isMobile) {
@@ -670,98 +567,36 @@ class MadrassaOverviewView extends ConsumerWidget {
     required String subtitle,
     required List<Map<String, dynamic>> students,
     required bool isGood,
-    required List<Color> gradient,
   }) {
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: gradient,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+    final c = context.comfort;
+    final tone = isGood ? c.success : c.danger;
+
+    return MadrassaCard(
+      tone: tone,
+      icon: isGood ? Icons.stars_rounded : Icons.warning_amber_rounded,
+      title: title,
+      subtitle: subtitle,
+      trailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: tone.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(10),
         ),
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: gradient.first.withValues(alpha: 0.35),
-            blurRadius: 14,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        child: Text(
+          '${students.length} ${context.isUrdu ? 'طلبہ' : 'Students'}',
+          style: GText.caption(tone).copyWith(fontWeight: FontWeight.bold, fontFamilyFallback: const ['Noori']),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: SoftPalette.gray50.withValues(alpha: 0.2),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        isGood ? Icons.stars_rounded : Icons.warning_amber_rounded,
-                        color: SoftPalette.gray50,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            title,
-                            style: const TextStyle(
-                              fontSize: 14.5,
-                              fontWeight: FontWeight.bold,
-                              color: SoftPalette.gray50,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          Text(
-                            subtitle,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: SoftPalette.gray50.withValues(alpha: 0.8),
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: SoftPalette.gray50.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  '${students.length} ${context.isUrdu ? 'طلبہ' : 'Students'}',
-                  style: const TextStyle(fontSize: 11, color: SoftPalette.gray50, fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
           if (students.isEmpty)
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
+              padding: const EdgeInsets.symmetric(vertical: 20),
               child: Center(
                 child: Text(
                   context.isUrdu ? 'کوئی ڈیٹا موجود نہیں' : 'No data available',
-                  style: const TextStyle(color: SoftPalette.gray50A70, fontSize: 12),
+                  style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
                 ),
               ),
             )
@@ -777,7 +612,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                   onTap: () => _showStudentProgressDialog(context, std),
                   borderRadius: BorderRadius.circular(10),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8.0),
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6.0),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -789,48 +624,47 @@ class MadrassaOverviewView extends ConsumerWidget {
                                 height: 24,
                                 decoration: BoxDecoration(
                                   color: isGood && idx == 0
-                                      ? SoftPalette.amber200
-                                      : SoftPalette.gray50.withValues(alpha: 0.22),
+                                      ? c.warningBg
+                                      : tone.withValues(alpha: 0.12),
                                   shape: BoxShape.circle,
                                 ),
                                 child: Center(
                                   child: Text(
                                     '${idx + 1}',
                                     style: TextStyle(
-                                      color: isGood && idx == 0 ? SoftPalette.orange700 : SoftPalette.gray50,
+                                      color: isGood && idx == 0 ? c.warning : tone,
                                       fontSize: 11.5,
                                       fontWeight: FontWeight.bold,
+                                      fontFeatures: const [FontFeature.tabularFigures()],
                                     ),
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 12),
+                              const SizedBox(width: 10),
                               Expanded(
-                                child: Text(
+                                child: MadrassaUrduAwareText(
                                   std['name']?.toString() ?? '',
-                                  style: const TextStyle(
-                                    fontSize: 13.5,
-                                    fontWeight: FontWeight.bold,
-                                    color: SoftPalette.gray50,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
+                                  color: c.textPrimary,
+                                  size: 13.5,
+                                  bold: true,
                                 ),
                               ),
                             ],
                           ),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                           decoration: BoxDecoration(
-                            color: SoftPalette.gray50.withValues(alpha: 0.25),
+                            color: tone.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
-                            '+$progress ${context.isUrdu ? 'لائنیں' : 'lines'}',
-                            style: const TextStyle(
+                            isGood ? '+$progress ${context.isUrdu ? 'لائنیں' : 'lines'}' : '$progress ${context.isUrdu ? 'لائنیں' : 'lines'}',
+                            style: TextStyle(
                               fontSize: 11.5,
                               fontWeight: FontWeight.bold,
-                              color: SoftPalette.gray50,
+                              color: tone,
+                              fontFeatures: const [FontFeature.tabularFigures()],
                             ),
                           ),
                         ),
@@ -847,6 +681,7 @@ class MadrassaOverviewView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.comfort;
     final configAsync = ref.watch(madrassaConfigProvider(branchId));
     final studentsAsync = ref.watch(madrassaStudentsProvider(branchId));
     final logsAsync = ref.watch(madrassaAllLogsProvider(branchId));
@@ -855,25 +690,25 @@ class MadrassaOverviewView extends ConsumerWidget {
 
     return configAsync.when(
       loading: () => Center(
-        child: CircularProgressIndicator(color: context.adapt(SoftPalette.teal550)),
+        child: CircularProgressIndicator(color: c.brand),
       ),
       error: (e, st) => Center(child: Text('Error loading config: $e')),
       data: (config) {
         return studentsAsync.when(
           loading: () => Center(
-            child: CircularProgressIndicator(color: context.adapt(SoftPalette.teal550)),
+            child: CircularProgressIndicator(color: c.brand),
           ),
           error: (e, st) => Center(child: Text('Error loading students: $e')),
           data: (allStudents) {
             return logsAsync.when(
               loading: () => Center(
-                child: CircularProgressIndicator(color: context.adapt(SoftPalette.teal550)),
+                child: CircularProgressIndicator(color: c.brand),
               ),
               error: (e, st) => Center(child: Text('Error loading logs: $e')),
               data: (allLogs) {
                 return dailyLogAsync.when(
                   loading: () => Center(
-                    child: CircularProgressIndicator(color: context.adapt(SoftPalette.teal550)),
+                    child: CircularProgressIndicator(color: c.brand),
                   ),
                   error: (e, st) => Center(child: Text('Error loading daily log: $e')),
                   data: (logData) {
@@ -909,7 +744,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                       onRefresh: () async {
                         await MadrassaLocalStorage.downloadStudents(branchId, force: true);
                         final now = DateTime.now();
-                        await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
+                        await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month, force: true);
                         await MadrassaLocalStorage.downloadHolidays(branchId);
                         await MadrassaLocalStorage.downloadTeachers(branchId);
                         await MadrassaLocalStorage.downloadTeacherAttendance(branchId, dateKey);
@@ -917,25 +752,65 @@ class MadrassaOverviewView extends ConsumerWidget {
                         ref.invalidate(madrassaAllLogsProvider(branchId));
                         ref.invalidate(madrassaDailyLogProvider((branchId: branchId, dateKey: dateKey)));
                       },
-                      child: SingleChildScrollView(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _buildWelcomeHeader(context),
-                            const SizedBox(height: 24),
-                            _buildRealtimeStatGrid(context, ref),
-                            const SizedBox(height: 24),
-                            _buildDailyProgressSummary(context, activeStudents, logData),
-                            const SizedBox(height: 24),
-                            _buildInsightsGrid(context, bestStudents, worstStudents),
-                            const SizedBox(height: 24),
-                            _buildQuickActions(context),
-                            const SizedBox(height: 24),
-                            _buildRecentActivity(context),
-                          ],
-                        ),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          final isDesktop = constraints.maxWidth >= 980;
+                          final pad = MadrassaErp.narrow(context) ? 14.0 : 20.0;
+
+                          return SingleChildScrollView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: EdgeInsets.all(pad),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _buildWelcomeHeader(context),
+                                const SizedBox(height: 18),
+                                _buildRealtimeStatGrid(context, ref),
+                                const SizedBox(height: 18),
+                                if (isDesktop) ...[
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      // Left Column: Academic Momentum & Progress
+                                      Expanded(
+                                        flex: 7,
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            _buildDailyProgressSummary(context, activeStudents, logData),
+                                            const SizedBox(height: 18),
+                                            _buildInsightsGrid(context, bestStudents, worstStudents),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 18),
+                                      // Right Column: Operations & Activity
+                                      Expanded(
+                                        flex: 5,
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            _buildQuickActions(context),
+                                            const SizedBox(height: 18),
+                                            _buildRecentActivity(context),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ] else ...[
+                                  _buildDailyProgressSummary(context, activeStudents, logData),
+                                  const SizedBox(height: 18),
+                                  _buildInsightsGrid(context, bestStudents, worstStudents),
+                                  const SizedBox(height: 18),
+                                  _buildQuickActions(context),
+                                  const SizedBox(height: 18),
+                                  _buildRecentActivity(context),
+                                ],
+                              ],
+                            ),
+                          );
+                        },
                       ),
                     );
                   },
@@ -957,152 +832,106 @@ class MadrassaOverviewView extends ConsumerWidget {
       formattedDate = DateFormat.yMMMMEEEEd().format(DateTime.now());
     }
 
-    return Container(
-      width: double.infinity,
+    final c = context.comfort;
+    final isMobile = MadrassaErp.narrow(context);
+
+    final dateChip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [SoftPalette.emerald700, SoftPalette.teal550, SoftPalette.emerald500],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: SoftPalette.teal550.withValues(alpha: 0.35),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
+        color: c.surfaceSunken,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.calendar_today_rounded, size: 13, color: c.brand),
+          const SizedBox(width: 6),
+          Text(
+            formattedDate,
+            style: GText.caption(c.textPrimary).copyWith(
+              fontWeight: FontWeight.w600,
+              fontFamilyFallback: const ['Noori'],
+            ),
           ),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final isMobile = constraints.maxWidth < kMobileBreakpoint;
+    );
 
-          final mosqueBadge = Container(
-            width: 58,
-            height: 58,
-            decoration: BoxDecoration(
-              color: SoftPalette.gray50.withValues(alpha: 0.18),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.25), width: 1.5),
-            ),
-            child: const Center(
-              child: Icon(
-                Icons.mosque_rounded,
-                color: SoftPalette.gray50,
-                size: 32,
-              ),
-            ),
-          );
-
-          final titleText = Text(
-            context.l.overviewTitle,
-            style: context.urduStyle(
-              style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: SoftPalette.gray50,
-                letterSpacing: -0.5,
-              ),
-            ),
-          );
-
-          final subtitleText = Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(
-                  color: SoftPalette.emerald300,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Principal Executive Dashboard • Branch Overview',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: SoftPalette.gray50.withValues(alpha: 0.9),
-                  ),
-                ),
-              ),
-            ],
-          );
-
-          final dateChip = Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: SoftPalette.gray50.withValues(alpha: 0.18),
-              borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: SoftPalette.gray50.withValues(alpha: 0.2), width: 1),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.calendar_today_rounded,
-                  color: SoftPalette.gray50,
-                  size: 14,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  formattedDate,
-                  style: context.urduStyle(
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: SoftPalette.gray50,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-
-          if (isMobile) {
-            return Column(
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 14 : 20, vertical: isMobile ? 12 : 16),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: MadrassaErp.cardRadius,
+        border: Border.all(color: c.border),
+      ),
+      child: isMobile
+          ? Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    mosqueBadge,
-                    const SizedBox(width: 16),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: c.brand.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(Icons.mosque_rounded, color: c.brand, size: 22),
+                    ),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          titleText,
-                          const SizedBox(height: 2),
-                          subtitleText,
+                          Text(
+                            context.l.overviewTitle,
+                            style: GText.body1Bold(c.textPrimary).copyWith(fontSize: 16, fontFamilyFallback: const ['Noori']),
+                          ),
+                          Text(
+                            context.isUrdu ? 'پرنسپل ایگزیکٹو ڈیش بورڈ' : 'Principal Executive Dashboard',
+                            style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
+                          ),
                         ],
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 10),
                 dateChip,
               ],
-            );
-          } else {
-            return Row(
+            )
+          : Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Expanded(
                   child: Row(
                     children: [
-                      mosqueBadge,
-                      const SizedBox(width: 18),
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: c.brand.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(Icons.mosque_rounded, color: c.brand, size: 24),
+                      ),
+                      const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            titleText,
-                            const SizedBox(height: 4),
-                            subtitleText,
+                            Text(
+                              context.l.overviewTitle,
+                              style: GText.h3(c.textPrimary).copyWith(fontSize: 18, fontFamilyFallback: const ['Noori']),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              context.isUrdu ? 'پرنسپل ایگزیکٹو ڈیش بورڈ • برانچ کا جائزہ' : 'Principal Executive Dashboard • Branch Overview',
+                              style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
+                            ),
                           ],
                         ),
                       ),
@@ -1112,37 +941,27 @@ class MadrassaOverviewView extends ConsumerWidget {
                 const SizedBox(width: 16),
                 dateChip,
               ],
-            );
-          }
-        },
-      ),
+            ),
     );
   } // End of _buildWelcomeHeader
 
   // Rewritten realtime stat grid with individual StreamBuilders and placeholders
   Widget _buildRealtimeStatGrid(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-
     // Helper placeholder card
     Widget placeholderCard(String label) {
+      final c = context.comfort;
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: theme.cardColor,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: SoftPalette.gray900.withValues(alpha: 0.04),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
+          color: c.surface,
+          borderRadius: MadrassaErp.cardRadius,
+          border: Border.all(color: c.border),
         ),
         child: Center(
           child: SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(strokeWidth: 2, color: theme.primaryColor),
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: c.brand),
           ),
         ),
       );
@@ -1430,44 +1249,30 @@ class MadrassaOverviewView extends ConsumerWidget {
     double hue, {
     String? badge,
     VoidCallback? onTap,
+    Color? customAccent,
   }) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final isMobile = GBreakpoint.isMobile(context);
-
-    // Derived HSL colors
-    final accentColor = HSLColor.fromAHSL(1.0, hue, 0.75, 0.46).toColor();
-    final bgTint = HSLColor.fromAHSL(1.0, hue, 0.70, 0.94).toColor();
+    final c = context.comfort;
+    final isMobile = MadrassaErp.narrow(context);
+    final accentColor = customAccent ??
+        (hue == 160
+            ? c.success
+            : (hue == 170
+                ? c.info
+                : (hue == 210
+                    ? c.brand
+                    : (hue == 35 ? c.warning : (hue == 0 ? c.danger : c.brand)))));
 
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        splashColor: accentColor.withValues(alpha: 0.12),
-        highlightColor: accentColor.withValues(alpha: 0.06),
-        child: Ink(
-          padding: EdgeInsets.all(isMobile ? 12 : 18),
+        borderRadius: MadrassaErp.cardRadius,
+        child: Container(
+          padding: EdgeInsets.all(isMobile ? 12 : 14),
           decoration: BoxDecoration(
-            color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.gray900.withValues(alpha: isDark ? 0.3 : 0.04),
-                blurRadius: 14,
-                offset: const Offset(0, 4),
-              ),
-              if (onTap != null)
-                BoxShadow(
-                  color: accentColor.withValues(alpha: isDark ? 0.08 : 0.03),
-                  blurRadius: 10,
-                  offset: const Offset(0, 2),
-                ),
-            ],
-            border: Border.all(
-              color: isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.slate150,
-              width: 1.2,
-            ),
+            color: c.surface,
+            borderRadius: MadrassaErp.cardRadius,
+            border: Border.all(color: c.border),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1477,28 +1282,22 @@ class MadrassaOverviewView extends ConsumerWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Container(
-                    padding: EdgeInsets.all(isMobile ? 7 : 10),
+                    width: 34,
+                    height: 34,
                     decoration: BoxDecoration(
-                      color: isDark ? accentColor.withValues(alpha: 0.22) : bgTint,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: accentColor.withValues(alpha: isDark ? 0.4 : 0.2),
-                        width: 1,
-                      ),
+                      color: accentColor.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Icon(icon, color: accentColor, size: isMobile ? 18 : 22),
+                    child: Icon(icon, color: accentColor, size: 18),
                   ),
                   if (badge != null)
                     Flexible(
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: isDark ? SoftPalette.gray50.withValues(alpha: 0.08) : SoftPalette.slate100,
+                          color: c.surfaceSunken,
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: isDark ? SoftPalette.gray50A10 : SoftPalette.slate150,
-                            width: 0.75,
-                          ),
+                          border: Border.all(color: c.border),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
@@ -1508,10 +1307,10 @@ class MadrassaOverviewView extends ConsumerWidget {
                                 badge,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: isMobile ? 9.5 : 10.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate600,
+                                style: GText.caption(c.textMuted).copyWith(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  fontFamilyFallback: const ['Noori'],
                                 ),
                               ),
                             ),
@@ -1519,8 +1318,8 @@ class MadrassaOverviewView extends ConsumerWidget {
                               const SizedBox(width: 3),
                               Icon(
                                 Icons.arrow_forward_ios_rounded,
-                                size: isMobile ? 7.5 : 9,
-                                color: isDark ? SoftPalette.gray50A38 : SoftPalette.slate350,
+                                size: 8,
+                                color: c.textMuted,
                               ),
                             ],
                           ],
@@ -1539,11 +1338,12 @@ class MadrassaOverviewView extends ConsumerWidget {
                       fit: BoxFit.scaleDown,
                       child: Text(
                         value,
-                        style: TextStyle(
-                          fontSize: isMobile ? 20 : 23,
-                          fontWeight: FontWeight.w800,
+                        style: GText.h2(c.textPrimary).copyWith(
+                          fontSize: isMobile ? 19 : 22,
+                          fontWeight: FontWeight.bold,
                           letterSpacing: -0.5,
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                          fontFamilyFallback: const ['Noori'],
                         ),
                       ),
                     ),
@@ -1555,12 +1355,9 @@ class MadrassaOverviewView extends ConsumerWidget {
                             label,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: isMobile ? 11 : 12,
-                                color: isDark ? SoftPalette.slate350 : SoftPalette.slate550,
-                                fontWeight: FontWeight.w600,
-                              ),
+                            style: GText.caption(c.textMuted).copyWith(
+                              fontSize: isMobile ? 11 : 12,
+                              fontFamilyFallback: const ['Noori'],
                             ),
                           ),
                         ),
@@ -1577,8 +1374,7 @@ class MadrassaOverviewView extends ConsumerWidget {
   }
 
   Widget _buildQuickActions(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final c = context.comfort;
 
     // Enumerate quick actions and their navigation destinations
     final actions = [
@@ -1631,13 +1427,7 @@ class MadrassaOverviewView extends ConsumerWidget {
       children: [
         Text(
           context.l.todayActions,
-          style: context.urduStyle(
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-            ),
-          ),
+          style: GText.h3(c.textPrimary).copyWith(fontSize: 18, fontFamilyFallback: const ['Noori']),
         ),
         const SizedBox(height: 16),
         LayoutBuilder(
@@ -1660,7 +1450,7 @@ class MadrassaOverviewView extends ConsumerWidget {
                   crossAxisCount: 2,
                   crossAxisSpacing: 16,
                   mainAxisSpacing: 16,
-                  mainAxisExtent: 88,
+                  mainAxisExtent: 80,
                 ),
                 itemCount: actions.length,
                 itemBuilder: (context, idx) {
@@ -1675,43 +1465,37 @@ class MadrassaOverviewView extends ConsumerWidget {
   }
 
   Widget _quickActionCard(BuildContext context, _QuickActionItem item) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-
-    final accentColor = HSLColor.fromAHSL(1.0, item.hue, 0.70, 0.45).toColor();
-    final bgTint = HSLColor.fromAHSL(1.0, item.hue, 0.70, 0.94).toColor();
+    final c = context.comfort;
+    final tone = item.hue == 160
+        ? c.success
+        : (item.hue == 170
+            ? c.info
+            : (item.hue == 35 ? c.warning : c.brand));
 
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: item.onTap,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: MadrassaErp.cardRadius,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
-            color: theme.cardColor,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: isDark ? SoftPalette.gray50A10 : SoftPalette.slate150, width: 1),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
+            color: c.surface,
+            borderRadius: MadrassaErp.cardRadius,
+            border: Border.all(color: c.border),
           ),
           child: Row(
             children: [
               Container(
-                width: 48,
-                height: 48,
+                width: 42,
+                height: 42,
                 decoration: BoxDecoration(
-                  color: isDark ? accentColor.withValues(alpha: 0.2) : bgTint,
-                  borderRadius: BorderRadius.circular(14),
+                  color: tone.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                child: Icon(item.icon, color: accentColor, size: 24),
+                child: Icon(item.icon, color: tone, size: 22),
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1719,34 +1503,23 @@ class MadrassaOverviewView extends ConsumerWidget {
                   children: [
                     Text(
                       item.title,
-                      style: context.urduStyle(
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                        ),
-                      ),
+                      style: GText.body1Bold(c.textPrimary).copyWith(fontSize: 14, fontFamilyFallback: const ['Noori']),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       item.subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: context.urduStyle(
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate550,
-                        ),
-                      ),
+                      style: GText.caption(c.textMuted).copyWith(fontSize: 11.5, fontFamilyFallback: const ['Noori']),
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 8),
               Icon(
-                Icons.arrow_forward_ios_rounded,
-                size: 14,
-                color: isDark ? SoftPalette.gray50A54 : SoftPalette.slate350,
+                GIcons.chevronRight,
+                size: 16,
+                color: c.textMuted,
               ),
             ],
           ),
@@ -1756,8 +1529,7 @@ class MadrassaOverviewView extends ConsumerWidget {
   }
 
   Widget _buildRecentActivity(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final c = context.comfort;
 
     return ValueListenableBuilder(
       valueListenable: Hive.box(LocalStorageService.auditLogsBox).listenable(),
@@ -1782,135 +1554,102 @@ class MadrassaOverviewView extends ConsumerWidget {
         });
         final docs = logs.take(10).toList();
 
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: theme.dividerColor.withValues(alpha: isDark ? 0.5 : 0.7)),
-            boxShadow: [
-              BoxShadow(
-                color: SoftPalette.gray900.withValues(alpha: isDark ? 0.2 : 0.04),
-                blurRadius: 16,
-                offset: const Offset(0, 6),
-              ),
-            ],
+        return MadrassaCard(
+          icon: Icons.history_rounded,
+          title: context.l.auditLog,
+          subtitle: context.isUrdu ? 'حالیہ سسٹم سرگرمیاں' : 'Recent audit & system activity',
+          trailing: TextButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => AuditLogView(branchId: branchId),
+                ),
+              );
+            },
+            icon: const Icon(Icons.arrow_forward_rounded, size: 14),
+            label: Text(context.isUrdu ? 'تمام لاگز' : 'View All', style: GText.caption(c.brand).copyWith(fontWeight: FontWeight.bold)),
+            style: TextButton.styleFrom(
+              foregroundColor: c.brand,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              minimumSize: const Size(0, 30),
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    context.l.auditLog,
-                    style: context.urduStyle(
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                      ),
-                    ),
-                  ),
-                  Icon(Icons.history_rounded, color: isDark ? SoftPalette.gray50A54 : SoftPalette.teal550),
-                ],
-              ),
-              const SizedBox(height: 20),
-              if (docs.isEmpty)
-                Padding(
+          child: docs.isEmpty
+              ? Padding(
                   padding: const EdgeInsets.symmetric(vertical: 24.0),
                   child: Center(
                     child: Column(
                       children: [
-                        Icon(Icons.event_note_rounded, size: 36, color: context.adapt(SoftPalette.gray300)),
+                        Icon(Icons.event_note_rounded, size: 36, color: c.textMuted.withValues(alpha: 0.5)),
                         const SizedBox(height: 8),
                         Text(
                           context.isUrdu ? 'کوئی حالیہ سرگرمی ریکارڈ نہیں ہے' : 'No recent activity logs recorded yet',
-                          style: context.urduStyle(style: TextStyle(color: context.adapt(SoftPalette.gray350), fontSize: 13.5)),
+                          style: GText.caption(c.textMuted).copyWith(fontFamilyFallback: const ['Noori']),
                         ),
                       ],
                     ),
                   ),
                 )
-              else ...[
-                ...List.generate(docs.length, (index) {
-                  final doc = docs[index];
-                  final log = doc;
-                  final editor = (log['editor'] ?? log['userName'] ?? log['user'] ?? 'System').toString();
-                  final role = (log['role'] ?? log['userRole'] ?? '').toString();
-                  final message = (log['message'] ?? log['action'] ?? log['details'] ?? log['note'] ?? 'Activity recorded').toString();
-                  final timestampObj = log['timestamp'] ?? log['date'] ?? log['createdAt'];
+              : Column(
+                  children: [
+                    ...List.generate(docs.length, (index) {
+                      final doc = docs[index];
+                      final log = doc;
+                      final editor = (log['editor'] ?? log['userName'] ?? log['user'] ?? 'System').toString();
+                      final role = (log['role'] ?? log['userRole'] ?? '').toString();
+                      final message = (log['message'] ?? log['action'] ?? log['details'] ?? log['note'] ?? 'Activity recorded').toString();
+                      final timestampObj = log['timestamp'] ?? log['date'] ?? log['createdAt'];
 
-                  DateTime? timestamp;
-                  if (timestampObj is Timestamp) {
-                    timestamp = timestampObj.toDate();
-                  } else if (timestampObj is String) {
-                    timestamp = DateTime.tryParse(timestampObj);
-                  }
+                      DateTime? timestamp;
+                      if (timestampObj is Timestamp) {
+                        timestamp = timestampObj.toDate();
+                      } else if (timestampObj is String) {
+                        timestamp = DateTime.tryParse(timestampObj);
+                      }
 
-                  final timeStr = timestamp != null ? _formatRelativeTime(timestamp) : '';
+                      final timeStr = timestamp != null ? _formatRelativeTime(timestamp) : '';
 
-                  String title = editor;
-                  IconData icon = Icons.info_outline;
-                  Color color = context.adapt(SoftPalette.teal550);
+                      String title = editor;
+                      IconData icon = Icons.info_outline;
+                      Color color = c.brand;
 
-                  final type = log['type'] ?? '';
-                  if (type == 'ptm_reschedule') {
-                    icon = Icons.notification_important_rounded;
-                    color = context.adapt(SoftPalette.red400);
-                  } else if (type == 'daily_log_edit') {
-                    icon = Icons.edit_calendar_rounded;
-                    color = context.adapt(SoftPalette.teal550);
-                  } else if (type == 'status_change') {
-                    icon = Icons.swap_horiz_rounded;
-                    color = context.adapt(SoftPalette.amber300);
-                  } else if (type == 'config_change') {
-                    icon = Icons.settings_rounded;
-                    color = context.adapt(SoftPalette.sky500);
-                  } else if (type == 'student_enrollment') {
-                    icon = Icons.person_add_rounded;
-                    color = context.adapt(SoftPalette.emerald350);
-                  } else if (type == 'student_edit') {
-                    icon = Icons.edit_note_rounded;
-                    color = context.adapt(SoftPalette.indigo500);
-                  }
+                      final type = log['type'] ?? '';
+                      if (type == 'ptm_reschedule') {
+                        icon = Icons.notification_important_rounded;
+                        color = c.danger;
+                      } else if (type == 'daily_log_edit') {
+                        icon = Icons.edit_calendar_rounded;
+                        color = c.brand;
+                      } else if (type == 'status_change') {
+                        icon = Icons.swap_horiz_rounded;
+                        color = c.warning;
+                      } else if (type == 'config_change') {
+                        icon = Icons.settings_rounded;
+                        color = c.info;
+                      } else if (type == 'student_enrollment') {
+                        icon = Icons.person_add_rounded;
+                        color = c.success;
+                      } else if (type == 'student_edit') {
+                        icon = Icons.edit_note_rounded;
+                        color = c.brand;
+                      }
 
-                  final isLast = index == docs.length - 1;
+                      final isLast = index == docs.length - 1;
 
-                  return _buildActivityTimelineItem(
-                    context: context,
-                    title: title,
-                    message: message,
-                    timeStr: timeStr,
-                    timestamp: timestamp,
-                    icon: icon,
-                    color: color,
-                    isLast: isLast,
-                    role: role,
-                  );
-                }),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.center,
-                  child: TextButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (context) => AuditLogView(branchId: branchId),
-                        ),
+                      return _buildActivityTimelineItem(
+                        context: context,
+                        title: title,
+                        message: message,
+                        timeStr: timeStr,
+                        timestamp: timestamp,
+                        icon: icon,
+                        color: color,
+                        isLast: isLast,
+                        role: role,
                       );
-                    },
-                    icon: const Icon(Icons.arrow_forward_rounded, size: 14),
-                    label: Text(context.isUrdu ? 'تمام لاگز دیکھیں' : 'View All Logs', style: const TextStyle(fontWeight: FontWeight.bold)),
-                    style: TextButton.styleFrom(
-                      foregroundColor: context.adapt(SoftPalette.teal550),
-                    ),
-                  ),
+                    }),
+                  ],
                 ),
-              ],
-            ],
-          ),
         );
       },
     );
@@ -1927,10 +1666,10 @@ class MadrassaOverviewView extends ConsumerWidget {
     required bool isLast,
     required String role,
   }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.comfort;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1938,21 +1677,21 @@ class MadrassaOverviewView extends ConsumerWidget {
           Column(
             children: [
               Container(
-                width: 32,
-                height: 32,
+                width: 30,
+                height: 30,
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.12),
                   shape: BoxShape.circle,
                   border: Border.all(color: color.withValues(alpha: 0.3), width: 1.2),
                 ),
-                child: Icon(icon, color: color, size: 16),
+                child: Icon(icon, color: color, size: 15),
               ),
               if (!isLast)
                 Container(
                   width: 2,
-                  height: 38,
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  color: isDark ? SoftPalette.gray50A12 : SoftPalette.slate150,
+                  height: 36,
+                  margin: const EdgeInsets.symmetric(vertical: 3),
+                  color: c.border,
                 ),
             ],
           ),
@@ -1960,14 +1699,11 @@ class MadrassaOverviewView extends ConsumerWidget {
           // Right column: Content card
           Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               decoration: BoxDecoration(
-                color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: isDark ? SoftPalette.slate700 : SoftPalette.slate150,
-                  width: 1,
-                ),
+                color: c.surfaceSunken,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: c.border),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1979,24 +1715,14 @@ class MadrassaOverviewView extends ConsumerWidget {
                       Expanded(
                         child: Text(
                           title,
-                          style: context.urduStyle(
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12.5,
-                              color: isDark ? SoftPalette.gray50 : SoftPalette.slate900,
-                            ),
-                          ),
+                          style: GText.body2Bold(c.textPrimary).copyWith(fontFamilyFallback: const ['Noori']),
                         ),
                       ),
                       if (timeStr.isNotEmpty) ...[
                         const SizedBox(width: 6),
                         Text(
                           timeStr,
-                          style: TextStyle(
-                            color: isDark ? SoftPalette.gray50A54 : SoftPalette.slate350,
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w500,
-                          ),
+                          style: GText.caption(c.textMuted).copyWith(fontSize: 10.5),
                         ),
                       ],
                     ],
@@ -2022,17 +1748,11 @@ class MadrassaOverviewView extends ConsumerWidget {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 4),
                   // Message Body
                   Text(
                     message,
-                    style: context.urduStyle(
-                      style: TextStyle(
-                        color: isDark ? SoftPalette.slate200 : SoftPalette.slate600,
-                        fontSize: 11.5,
-                        height: 1.4,
-                      ),
-                    ),
+                    style: GText.body2(c.textSecondary).copyWith(fontSize: 11.5, height: 1.35, fontFamilyFallback: const ['Noori']),
                   ),
                 ],
               ),

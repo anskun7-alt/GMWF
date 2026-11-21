@@ -25,6 +25,8 @@ import 'dart:async';
 
 import '../madrassa_strings.dart';
 import 'package:gmwf_ui/gmwf_ui.dart' show GIcons;
+import 'package:gmwf_ui/gmwf_ui.dart' as ui show GComfortColors;
+import '../widgets/madrassa_erp.dart';
 import '../../../design/design_system.dart';
 import '../../../services/user_theme_service.dart';
 
@@ -66,44 +68,35 @@ class _DailyLogViewState extends ConsumerState<DailyLogView> {
   bool _allPresentToggled = false;
   bool _allUniformToggled = false;
   bool _allRepliedToggled = false;
-  // Student notifiers to allow isolated rebuilding of student cards
-  final Map<String, ValueNotifier<Map<String, dynamic>>> _studentNotifiers = {};
-  // Counter to trigger legend and save button rebuilds
+  // Bumped on every edit, decision and save: the register rebuilds from it.
   final ValueNotifier<int> _changeNotifier = ValueNotifier(0);
-  final ScrollController _calendarScrollController = ScrollController();
-  final ScrollController _verticalScrollController = ScrollController();
-  final GlobalKey _calendarKey = GlobalKey();
-  bool _hasInitialScrollDone = false;
-  bool _showBackToTop = false;
   bool? _localAllowStudentLeave;
   String get _effectiveBranch => MadrassaLocalStorage.normalizeBranch(widget.branchId);
 
   @override
   void initState() {
     super.initState();
-    _verticalScrollController.addListener(() {
-      final show = _verticalScrollController.offset > 300;
-      if (show != _showBackToTop) {
-        setState(() {
-          _showBackToTop = show;
-        });
-      }
-    });
-    _calendarScrollController.addListener(() {
-      if (mounted) setState(() {});
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollToSelectedDate(animate: false);
-    });
-
     // Initialise streams/downloads for the initially selected date
     _updateDateStreams();
+    // Leave requests are listed for last, this and next month: fetch next month's
+    // days too (guardians ask ahead of time).
+    final now = DateTime.now();
+    final next = DateTime(now.year, now.month + 1, 1);
+    if (_downloadDue('logs|$_effectiveBranch|${next.year}-${next.month}', const Duration(minutes: 2))) {
+      MadrassaLocalStorage.downloadLogsForMonth(_effectiveBranch, next.year, next.month);
+    }
   }
+
+  Widget? _publishedSlot;
 
   @override
   void dispose() {
-    _calendarScrollController.dispose();
-    _verticalScrollController.dispose();
+    // Take our controls out of the hub bar (only if they are still ours).
+    if (_publishedSlot != null && identical(MadrassaHubSlot.toolbar.value, _publishedSlot)) {
+      MadrassaHubSlot.toolbar.value = null;
+    }
+    _searchCtrl.dispose();
+    _changeNotifier.dispose();
     super.dispose();
   }
 
@@ -178,105 +171,45 @@ class _DailyLogViewState extends ConsumerState<DailyLogView> {
     return date;
   }
 
-  void _scrollToSelectedDate({bool animate = true}) {
-    if (!_calendarScrollController.hasClients) return;
-    final context = _calendarKey.currentContext;
-    if (context == null) return;
-
-    final RenderBox? renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox == null) return;
-
-    final viewportWidth = renderBox.size.width;
-    if (viewportWidth <= 0) return;
-
-    final daysInMonth = DateTime(_selectedDate.year, _selectedDate.month + 1, 0).day;
-    const itemWidth = 68.0; // 60 width + 8 horizontal margin (4 each side)
-    const listPadding = 16.0; // padding at start of list
-
-    final index = _selectedDate.day - 1;
-    final itemCenter = listPadding + (index * itemWidth) + (itemWidth / 2);
-    final targetOffset = itemCenter - (viewportWidth / 2);
-
-    final maxScroll = (listPadding * 2) + (daysInMonth * itemWidth) - viewportWidth;
-    final clampedOffset = targetOffset.clamp(0.0, maxScroll < 0 ? 0.0 : maxScroll);
-
-    if (animate) {
-      _calendarScrollController.animateTo(
-        clampedOffset,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
-    } else {
-      _calendarScrollController.jumpTo(clampedOffset);
-    }
-  }
-
   Future<void> _saveChanges() async {
     if (_localChanges.isEmpty) return;
     setState(() => _isSaving = true);
 
-    // Validation for sabki and manzil fields: both Para and Ratio must be provided together.
-    for (var entry in _localChanges.entries) {
-      final data = entry.value;
-      
-      // Sabki validation
-      final int sabkiPara = data['sabkiPara'] is int ? data['sabkiPara'] : 0;
-      final String? sabkiRatio = data['sabkiRatio']?.toString();
-      final bool hasSabkiRatio = sabkiRatio != null && sabkiRatio.isNotEmpty && sabkiRatio != '-';
-      
-      if (hasSabkiRatio && sabkiRatio != 'nahi_sunaya' && sabkiPara == 0) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Sabki: Para must be selected for ratio $sabkiRatio.')),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
-      if (sabkiPara > 0 && !hasSabkiRatio) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Sabki: Ratio must be selected for Para $sabkiPara.')),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
+    // Para and amount go together for Sabqi, Manzil and Ruku. Only the pairs edited
+    // now are checked, against what the screen shows (saved value + this edit).
+    final logData = _currentDbLog();
+    String nameOf(String sId) {
+      final cached = MadrassaLocalStorage.getStudentCached(_effectiveBranch, sId);
+      final n = (cached?['name'] ?? '').toString();
+      return n.isEmpty ? sId : n;
+    }
 
-      // Manzil validation
-      final int manzilPara = data['manzilPara'] is int ? data['manzilPara'] : 0;
-      final String? manzilRatio = data['manzilRatio']?.toString();
-      final bool hasManzilRatio = manzilRatio != null && manzilRatio.isNotEmpty && manzilRatio != '-';
-      
-      if (hasManzilRatio && manzilRatio != 'nahi_sunaya' && manzilPara == 0) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Manzil: Para must be selected for ratio $manzilRatio.')),
-        );
-        setState(() => _isSaving = false);
-        return;
+    String? problem;
+    for (final entry in _localChanges.entries) {
+      final delta = entry.value;
+      final v = _viewOf(entry.key, logData);
+      for (final (label, paraKey, ratioKey) in const [
+        ('Sabqi', 'sabkiPara', 'sabkiRatio'),
+        ('Manzil', 'manzilPara', 'manzilRatio'),
+        ('Ruku', 'rukuPara', 'ruku'),
+      ]) {
+        if (!delta.containsKey(paraKey) && !delta.containsKey(ratioKey)) continue;
+        final para = _asInt(v[paraKey]);
+        final ratio = v[ratioKey]?.toString();
+        final hasRatio = ratio != null && ratio.isNotEmpty && ratio != '-' && ratio != '0';
+        if (hasRatio && ratio != 'nahi_sunaya' && para == 0) {
+          problem = '$label (${nameOf(entry.key)}): choose the Para too.';
+        } else if (para > 0 && !hasRatio) {
+          problem = '$label (${nameOf(entry.key)}): choose how much was heard for Para $para.';
+        }
+        if (problem != null) break;
       }
-      if (manzilPara > 0 && !hasManzilRatio) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Manzil: Ratio must be selected for Para $manzilPara.')),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
-
-      // Ruku validation
-      final int rukuPara = data['rukuPara'] is int ? data['rukuPara'] : (int.tryParse(data['rukuPara']?.toString() ?? '') ?? 0);
-      final String? rukuVal = data['ruku']?.toString();
-      final bool hasRuku = rukuVal != null && rukuVal.isNotEmpty && rukuVal != '-';
-      if (hasRuku && rukuVal != 'nahi_sunaya' && rukuPara == 0) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Ruku: Para must be selected for $rukuVal Ruku.')),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
-      if (rukuPara > 0 && !hasRuku) {
-        AppToast.showSnackBar(context, 
-          SnackBar(content: Text('Ruku: Please select Ruku count for Para $rukuPara.')),
-        );
-        setState(() => _isSaving = false);
-        return;
-      }
+      if (problem != null) break;
+    }
+    if (problem != null) {
+      AppToast.showSnackBar(context, SnackBar(content: Text(problem)));
+      setState(() => _isSaving = false);
+      return;
     }
 
     try {
@@ -338,15 +271,15 @@ class _DailyLogViewState extends ConsumerState<DailyLogView> {
       // Trigger background upload if online
       SyncService().triggerUpload();
 
+      if (!mounted) return;
       setState(() {
-  _localChanges = {};
-  _isSaving = false;
-  _allPresentToggled = false;
-  _allUniformToggled = false;
-  _allRepliedToggled = false;
-  _studentNotifiers.clear();
-});
-_changeNotifier.value++;
+        _localChanges = {};
+        _isSaving = false;
+        _allPresentToggled = false;
+        _allUniformToggled = false;
+        _allRepliedToggled = false;
+      });
+      _changeNotifier.value++;
       if (mounted) {
         AppToast.showSnackBar(context, 
           SnackBar(content: Text(context.l.savedSuccess)),
@@ -373,27 +306,17 @@ _changeNotifier.value++;
     return {};
   }
 
-  // Update local changes silently (isolated rebuilds)
+  // Records ONE changed field. Unsaved edits hold only the fields this user
+  // changed: they used to start as a copy of the student's whole saved entry, so
+  // "Save" (and "All present" / "All replied", which touch every student) sent
+  // this PC's older Sabak/Sabqi/Manzil back to the cloud over another PC's entry.
   void _updateLocalSilent(String sId, String key, dynamic value) {
-    if (!_localChanges.containsKey(sId)) {
-      final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-      final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
-      final dbLog = _safeMap(logData[sId]);
-      _localChanges[sId] = Map<String, dynamic>.from(dbLog);
-    }
-    _localChanges[sId]![key] = value;
-    if (_studentNotifiers.containsKey(sId)) {
-      _studentNotifiers[sId]!.value =
-          Map<String, dynamic>.from(_localChanges[sId]!);
-    }
+    (_localChanges[sId] ??= <String, dynamic>{})[key] = value;
     _changeNotifier.value++;
   }
 
   void _updateSabakLines(String sId, int newSabak) {
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
-    final dbLog = _safeMap(logData[sId]);
-    final currentLocal = _localChanges[sId] ?? dbLog;
+    final currentLocal = _viewOf(sId);
 
     final studentCache = MadrassaLocalStorage.getStudentCached(_effectiveBranch, sId);
     final initialCurrentLines = (studentCache?['currentLines'] as num?)?.toInt() ?? 0;
@@ -418,31 +341,17 @@ _changeNotifier.value++;
     _updateLocalSilent(sId, 'currentLines', currentLines);
   }
 
+  /// Approve / deny from the student editor: saved at once, like the bell.
   void _decideLeaveSilent(String sId, {required bool approve}) {
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
-    final current = _localChanges[sId] ?? _safeMap(logData[sId]);
-    final nowIso = DateTime.now().toUtc().toIso8601String();
-    final reqAt = current['leaveRequestedAt'] ?? current['timestamp'];
-
-    _updateLocalSilent(sId, 'attendance', approve ? 'leave' : 'absent');
-    _updateLocalSilent(sId, 'leaveStatus', approve ? 'approved' : 'denied');
-    _updateLocalSilent(sId, 'isParentRequested', false);
-    _updateLocalSilent(sId, 'leaveDecidedAt', nowIso);
-    _updateLocalSilent(sId, 'leaveDecidedBy', widget.editorName);
-    if (reqAt != null) {
-      _updateLocalSilent(sId, 'leaveDecidedFor', reqAt);
-    }
-    _updateLocalSilent(sId, 'uniform', approve ? 'leave' : false);
-    _updateLocalSilent(sId, 'isLate', false);
-    _updateLocalSilent(sId, 'timing', 'on_time');
-    _updateLocalSilent(sId, 'arrivalTime', null);
+    final student = MadrassaLocalStorage.getStudentCached(_effectiveBranch, sId) ?? <String, dynamic>{'id': sId};
+    unawaited(_decideLeaveNow(
+      _LeaveRequest(dateKey: _dateKey, studentId: sId, student: student, log: _viewOf(sId)),
+      approve: approve,
+    ));
   }
 
   void _updateAttendanceSilent(String sId, String value) {
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final logData = ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey))).value ?? {};
-    final current = _localChanges[sId] ?? _safeMap(logData[sId]);
+    final current = _viewOf(sId);
     final prevAtt = (current['attendance'] ?? '').toString().toLowerCase().trim();
     final prevLeaveStatus = (current['leaveStatus'] ?? '').toString().toLowerCase().trim();
     final hadPendingOrApprovedLeave = prevAtt == 'leave_requested' ||
@@ -523,7 +432,7 @@ _changeNotifier.value++;
                     : ListView.separated(
                         shrinkWrap: true,
                         itemCount: claims.length,
-                        separatorBuilder: (_, __) => const Divider(),
+                        separatorBuilder: (_, _) => const Divider(),
                         itemBuilder: (context, index) {
                           final claim = claims[index];
                           final sId = claim['id'];
@@ -602,1556 +511,2007 @@ _changeNotifier.value++;
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final isDesktop = GBreakpoint.isDesktop(context);
-    
-    final configAsyncValue = ref.watch(madrassaConfigProvider(_effectiveBranch));
-    final holidaysAsyncValue = ref.watch(madrassaHolidaysProvider(_effectiveBranch));
-    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final filteredStudentsAsyncValue = ref.watch(madrassaFilteredStudentsProvider((branchId: _effectiveBranch, selectedDate: _selectedDate)));
-    final logAsyncValue = ref.watch(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateKey)));
+  // ── Register (redesign 2026-11-21) ─────────────────────────────────────────
+  // One dense table row per student instead of one big card each. The full
+  // editor (Qaida, Ruku, photo, PTM claim, parent reply…) opens for a row in a
+  // side panel, dialog or bottom sheet. Leave requests come in through the bell.
 
-    return configAsyncValue.when(
-      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (e, st) => Scaffold(body: Center(child: Text('Error loading config: $e'))),
-      data: (config) {
-        final effectiveAllowLeave = _localAllowStudentLeave ?? config.allowStudentLeave;
-        final ptmDate = getPtmDateFor(_selectedDate.year, _selectedDate.month, config);
-        final isPtmDay = _selectedDate.year == ptmDate.year && _selectedDate.month == ptmDate.month && _selectedDate.day == ptmDate.day;
-        final isReadOnly = !_canSaveData();
+  String? _selectedStudentId;
+  String _searchText = '';
+  String _statusFilter = 'all';
+  final TextEditingController _searchCtrl = TextEditingController();
+  final Set<String> _seenRequestIds = {};
+  bool _requestsPrimed = false;
 
-        // Read holidays from cache
-        final cachedHolidays = holidaysAsyncValue.value ?? [];
-        String? holidayName;
-        for (final h in cachedHolidays) {
-          final dateVal = h['date'];
-          DateTime? d;
-          if (dateVal is String) {
-            d = DateTime.tryParse(dateVal);
-          } else if (dateVal is Timestamp) {
-            d = dateVal.toDate();
-          }
-          if (d != null && d.year == _selectedDate.year && d.month == _selectedDate.month && d.day == _selectedDate.day) {
-            holidayName = h['name'] as String? ?? 'Holiday';
-            break;
-          }
-        }
-        final islamicEvent = IslamicCalendarHelper.getIslamicEvent(_selectedDate);
-        final isIslamicHoliday = islamicEvent != null && islamicEvent.isOfficialHoliday;
-        if (holidayName == null && isIslamicHoliday) {
-          holidayName = context.isUrdu ? islamicEvent.titleUr : islamicEvent.titleEn;
-        }
-        final isHoliday = holidayName != null;
-        final isSunday = _selectedDate.weekday == DateTime.sunday;
-        final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
+  String get _dateKey => DateFormat('yyyy-MM-dd').format(_selectedDate);
 
-        return Scaffold(
-          backgroundColor: isDark ? SoftPalette.slate900 : SoftPalette.gray50,
-          floatingActionButton: ValueListenableBuilder<int>(
-            valueListenable: _changeNotifier,
-            builder: (context, _, __) {
-              return _buildFabArea(isDesktop) ?? const SizedBox.shrink();
-            },
+  // Notifications (leave requests: badge, dots, request chip) use the theme's
+  // amber accent, not the warning colour; the bell itself stays neutral.
+  ui.GComfortColors get _ds =>
+      Theme.of(context).extension<ui.GComfortColors>() ??
+      (Theme.of(context).brightness == Brightness.dark ? ui.GComfortColors.dark : ui.GComfortColors.light);
+  Color get _amber => _ds.accent;
+  Color get _amberText => Theme.of(context).brightness == Brightness.dark ? _ds.accent : _ds.accentStrong;
+
+  Map<String, dynamic> _currentDbLog() =>
+      ref.read(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: _dateKey))).value ?? {};
+
+  /// What the screen shows for a student: the saved entry with this user's
+  /// unsaved edits on top.
+  Map<String, dynamic> _viewOf(String sId, [Map<String, dynamic>? logData]) {
+    final db = _safeMap((logData ?? _currentDbLog())[sId]);
+    final local = _localChanges[sId];
+    return local == null ? db : {...db, ...local};
+  }
+
+  static bool _isNazraStudent(Map<String, dynamic> s, bool nazraOnly) =>
+      nazraOnly ||
+      s['isNazra'] == true ||
+      s['program']?.toString().toLowerCase() == 'nazra' ||
+      s['class']?.toString().toLowerCase() == 'nazra';
+
+  static const _decidedLeaveStates = {'approved', 'denied', 'declined', 'cancelled'};
+
+  /// A guardian's leave request nobody has answered yet.
+  static bool _isPendingLeave(Map log) {
+    final status = (log['leaveStatus'] ?? '').toString().toLowerCase().trim();
+    if (_decidedLeaveStates.contains(status)) return false;
+    final reason = (log['leaveReason'] ?? '').toString().trim();
+    return ((log['isParentRequested'] == true || log['attendance'] == 'leave_requested') &&
+            (status.isEmpty || status == 'pending')) ||
+        (status == 'pending' && reason.isNotEmpty);
+  }
+
+  static int _asInt(dynamic v) => v is num ? v.toInt() : (int.tryParse(v?.toString() ?? '') ?? 0);
+
+  String _ratioLabel(String? r) {
+    final urdu = context.isUrdu;
+    switch (r) {
+      case '1/4':
+        return urdu ? 'پاؤ' : 'Pao';
+      case '1/2':
+        return urdu ? 'نصف' : 'Nisf';
+      case '3/4':
+        return urdu ? 'ثلاثہ' : 'Salasa';
+      case '1':
+        return urdu ? 'پارہ' : 'Para';
+      case 'nahi_sunaya':
+        return urdu ? 'نہیں سنایا' : 'Not heard';
+    }
+    return '';
+  }
+
+  String _sessionLabel(String s) {
+    final urdu = context.isUrdu;
+    switch (s) {
+      case 'evening':
+        return urdu ? 'شام' : 'Evening';
+      case 'night':
+        return urdu ? 'رات' : 'Night';
+      default:
+        return urdu ? 'صبح' : 'Morning';
+    }
+  }
+
+  // ── Navigation ─────────────────────────────────────────────────────────────
+
+  Future<bool> _confirmDiscard() async {
+    if (_localChanges.isEmpty) return true;
+    final c = context.comfort;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => _urduSafe(AlertDialog(
+        title: Text(context.isUrdu ? 'محفوظ نہ کی گئی تبدیلیاں' : 'Unsaved changes', style: GText.h3(c.textPrimary)),
+        content: Text(
+          context.isUrdu
+              ? '${_localChanges.length} طلباء کی تبدیلیاں محفوظ نہیں ہوئیں۔ چھوڑ دیں؟'
+              : 'Changes for ${_localChanges.length} student(s) are not saved. Discard them?',
+          style: GText.body2(c.textSecondary),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(context.isUrdu ? 'واپس' : 'Keep editing')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: c.danger, foregroundColor: c.onBrand),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(context.isUrdu ? 'چھوڑ دیں' : 'Discard'),
           ),
-          body: Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: Opacity(
-                    opacity: isDark ? 0.085 : 0.11,
-                    child: GDecorativeImage.asset(
-                      'assets/images/islamic_pattern.webp',
-                      fit: BoxFit.cover,
-                      repeat: ImageRepeat.repeat,
-                      color: SoftPalette.yellow300,
-                      colorBlendMode: BlendMode.srcIn,
-                    ),
-                  ),
+        ],
+      )),
+    );
+    return ok == true;
+  }
+
+  Future<void> _goToDate(DateTime d) async {
+    final target = DateTime(d.year, d.month, d.day);
+    if (target == DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day)) return;
+    if (!await _confirmDiscard()) return;
+    if (!mounted) return;
+    setState(() {
+      _selectedDate = target;
+      _localChanges = {};
+      _selectedStudentId = null;
+      _allPresentToggled = false;
+      _allUniformToggled = false;
+      _allRepliedToggled = false;
+    });
+    _changeNotifier.value++;
+    _updateDateStreams();
+  }
+
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(now.year - 3),
+      lastDate: DateTime(now.year + 1, 12, 31),
+    );
+    if (picked != null) await _goToDate(picked);
+  }
+
+  // ── Leave requests (notifications) ────────────────────────────────────────
+
+  List<_LeaveRequest> _collectLeaveRequests(List<Map<String, dynamic>> allStudents) {
+    final now = DateTime.now();
+    final byId = {for (final s in allStudents) (s['id'] ?? '').toString(): s};
+    final out = <_LeaveRequest>[];
+    final seen = <String>{};
+    for (final offset in const [-1, 0, 1]) {
+      final m = DateTime(now.year, now.month + offset, 1);
+      final logs = ref
+              .watch(madrassaMonthlyLogsProvider((branchId: _effectiveBranch, year: m.year, month: m.month)))
+              .value ??
+          const <Map<String, dynamic>>[];
+      for (final day in logs) {
+        final dateKey = (day['dateKey'] ?? day['id'] ?? '').toString();
+        if (dateKey.isEmpty) continue;
+        day.forEach((sId, entry) {
+          if (entry is! Map || !_isPendingLeave(entry)) return;
+          final student = byId[sId];
+          if (student == null) return;
+          final id = '$dateKey|$sId';
+          if (!seen.add(id)) return;
+          out.add(_LeaveRequest(
+            dateKey: dateKey,
+            studentId: sId,
+            student: student,
+            log: Map<String, dynamic>.from(entry),
+          ));
+        });
+      }
+    }
+    out.sort((a, b) {
+      final d = a.dateKey.compareTo(b.dateKey);
+      if (d != 0) return d;
+      return _asInt(a.student['rollNumber']).compareTo(_asInt(b.student['rollNumber']));
+    });
+    return out;
+  }
+
+  /// Shows a short notice when a new request arrives while the screen is open.
+  void _announceNewRequests(List<_LeaveRequest> requests) {
+    final ids = requests.map((r) => r.id).toSet();
+    if (!_requestsPrimed) {
+      _requestsPrimed = true;
+      _seenRequestIds.addAll(ids);
+      return;
+    }
+    final fresh = requests.where((r) => !_seenRequestIds.contains(r.id)).toList();
+    _seenRequestIds
+      ..removeWhere((id) => !ids.contains(id))
+      ..addAll(ids);
+    if (fresh.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final first = fresh.first;
+      final name = (first.student['name'] ?? '').toString();
+      AppToast.showSnackBar(
+        context,
+        SnackBar(
+          content: Text(
+            fresh.length == 1
+                ? (context.isUrdu ? 'رخصت کی نئی درخواست: $name' : 'New leave request: $name')
+                : (context.isUrdu ? '${fresh.length} نئی رخصت کی درخواستیں' : '${fresh.length} new leave requests'),
+          ),
+          action: SnackBarAction(
+            label: context.isUrdu ? 'دیکھیں' : 'Open',
+            onPressed: () => fresh.length == 1 ? _openLeaveRequest(first) : _showLeaveInbox(requests),
+          ),
+        ),
+      );
+    });
+  }
+
+  String _friendlyDate(String dateKey) {
+    final d = DateTime.tryParse(dateKey);
+    if (d == null) return dateKey;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = DateTime(d.year, d.month, d.day).difference(today).inDays;
+    final urdu = context.isUrdu;
+    final base = DateFormat('EEE d MMM').format(d);
+    if (diff == 0) return '${urdu ? 'آج' : 'Today'} · $base';
+    if (diff == 1) return '${urdu ? 'کل (آنے والا)' : 'Tomorrow'} · $base';
+    if (diff == -1) return '${urdu ? 'کل (گزرا)' : 'Yesterday'} · $base';
+    return base;
+  }
+
+  Future<void> _showLeaveInbox(List<_LeaveRequest> requests) async {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final picked = await showDialog<_LeaveRequest>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(Gsp.sp4),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Gr.r5)),
+        child: _urduSafe(ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 560),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(Gsp.sp4, Gsp.sp3, Gsp.sp2, Gsp.sp3),
+              child: Row(children: [
+                Icon(GIcons.notifications, size: 20, color: _amber),
+                const SizedBox(width: Gsp.sp2),
+                Expanded(
+                  child: Text(urdu ? 'رخصت کی درخواستیں' : 'Leave requests', style: GText.body1Bold(c.textPrimary)),
                 ),
-              ),
-              RefreshIndicator(
-                onRefresh: () async {
-                  final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-                  await MadrassaLocalStorage.downloadLogsForMonth(_effectiveBranch, _selectedDate.year, _selectedDate.month);
-                  await MadrassaLocalStorage.downloadStudents(_effectiveBranch, force: false);
-                  ref.invalidate(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: dateStr)));
-                  ref.invalidate(madrassaFilteredStudentsProvider((branchId: _effectiveBranch, selectedDate: _selectedDate)));
-                  if (mounted) setState(() => _studentNotifiers.clear());
-                },
-                child: CustomScrollView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  key: const PageStorageKey('daily_log_scroll'),
-                  controller: _verticalScrollController,
-                  slivers: [
-              SliverToBoxAdapter(
-                child: _buildHeader(config),
-              ),
-              // Holiday summary for the selected month
-              SliverToBoxAdapter(
-                child: _buildHorizontalCalendar(config, cachedHolidays),
-              ),
-              // Pending PTM claims notification banner
-              ValueListenableBuilder<int>(
-                valueListenable: _changeNotifier,
-                builder: (context, _, __) {
-                  final logData = logAsyncValue.value ?? {};
-                  final pendingPtmClaims = <Map<String, dynamic>>[];
-                  final studentsList = filteredStudentsAsyncValue.value ?? [];
-                  for (final s in studentsList) {
-                    final sId = s['id'] ?? '';
-                    final sLog = _localChanges[sId] ?? _safeMap(logData[sId]);
-                    if (sLog['ptmRequestStatus'] == 'claimed') {
-                      pendingPtmClaims.add({
-                        'id': sId,
-                        'name': s['name'] ?? 'Student',
-                        'rollNumber': s['rollNumber'] ?? '?',
-                        'log': sLog,
-                      });
-                    }
-                  }
-
-                  if (pendingPtmClaims.isEmpty || isReadOnly) {
-                    return const SliverToBoxAdapter(child: SizedBox.shrink());
-                  }
-
-                  return SliverToBoxAdapter(
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: context.adapt(SoftPalette.slate100),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: context.adapt(SoftPalette.sky300)),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.people_rounded, color: context.adapt(SoftPalette.blue600)),
-                          const SizedBox(width: 16),
+                if (requests.length > 1)
+                  TextButton.icon(
+                    style: TextButton.styleFrom(foregroundColor: c.success, visualDensity: VisualDensity.compact),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _approveAllLeaves(requests);
+                    },
+                    icon: const Icon(GIcons.checkCircle, size: 16),
+                    label: Text(urdu ? 'سب منظور' : 'Approve all (${requests.length})'),
+                  )
+                else
+                  Text('${requests.length}', style: GText.label(c.textMuted)),
+                IconButton(tooltip: urdu ? 'بند کریں' : 'Close', onPressed: () => Navigator.pop(ctx), icon: const Icon(GIcons.close)),
+              ]),
+            ),
+            Divider(height: 1, color: c.border),
+            if (requests.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(Gsp.sp6),
+                child: AppEmptyState(
+                  icon: GIcons.checkCircle,
+                  title: urdu ? 'کوئی درخواست باقی نہیں' : 'No requests waiting',
+                  subtitle: urdu ? 'والدین کی نئی درخواستیں یہاں آئیں گی۔' : 'New requests from parents show up here.',
+                  compact: true,
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: requests.length,
+                  separatorBuilder: (_, _) => Divider(height: 1, color: c.border),
+                  itemBuilder: (_, i) {
+                    final r = requests[i];
+                    final name = (r.student['name'] ?? '—').toString();
+                    final reason = (r.log['leaveReason'] ?? '').toString().trim();
+                    return InkWell(
+                      onTap: () => Navigator.pop(ctx, r),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: Gsp.sp4, vertical: Gsp.sp2 + 2),
+                        child: Row(children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(color: _amber, shape: BoxShape.circle),
+                          ),
+                          const SizedBox(width: Gsp.sp3),
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  context.isUrdu 
-                                      ? 'پی ٹی ایم کی حاضری کے دعوے زیر التوا ہیں'
-                                      : 'Pending PTM Attendance Claims',
-                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: context.adapt(SoftPalette.blue600)),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  context.isUrdu
-                                      ? '${pendingPtmClaims.length} طلباء نے پی ٹی ایم میں شرکت کا دعویٰ کیا ہے۔ جائزہ لینے کے لیے کلک کریں۔'
-                                      : '${pendingPtmClaims.length} student(s) claimed PTM attendance. Tap to review.',
-                                  style: TextStyle(fontSize: 12, color: context.adapt(SoftPalette.blue550)),
-                                ),
-                              ],
-                            ),
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              MadrassaUrduAwareText(name, color: c.textPrimary),
+                              Row(children: [
+                                Text(_friendlyDate(r.dateKey), style: GText.caption(c.textMuted)),
+                                if (reason.isNotEmpty) ...[
+                                  Text('  ·  ', style: GText.caption(c.textMuted)),
+                                  Flexible(child: MadrassaUrduAwareText(reason, color: c.textMuted, size: 12, bold: false)),
+                                ],
+                              ]),
+                            ]),
                           ),
-                          const SizedBox(width: 12),
-                          ElevatedButton(
-                            onPressed: () {
-                              _showPtmClaimsPopup(context, pendingPtmClaims);
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: SoftPalette.blue500,
-                              foregroundColor: SoftPalette.gray50,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                            child: Text(context.isUrdu ? 'جائزہ لیں' : 'Review'),
-                          ),
-                        ],
+                          Icon(GIcons.chevronRight, size: 18, color: c.textMuted),
+                        ]),
                       ),
-                    ),
-                  );
-                },
-              ),
-              if (isReadOnly)
-                SliverToBoxAdapter(
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: context.adapt(SoftPalette.yellow50),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: context.adapt(SoftPalette.yellow150)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.warning_amber_rounded, color: context.adapt(SoftPalette.orange350)),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            context.isUrdu
-                                ? 'صرف پڑھنے کی حد: آپ صرف موجودہ یا پچھلے مہینے کا ڈیٹا تبدیل اور محفوظ کر سکتے ہیں۔'
-                                : 'Read-Only Mode: You can only edit and save daily log data for the current or previous month.',
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
-                                color: context.adapt(SoftPalette.orange350),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              if (isHoliday)
-                SliverToBoxAdapter(
-                  child: Container(
-                    height: MediaQuery.of(context).size.height - 250,
-                    alignment: Alignment.center,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(24),
-                            decoration: BoxDecoration(
-                              color: islamicEvent != null
-                                  ? context.adapt(SoftPalette.yellow300).withValues(alpha: 0.15)
-                                  : context.adapt(SoftPalette.green100m),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: islamicEvent != null
-                                    ? context.adapt(SoftPalette.yellow300).withValues(alpha: 0.4)
-                                    : context.adapt(SoftPalette.green300),
-                                width: 2,
-                              ),
-                            ),
-                            child: islamicEvent != null
-                                ? Text(islamicEvent.emoji, style: const TextStyle(fontSize: 52))
-                                : Icon(Icons.flag_rounded, size: 64, color: context.adapt(SoftPalette.green500)),
-                          ),
-                          const SizedBox(height: 24),
-                          Text(
-                            holidayName!,
-                            textAlign: TextAlign.center,
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                color: islamicEvent != null
-                                    ? (isDark ? SoftPalette.yellow150 : SoftPalette.orange600)
-                                    : SoftPalette.green600,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            islamicEvent != null
-                                ? (context.isUrdu
-                                    ? '${islamicEvent.descriptionUr} - مبارک ہو!'
-                                    : '${islamicEvent.descriptionEn} - Mubarak!')
-                                : DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate),
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: islamicEvent != null
-                                  ? (isDark ? SoftPalette.amber200 : SoftPalette.orange500)
-                                  : SoftPalette.gray350,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: context.adapt(SoftPalette.green200).withValues(alpha: 0.5),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              () {
-                                final now = DateTime.now();
-                                final isToday = _selectedDate.year == now.year &&
-                                    _selectedDate.month == now.month &&
-                                    _selectedDate.day == now.day;
-                                if (isToday) {
-                                  return context.isUrdu
-                                      ? 'آج مدرسہ بند ہے'
-                                      : 'Madrassa is Closed Today';
-                                } else {
-                                  return context.isUrdu
-                                      ? 'اس دن مدرسہ بند ہے'
-                                      : 'Madrassa is Closed on this Day';
-                                }
-                              }(),
-                              style: context.urduStyle(
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: context.adapt(SoftPalette.green600),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                )
-              else if (isSunday)
-                SliverToBoxAdapter(
-                  child: Container(
-                    height: MediaQuery.of(context).size.height - 250,
-                    alignment: Alignment.center,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(24),
-                            decoration: BoxDecoration(
-                              color: context.adapt(SoftPalette.slate100),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: context.adapt(SoftPalette.sky300), width: 2),
-                            ),
-                            child: Icon(Icons.weekend_rounded, size: 64, color: context.adapt(SoftPalette.blue500)),
-                          ),
-                          const SizedBox(height: 24),
-                          Text(
-                            context.isUrdu ? 'اتوار کی چھٹی' : 'Weekly Holiday (Sunday)',
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                color: context.adapt(SoftPalette.blue600),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate),
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: context.adapt(SoftPalette.gray350),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                )
-              else if (_isFutureDate(_selectedDate))
-                SliverToBoxAdapter(
-                  child: Container(
-                    height: MediaQuery.of(context).size.height - 250,
-                    alignment: Alignment.center,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            isPtmDay ? Icons.people_outline : Icons.calendar_today_outlined,
-                            size: 64,
-                            color: isPtmDay ? context.adapt(SoftPalette.amber300) : context.adapt(SoftPalette.gray300),
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            isPtmDay
-                                ? (context.isUrdu ? 'پی ٹی ایم میٹنگ شیڈول ہے' : 'PTM Meeting Scheduled')
-                                : context.l.futureDateTitle,
-                            style: context.urduStyle(
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: isPtmDay ? context.adapt(SoftPalette.orange400) : context.adapt(SoftPalette.gray350),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 32.0),
-                            child: Text(
-                              isPtmDay
-                                  ? (context.isUrdu
-                                      ? 'اس تاریخ کو پیرنٹ ٹیچر میٹنگ (PTM) شیڈول ہے۔'
-                                      : 'At this date, the Parent Teacher Meeting is scheduled.')
-                                  : context.l.futureDateSubtitle,
-                              textAlign: TextAlign.center,
-                              style: context.urduStyle(
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: context.adapt(SoftPalette.gray350),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                )
-              else
-                filteredStudentsAsyncValue.when(
-                  loading: () => const SliverToBoxAdapter(
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                  error: (e, st) => SliverToBoxAdapter(
-                    child: Center(child: Text('Error: $e')),
-                  ),
-                  data: (students) {
-                    return logAsyncValue.when(
-                      loading: () => const SliverToBoxAdapter(
-                        child: Center(child: CircularProgressIndicator()),
-                      ),
-                      error: (e, st) => SliverToBoxAdapter(
-                        child: Center(child: Text('Error: $e')),
-                      ),
-                      data: (logData) {
-                        final double paddingVal = GBreakpoint.isMobile(context) ? Gsp.s16 : Gsp.s24;
-                        final isNazraOnly = LocalStorageService.isMadrassaNazraOnly(_effectiveBranch);
-                        final branchSessions = CampSessionService.getMadrassaSessions(_effectiveBranch);
-
-                        final displayedStudents = students.where((s) {
-                          if (_selectedSessionFilter != 'all') {
-                            final sSess = (s['session'] ?? 'morning').toString().toLowerCase().trim();
-                            if (sSess != _selectedSessionFilter) return false;
-                          }
-                          final isStudentNazra = isNazraOnly ||
-                              (s['isNazra'] == true) ||
-                              (s['program']?.toString().toLowerCase() == 'nazra') ||
-                              (s['class']?.toString().toLowerCase() == 'nazra');
-                          if (_selectedProgramFilter == 'hifz') {
-                            if (isStudentNazra) return false;
-                          } else if (_selectedProgramFilter == 'nazra') {
-                            if (!isStudentNazra) return false;
-                          }
-                          return true;
-                        }).toList();
-
-                        final nazraCount = students.where((s) => isNazraOnly ||
-                            (s['isNazra'] == true) ||
-                            (s['program']?.toString().toLowerCase() == 'nazra') ||
-                            (s['class']?.toString().toLowerCase() == 'nazra')).length;
-                        final hifzCount = students.length - nazraCount;
-
-                        return SliverPadding(
-                          padding: EdgeInsets.symmetric(horizontal: paddingVal),
-                          sliver: SliverList(
-                            key: const PageStorageKey('daily_log_student_list'),
-                            delegate: SliverChildBuilderDelegate(
-                              (context, index) {
-                                if (index == 0) {
-                                  return Column(
-                                    children: [
-                                      if (isNazraOnly)
-                                        Container(
-                                          margin: const EdgeInsets.only(bottom: 8),
-                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                                          decoration: BoxDecoration(
-                                            color: context.adapt(SoftPalette.teal500).withValues(alpha: 0.12),
-                                            borderRadius: BorderRadius.circular(10),
-                                            border: Border.all(color: context.adapt(SoftPalette.teal500).withValues(alpha: 0.3)),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Icon(Icons.menu_book_rounded, color: context.adapt(SoftPalette.teal500), size: 18),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: Text(
-                                                  context.isUrdu
-                                                      ? 'صرف ناظرہ سسٹم: حاضری، یونیفارم اور سبق لاگ فعال ہے۔ سبقی/منزل سسٹم بند ہے۔'
-                                                      : 'Only Nazra System Active: Tracking Attendance, Uniform & Sabak. Sabqi/Manzil disabled.',
-                                                  style: context.urduStyle(
-                                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: context.adapt(SoftPalette.teal500)),
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      // Program Filter Bar (Hifz / Nazra)
-                                      if (!isNazraOnly)
-                                        Container(
-                                          margin: const EdgeInsets.only(bottom: 8),
-                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                          decoration: BoxDecoration(
-                                            color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Icon(Icons.category_rounded, size: 16, color: isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                                              const SizedBox(width: 8),
-                                              Text(
-                                                context.isUrdu ? 'پروگرام / کلاس:' : 'Program:',
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate600,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: SingleChildScrollView(
-                                                  scrollDirection: Axis.horizontal,
-                                                  child: Row(
-                                                    children: [
-                                                      ChoiceChip(
-                                                        label: Text('All (${students.length})'),
-                                                        selected: _selectedProgramFilter == 'all',
-                                                        onSelected: (val) {
-                                                          if (val) setState(() => _selectedProgramFilter = 'all');
-                                                        },
-                                                        selectedColor: SoftPalette.teal550,
-                                                        labelStyle: TextStyle(
-                                                          fontSize: 11,
-                                                          fontWeight: FontWeight.bold,
-                                                          color: _selectedProgramFilter == 'all' ? SoftPalette.gray50 : null,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 6),
-                                                      ChoiceChip(
-                                                        label: Text('🕋 Hifz ($hifzCount)'),
-                                                        selected: _selectedProgramFilter == 'hifz',
-                                                        onSelected: (val) {
-                                                          if (val) setState(() => _selectedProgramFilter = 'hifz');
-                                                        },
-                                                        selectedColor: SoftPalette.violet550,
-                                                        labelStyle: TextStyle(
-                                                          fontSize: 11,
-                                                          fontWeight: FontWeight.bold,
-                                                          color: _selectedProgramFilter == 'hifz' ? SoftPalette.gray50 : null,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 6),
-                                                      ChoiceChip(
-                                                        label: Text('📖 Nazra ($nazraCount)'),
-                                                        selected: _selectedProgramFilter == 'nazra',
-                                                        onSelected: (val) {
-                                                          if (val) setState(() => _selectedProgramFilter = 'nazra');
-                                                        },
-                                                        selectedColor: SoftPalette.teal500,
-                                                        labelStyle: TextStyle(
-                                                          fontSize: 11,
-                                                          fontWeight: FontWeight.bold,
-                                                          color: _selectedProgramFilter == 'nazra' ? SoftPalette.gray50 : null,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      // Session Filter Bar
-                                      if (branchSessions.length > 1 || students.any((st) => st['session'] != null))
-                                        Container(
-                                          margin: const EdgeInsets.only(bottom: 10),
-                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                          decoration: BoxDecoration(
-                                            color: isDark ? SoftPalette.slate800 : SoftPalette.gray50,
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: Border.all(color: isDark ? SoftPalette.slate700 : SoftPalette.slate150),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Icon(Icons.filter_list_rounded, size: 16, color: isDark ? SoftPalette.slate350 : SoftPalette.slate550),
-                                              const SizedBox(width: 8),
-                                              Text(
-                                                context.isUrdu ? 'شفٹ / سیشن:' : 'Session:',
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: isDark ? SoftPalette.gray50A70 : SoftPalette.slate600,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: SingleChildScrollView(
-                                                  scrollDirection: Axis.horizontal,
-                                                  child: Row(
-                                                    children: [
-                                                      ChoiceChip(
-                                                        label: Text('All (${students.length})'),
-                                                        selected: _selectedSessionFilter == 'all',
-                                                        onSelected: (val) {
-                                                          if (val) setState(() => _selectedSessionFilter = 'all');
-                                                        },
-                                                        selectedColor: SoftPalette.teal550,
-                                                        labelStyle: TextStyle(
-                                                          fontSize: 11,
-                                                          fontWeight: FontWeight.bold,
-                                                          color: _selectedSessionFilter == 'all' ? SoftPalette.gray50 : null,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 6),
-                                                      ...['morning', 'evening', 'night'].where((s) => branchSessions.contains(s) || students.any((st) => (st['session'] ?? 'morning') == s)).map((s) {
-                                                        final count = students.where((st) => (st['session'] ?? 'morning') == s).length;
-                                                        final label = s == 'morning'
-                                                            ? '☀️ Morning ($count)'
-                                                            : (s == 'evening' ? '🌅 Evening ($count)' : '🌙 Night ($count)');
-                                                        final isSelected = _selectedSessionFilter == s;
-                                                        return Padding(
-                                                          padding: const EdgeInsets.only(right: 6),
-                                                          child: ChoiceChip(
-                                                            label: Text(label),
-                                                            selected: isSelected,
-                                                            onSelected: (val) {
-                                                              if (val) setState(() => _selectedSessionFilter = s);
-                                                            },
-                                                            selectedColor: SoftPalette.teal550,
-                                                            labelStyle: TextStyle(
-                                                              fontSize: 11,
-                                                              fontWeight: FontWeight.bold,
-                                                              color: isSelected ? SoftPalette.gray50 : null,
-                                                            ),
-                                                          ),
-                                                        );
-                                                      }),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      if (isReadOnly)
-                                        Container(
-                                          margin: const EdgeInsets.only(bottom: 8),
-                                          padding: const EdgeInsets.all(8),
-                                          width: double.infinity,
-                                          alignment: Alignment.center,
-                                          decoration: BoxDecoration(
-                                            color: context.adapt(SoftPalette.yellow50),
-                                            borderRadius: BorderRadius.circular(8),
-                                            border: Border.all(color: context.adapt(SoftPalette.yellow150)),
-                                          ),
-                                          child: Text(
-                                            context.isUrdu ? 'صرف پڑھنے کی اجازت ہے (پرانی تاریخ)' : 'Read Only Mode (Past Date)',
-                                            style: TextStyle(color: context.adapt(SoftPalette.orange350), fontSize: 12, fontWeight: FontWeight.bold),
-                                          ),
-                                        ),
-                                      ValueListenableBuilder<int>(
-                                        valueListenable: _changeNotifier,
-                                        builder: (context, _, __) =>
-                                            _buildStatusLegend(context, config, displayedStudents, logData),
-                                      ),
-                                    ],
-                                  );
-                                }
-                                final s = displayedStudents[index - 1];
-                                final sId = s['id'] ?? '';
-                                final sLog = _localChanges[sId] ?? _safeMap(logData[sId]);
-                                // Marks saved on another device arrive in logData after this
-                                // screen was built. Refresh the card with them unless this user
-                                // has unsaved edits for the student (those are never overwritten).
-                                var notifier = _studentNotifiers[sId];
-                                if (notifier == null ||
-                                    (!_localChanges.containsKey(sId) &&
-                                        !const DeepCollectionEquality().equals(notifier.value, sLog))) {
-                                  notifier = ValueNotifier(sLog);
-                                  _studentNotifiers[sId] = notifier;
-                                }
-                                return _StudentLogCard(
-                                  key: ValueKey('${sId}_${_selectedDate.toIso8601String()}'),
-                                  student: s,
-                                  logNotifier: notifier,
-                                  isPtmDay: isPtmDay,
-                                  isReadOnly: isReadOnly,
-                                  branchId: _effectiveBranch,
-                                  allowStudentLeave: effectiveAllowLeave,
-                                  editorRole: widget.editorRole,
-                                  uploadStatus: _uploadStates[sId],
-                                  onUpdateLocal: _updateLocalSilent,
-                                  onUpdateAttendance: _updateAttendanceSilent,
-                                  onDecideLeave: _decideLeaveSilent,
-                                  onUpdateSabak: _updateSabakLines,
-                                  onPickPhoto: _pickAndUploadPhoto,
-                                  onSendWhatsApp: _sendDailyWhatsApp,
-                                  onShowCustomLines: _showCustomLinesDialog,
-                                  buildParaDropdown: _buildParaDropdown,
-                                  buildRatioDropdown: _buildRatioDropdown,
-                                );
-                              },
-                              childCount: displayedStudents.length + 1,
-                            ),
-                          ),
-                        );
-                      },
                     );
                   },
                 ),
-              const SliverToBoxAdapter(
-                child: SizedBox(height: 80),
               ),
-            ],
-          ),
-        ),
-        ],
+          ]),
+        )),
       ),
     );
-      },
-    );
+    if (picked != null && mounted) await _openLeaveRequest(picked);
   }
 
+  Future<void> _openLeaveRequest(_LeaveRequest r) async {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final name = (r.student['name'] ?? '—').toString();
+    final reason = (r.log['leaveReason'] ?? '').toString().trim();
+    final requestedAt = DateTime.tryParse((r.log['leaveRequestedAt'] ?? r.log['timestamp'] ?? '').toString());
+    final roll = r.student['rollNumber']?.toString() ?? '—';
+    final program = _isNazraStudent(r.student, LocalStorageService.isMadrassaNazraOnly(_effectiveBranch))
+        ? (urdu ? 'ناظرہ' : 'Nazra')
+        : (urdu ? 'حفظ' : 'Hifz');
 
-
-  // Builds the status legend based on students and log data
-
-
-  Widget _buildHeader(MadrassaConfig config) {
-    final ptmDate = getPtmDateFor(_selectedDate.year, _selectedDate.month, config);
-    final workingDays = MadrassaFeeLogic.getWorkingDaysCount(_selectedDate.year, _selectedDate.month);
-    final isMobile = GBreakpoint.isMobile(context);
-    final effectiveAllowLeave = _localAllowStudentLeave ?? config.allowStudentLeave;
-    final isDark = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
-
-    final controlsRow = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        TextButton.icon(
-          icon: Icon(Icons.today, size: 16, color: context.adapt(SoftPalette.teal550)),
-          label: Text(
-            context.isUrdu ? 'آج' : 'Today',
-            style: TextStyle(
-              color: context.adapt(SoftPalette.teal550),
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
+    Widget fact(String label, String value) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: Gsp.sp1),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 110, child: Text(label, style: GText.caption(c.textMuted))),
+            Expanded(
+              child: MadrassaErp.isUrduText(value)
+                  ? Text(value, style: GText.body2(c.textPrimary).copyWith(fontFamily: 'Noori', fontSize: 15, height: 1.6))
+                  : Text(value.isEmpty ? '—' : value, style: GText.body2(c.textPrimary)),
             ),
-          ),
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          onPressed: () {
-            setState(() {
-              _selectedDate = DateTime.now();
-              _localChanges.clear();
-              _studentNotifiers.clear();
-            });
-            _changeNotifier.value++;
-            _updateDateStreams();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _scrollToSelectedDate(animate: true);
-            });
-          },
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          icon: Icon(Icons.arrow_back_ios, size: 16, color: context.adapt(SoftPalette.teal550)),
-          tooltip: 'Previous Month',
-          padding: const EdgeInsets.all(6),
-          constraints: const BoxConstraints(),
-          onPressed: () {
-            setState(() {
-              final prevMonth = DateTime(_selectedDate.year, _selectedDate.month - 1, 1);
-              final lastDayOfPrevMonth = DateTime(prevMonth.year, prevMonth.month + 1, 0).day;
-              final targetDay = _selectedDate.day.clamp(1, lastDayOfPrevMonth);
-              _selectedDate = DateTime(prevMonth.year, prevMonth.month, targetDay);
-              _localChanges.clear();
-              _studentNotifiers.clear();
-            });
-            _changeNotifier.value++;
-            _updateDateStreams();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _scrollToSelectedDate(animate: true);
-            });
-          },
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          icon: Icon(Icons.arrow_forward_ios, size: 16, color: context.adapt(SoftPalette.teal550)),
-          tooltip: 'Next Month',
-          padding: const EdgeInsets.all(6),
-          constraints: const BoxConstraints(),
-          onPressed: () {
-            setState(() {
-              final nextMonth = DateTime(_selectedDate.year, _selectedDate.month + 1, 1);
-              final lastDayOfNextMonth = DateTime(nextMonth.year, nextMonth.month + 1, 0).day;
-              final targetDay = _selectedDate.day.clamp(1, lastDayOfNextMonth);
-              _selectedDate = DateTime(nextMonth.year, nextMonth.month, targetDay);
-              _localChanges.clear();
-              _studentNotifiers.clear();
-            });
-            _changeNotifier.value++;
-            _updateDateStreams();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _scrollToSelectedDate(animate: true);
-            });
-          },
-        ),
-      ],
-    );
+          ]),
+        );
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(isMobile ? 16 : 24, isMobile ? 16 : 24, isMobile ? 16 : 24, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      DateFormat('MMMM yyyy').format(_selectedDate),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: isMobile ? 18 : 22,
-                        color: isDark ? SoftPalette.gray50 : SoftPalette.gray900,
-                      ),
-                    ),
-                    Text(
-                      context.l.dailyLog,
-                      style: context.urduStyle(
-                        style: TextStyle(
-                          fontSize: isMobile ? 12 : 13,
-                          fontWeight: FontWeight.w600,
-                          color: isDark ? SoftPalette.indigo400 : SoftPalette.indigo550,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              controlsRow,
-            ],
+    final decision = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => _urduSafe(AlertDialog(
+        titlePadding: const EdgeInsetsDirectional.fromSTEB(Gsp.sp5, Gsp.sp4, Gsp.sp3, 0),
+        title: Row(children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(color: _amber.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(Gr.r2)),
+            child: Icon(GIcons.event, size: 18, color: _amber),
           ),
-          const SizedBox(height: 6),
-          Text(
-            '$workingDays working days • Sundays excluded • PTM: ${DateFormat('EEE, MMM d').format(ptmDate)}',
-            style: TextStyle(
-              fontSize: isMobile ? 12 : 13,
-              color: isDark ? SoftPalette.slate350 : SoftPalette.gray500,
+          const SizedBox(width: Gsp.sp3),
+          Expanded(child: Text(urdu ? 'رخصت کی درخواست' : 'Leave request', style: GText.h3(c.textPrimary))),
+        ]),
+        content: SizedBox(
+          width: 400,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            MadrassaUrduAwareText(name, color: c.textPrimary, size: 16),
+            Text('${urdu ? 'رول' : 'Roll'} $roll · $program', style: GText.caption(c.textMuted)),
+            const SizedBox(height: Gsp.sp3),
+            fact(urdu ? 'تاریخ' : 'Date', _friendlyDate(r.dateKey)),
+            fact(urdu ? 'وجہ' : 'Reason', reason),
+            if (requestedAt != null)
+              fact(urdu ? 'درخواست کا وقت' : 'Requested', DateFormat('d MMM, hh:mm a').format(requestedAt.toLocal())),
+            const SizedBox(height: Gsp.sp2),
+            Text(
+              urdu
+                  ? 'منظوری پر اس دن حاضری میں L لگ جائے گا، مسترد کرنے پر A۔'
+                  : 'Approve marks the day as Leave (L); Deny marks it Absent (A).',
+              style: GText.caption(c.textMuted),
             ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(urdu ? 'بعد میں' : 'Later')),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(foregroundColor: c.danger, side: BorderSide(color: c.danger.withValues(alpha: 0.5))),
+            onPressed: () => Navigator.pop(ctx, false),
+            icon: const Icon(GIcons.cancel, size: 16),
+            label: Text(urdu ? 'مسترد' : 'Deny'),
           ),
-          if (_isGlobalLevelUser(widget.editorRole)) ...[
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: effectiveAllowLeave ? context.adapt(SoftPalette.yellow50) : context.adapt(SoftPalette.teal100m),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: effectiveAllowLeave ? context.adapt(SoftPalette.yellow200) : context.adapt(SoftPalette.teal550),
-                  width: 1.5,
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    effectiveAllowLeave ? Icons.event_available_rounded : Icons.event_busy_rounded,
-                    color: effectiveAllowLeave ? context.adapt(SoftPalette.orange350) : context.adapt(SoftPalette.teal550),
-                    size: 26,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: SoftPalette.slate800,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                context.isUrdu ? '👑 صرف گلوبل لیول یوزرز' : '👑 Global Users Only (Chairman, CEO, HQ Manager, Admin)',
-                                style: const TextStyle(color: SoftPalette.amber200, fontSize: 10, fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          effectiveAllowLeave
-                              ? (context.isUrdu ? 'طلباء کی رخصت (L) تمام یوزرز کے لیے آن ہے' : 'Student Leave Allowed (Visible to ALL Users)')
-                              : (context.isUrdu ? 'طلباء کی رخصت (L) تمام یوزرز کے لیے بند ہے' : 'Student Leave Stopped (Hidden from ALL Users)'),
-                          style: context.urduStyle(
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              color: effectiveAllowLeave ? context.adapt(SoftPalette.orange350) : context.adapt(SoftPalette.teal700),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          effectiveAllowLeave
-                              ? (context.isUrdu
-                                  ? 'رخصت بند کرنے کے لیے کلک کریں۔ یہ تمام اساتذہ، پرنسپل اور گلوبل یوزرز سے بٹن چھپا دے گا۔'
-                                  : 'Click to STOP leave. This will hide the Leave (L) button for ALL users.')
-                              : (context.isUrdu
-                                  ? 'رخصت کھولنی کے لیے کلک کریں۔ یہ تمام اساتذہ، پرنسپل اور گلوبل یوزرز کے لیے بٹن ظاہر کر دے گا۔'
-                                  : 'Click to ALLOW leave. This will display the Leave (L) button for ALL users.'),
-                          style: context.urduStyle(
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: effectiveAllowLeave ? context.adapt(SoftPalette.orange350) : context.adapt(SoftPalette.gray550),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: effectiveAllowLeave ? SoftPalette.red500 : SoftPalette.teal550,
-                      foregroundColor: SoftPalette.gray50,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    ),
-                    icon: Icon(
-                      effectiveAllowLeave ? Icons.block : Icons.check_circle_outline,
-                      size: 18,
-                    ),
-                    label: Text(
-                      effectiveAllowLeave
-                          ? (context.isUrdu ? 'رخصت بند کریں' : 'Stop Leave')
-                          : (context.isUrdu ? 'اجازت رخصت دیں' : 'Allow Leave'),
-                      style: context.urduStyle(
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                      ),
-                    ),
-                    onPressed: () async {
-                      final newAllowState = !effectiveAllowLeave;
-                      setState(() {
-                        _localAllowStudentLeave = newAllowState;
-                      });
-                      unawaited(
-                        FirebaseFirestore.instance
-                            .collection('branches')
-                            .doc(_effectiveBranch)
-                            .collection('madrassa_config')
-                            .doc('current')
-                            .set({'allowStudentLeave': newAllowState}, SetOptions(merge: true))
-                            .timeout(const Duration(seconds: 4))
-                            .catchError((err) {
-                              debugPrint('[DailyLogView] Update allowStudentLeave error: $err');
-                            })
-                      );
-
-                      if (mounted) {
-                        AppToast.showSnackBar(context, 
-                          SnackBar(
-                            duration: const Duration(seconds: 2),
-                            backgroundColor: newAllowState ? SoftPalette.green550 : SoftPalette.red550,
-                            content: Text(
-                              newAllowState
-                                  ? (context.isUrdu
-                                      ? 'رخصت کا بٹن تمام اساتذہ اور تمام یوزرز کے لیے آن ہو گیا ہے۔'
-                                      : 'Leave (L) button is now VISIBLE to ALL users.')
-                                  : (context.isUrdu
-                                      ? 'رخصت کا بٹن تمام اساتذہ اور تمام یوزرز کے لیے بند کر دیا گیا ہے۔'
-                                      : 'Leave (L) button is now HIDDEN from ALL users.'),
-                            ),
-                          ),
-                        );
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
+          FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: c.success, foregroundColor: c.onBrand),
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(GIcons.checkCircle, size: 16),
+            label: Text(urdu ? 'منظور' : 'Approve'),
+          ),
         ],
-      ),
+      )),
     );
+    if (decision != null && mounted) await _decideLeaveNow(r, approve: decision);
   }
 
-  Widget _buildHorizontalCalendar(MadrassaConfig config, List<Map<String, dynamic>> holidays) {
-    final daysInMonth = DateTime(_selectedDate.year, _selectedDate.month + 1, 0).day;
-    final now = DateTime.now();
-
-    if (!_hasInitialScrollDone) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_calendarScrollController.hasClients) {
-          _scrollToSelectedDate(animate: false);
-          _hasInitialScrollDone = true;
-        }
-      });
+  /// Approves every waiting request after one confirmation.
+  Future<void> _approveAllLeaves(List<_LeaveRequest> requests) async {
+    if (requests.isEmpty) return;
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => _urduSafe(AlertDialog(
+        title: Text(urdu ? 'سب منظور کریں؟' : 'Approve all leave requests?', style: GText.h3(c.textPrimary)),
+        content: SizedBox(
+          width: 400,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(
+              urdu
+                  ? '${requests.length} درخواستیں منظور ہوں گی اور ان دنوں میں L لگ جائے گا:'
+                  : '${requests.length} request(s) will be approved and marked Leave (L):',
+              style: GText.body2(c.textSecondary),
+            ),
+            const SizedBox(height: Gsp.sp2),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: ListView(shrinkWrap: true, children: [
+                for (final r in requests)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Row(children: [
+                      Expanded(child: MadrassaUrduAwareText((r.student['name'] ?? '—').toString(), color: c.textPrimary, size: 13)),
+                      Text(_friendlyDate(r.dateKey), style: GText.caption(c.textMuted)),
+                    ]),
+                  ),
+              ]),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(urdu ? 'واپس' : 'Cancel')),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: c.success, foregroundColor: c.onBrand),
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(GIcons.checkCircle, size: 16),
+            label: Text(urdu ? 'سب منظور' : 'Approve all (${requests.length})'),
+          ),
+        ],
+      )),
+    );
+    if (ok != true || !mounted) return;
+    var done = 0;
+    for (final r in List<_LeaveRequest>.from(requests)) {
+      if (await _decideLeaveNow(r, approve: true, quiet: true)) done++;
     }
-
-    final showLeftGrey = !_calendarScrollController.hasClients || _calendarScrollController.offset <= 0;
-    final showRightGrey = !_calendarScrollController.hasClients || 
-        (_calendarScrollController.position.hasContentDimensions &&
-         _calendarScrollController.offset >= _calendarScrollController.position.maxScrollExtent);
-    final leftColor = showLeftGrey ? context.adapt(SoftPalette.gray350) : context.adapt(SoftPalette.teal550);
-    final rightColor = showRightGrey ? context.adapt(SoftPalette.gray350) : context.adapt(SoftPalette.teal550);
-
-    return Row(
-      children: [
-        IconButton(
-          icon: Icon(Icons.chevron_left, color: leftColor),
-          onPressed: showLeftGrey
-              ? null
-              : () {
-                  if (_calendarScrollController.hasClients) {
-                    final target = (_calendarScrollController.offset - 204.0).clamp(0.0, _calendarScrollController.position.maxScrollExtent);
-                    _calendarScrollController.animateTo(
-                      target,
-                      duration: const Duration(milliseconds: 300),
-                      curve: Curves.easeInOut,
-                    );
-                  }
-                },
-        ),
-        Expanded(
-          child: SizedBox(
-            key: _calendarKey,
-            height: 100,
-            child: Listener(
-              onPointerSignal: (pointerSignal) {
-                if (pointerSignal is PointerScrollEvent && _calendarScrollController.hasClients) {
-                  final newOffset = _calendarScrollController.offset + pointerSignal.scrollDelta.dy;
-                  _calendarScrollController.jumpTo(
-                    newOffset.clamp(
-                      0.0,
-                      _calendarScrollController.position.maxScrollExtent,
-                    ),
-                  );
-                }
-              },
-              child: ListView.builder(
-                controller: _calendarScrollController,
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: daysInMonth,
-                itemBuilder: (context, i) {
-                  final date = DateTime(_selectedDate.year, _selectedDate.month, i + 1);
-                  final isSelected = date.day == _selectedDate.day;
-                  final isSunday = date.weekday == DateTime.sunday;
-                  final ptmDateForCell = getPtmDateFor(date.year, date.month, config);
-                  final isPtm = date.year == ptmDateForCell.year && date.month == ptmDateForCell.month && date.day == ptmDateForCell.day;
-                  final isToday = date.year == now.year && date.month == now.month && date.day == now.day;
-
-                  String? holidayName;
-                  for (var h in holidays) {
-                    final dateVal = h['date'];
-                    DateTime? hDate;
-                    if (dateVal is String) {
-                      hDate = DateTime.tryParse(dateVal);
-                    } else if (dateVal is Timestamp) {
-                      hDate = dateVal.toDate();
-                    }
-                    if (hDate != null && hDate.year == date.year && hDate.month == date.month && hDate.day == date.day) {
-                      holidayName = h['name'] as String? ?? 'Holiday';
-                      break;
-                    }
-                  }
-                  final cellIslamicEvent = IslamicCalendarHelper.getIslamicEvent(date);
-                  final isIslamicHoliday = cellIslamicEvent != null && cellIslamicEvent.isOfficialHoliday;
-                  final isSpecialEvent = cellIslamicEvent != null && !cellIslamicEvent.isOfficialHoliday;
-                  if (holidayName == null && (isIslamicHoliday || isSpecialEvent)) {
-                    holidayName = context.isUrdu ? cellIslamicEvent!.titleUr : cellIslamicEvent!.titleEn;
-                  }
-                  final isHoliday = holidayName != null;
-
-                  final isDarkCalendar = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
-                  Color cardColor = isDarkCalendar ? SoftPalette.slate800 : SoftPalette.gray50;
-                  if (isSelected) {
-                    cardColor = isHoliday
-                        ? (cellIslamicEvent != null ? SoftPalette.yellow300 : SoftPalette.green550)
-                        : SoftPalette.indigo550;
-                  } else if (isHoliday) {
-                    cardColor = cellIslamicEvent != null
-                        ? (isDarkCalendar ? SoftPalette.amber750m : SoftPalette.yellow100)
-                        : (isDarkCalendar ? SoftPalette.emerald750 : SoftPalette.green100m);
-                  }
-
-                  Border border;
-                  if (isSelected) {
-                    border = Border.all(color: cardColor, width: 1.0);
-                  } else if (isToday) {
-                    border = Border.all(color: context.adapt(SoftPalette.teal550), width: 2.0);
-                  } else if (isHoliday) {
-                    border = Border.all(
-                      color: cellIslamicEvent != null ? context.adapt(SoftPalette.yellow300) : context.adapt(SoftPalette.green300),
-                      width: 1.0,
-                    );
-                  } else {
-                    border = Border.all(color: isDarkCalendar ? SoftPalette.slate700 : SoftPalette.slate150, width: 1.0);
-                  }
-
-                  Color dayAbbrevColor = isSelected
-                      ? SoftPalette.gray50A70
-                      : (isHoliday
-                          ? (cellIslamicEvent != null
-                              ? (isDarkCalendar ? SoftPalette.amber200 : SoftPalette.orange500)
-                              : (isDarkCalendar ? SoftPalette.green300 : SoftPalette.green550))
-                          : (isDarkCalendar ? SoftPalette.slate350 : SoftPalette.gray350));
-                  Color dayNumColor = isSelected
-                      ? SoftPalette.gray50
-                      : (isHoliday
-                          ? (cellIslamicEvent != null
-                              ? (isDarkCalendar ? SoftPalette.yellow150 : SoftPalette.orange600)
-                              : (isDarkCalendar ? SoftPalette.emerald150 : SoftPalette.green600))
-                          : (isDarkCalendar ? SoftPalette.gray50 : SoftPalette.gray900));
-
-                  return GestureDetector(
-                    onTap: isSunday ? null : () {
-  setState(() {
-    _selectedDate = date;
-    _localChanges.clear();
-    _allPresentToggled = false;
-    _allUniformToggled = false;
-    _allRepliedToggled = false;
-    _studentNotifiers.clear();
-  });
-  _changeNotifier.value++;
-  _updateDateStreams(); // this calls _subscribeToLog() which resets _logNotifier
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    _scrollToSelectedDate(animate: true);
-  });
-},
-                    child: Opacity(
-                      opacity: isSunday ? 0.3 : 1.0,
-                      child: Container(
-                        width: 60,
-                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: cardColor,
-                          borderRadius: BorderRadius.circular(12),
-                          border: border,
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              DateFormat('E').format(date).toUpperCase(),
-                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: dayAbbrevColor),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${date.day}',
-                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: dayNumColor),
-                            ),
-                            if (isHoliday)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2, left: 2, right: 2),
-                                child: Text(
-                                  cellIslamicEvent != null ? '${cellIslamicEvent.emoji} $holidayName' : holidayName,
-                                  textAlign: TextAlign.center,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 8,
-                                    fontWeight: FontWeight.w900,
-                                    color: isSelected
-                                        ? SoftPalette.gray50
-                                        : (cellIslamicEvent != null
-                                            ? (isDarkCalendar ? SoftPalette.amber200 : SoftPalette.orange500)
-                                            : SoftPalette.green550),
-                                  ),
-                                ),
-                              )
-                            else if (isPtm)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2),
-                                child: Text(
-                                  'PTM',
-                                  style: TextStyle(fontSize: 8, fontWeight: FontWeight.w900, color: isSelected ? SoftPalette.gray50 : context.adapt(SoftPalette.red500)),
-                                ),
-                              ),
-                            if (isToday)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? SoftPalette.gray50 : (isHoliday ? context.adapt(SoftPalette.green550) : context.adapt(SoftPalette.teal550)),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-        IconButton(
-          icon: Icon(Icons.chevron_right, color: rightColor),
-          onPressed: showRightGrey
-              ? null
-              : () {
-                  if (_calendarScrollController.hasClients) {
-                    final target = (_calendarScrollController.offset + 204.0).clamp(0.0, _calendarScrollController.position.maxScrollExtent);
-                    _calendarScrollController.animateTo(
-                      target,
-                      duration: const Duration(milliseconds: 300),
-                      curve: Curves.easeInOut,
-                    );
-                  }
-                },
-        ),
-      ],
+    if (!mounted) return;
+    AppToast.showSnackBar(
+      context,
+      SnackBar(content: Text(urdu ? '$done رخصتیں منظور ہو گئیں' : '$done leave request(s) approved')),
     );
   }
 
-  Widget _buildStatusLegend(BuildContext context, MadrassaConfig config, List<Map<String, dynamic>> students, Map<String, dynamic> logData) {
-    final isDesktop = GBreakpoint.isDesktop(context);
-    final isMobile = GBreakpoint.isMobile(context);
+  /// Saves a leave decision at once (any date), so it does not wait for "Save".
+  Future<bool> _decideLeaveNow(_LeaveRequest r, {required bool approve, bool quiet = false}) async {
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final reqAt = r.log['leaveRequestedAt'] ?? r.log['timestamp'];
+    final payload = <String, dynamic>{
+      'attendance': approve ? 'leave' : 'absent',
+      'leaveStatus': approve ? 'approved' : 'denied',
+      'isParentRequested': false,
+      'leaveDecidedAt': nowIso,
+      'leaveDecidedBy': widget.editorName,
+      'leaveDecidedFor': ?reqAt,
+      'uniform': approve ? 'leave' : false,
+      'isLate': false,
+      'timing': 'on_time',
+      'arrivalTime': null,
+    };
+    try {
+      await MadrassaLocalStorage.saveLogRecordLocal(
+        branchId: _effectiveBranch,
+        dateKey: r.dateKey,
+        logData: {r.studentId: payload},
+        editorName: widget.editorName,
+        editorRole: widget.editorRole,
+      );
+      // An unsaved edit of the same fields on screen would hide the decision.
+      if (r.dateKey == _dateKey) {
+        final local = _localChanges[r.studentId];
+        if (local != null) {
+          local.removeWhere((k, _) => payload.containsKey(k));
+          if (local.isEmpty) _localChanges.remove(r.studentId);
+        }
+      }
+      _seenRequestIds.remove(r.id);
+      _changeNotifier.value++;
+      if (!mounted || quiet) return true;
+      final name = (r.student['name'] ?? '').toString();
+      AppToast.showSnackBar(
+        context,
+        SnackBar(
+          content: Text(approve
+              ? (context.isUrdu ? 'رخصت منظور: $name' : 'Leave approved: $name')
+              : (context.isUrdu ? 'رخصت مسترد: $name' : 'Leave denied: $name')),
+        ),
+      );
+      return true;
+    } catch (e) {
+      if (mounted) AppToast.showSnackBar(context, SnackBar(content: Text('Error: $e')));
+      return false;
+    }
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.comfort;
+    final configAsync = ref.watch(madrassaConfigProvider(_effectiveBranch));
+    final holidays = ref.watch(madrassaHolidaysProvider(_effectiveBranch)).value ?? const <Map<String, dynamic>>[];
+    final studentsAsync = ref.watch(madrassaFilteredStudentsProvider((branchId: _effectiveBranch, selectedDate: _selectedDate)));
+    final logAsync = ref.watch(madrassaDailyLogProvider((branchId: _effectiveBranch, dateKey: _dateKey)));
+    final allStudents = ref.watch(madrassaStudentsProvider(_effectiveBranch)).value ?? const <Map<String, dynamic>>[];
+    final requests = _collectLeaveRequests(allStudents);
+    _announceNewRequests(requests);
+
+    return Scaffold(
+      backgroundColor: c.background,
+      body: configAsync.when(
+        skipLoadingOnReload: true,
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('Error loading config: $e', style: GText.body2(c.danger))),
+        data: (config) => ValueListenableBuilder<int>(
+          valueListenable: _changeNotifier,
+          builder: (context, _, _) =>
+              _urduSafe(_buildRegisterPage(context, config, holidays, studentsAsync, logAsync, requests)),
+        ),
+      ),
+    );
+  }
+
+  /// The UI font has no Urdu letters: any Urdu text under [child] falls back to
+  /// Noori Nastaliq instead of showing empty boxes. (Text styles inherit this
+  /// fallback; dialogs are new routes, so their parts are wrapped too.)
+  static Widget _urduSafe(Widget child) => Builder(builder: (context) {
+        final theme = Theme.of(context);
+        return Theme(
+          // Dialog titles and button labels take their style from the theme.
+          data: theme.copyWith(textTheme: theme.textTheme.apply(fontFamilyFallback: const ['Noori'])),
+          child: DefaultTextStyle.merge(style: const TextStyle(fontFamilyFallback: ['Noori']), child: child),
+        );
+      });
+
+  Widget _buildRegisterPage(
+    BuildContext context,
+    MadrassaConfig config,
+    List<Map<String, dynamic>> holidays,
+    AsyncValue<List<Map<String, dynamic>>> studentsAsync,
+    AsyncValue<Map<String, dynamic>> logAsync,
+    List<_LeaveRequest> requests,
+  ) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final narrow = MadrassaErp.narrow(context);
+    final pad = narrow ? Gsp.sp3 : Gsp.sp5;
     final isReadOnly = !_canSaveData();
-    int present = 0, leave = 0, absent = 0, replied = 0, lateCount = 0;
-    for (var s in students) {
-      final sId = s['id'] ?? '';
-      final log = _localChanges[sId] ?? _safeMap(logData[sId]);
-      final att = log['attendance'] ?? 'absent';
+    final allowLeave = _localAllowStudentLeave ?? config.allowStudentLeave;
+    final ptmDate = getPtmDateFor(_selectedDate.year, _selectedDate.month, config);
+    final isPtmDay = DateUtils.isSameDay(_selectedDate, ptmDate);
+    final workingDays = MadrassaFeeLogic.getWorkingDaysCount(_selectedDate.year, _selectedDate.month);
+    final hijri = IslamicCalendarHelper.fromGregorian(_selectedDate).format(isUrdu: urdu);
+    final nazraOnly = LocalStorageService.isMadrassaNazraOnly(_effectiveBranch);
+
+    // Closed days
+    String? holidayName;
+    for (final h in holidays) {
+      final v = h['date'];
+      final d = v is String ? DateTime.tryParse(v) : (v is Timestamp ? v.toDate() : null);
+      if (d != null && DateUtils.isSameDay(d, _selectedDate)) {
+        holidayName = (h['name'] as String?) ?? (urdu ? 'چھٹی' : 'Holiday');
+        break;
+      }
+    }
+    final islamicEvent = IslamicCalendarHelper.getIslamicEvent(_selectedDate);
+    if (holidayName == null && islamicEvent != null && islamicEvent.isOfficialHoliday) {
+      holidayName = urdu ? islamicEvent.titleUr : islamicEvent.titleEn;
+    }
+    final isSunday = _selectedDate.weekday == DateTime.sunday;
+    final isFuture = _isFutureDate(_selectedDate);
+
+    // Students and filters
+    final students = studentsAsync.value ?? const <Map<String, dynamic>>[];
+    final logData = logAsync.value ?? const <String, dynamic>{};
+    final loading = (studentsAsync.isLoading && studentsAsync.value == null) || (logAsync.isLoading && logAsync.value == null);
+    final branchSessions = CampSessionService.getMadrassaSessions(_effectiveBranch);
+    final sessions = ['morning', 'evening', 'night']
+        .where((s) => branchSessions.contains(s) || students.any((st) => (st['session'] ?? 'morning') == s))
+        .toList();
+
+    final scoped = students.where((s) {
+      if (_selectedSessionFilter != 'all' &&
+          (s['session'] ?? 'morning').toString().toLowerCase().trim() != _selectedSessionFilter) {
+        return false;
+      }
+      final nazra = _isNazraStudent(s, nazraOnly);
+      if (_selectedProgramFilter == 'hifz' && nazra) return false;
+      if (_selectedProgramFilter == 'nazra' && !nazra) return false;
+      return true;
+    }).toList();
+
+    final q = _searchText.trim().toLowerCase();
+    final shown = scoped.where((s) {
+      if (q.isNotEmpty) {
+        final hay = '${s['name'] ?? ''} ${s['rollNumber'] ?? ''} ${s['fatherName'] ?? ''}'.toLowerCase();
+        if (!hay.contains(q)) return false;
+      }
+      if (_statusFilter == 'all') return true;
+      final v = _viewOf((s['id'] ?? '').toString(), logData);
+      final att = (v['attendance'] ?? 'absent').toString();
+      switch (_statusFilter) {
+        case 'present':
+          return att == 'present';
+        case 'late':
+          return att == 'present' && (v['isLate'] == true || v['timing'] == 'late');
+        case 'leave':
+          return att == 'leave';
+        case 'absent':
+          return att != 'present' && att != 'leave' && !_isPendingLeave(v);
+        case 'requests':
+          return _isPendingLeave(v);
+        case 'unsaved':
+          return _localChanges.containsKey((s['id'] ?? '').toString());
+      }
+      return true;
+    }).toList();
+
+    // Stats
+    int present = 0, late = 0, leave = 0, absent = 0, replied = 0;
+    for (final s in scoped) {
+      final v = _viewOf((s['id'] ?? '').toString(), logData);
+      final att = (v['attendance'] ?? 'absent').toString();
       if (att == 'present') {
         present++;
-        if (log['isLate'] == true || log['timing'] == 'late') {
-          lateCount++;
-        }
+        if (v['isLate'] == true || v['timing'] == 'late') late++;
       } else if (att == 'leave') {
         leave++;
       } else {
         absent++;
       }
-      if (log['parentReplied'] == true) replied++;
+      if (v['parentReplied'] == true) replied++;
     }
 
-    final dateText = DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate);
-    final hijriDate = IslamicCalendarHelper.fromGregorian(_selectedDate);
-    final hijriText = hijriDate.format(isUrdu: context.isUrdu);
-    final fullDateHeading = '$dateText  •  🌙 $hijriText';
+    final dateNav = Row(mainAxisSize: MainAxisSize.min, children: [
+      IconButton(
+        tooltip: urdu ? 'پچھلا دن' : 'Previous day',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _goToDate(_selectedDate.subtract(const Duration(days: 1))),
+        icon: const Icon(GIcons.back, size: 18),
+      ),
+      OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          minimumSize: const Size(0, 34),
+          padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3),
+        ),
+        onPressed: _pickDate,
+        icon: const Icon(GIcons.calendar, size: 16),
+        label: Text(DateFormat('EEE d MMM yyyy').format(_selectedDate), style: GText.label(c.textPrimary)),
+      ),
+      IconButton(
+        tooltip: urdu ? 'اگلا دن' : 'Next day',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _goToDate(_selectedDate.add(const Duration(days: 1))),
+        icon: const Icon(GIcons.forward, size: 18),
+      ),
+      if (!DateUtils.isSameDay(_selectedDate, DateTime.now()))
+        TextButton(
+          style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+          onPressed: () => _goToDate(DateTime.now()),
+          child: Text(urdu ? 'آج' : 'Today'),
+        ),
+    ]);
 
-    final isDarkStats = Theme.of(context).brightness == Brightness.dark || UserThemeService.isDarkMode(widget.editorName);
-    final dateTextColor = isDarkStats ? SoftPalette.gray50 : SoftPalette.gray900;
-
-    // Date & stats section
-    final statsRow = _buildAttendanceStatsRow(
-      context,
-      present: present,
-      lateCount: lateCount,
-      leave: leave,
-      absent: absent,
-      replied: replied,
+    final bell = Badge(
+      isLabelVisible: requests.isNotEmpty,
+      backgroundColor: _amber,
+      offset: const Offset(-4, 4),
+      label: Text('${requests.length}'),
+      child: IconButton(
+        tooltip: urdu ? 'رخصت کی درخواستیں' : 'Leave requests',
+        onPressed: () => _showLeaveInbox(requests),
+        icon: Icon(GIcons.notifications, color: c.textSecondary),
+      ),
     );
 
-    Widget dateAndStatsWidget;
-    if (isMobile) {
-      dateAndStatsWidget = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            fullDateHeading,
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
-          ),
-          const SizedBox(height: 8),
-          statsRow,
-        ],
-      );
+    // The Madrassa hub's top bar already has the logo, the "Daily Log" title,
+    // branch, sync, theme and language: this screen adds only its own controls.
+    final dayCaption = [
+      hijri,
+      urdu ? '$workingDays تعلیمی دن' : '$workingDays working days',
+      'PTM ${DateFormat('EEE d MMM').format(ptmDate)}',
+      if (nazraOnly) urdu ? 'صرف ناظرہ' : 'Nazra only',
+    ].join('  ·  ');
+    final Widget header;
+    if (MadrassaHubSlot.available(context) && !narrow) {
+      // Desktop hub: the controls go into the hub's own top bar (no second row).
+      final slot = _urduSafe(Row(children: [
+        dateNav,
+        const SizedBox(width: Gsp.sp3),
+        Flexible(child: Text(dayCaption, maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.caption(c.textMuted))),
+        const Spacer(),
+        bell,
+      ]));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _publishedSlot = slot;
+          MadrassaHubSlot.toolbar.value = slot;
+        }
+      });
+      header = const SizedBox.shrink();
     } else {
-      dateAndStatsWidget = Row(
-        children: [
-          Expanded(
-            child: Text(
-              fullDateHeading,
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: dateTextColor),
-            ),
+      header = MadrassaErpControlBar(leading: [dateNav], caption: dayCaption, trailing: [bell]);
+    }
+
+    Widget body;
+    if (holidayName != null || isSunday || isFuture) {
+      body = Container(
+        decoration: BoxDecoration(color: c.surface, borderRadius: MadrassaErp.radius, border: Border.all(color: c.border)),
+        child: Center(
+          child: AppEmptyState(
+            icon: holidayName != null ? GIcons.event : (isSunday ? GIcons.calendar : GIcons.time),
+            title: holidayName ??
+                (isSunday
+                    ? (urdu ? 'اتوار کی چھٹی' : 'Sunday — weekly holiday')
+                    : (isPtmDay ? (urdu ? 'پی ٹی ایم شیڈول ہے' : 'PTM scheduled') : context.l.futureDateTitle)),
+            subtitle: holidayName != null || isSunday
+                ? (urdu ? 'اس دن مدرسہ بند ہے' : 'Madrassa is closed on this day')
+                : context.l.futureDateSubtitle,
+            action: requests.isEmpty
+                ? null
+                : OutlinedButton.icon(
+                    onPressed: () => _showLeaveInbox(requests),
+                    icon: const Icon(GIcons.notifications, size: 16),
+                    label: Text(urdu ? 'رخصت کی درخواستیں (${requests.length})' : 'Leave requests (${requests.length})'),
+                  ),
           ),
-          statsRow,
+        ),
+      );
+    } else if (loading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else {
+      final card = _buildRegisterCard(
+        context,
+        config: config,
+        scoped: scoped,
+        shown: shown,
+        logData: logData,
+        sessions: sessions,
+        nazraOnly: nazraOnly,
+        isReadOnly: isReadOnly,
+        isPtmDay: isPtmDay,
+        allowLeave: allowLeave,
+        requests: requests,
+      );
+      final selected = _selectedStudentId == null
+          ? null
+          : students.firstWhereOrNull((s) => (s['id'] ?? '').toString() == _selectedStudentId);
+      if (selected != null && MadrassaErp.roomForPanel(context)) {
+        body = Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Expanded(child: card),
+          const SizedBox(width: Gsp.sp4),
+          SizedBox(
+            width: 460,
+            child: _studentPanel(selected,
+                isPtmDay: isPtmDay, isReadOnly: isReadOnly, allowLeave: allowLeave, onClose: () => setState(() => _selectedStudentId = null)),
+          ),
+        ]);
+      } else {
+        body = card;
+      }
+    }
+
+    final stats = MadrassaErpStatStrip([
+      MadrassaErpStat(
+        label: context.l.present,
+        value: '$present',
+        caption: late > 0 ? (urdu ? '$late تاخیر' : '$late late') : (urdu ? 'از ${scoped.length}' : 'of ${scoped.length}'),
+        color: c.success,
+        icon: GIcons.checkCircle,
+        onTap: () => setState(() => _statusFilter = _statusFilter == 'present' ? 'all' : 'present'),
+      ),
+      MadrassaErpStat(
+        label: context.l.late,
+        value: '$late',
+        color: c.warning,
+        icon: GIcons.time,
+        onTap: () => setState(() => _statusFilter = _statusFilter == 'late' ? 'all' : 'late'),
+      ),
+      MadrassaErpStat(
+        label: context.l.leave,
+        value: '$leave',
+        color: c.info,
+        icon: GIcons.event,
+        onTap: () => setState(() => _statusFilter = _statusFilter == 'leave' ? 'all' : 'leave'),
+      ),
+      MadrassaErpStat(
+        label: context.l.absent,
+        value: '$absent',
+        color: c.danger,
+        icon: GIcons.cancel,
+        onTap: () => setState(() => _statusFilter = _statusFilter == 'absent' ? 'all' : 'absent'),
+      ),
+      MadrassaErpStat(
+        label: urdu ? 'جواب دیا' : 'Replied',
+        value: '$replied',
+        caption: urdu ? 'از ${scoped.length}' : 'of ${scoped.length}',
+        color: c.brand,
+        icon: GIcons.whatsapp,
+      ),
+      MadrassaErpStat(
+        label: urdu ? 'رخصت کی درخواستیں' : 'Leave requests',
+        value: '${requests.length}',
+        caption: requests.isEmpty ? null : (urdu ? 'جواب دیں' : 'to answer'),
+        color: requests.isEmpty ? c.textMuted : _amber,
+        icon: GIcons.notifications,
+        onTap: () => _showLeaveInbox(requests),
+      ),
+    ]);
+
+    final readOnlyBanner = Container(
+      padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+      decoration: BoxDecoration(color: c.warningBg, borderRadius: MadrassaErp.radius, border: Border.all(color: c.warning.withValues(alpha: 0.4))),
+      child: Row(children: [
+        Icon(GIcons.lock, size: 16, color: c.warning),
+        const SizedBox(width: Gsp.sp2),
+        Expanded(
+          child: Text(
+            urdu
+                ? 'صرف پڑھنے کے لیے: صرف موجودہ یا پچھلے مہینے کا ریکارڈ بدلا جا سکتا ہے۔'
+                : 'Read only: only the current or previous month can be changed.',
+            style: GText.caption(c.textPrimary),
+          ),
+        ),
+      ]),
+    );
+    final openDay = holidayName == null && !isSunday && !isFuture;
+
+    if (narrow) {
+      // Phone: the header, banner and figures scroll away with the list, so the
+      // students get the whole screen.
+      return NestedScrollView(
+        headerSliverBuilder: (context, _) => [
+          SliverToBoxAdapter(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              header,
+              Padding(
+                padding: EdgeInsets.fromLTRB(pad, Gsp.sp2, pad, 0),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  if (isReadOnly) ...[readOnlyBanner, const SizedBox(height: Gsp.sp2)],
+                  if (openDay) stats,
+                ]),
+              ),
+            ]),
+          ),
         ],
+        body: Padding(padding: const EdgeInsets.only(top: Gsp.sp2), child: body),
       );
     }
 
-    // Actions & Legends section
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      header,
+      Expanded(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(pad, Gsp.sp3, pad, Gsp.sp3),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            if (isReadOnly) ...[readOnlyBanner, const SizedBox(height: Gsp.sp2)],
+            if (openDay) ...[stats, const SizedBox(height: Gsp.sp3)],
+            Expanded(child: body),
+          ]),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _buildRegisterCard(
+    BuildContext context, {
+    required MadrassaConfig config,
+    required List<Map<String, dynamic>> scoped,
+    required List<Map<String, dynamic>> shown,
+    required Map<String, dynamic> logData,
+    required List<String> sessions,
+    required bool nazraOnly,
+    required bool isReadOnly,
+    required bool isPtmDay,
+    required bool allowLeave,
+    required List<_LeaveRequest> requests,
+  }) {
     final c = context.comfort;
-    Widget actionsAndLegendsWidget;
-    if (isDesktop) {
-      actionsAndLegendsWidget = Row(
-        children: [
-          _efficiencyButton(
-            label: context.l.allPresent,
-            icon: GIcons.checkCircle,
-            color: c.success,
-            isSelected: _allPresentToggled,
-            onTap: isReadOnly ? null : () {
-              setState(() {
+    final urdu = context.isUrdu;
+    final nazraCount = scoped.where((s) => _isNazraStudent(s, nazraOnly)).length;
+    final unsaved = _localChanges.length;
+
+    // PTM claims waiting for the teacher
+    final ptmClaims = <Map<String, dynamic>>[];
+    for (final s in scoped) {
+      final sId = (s['id'] ?? '').toString();
+      final v = _viewOf(sId, logData);
+      if (v['ptmRequestStatus'] == 'claimed') {
+        ptmClaims.add({'id': sId, 'name': s['name'] ?? 'Student', 'rollNumber': s['rollNumber'] ?? '?', 'log': v});
+      }
+    }
+
+    // One list of actions: buttons on a desktop, one menu (plus Save) on a phone.
+    final ops = <({String label, IconData icon, bool on, Color? tone, VoidCallback? onTap})>[
+      (
+        label: context.l.allPresent,
+        icon: GIcons.checkCircle,
+        on: _allPresentToggled,
+        tone: null,
+        onTap: isReadOnly
+            ? null
+            : () {
                 _allPresentToggled = !_allPresentToggled;
-                for (var s in students) {
-                  final sId = s['id'] ?? '';
-                  final log = _safeMap(logData[sId]);
-                  final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                  if (currentAtt != 'leave' && currentAtt != 'leave_requested') {
+                for (final s in shown) {
+                  final sId = (s['id'] ?? '').toString();
+                  final v = _viewOf(sId, logData);
+                  final att = v['attendance'];
+                  if (att != 'leave' && att != 'leave_requested' && !_isPendingLeave(v)) {
                     _updateAttendanceSilent(sId, _allPresentToggled ? 'present' : 'absent');
                   }
                 }
-              });
-            },
-          ),
-          const SizedBox(width: 8),
-          _efficiencyButton(
-            label: context.l.allUniform,
-            icon: GIcons.check,
-            color: c.info,
-            isSelected: _allUniformToggled,
-            onTap: isReadOnly ? null : () {
-              setState(() {
+                _changeNotifier.value++;
+              },
+      ),
+      (
+        label: context.l.allUniform,
+        icon: GIcons.check,
+        on: _allUniformToggled,
+        tone: null,
+        onTap: isReadOnly
+            ? null
+            : () {
                 _allUniformToggled = !_allUniformToggled;
-                for (var s in students) {
-                  final sId = s['id'] ?? '';
-                  final log = _safeMap(logData[sId]);
-                  final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                  if (currentAtt == 'present') {
+                for (final s in shown) {
+                  final sId = (s['id'] ?? '').toString();
+                  if (_viewOf(sId, logData)['attendance'] == 'present') {
                     _updateLocalSilent(sId, 'uniform', _allUniformToggled);
                   }
                 }
-              });
-            },
-          ),
-          const SizedBox(width: 8),
-          _efficiencyButton(
-            label: context.isUrdu ? 'سب نے جواب دیا' : 'All Replied',
-            icon: GIcons.whatsapp,
-            color: c.warning,
-            isSelected: _allRepliedToggled,
-            onTap: isReadOnly ? null : () {
-              setState(() {
+              },
+      ),
+      (
+        label: urdu ? 'سب نے جواب دیا' : 'All replied',
+        icon: GIcons.whatsapp,
+        on: _allRepliedToggled,
+        tone: null,
+        onTap: isReadOnly
+            ? null
+            : () {
                 _allRepliedToggled = !_allRepliedToggled;
-                for (var s in students) {
-                  final sId = s['id'] ?? '';
-                  _updateLocalSilent(sId, 'parentReplied', _allRepliedToggled);
+                for (final s in shown) {
+                  _updateLocalSilent((s['id'] ?? '').toString(), 'parentReplied', _allRepliedToggled);
                 }
-              });
-            },
-          ),
-          const SizedBox(width: 16),
-          ElevatedButton.icon(
-            onPressed: _localChanges.isEmpty || _isSaving || isReadOnly ? null : _saveChanges,
-            icon: _isSaving
-                ? SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(color: c.onBrand, strokeWidth: 1.5),
-                  )
-                : const Icon(GIcons.save, size: 16),
-            label: Text(context.l.saveChanges, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: c.brand,
-              foregroundColor: c.onBrand,
-              disabledBackgroundColor: c.surfaceSunken,
-              disabledForegroundColor: c.textMuted,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-          ),
-          const SizedBox(width: 8),
-          OutlinedButton.icon(
-            onPressed: () => _showDailyReportDialog(config, students, logData),
-            icon: FaIcon(FontAwesomeIcons.whatsapp, color: c.success, size: 16),
-            label: Text(
-              context.isUrdu ? 'روزانہ گروپ رپورٹ' : 'Daily Group Report',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: c.textPrimary),
-            ),
-            style: OutlinedButton.styleFrom(
-              side: BorderSide(color: c.border),
-              backgroundColor: c.surface,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-          ),
-        ],
-      );
-    } else {
-      actionsAndLegendsWidget = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _efficiencyButton(
-                label: context.l.allPresent,
-                icon: GIcons.checkCircle,
-                color: c.success,
-                isSelected: _allPresentToggled,
-                onTap: isReadOnly ? null : () {
-                  setState(() {
-                    _allPresentToggled = !_allPresentToggled;
-                    for (var s in students) {
-                      final sId = s['id'] ?? '';
-                      final log = _safeMap(logData[sId]);
-                      final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                      if (currentAtt != 'leave' && currentAtt != 'leave_requested') {
-                        _updateAttendanceSilent(sId, _allPresentToggled ? 'present' : 'absent');
-                      }
-                    }
-                  });
-                },
-              ),
-              _efficiencyButton(
-                label: context.l.allUniform,
-                icon: GIcons.check,
-                color: c.info,
-                isSelected: _allUniformToggled,
-                onTap: isReadOnly ? null : () {
-                  setState(() {
-                    _allUniformToggled = !_allUniformToggled;
-                    for (var s in students) {
-                      final sId = s['id'] ?? '';
-                      final log = _safeMap(logData[sId]);
-                      final currentAtt = _localChanges[sId]?['attendance'] ?? log['attendance'];
-                      if (currentAtt == 'present') {
-                        _updateLocalSilent(sId, 'uniform', _allUniformToggled);
-                      }
-                    }
-                  });
-                },
-              ),
-              _efficiencyButton(
-                label: context.isUrdu ? 'سب نے جواب دیا' : 'All Replied',
-                icon: GIcons.whatsapp,
-                color: c.warning,
-                isSelected: _allRepliedToggled,
-                onTap: isReadOnly ? null : () {
-                  setState(() {
-                    _allRepliedToggled = !_allRepliedToggled;
-                    for (var s in students) {
-                      final sId = s['id'] ?? '';
-                      _updateLocalSilent(sId, 'parentReplied', _allRepliedToggled);
-                    }
-                  });
-                },
-              ),
-              _efficiencyButton(
-                label: context.isUrdu ? 'روزانہ گروپ رپورٹ' : 'Daily Group Report',
-                icon: GIcons.share,
-                color: c.brand,
-                isSelected: false,
-                onTap: () => _showDailyReportDialog(config, students, logData),
-              ),
-            ],
-          ),
-        ],
-      );
-    }
-
-    return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: 0,
-        vertical: isMobile ? 12 : 24,
+              },
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          dateAndStatsWidget,
-          SizedBox(height: isMobile ? 12 : 16),
-          actionsAndLegendsWidget,
-        ],
+      (
+        label: urdu ? 'گروپ رپورٹ' : 'Group report',
+        icon: GIcons.share,
+        on: false,
+        tone: null,
+        onTap: () => _showDailyReportDialog(config, shown, logData),
       ),
-    );
-  }
-
-  Widget _efficiencyButton({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required bool isSelected,
-    required VoidCallback? onTap,
-  }) {
-    final c = context.comfort;
-    final isDisabled = onTap == null;
-    final bg = isDisabled
-        ? c.surfaceSunken
-        : (isSelected ? color : color.withValues(alpha: 0.08));
-    final border = isDisabled
-        ? c.border
-        : (isSelected ? color : color.withValues(alpha: 0.25));
-    final fg = isDisabled
-        ? c.textMuted
-        : (isSelected ? SoftPalette.gray50 : color);
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: border),
+      if (requests.isNotEmpty)
+        (
+          label: urdu ? 'سب رخصتیں منظور (${requests.length})' : 'Approve all leaves (${requests.length})',
+          icon: GIcons.checkCircle,
+          on: false,
+          tone: c.success,
+          onTap: () => _approveAllLeaves(requests),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: fg),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: context.urduStyle(
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.bold,
-                  color: fg,
+      if (ptmClaims.isNotEmpty && !isReadOnly)
+        (
+          label: urdu ? 'پی ٹی ایم دعوے (${ptmClaims.length})' : 'PTM claims (${ptmClaims.length})',
+          icon: GIcons.users,
+          on: false,
+          tone: c.info,
+          onTap: () => _showPtmClaimsPopup(context, ptmClaims),
+        ),
+    ];
+
+    final saveButton = FilledButton.icon(
+      onPressed: unsaved == 0 || _isSaving || isReadOnly ? null : _saveChanges,
+      icon: _isSaving
+          ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5, color: c.onBrand))
+          : const Icon(GIcons.save, size: 16),
+      label: Text(unsaved == 0 ? context.l.saveChanges : '${context.l.saveChanges} ($unsaved)'),
+    );
+
+    final actions = <Widget>[
+      for (final o in ops)
+        o.on
+            ? FilledButton.tonalIcon(onPressed: o.onTap, icon: Icon(o.icon, size: 16), label: Text(o.label))
+            : OutlinedButton.icon(
+                style: o.tone == null
+                    ? null
+                    : OutlinedButton.styleFrom(foregroundColor: o.tone, side: BorderSide(color: o.tone!.withValues(alpha: 0.5))),
+                onPressed: o.onTap,
+                icon: Icon(o.icon, size: 16),
+                label: Text(o.label),
+              ),
+      saveButton,
+    ];
+
+    final filters = <Widget>[
+      SizedBox(
+        width: MadrassaErp.narrow(context) ? 200 : 240,
+        height: 38,
+        child: TextField(
+          controller: _searchCtrl,
+          onChanged: (v) => setState(() => _searchText = v),
+          style: GText.body2(c.textPrimary),
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+            prefixIcon: const Icon(GIcons.search, size: 18),
+            hintText: urdu ? 'نام یا رول نمبر' : 'Name or roll no.',
+            suffixIcon: _searchText.isEmpty
+                ? null
+                : IconButton(
+                    icon: const Icon(GIcons.close, size: 16),
+                    onPressed: () {
+                      _searchCtrl.clear();
+                      setState(() => _searchText = '');
+                    },
+                  ),
+          ),
+        ),
+      ),
+      if (!nazraOnly)
+        MadrassaErpFilter<String>(
+          label: urdu ? 'پروگرام' : 'Program',
+          value: _selectedProgramFilter,
+          width: 150,
+          options: {
+            'all': urdu ? 'سب' : 'All',
+            'hifz': '${urdu ? 'حفظ' : 'Hifz'}${_selectedProgramFilter == 'all' ? ' (${scoped.length - nazraCount})' : ''}',
+            'nazra': '${urdu ? 'ناظرہ' : 'Nazra'}${_selectedProgramFilter == 'all' ? ' ($nazraCount)' : ''}',
+          },
+          onChanged: (v) => setState(() => _selectedProgramFilter = v),
+        ),
+      if (sessions.length > 1)
+        MadrassaErpFilter<String>(
+          label: urdu ? 'سیشن' : 'Session',
+          value: _selectedSessionFilter,
+          width: 140,
+          options: {'all': urdu ? 'سب' : 'All', for (final s in sessions) s: _sessionLabel(s)},
+          onChanged: (v) => setState(() => _selectedSessionFilter = v),
+        ),
+      MadrassaErpFilter<String>(
+        label: urdu ? 'حالت' : 'Status',
+        value: _statusFilter,
+        width: 150,
+        options: {
+          'all': urdu ? 'سب' : 'All',
+          'present': context.l.present,
+          'late': context.l.late,
+          'leave': context.l.leave,
+          'absent': context.l.absent,
+          'requests': urdu ? 'درخواستیں' : 'Leave requests',
+          'unsaved': urdu ? 'غیر محفوظ' : 'Unsaved',
+        },
+        onChanged: (v) => setState(() => _statusFilter = v),
+      ),
+      if (_isGlobalLevelUser(widget.editorRole))
+        Tooltip(
+          message: urdu
+              ? 'تمام یوزرز کے لیے رخصت (L) کا بٹن دکھائیں یا چھپائیں'
+              : 'Show or hide the Leave (L) button for all users',
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Switch(value: allowLeave, onChanged: (v) => _setAllowLeave(v)),
+            Text(urdu ? 'رخصت (L) کی اجازت' : 'Leave (L) allowed', style: GText.caption(c.textSecondary)),
+          ]),
+        ),
+    ];
+
+    // Phone: every action except Save goes into one menu; filters scroll in one line.
+    final phone = MadrassaErp.narrow(context);
+    List<Widget> phoneActions() => [
+          PopupMenuButton<int>(
+            tooltip: urdu ? 'مزید' : 'More actions',
+            icon: Badge(isLabelVisible: requests.isNotEmpty, smallSize: 8, backgroundColor: _amber, child: const Icon(GIcons.more)),
+            itemBuilder: (_) => [
+              for (final (i, o) in ops.indexed)
+                PopupMenuItem<int>(
+                  value: i,
+                  enabled: o.onTap != null,
+                  child: Row(children: [
+                    Icon(o.on ? GIcons.checkCircle : o.icon, size: 18, color: o.tone ?? c.textSecondary),
+                    const SizedBox(width: Gsp.sp3),
+                    Flexible(child: Text(o.label, style: GText.body2(c.textPrimary))),
+                  ]),
+                ),
+            ],
+            onSelected: (i) => ops[i].onTap?.call(),
+          ),
+          saveButton,
+        ];
+
+    if (phone) {
+      // Phone: one row (search · filter menu · more menu), the list edge to edge,
+      // and Save as a bottom bar only while there is something to save.
+      final filterActive = _selectedProgramFilter != 'all' || _selectedSessionFilter != 'all' || _statusFilter != 'all';
+      PopupMenuItem<String> head(String t) =>
+          PopupMenuItem<String>(enabled: false, height: 28, child: Text(t.toUpperCase(), style: GText.overline(c.textMuted)));
+      CheckedPopupMenuItem<String> pick(String value, String label, bool on) =>
+          CheckedPopupMenuItem<String>(value: value, checked: on, child: Text(label, style: GText.body2(c.textPrimary)));
+      final statusLabels = {
+        'all': urdu ? 'سب' : 'All',
+        'present': context.l.present,
+        'late': context.l.late,
+        'leave': context.l.leave,
+        'absent': context.l.absent,
+        'requests': urdu ? 'درخواستیں' : 'Leave requests',
+        'unsaved': urdu ? 'غیر محفوظ' : 'Unsaved',
+      };
+      final filterMenu = PopupMenuButton<String>(
+        tooltip: urdu ? 'فلٹر' : 'Filter',
+        icon: Badge(isLabelVisible: filterActive, smallSize: 8, backgroundColor: c.brand, child: Icon(GIcons.filter, color: c.textSecondary)),
+        itemBuilder: (_) => [
+          if (!nazraOnly) ...[
+            head(urdu ? 'پروگرام' : 'Program'),
+            pick('p:all', urdu ? 'سب' : 'All', _selectedProgramFilter == 'all'),
+            pick('p:hifz', '${urdu ? 'حفظ' : 'Hifz'} (${scoped.length - nazraCount})', _selectedProgramFilter == 'hifz'),
+            pick('p:nazra', '${urdu ? 'ناظرہ' : 'Nazra'} ($nazraCount)', _selectedProgramFilter == 'nazra'),
+            const PopupMenuDivider(),
+          ],
+          if (sessions.length > 1) ...[
+            head(urdu ? 'سیشن' : 'Session'),
+            pick('s:all', urdu ? 'سب' : 'All', _selectedSessionFilter == 'all'),
+            for (final s in sessions) pick('s:$s', _sessionLabel(s), _selectedSessionFilter == s),
+            const PopupMenuDivider(),
+          ],
+          head(urdu ? 'حالت' : 'Status'),
+          for (final e in statusLabels.entries) pick('t:${e.key}', e.value, _statusFilter == e.key),
+          if (_isGlobalLevelUser(widget.editorRole)) ...[
+            const PopupMenuDivider(),
+            pick('leave', urdu ? 'رخصت (L) کی اجازت' : 'Leave (L) allowed', allowLeave),
+          ],
+        ],
+        onSelected: (v) {
+          if (v == 'leave') {
+            _setAllowLeave(!allowLeave);
+            return;
+          }
+          final val = v.substring(2);
+          setState(() {
+            if (v.startsWith('p:')) _selectedProgramFilter = val;
+            if (v.startsWith('s:')) _selectedSessionFilter = val;
+            if (v.startsWith('t:')) _statusFilter = val;
+          });
+        },
+      );
+      return Container(
+        decoration: BoxDecoration(color: c.surface, border: Border.symmetric(horizontal: BorderSide(color: c.border))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(Gsp.sp2, Gsp.sp2, 0, Gsp.sp2),
+            child: Row(children: [
+              Expanded(
+                child: SizedBox(
+                  height: 38,
+                  child: TextField(
+                    controller: _searchCtrl,
+                    onChanged: (v) => setState(() => _searchText = v),
+                    style: GText.body2(c.textPrimary),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                      prefixIcon: const Icon(GIcons.search, size: 18),
+                      hintText: urdu
+                          ? 'تلاش (${shown.length}/${scoped.length})'
+                          : 'Search ${shown.length} of ${scoped.length}',
+                    ),
+                  ),
                 ),
               ),
+              filterMenu,
+              phoneActions().first,
+            ]),
+          ),
+          Divider(height: 1, color: c.border),
+          Expanded(
+            child: _registerTable(context,
+                rows: shown, logData: logData, nazraOnly: nazraOnly, isReadOnly: isReadOnly, isPtmDay: isPtmDay, allowLeave: allowLeave),
+          ),
+          if (unsaved > 0 && !isReadOnly)
+            Container(
+              padding: const EdgeInsets.fromLTRB(Gsp.sp3, Gsp.sp2, Gsp.sp3, Gsp.sp2),
+              decoration: BoxDecoration(color: c.surfaceRaised, border: Border(top: BorderSide(color: c.border))),
+              child: Row(children: [
+                Expanded(
+                  child: Text(
+                    urdu ? '$unsaved طلباء کی تبدیلیاں باقی' : '$unsaved student(s) not saved',
+                    style: GText.caption(c.warning),
+                  ),
+                ),
+                saveButton,
+              ]),
             ),
-          ],
+        ]),
+      );
+    }
+
+    return MadrassaErpCard(
+      title: urdu ? 'حاضری رجسٹر' : 'Register',
+      subtitle: urdu
+          ? '${scoped.length} میں سے ${shown.length} طلباء'
+          : '${shown.length} of ${scoped.length} students${unsaved > 0 ? ' · $unsaved unsaved' : ''}',
+      actions: actions,
+      toolbar: phone
+          ? SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(children: [
+                for (final (i, f) in filters.indexed) ...[if (i > 0) const SizedBox(width: Gsp.sp2), f],
+              ]),
+            )
+          : Wrap(spacing: Gsp.sp2, runSpacing: Gsp.sp2, crossAxisAlignment: WrapCrossAlignment.center, children: filters),
+      child: _registerTable(context,
+          rows: shown, logData: logData, nazraOnly: nazraOnly, isReadOnly: isReadOnly, isPtmDay: isPtmDay, allowLeave: allowLeave),
+    );
+  }
+
+  void _setAllowLeave(bool allow) {
+    setState(() => _localAllowStudentLeave = allow);
+    unawaited(FirebaseFirestore.instance
+        .collection('branches')
+        .doc(_effectiveBranch)
+        .collection('madrassa_config')
+        .doc('current')
+        .set({'allowStudentLeave': allow}, SetOptions(merge: true))
+        .timeout(const Duration(seconds: 4))
+        .catchError((err) {
+      debugPrint('[DailyLogView] Update allowStudentLeave error: $err');
+    }));
+    AppToast.showSnackBar(
+      context,
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        content: Text(allow
+            ? (context.isUrdu ? 'رخصت (L) کا بٹن سب کے لیے آن ہے۔' : 'Leave (L) button is now shown to all users.')
+            : (context.isUrdu ? 'رخصت (L) کا بٹن سب کے لیے بند ہے۔' : 'Leave (L) button is now hidden from all users.')),
+      ),
+    );
+  }
+
+  // ── Table ──────────────────────────────────────────────────────────────────
+
+  static const double _wRoll = 40, _wAtt = 118, _wLate = 76, _wTick = 62, _wSabak = 110, _wLesson = 168, _wPtm = 74, _wAct = 64;
+
+  Widget _registerTable(
+    BuildContext context, {
+    required List<Map<String, dynamic>> rows,
+    required Map<String, dynamic> logData,
+    required bool nazraOnly,
+    required bool isReadOnly,
+    required bool isPtmDay,
+    required bool allowLeave,
+  }) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    if (rows.isEmpty) {
+      return Center(
+        child: AppEmptyState(
+          icon: GIcons.searchOff,
+          title: urdu ? 'کوئی طالب علم نہیں ملا' : 'No students match',
+          subtitle: urdu ? 'فلٹر بدل کر دیکھیں۔' : 'Try another filter or search.',
+          compact: true,
+        ),
+      );
+    }
+    if (MadrassaErp.narrow(context)) {
+      // Phone: variable-height two-line rows, no sideways scrolling.
+      return ListView.builder(
+        itemCount: rows.length,
+        itemBuilder: (context, i) {
+          final s = rows[i];
+          return _registerRow(context, s, _viewOf((s['id'] ?? '').toString(), logData), i,
+              nazraOnly: nazraOnly, isReadOnly: isReadOnly, isPtmDay: isPtmDay, allowLeave: allowLeave, gap: (w) => w);
+        },
+      );
+    }
+    final allNazra = rows.every((s) => _isNazraStudent(s, nazraOnly));
+    final minWidth = 220 + _wRoll + _wAtt + _wLate + _wTick * 2 + _wSabak + _wLesson * 2 + _wAct + (isPtmDay ? _wPtm : 0) + 11 * Gsp.sp2 + 2 * Gsp.sp3;
+
+    Widget head(String label, double? w, {bool center = false}) {
+      final t = Text(label.toUpperCase(), maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.overline(c.textMuted));
+      return w == null
+          ? Expanded(child: t)
+          : SizedBox(width: w, child: center ? Center(child: t) : t);
+    }
+
+    List<Widget> gap(List<Widget> cells) => [
+          for (final (i, w) in cells.indexed) ...[if (i > 0) const SizedBox(width: Gsp.sp2), w],
+        ];
+
+    final header = Container(
+      height: MadrassaErp.headerHeight,
+      color: c.surfaceSunken,
+      padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3),
+      child: Row(
+        children: gap([
+          head('#', _wRoll),
+          head(urdu ? 'طالب علم' : 'Student', null),
+          head(urdu ? 'حاضری' : 'P · L · A', _wAtt),
+          head(context.l.late, _wLate, center: true),
+          head(context.l.uniform, _wTick, center: true),
+          head(urdu ? 'جواب' : 'Replied', _wTick, center: true),
+          head(urdu ? 'سبق' : 'Sabak', _wSabak, center: true),
+          head(allNazra ? (urdu ? 'رکوع' : 'Ruku') : (urdu ? 'سبقی' : 'Sabqi'), _wLesson),
+          head(allNazra ? (urdu ? 'قاعدہ' : 'Qaida') : (urdu ? 'منزل' : 'Manzil'), _wLesson),
+          if (isPtmDay) head(context.l.ptm, _wPtm, center: true),
+          head('', _wAct),
+        ]),
+      ),
+    );
+
+    final list = ListView.builder(
+      itemCount: rows.length,
+      itemExtent: MadrassaErp.rowHeight,
+      itemBuilder: (context, i) {
+        final s = rows[i];
+        final sId = (s['id'] ?? '').toString();
+        return _registerRow(context, s, _viewOf(sId, logData), i,
+            nazraOnly: nazraOnly, isReadOnly: isReadOnly, isPtmDay: isPtmDay, allowLeave: allowLeave, gap: gap);
+      },
+    );
+
+    return LayoutBuilder(builder: (context, box) {
+      final width = box.maxWidth < minWidth ? minWidth : box.maxWidth;
+      final grid = SizedBox(width: width, child: Column(children: [header, Expanded(child: list)]));
+      if (width <= box.maxWidth) return grid;
+      return Scrollbar(
+        child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: SizedBox(height: box.maxHeight, child: grid)),
+      );
+    });
+  }
+
+  Widget _registerRow(
+    BuildContext context,
+    Map<String, dynamic> s,
+    Map<String, dynamic> v,
+    int index, {
+    required bool nazraOnly,
+    required bool isReadOnly,
+    required bool isPtmDay,
+    required bool allowLeave,
+    required List<Widget> Function(List<Widget>) gap,
+  }) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final sId = (s['id'] ?? '').toString();
+    final att = (v['attendance'] ?? 'absent').toString();
+    final present = att == 'present';
+    final pendingLeave = _isPendingLeave(v);
+    final isLate = v['isLate'] == true || v['timing'] == 'late';
+    final arrival = v['arrivalTime']?.toString();
+    final uniform = att == 'leave' || v['uniform'] == true || v['uniform'] == 'leave';
+    final replied = v['parentReplied'] == true;
+    final replyText = (v['parentReplyText'] ?? v['parentReplyMessage'])?.toString().trim() ?? '';
+    final replyWaiting = !replied && (v['parentRepliedRequested'] == true || replyText.isNotEmpty);
+    final nazra = _isNazraStudent(s, nazraOnly);
+    final unsaved = _localChanges.containsKey(sId);
+    final selected = _selectedStudentId == sId;
+    final lines = v['sabakLines'] != null ? _asInt(v['sabakLines']) : 0;
+    final totalLines = v['currentLines'] != null
+        ? _asInt(v['currentLines'])
+        : _asInt(s['currentLines']);
+    final canEdit = !isReadOnly;
+    final name = (s['name'] ?? '—').toString();
+    final session = (s['session'] ?? 'morning').toString().toLowerCase().trim();
+
+    // Attendance cell
+    Widget attCell;
+    if (pendingLeave) {
+      attCell = Row(mainAxisSize: MainAxisSize.min, children: [
+        Flexible(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Gr.r2),
+            onTap: canEdit
+                ? () => _openLeaveRequest(_LeaveRequest(dateKey: _dateKey, studentId: sId, student: s, log: v))
+                : null,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              decoration: BoxDecoration(color: _amber.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(Gr.r2), border: Border.all(color: _amber.withValues(alpha: 0.55))),
+              child: Text(urdu ? 'درخواست' : 'Request', maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.micro(_amberText).copyWith(fontWeight: FontWeight.w700)),
+            ),
+          ),
+        ),
+        if (canEdit) ...[
+          IconButton(
+            tooltip: urdu ? 'منظور' : 'Approve',
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            padding: EdgeInsets.zero,
+            onPressed: () => _decideLeaveNow(_LeaveRequest(dateKey: _dateKey, studentId: sId, student: s, log: v), approve: true),
+            icon: Icon(GIcons.checkCircle, size: 18, color: c.success),
+          ),
+          IconButton(
+            tooltip: urdu ? 'مسترد' : 'Deny',
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            padding: EdgeInsets.zero,
+            onPressed: () => _decideLeaveNow(_LeaveRequest(dateKey: _dateKey, studentId: sId, student: s, log: v), approve: false),
+            icon: Icon(GIcons.cancel, size: 18, color: c.danger),
+          ),
+        ],
+      ]);
+    } else {
+      Widget seg(String label, String value, Color tone, {bool enabled = true}) {
+        final on = att == value;
+        return Tooltip(
+          message: value == 'present' ? context.l.present : (value == 'leave' ? context.l.leave : context.l.absent),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Gr.r2),
+            onTap: canEdit && enabled && !on ? () => _updateAttendanceSilent(sId, value) : null,
+            child: Container(
+              width: 32,
+              height: 28,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: on ? tone : (enabled ? c.surface : c.surfaceSunken),
+                borderRadius: BorderRadius.circular(Gr.r2),
+                border: Border.all(color: on ? tone : c.border),
+              ),
+              child: Text(label, style: GText.label(on ? c.onBrand : (enabled ? c.textSecondary : c.textMuted.withValues(alpha: 0.5)))),
+            ),
+          ),
+        );
+      }
+
+      final showLeave = allowLeave || att == 'leave';
+      attCell = Row(mainAxisSize: MainAxisSize.min, children: [
+        seg('P', 'present', c.success),
+        const SizedBox(width: 4),
+        if (showLeave) ...[seg('L', 'leave', c.info, enabled: allowLeave), const SizedBox(width: 4)],
+        seg('A', 'absent', c.danger),
+      ]);
+    }
+
+    // Lesson cells
+    Widget muted(String t) => Text(t, maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.caption(c.textMuted));
+
+    Widget sabakCell;
+    if (!present) {
+      sabakCell = Center(child: muted(lines > 0 ? '$lines' : '—'));
+    } else {
+      sabakCell = Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _miniIconButton(Icons.remove_rounded, canEdit && lines > 0 ? () => _updateSabakLines(sId, lines - 1) : null,
+            tooltip: urdu ? 'ایک لائن کم' : 'One line less'),
+        InkWell(
+          onTap: canEdit ? () => _showCustomLinesDialog(context, sId, lines) : null,
+          borderRadius: BorderRadius.circular(Gr.r2),
+          child: Container(
+            width: 36,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(color: c.surfaceSunken, borderRadius: BorderRadius.circular(Gr.r2)),
+            child: Text('$lines', style: GText.label(c.textPrimary).copyWith(fontFeatures: const [FontFeature.tabularFigures()])),
+          ),
+        ),
+        _miniIconButton(GIcons.add, canEdit ? () => _updateSabakLines(sId, (lines + 1).clamp(0, 8640)) : null,
+            tooltip: urdu ? 'ایک لائن زیادہ' : 'One line more'),
+      ]);
+    }
+
+    Widget paraRatioCell(String paraKey, String ratioKey) {
+      final para = _asInt(v[paraKey]);
+      final ratio = v[ratioKey]?.toString();
+      if (!present) {
+        final txt = ratio == 'nahi_sunaya'
+            ? _ratioLabel(ratio)
+            : (para > 0 ? '${urdu ? 'پارہ' : 'Para'} $para · ${_ratioLabel(ratio)}' : '—');
+        return muted(txt);
+      }
+      return Row(children: [
+        SizedBox(
+          width: 62,
+          child: _miniDropdown<int>(
+            value: para == 0 ? null : para,
+            hint: urdu ? 'پارہ' : 'Para',
+            items: {for (int p = 1; p <= 30; p++) p: '$p'},
+            onChanged: canEdit ? (val) => _updateLocalSilent(sId, paraKey, val ?? 0) : null,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: _miniDropdown<String>(
+            value: (ratio == null || ratio.isEmpty || ratio == '-') ? null : ratio,
+            hint: urdu ? 'مقدار' : 'Amount',
+            items: {for (final r in const ['1/4', '1/2', '3/4', '1', 'nahi_sunaya']) r: _ratioLabel(r)},
+            onChanged: canEdit ? (val) => _updateLocalSilent(sId, ratioKey, val ?? '-') : null,
+          ),
+        ),
+      ]);
+    }
+
+    Widget nazraSummary(String text) => InkWell(
+          onTap: () => _openStudent(s),
+          child: Row(children: [
+            Expanded(child: muted(text)),
+            if (present && canEdit) Icon(GIcons.edit, size: 14, color: c.textMuted),
+          ]),
+        );
+
+    Widget lesson1;
+    Widget lesson2;
+    if (nazra) {
+      final rukuPara = _asInt(v['rukuPara']);
+      final ruku = v['ruku']?.toString();
+      lesson1 = nazraSummary(ruku == 'nahi_sunaya'
+          ? _ratioLabel(ruku)
+          : (rukuPara > 0 && ruku != null && ruku != '-' ? '${urdu ? 'پارہ' : 'Para'} $rukuPara · ${urdu ? 'رکوع' : 'Ruku'} $ruku' : '—'));
+      final qaidaDone = v['qaidaCompleted'] != false &&
+          (s['qaidaCompleted'] == true || v['qaidaCompleted'] == true || v['qaidaSabak'] == 'completed');
+      final qaida = (v['qaidaSabak'] ?? s['qaidaSabak'])?.toString();
+      lesson2 = nazraSummary(qaidaDone
+          ? (urdu ? 'قاعدہ مکمل' : 'Qaida complete')
+          : (qaida != null && qaida != '-' && qaida != '0' ? '${urdu ? 'تختی' : 'Lesson'} $qaida' : '—'));
+    } else {
+      lesson1 = paraRatioCell('sabkiPara', 'sabkiRatio');
+      lesson2 = paraRatioCell('manzilPara', 'manzilRatio');
+    }
+
+    Widget ptmCell() => Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          MadrassaTick(
+            on: v['ptm'] == true,
+            onIcon: GIcons.users,
+            tooltip: urdu ? 'والدین آئے' : 'Parent came',
+            onTap: canEdit ? () => _updateLocalSilent(sId, 'ptm', v['ptm'] == true ? null : true) : null,
+          ),
+          MadrassaTick(
+            on: v['ptm'] == false,
+            color: c.danger,
+            onIcon: GIcons.close,
+            tooltip: urdu ? 'والدین نہیں آئے' : 'Parent missed',
+            onTap: canEdit ? () => _updateLocalSilent(sId, 'ptm', v['ptm'] == false ? null : false) : null,
+          ),
+        ]);
+
+    final sub = <String>[
+      if (!nazraOnly) nazra ? (urdu ? 'ناظرہ' : 'Nazra') : (urdu ? 'حفظ' : 'Hifz'),
+      _sessionLabel(session),
+      if (!nazra && totalLines >= 8640) urdu ? 'حفظ مکمل' : 'Hifz complete',
+    ].join(' · ');
+    final leaveReason = att == 'leave' || pendingLeave ? (v['leaveReason'] ?? '').toString().trim() : '';
+
+    final rowColor = selected
+        ? c.brandSoft
+        : (pendingLeave
+            ? _amber.withValues(alpha: 0.07)
+            : (index.isOdd ? c.surfaceSunken.withValues(alpha: 0.35) : c.surface));
+
+    final lateTick = present
+        ? MadrassaTick(
+            on: isLate,
+            color: c.warning,
+            onIcon: GIcons.time,
+            // Phones have no room for the time beside the mark: it is in the tooltip.
+            label: (MadrassaErp.narrow(context) || arrival == null || arrival.isEmpty) ? null : arrival.replaceAll(' ', ''),
+            tooltip: isLate
+                ? '${arrival == null || arrival.isEmpty ? '' : '$arrival · '}'
+                    '${urdu ? 'دیر سے آیا — وقت بدلنے کے لیے کھولیں' : 'Late — open the row to change the time'}'
+                : (urdu ? 'وقت پر' : 'On time'),
+            onTap: canEdit ? () => _toggleLate(sId, !isLate, v) : null,
+          )
+        : muted('—');
+    final uniformTick = MadrassaTick(
+      on: uniform,
+      color: att == 'leave' ? c.info : c.success,
+      onIcon: GIcons.clothes,
+      tooltip: context.l.uniform,
+      onTap: canEdit && present ? () => _updateLocalSilent(sId, 'uniform', !(v['uniform'] == true)) : null,
+    );
+    final repliedTick = Badge(
+      isLabelVisible: replyWaiting,
+      smallSize: 8,
+      backgroundColor: c.info,
+      child: MadrassaTick(
+        on: replied,
+        color: c.brand,
+        onIcon: GIcons.whatsapp,
+        tooltip: replyWaiting
+            ? (replyText.isNotEmpty
+                ? '${urdu ? 'والدین کا جواب' : 'Parent reply'}: $replyText'
+                : (urdu ? 'والدین نے جواب کی تصدیق مانگی' : 'Parent asked to confirm a reply'))
+            : context.l.parentReplied,
+        onTap: canEdit
+            ? () {
+                _updateLocalSilent(sId, 'parentReplied', !replied);
+                if (!replied) _updateLocalSilent(sId, 'parentRepliedRequested', false);
+              }
+            : null,
+      ),
+    );
+    final nameBlock = Row(children: [
+      _studentAvatar(s, sId, name),
+      const SizedBox(width: Gsp.sp2 + 2),
+      Expanded(
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          MadrassaUrduAwareText(name, color: c.textPrimary),
+          const SizedBox(height: 2),
+          Row(children: [
+            Flexible(child: Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.micro(c.textMuted))),
+            if (leaveReason.isNotEmpty) ...[
+              Text('  ·  ${context.l.leave}: ', style: GText.micro(c.textMuted)),
+              Flexible(child: MadrassaUrduAwareText(leaveReason, color: c.textMuted, size: 10.5, bold: false)),
+            ],
+          ]),
+        ]),
+      ),
+    ]);
+
+    // Phone: two short lines per student instead of a wide grid.
+    if (MadrassaErp.narrow(context)) {
+      // Icon instead of a word label keeps all marks and Sabak on one line.
+      Widget labelled(IconData icon, String label, Widget child) => Tooltip(
+            message: label,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              child,
+            ]),
+          );
+      return Material(
+        color: rowColor,
+        child: InkWell(
+          onTap: () => _openStudent(s),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: Gsp.sp2, vertical: 6),
+            decoration: BoxDecoration(
+              border: BorderDirectional(
+                bottom: BorderSide(color: c.border),
+                start: BorderSide(color: selected ? c.brand : (unsaved ? c.warning : Colors.transparent), width: 3),
+              ),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Row(children: [
+                SizedBox(
+                  width: 26,
+                  child: Text(s['rollNumber']?.toString() ?? '—', style: GText.label(c.textMuted)),
+                ),
+                Expanded(child: nameBlock),
+                const SizedBox(width: Gsp.sp2),
+                attCell,
+              ]),
+              if (!pendingLeave && att != 'leave')
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(start: 26 + 34 + Gsp.sp2 + 2),
+                  child: Row(children: [
+                    if (present) ...[labelled(GIcons.time, context.l.late, lateTick), const SizedBox(width: Gsp.sp2)],
+                    labelled(GIcons.clothes, context.l.uniform, uniformTick),
+                    const SizedBox(width: Gsp.sp2),
+                    labelled(GIcons.whatsapp, context.l.parentReplied, repliedTick),
+                    const Spacer(),
+                    if (present) SizedBox(width: 100, child: sabakCell),
+                  ]),
+                ),
+            ]),
+          ),
+        ),
+      );
+    }
+
+    return RepaintBoundary(
+      child: Material(
+        color: rowColor,
+        child: InkWell(
+          hoverColor: c.textPrimary.withValues(alpha: 0.04),
+          onTap: () => _openStudent(s),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3),
+            decoration: BoxDecoration(
+              border: BorderDirectional(
+                bottom: BorderSide(color: c.border),
+                start: BorderSide(color: selected ? c.brand : (unsaved ? c.warning : Colors.transparent), width: 3),
+              ),
+            ),
+            child: Row(
+              children: gap([
+                SizedBox(
+                  width: _wRoll,
+                  child: Text(s['rollNumber']?.toString() ?? '—',
+                      style: GText.label(c.textMuted).copyWith(fontFeatures: const [FontFeature.tabularFigures()])),
+                ),
+                Expanded(child: nameBlock),
+                SizedBox(width: _wAtt, child: attCell),
+                SizedBox(width: _wLate, child: Center(child: lateTick)),
+                SizedBox(width: _wTick, child: Center(child: uniformTick)),
+                SizedBox(width: _wTick, child: Center(child: repliedTick)),
+                SizedBox(width: _wSabak, child: sabakCell),
+                SizedBox(width: _wLesson, child: lesson1),
+                SizedBox(width: _wLesson, child: lesson2),
+                if (isPtmDay) SizedBox(width: _wPtm, child: ptmCell()),
+                SizedBox(
+                  width: _wAct,
+                  child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    _miniIconButton(GIcons.whatsapp, () => _sendDailyWhatsApp(s, v),
+                        tooltip: urdu ? 'واٹس ایپ رپورٹ' : 'WhatsApp report', color: c.success),
+                    _miniIconButton(GIcons.chevronRight, () => _openStudent(s), tooltip: urdu ? 'تفصیل' : 'Details'),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildAttendanceStatsRow(
-    BuildContext context, {
-    required int present,
-    required int lateCount,
-    required int leave,
-    required int absent,
-    required int replied,
-  }) {
+  /// Student photo (base64 or URL) as a 34 px circle, or the first letter.
+  /// Tap: enlarge, with "Change photo"; no photo yet: pick one.
+  Widget _studentAvatar(Map<String, dynamic> s, String sId, String name) {
     final c = context.comfort;
-    final isUrdu = context.isUrdu;
-
-    Widget presentWidget;
-    if (lateCount > 0) {
-      final lateLabel = isUrdu ? ' ($lateCount ${context.l.late})' : ' ($lateCount ${context.l.late})';
-      presentWidget = Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: '${context.l.present}: $present',
-              style: TextStyle(color: c.success, fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            TextSpan(
-              text: lateLabel,
-              style: TextStyle(color: c.warning, fontWeight: FontWeight.bold, fontSize: 13),
-            ),
-          ],
-        ),
+    const size = 34.0;
+    final raw = (s['photoUrl'] ??
+            s['photo_url'] ??
+            s['photoBase64'] ??
+            s['studentPhotoBase64'] ??
+            s['avatarUrl'] ??
+            s['imageUrl'] ??
+            s['profileImage'])
+        ?.toString()
+        .trim();
+    final bytes = ImageUploadService.decodeBase64ToBytes(raw);
+    final letter = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.brandSoft, shape: BoxShape.circle),
+      child: (name.isEmpty || MadrassaErp.isUrduText(name))
+          ? Icon(Icons.person_rounded, size: size * 0.55, color: c.brand)
+          : Text(name.characters.first.toUpperCase(),
+          style: GText.label(c.brand).copyWith(fontFamilyFallback: const ['Noori'])),
+    );
+    Widget img;
+    if (_uploadStates[sId] == PhotoUploadStatus.uploading) {
+      img = const SizedBox(width: size, height: size, child: Padding(padding: EdgeInsets.all(8), child: CircularProgressIndicator(strokeWidth: 2)));
+    } else if (bytes != null) {
+      img = ClipOval(
+        child: Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, cacheWidth: 96, gaplessPlayback: true, errorBuilder: (_, _, _) => letter),
       );
+    } else if (raw != null && raw.startsWith('http')) {
+      img = ClipOval(child: Image.network(raw, width: size, height: size, fit: BoxFit.cover, cacheWidth: 96, errorBuilder: (_, _, _) => letter));
     } else {
-      presentWidget = _statText('${context.l.present}: $present', c.success);
+      img = letter;
     }
-
-    return Wrap(
-      spacing: 12,
-      runSpacing: 6,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        presentWidget,
-        _statText('${context.l.leave}: $leave', c.warning),
-        _statText('${context.l.absent}: $absent', c.danger),
-        _statText(isUrdu ? 'جوابات: $replied' : 'Replied: $replied', c.info),
-      ],
+    final hasPhoto = bytes != null || (raw != null && raw.startsWith('http'));
+    return InkWell(
+      customBorder: const CircleBorder(),
+      onTap: () {
+        if (!hasPhoto) {
+          _pickAndUploadPhoto(sId);
+          return;
+        }
+        showDialog<void>(
+          context: context,
+          builder: (ctx) => Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(Gsp.sp4),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(Gr.r4),
+                child: InteractiveViewer(
+                  maxScale: 4,
+                  child: bytes != null
+                      ? Image.memory(bytes, width: 320, height: 320, fit: BoxFit.contain)
+                      : Image.network(raw!, width: 320, height: 320, fit: BoxFit.contain),
+                ),
+              ),
+              const SizedBox(height: Gsp.sp3),
+              Wrap(spacing: Gsp.sp2, children: [
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadPhoto(sId);
+                  },
+                  icon: const Icon(GIcons.edit, size: 16),
+                  label: Text(context.isUrdu ? 'تصویر بدلیں' : 'Change photo'),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(backgroundColor: c.surface),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(context.isUrdu ? 'بند کریں' : 'Close'),
+                ),
+              ]),
+            ]),
+          ),
+        );
+      },
+      child: Tooltip(message: hasPhoto ? name : (context.isUrdu ? 'تصویر لگائیں' : 'Add photo'), child: img),
     );
   }
 
-  Widget _statText(String label, Color color) {
-    return Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14));
+  void _toggleLate(String sId, bool late, Map<String, dynamic> v) {
+    _updateLocalSilent(sId, 'isLate', late);
+    _updateLocalSilent(sId, 'timing', late ? 'late' : 'on_time');
+    if (late) {
+      final existing = v['arrivalTime']?.toString();
+      if (existing == null || existing.isEmpty) {
+        _updateLocalSilent(sId, 'arrivalTime', DateFormat('hh:mm a').format(DateTime.now()));
+      }
+    } else {
+      _updateLocalSilent(sId, 'arrivalTime', null);
+    }
   }
+
+  Widget _miniIconButton(IconData icon, VoidCallback? onTap, {String? tooltip, Color? color}) {
+    final c = context.comfort;
+    // Fixed 28 px target: IconButton grows to the theme's minimum size (40+)
+    // in some themes and overflowed the Sabak cell.
+    final button = InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 28,
+        height: 28,
+        child: Icon(icon, size: 16, color: onTap == null ? c.textMuted.withValues(alpha: 0.4) : (color ?? c.textSecondary)),
+      ),
+    );
+    return tooltip == null ? button : Tooltip(message: tooltip, child: button);
+  }
+
+  Widget _miniDropdown<T>({
+    required T? value,
+    required String hint,
+    required Map<T, String> items,
+    required ValueChanged<T?>? onChanged,
+  }) {
+    final c = context.comfort;
+    return Container(
+      height: 30,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: onChanged == null ? c.surfaceSunken : c.surface,
+        border: Border.all(color: value == null ? c.border : c.brand.withValues(alpha: 0.5)),
+        borderRadius: BorderRadius.circular(Gr.r2),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<T>(
+          value: items.containsKey(value) ? value : null,
+          isDense: true,
+          isExpanded: true,
+          hint: Text(hint, maxLines: 1, overflow: TextOverflow.ellipsis, style: GText.caption(c.textMuted)),
+          icon: Icon(GIcons.chevronDown, size: 14, color: c.textMuted),
+          dropdownColor: c.surfaceRaised,
+          style: GText.caption(c.textPrimary).copyWith(fontWeight: FontWeight.w600),
+          items: [
+            for (final e in items.entries)
+              DropdownMenuItem<T>(
+                value: e.key,
+                child: Text(e.value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: MadrassaErp.isUrduText(e.value)
+                        ? GText.caption(c.textPrimary).copyWith(fontFamily: 'Noori', fontSize: 13)
+                        : null),
+              ),
+          ],
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+
+  // ── Student editor (panel / dialog / sheet) ───────────────────────────────
+
+  void _openStudent(Map<String, dynamic> s) {
+    final sId = (s['id'] ?? '').toString();
+    if (MadrassaErp.roomForPanel(context)) {
+      setState(() => _selectedStudentId = _selectedStudentId == sId ? null : sId);
+      return;
+    }
+    final config = ref.read(madrassaConfigProvider(_effectiveBranch)).value;
+    if (config == null) return;
+    final ptmDate = getPtmDateFor(_selectedDate.year, _selectedDate.month, config);
+    final isPtmDay = DateUtils.isSameDay(_selectedDate, ptmDate);
+    final allowLeave = _localAllowStudentLeave ?? config.allowStudentLeave;
+    final isReadOnly = !_canSaveData();
+    setState(() => _selectedStudentId = sId);
+    final Future<void> done;
+    if (MadrassaErp.narrow(context)) {
+      done = showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: context.comfort.surface,
+        builder: (ctx) => _urduSafe(FractionallySizedBox(
+          heightFactor: 0.88,
+          child: _studentPanel(s, isPtmDay: isPtmDay, isReadOnly: isReadOnly, allowLeave: allowLeave, onClose: () => Navigator.pop(ctx)),
+        )),
+      );
+    } else {
+      done = showDialog<void>(
+        context: context,
+        builder: (ctx) => Dialog(
+          insetPadding: const EdgeInsets.all(Gsp.sp6),
+          child: _urduSafe(SizedBox(
+            width: 720,
+            height: 640,
+            child: _studentPanel(s, isPtmDay: isPtmDay, isReadOnly: isReadOnly, allowLeave: allowLeave, onClose: () => Navigator.pop(ctx)),
+          )),
+        ),
+      );
+    }
+    done.whenComplete(() {
+      if (mounted && _selectedStudentId == sId) setState(() => _selectedStudentId = null);
+    });
+  }
+
+  Widget _studentPanel(
+    Map<String, dynamic> s, {
+    required bool isPtmDay,
+    required bool isReadOnly,
+    required bool allowLeave,
+    required VoidCallback onClose,
+  }) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final sId = (s['id'] ?? '').toString();
+    final name = (s['name'] ?? '—').toString();
+    return Container(
+      decoration: BoxDecoration(color: c.surface, borderRadius: MadrassaErp.radius, border: Border.all(color: c.border)),
+      clipBehavior: Clip.antiAlias,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Container(
+          color: c.surfaceSunken,
+          padding: const EdgeInsetsDirectional.fromSTEB(Gsp.sp4, Gsp.sp3, Gsp.sp2, Gsp.sp3),
+          child: Row(children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                MadrassaUrduAwareText(name, color: c.textPrimary, size: 16),
+                Text(
+                  '${urdu ? 'رول' : 'Roll'} ${s['rollNumber'] ?? '—'} · ${DateFormat('EEE d MMM yyyy').format(_selectedDate)}',
+                  style: GText.caption(c.textMuted),
+                ),
+              ]),
+            ),
+            IconButton(tooltip: urdu ? 'بند کریں' : 'Close', onPressed: onClose, icon: const Icon(GIcons.close)),
+          ]),
+        ),
+        Divider(height: 1, color: c.border),
+        Expanded(
+          child: ValueListenableBuilder<int>(
+            valueListenable: _changeNotifier,
+            builder: (context, _, _) {
+              final view = _viewOf(sId);
+              // The editor picks its layout from the screen width; inside a panel
+              // it must use its narrow (stacked) layout.
+              final mq = MediaQuery.of(context);
+              return SingleChildScrollView(
+                padding: const EdgeInsets.all(Gsp.sp3),
+                child: MediaQuery(
+                  data: mq.copyWith(size: Size(420, mq.size.height)),
+                  child: _StudentLogCard(
+                  key: ValueKey('panel_${sId}_$_dateKey'),
+                  student: s,
+                  logNotifier: ValueNotifier(view),
+                  isPtmDay: isPtmDay,
+                  isReadOnly: isReadOnly,
+                  branchId: _effectiveBranch,
+                  allowStudentLeave: allowLeave,
+                  editorRole: widget.editorRole,
+                  uploadStatus: _uploadStates[sId],
+                  onUpdateLocal: _updateLocalSilent,
+                  onUpdateAttendance: _updateAttendanceSilent,
+                  onDecideLeave: _decideLeaveSilent,
+                  onUpdateSabak: _updateSabakLines,
+                  onPickPhoto: _pickAndUploadPhoto,
+                  onSendWhatsApp: _sendDailyWhatsApp,
+                  onShowCustomLines: _showCustomLinesDialog,
+                  buildParaDropdown: _buildParaDropdown,
+                  buildRatioDropdown: _buildRatioDropdown,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        if (!isReadOnly)
+          Container(
+            decoration: BoxDecoration(border: Border(top: BorderSide(color: c.border))),
+            padding: const EdgeInsets.symmetric(horizontal: Gsp.sp3, vertical: Gsp.sp2),
+            child: ValueListenableBuilder<int>(
+              valueListenable: _changeNotifier,
+              builder: (context, _, _) => Row(children: [
+                Expanded(
+                  child: Text(
+                    _localChanges.isEmpty
+                        ? (urdu ? 'سب محفوظ ہے' : 'All saved')
+                        : (urdu ? '${_localChanges.length} طلباء کی تبدیلیاں باقی' : '${_localChanges.length} student(s) not saved yet'),
+                    style: GText.caption(_localChanges.isEmpty ? c.textMuted : c.warning),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _localChanges.isEmpty || _isSaving ? null : _saveChanges,
+                  icon: const Icon(GIcons.save, size: 16),
+                  label: Text(context.l.saveChanges),
+                ),
+              ]),
+            ),
+          ),
+      ]),
+    );
+  }
+
 
 
 
@@ -2816,57 +3176,6 @@ _changeNotifier.value++;
 
 
 
-  Widget? _buildFabArea(bool isDesktop) {
-    final showSave = _localChanges.isNotEmpty && !isDesktop;
-    final showTop = _showBackToTop;
-
-    if (!showSave && !showTop) return null;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (showTop) ...[
-            FloatingActionButton(
-              heroTag: 'btn_back_to_top',
-              mini: true,
-              backgroundColor: SoftPalette.teal550.withValues(alpha: 0.8),
-              foregroundColor: SoftPalette.gray50,
-              onPressed: () {
-                _verticalScrollController.animateTo(
-                  0,
-                  duration: const Duration(milliseconds: 300),
-                  curve: Curves.easeOut,
-                );
-              },
-              child: const Icon(Icons.arrow_upward),
-            ),
-            const SizedBox(width: 12),
-          ],
-          if (showSave)
-            ElevatedButton.icon(
-              onPressed: _isSaving || !_canSaveData() ? null : _saveChanges,
-              icon: _isSaving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(color: SoftPalette.gray50, strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save),
-              label: Text(context.l.saveChanges),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: SoftPalette.teal550, // Teal
-                foregroundColor: SoftPalette.gray50,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
 }
 
 
@@ -4994,4 +5303,14 @@ class _StudentLogCard extends StatelessWidget {
       },
     );
   }
+}
+
+/// A guardian's leave request for one student on one day.
+class _LeaveRequest {
+  const _LeaveRequest({required this.dateKey, required this.studentId, required this.student, required this.log});
+  final String dateKey;
+  final String studentId;
+  final Map<String, dynamic> student;
+  final Map<String, dynamic> log;
+  String get id => '$dateKey|$studentId';
 }

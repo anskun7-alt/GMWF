@@ -1136,6 +1136,7 @@ class MadrassaLocalStorage {
   /// for this branch so all teachers on peer devices see newly added or edited
   /// students immediately without requiring a manual refresh.
   static void listenToStudentsRealtime(String branchId) {
+    if (Firebase.apps.isEmpty) return; // offline previews / tests
     final normBranch = normalizeBranch(branchId);
     if (normBranch.isEmpty || normBranch == 'unknown') return;
 
@@ -1202,6 +1203,7 @@ class MadrassaLocalStorage {
   /// for this branch and date so that when one teacher saves attendance or sabq,
   /// all other teachers on peer computers receive it immediately without a page reload.
   static void listenToLogsRealtime(String branchId, String dateKey) {
+    if (Firebase.apps.isEmpty) return; // offline previews / tests
     final normBranch = normalizeBranch(branchId);
     if (normBranch.isEmpty || normBranch == 'unknown') return;
 
@@ -1234,9 +1236,10 @@ class MadrassaLocalStorage {
         if (!snap.exists || snap.data() == null) return;
         final cloudData = snap.data()!;
         final box = await LocalStorageService.ensureBoxOpen(logsBox);
+        await _loadPendingFields();
         final key = _logKey(normBranch, dateKey);
         final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
-        final merged = _mergeRemoteLog(box.get(key), cloudData, toHeal: toHeal);
+        final merged = _mergeRemoteLog(box.get(key), cloudData, toHeal: toHeal, logKey: key);
         await box.put(key, _sanitize(merged));
         await box.flush();
         _healLeaveDecisions(normBranch, dateKey, toHeal);
@@ -1418,6 +1421,15 @@ class MadrassaLocalStorage {
         return results.every((ok) => ok);
       }
 
+      // Read budget: the live listener (listenToStudentsRealtime) already keeps this
+      // PC's copy current, so the full re-read runs at most every 6 hours (or on a
+      // manual sync, or when this PC has no students for the branch yet).
+      if (!force && !_fetchDue('students|$normBranch', const Duration(hours: 6))) {
+        final prefix = '${normBranch}__std__';
+        final hasLocal = Hive.isBoxOpen(studentsBox) && Hive.box(studentsBox).keys.any((k) => k.toString().startsWith(prefix));
+        if (hasLocal) return true;
+      }
+
       // 4 s was too short for a cold Windows Firestore client or a slow mobile link; the
       // download silently gave up and the screen still said "Sync completed".
       final timeout = Duration(seconds: force ? 30 : 15);
@@ -1504,6 +1516,7 @@ class MadrassaLocalStorage {
         await box.flush();
       }
       if (migrated > 0) unawaited(SyncService().triggerUpload(urgent: true));
+      _markFetched('students|$normBranch');
       debugPrint('[MadrassaLocalStorage] Downloaded ${snap.docs.length} madrassa students for $normBranch'
           '${migrated > 0 ? ' (+$migrated from ${legacy.keys.join('/')}, queued to $normBranch)' : ''}');
       return true;
@@ -1771,13 +1784,72 @@ class MadrassaLocalStorage {
   /// every PC's backfill re-uploads the day on every sweep. The day is
   /// already in the cloud (or its originator uploads it), so it is marked
   /// synced here — unless this PC has its own unsynced edits for that day.
+  // ── Unsent fields per day ──────────────────────────────────────────────────
+  // Which fields of which student this PC changed and has not uploaded yet
+  // (log key → student id → field names). While a day is unsent, a copy that
+  // arrives from a LAN peer or the cloud still updates every OTHER field.
+  // Before this, the whole local entry won: an older Sabak/Sabqi/Manzil on
+  // this PC hid what another PC had just entered, and was later uploaded over it.
+  static const String _pendingFieldsBox = 'madrassa_log_pending_fields';
+  static final Map<String, Map<String, Set<String>>> _pendingFields = {};
+  static bool _pendingFieldsLoaded = false;
+
+  static Future<void> _loadPendingFields() async {
+    if (_pendingFieldsLoaded) return;
+    _pendingFieldsLoaded = true;
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(_pendingFieldsBox);
+      for (final k in box.keys) {
+        final raw = box.get(k);
+        if (raw is! Map) continue;
+        _pendingFields[k.toString()] = {
+          for (final e in raw.entries)
+            if (e.value is List) e.key.toString(): {for (final f in e.value as List) f.toString()},
+        };
+      }
+    } catch (e) {
+      debugPrint('[MadrassaLocalStorage] pending fields load note: $e');
+    }
+  }
+
+  static Future<void> _savePendingFields(String logKey) async {
+    try {
+      final box = await LocalStorageService.ensureBoxOpen(_pendingFieldsBox);
+      final day = _pendingFields[logKey];
+      if (day == null || day.isEmpty) {
+        await box.delete(logKey);
+      } else {
+        await box.put(logKey, {for (final e in day.entries) e.key: e.value.toList()});
+      }
+    } catch (e) {
+      debugPrint('[MadrassaLocalStorage] pending fields save note: $e');
+    }
+  }
+
+  @visibleForTesting
+  static void setPendingFieldsForTest(String logKey, Map<String, Set<String>>? fields) {
+    _pendingFieldsLoaded = true;
+    if (fields == null) {
+      _pendingFields.remove(logKey);
+    } else {
+      _pendingFields[logKey] = fields;
+    }
+  }
+
   static Map<String, dynamic> _mergeRemoteLog(
     dynamic local,
     Map<String, dynamic> remote, {
     List<MapEntry<String, Map<String, dynamic>>>? toHeal,
+    String? logKey,
   }) {
     final localMap = local is Map ? Map<String, dynamic>.from(local) : <String, dynamic>{};
     final localPending = localMap['pendingSync'] == true || localMap['syncStatus'] == 'pending';
+    final dayPending = logKey == null ? null : _pendingFields[logKey];
+    if (!localPending && dayPending != null) {
+      // Everything this PC had for the day is uploaded: forget the old marks.
+      _pendingFields.remove(logKey);
+      unawaited(_savePendingFields(logKey!));
+    }
     final merged = <String, dynamic>{...localMap, ...remote};
     // Per student, not whole entries blindly: a remote copy used to replace the student's
     // entry even while this PC's own edit was unsent, and a guardian's copy of a leave
@@ -1789,6 +1861,7 @@ class MadrassaLocalStorage {
         Map<String, dynamic>.from(l),
         Map<String, dynamic>.from(e.value as Map),
         localPending: localPending,
+        pendingFields: localPending && dayPending != null ? dayPending[e.key] : null,
       );
       merged[e.key] = kept.entry;
       if (kept.reupload) {
@@ -1900,7 +1973,7 @@ class MadrassaLocalStorage {
   /// One student's entry: this PC's copy [local] against an incoming copy [remote].
   static ({Map<String, dynamic> entry, bool reupload}) _mergeStudentEntry(
       Map<String, dynamic> local, Map<String, dynamic> remote,
-      {required bool localPending}) {
+      {required bool localPending, Set<String>? pendingFields}) {
     final localStatus = _normLeaveStatus(local['leaveStatus']);
     final remoteStatus = _normLeaveStatus(remote['leaveStatus']);
 
@@ -1944,6 +2017,19 @@ class MadrassaLocalStorage {
 
     // 2. This PC's unsent edit that is newer than the incoming copy wins on its fields,
     //    while keeping any untouched fields from the remote copy.
+    if (localPending && pendingFields != null && pendingFields.isNotEmpty) {
+      // Known unsent fields: only those stay local; the rest take the incoming copy
+      // (e.g. a Sabqi entered on another PC while this PC marked attendance).
+      final kept = <String, dynamic>{...local, ...remote};
+      for (final f in pendingFields) {
+        if (local.containsKey(f)) {
+          kept[f] = local[f];
+        } else {
+          kept.remove(f);
+        }
+      }
+      return (entry: kept, reupload: false);
+    }
     if (localPending) {
       final lt = _when(local['lastEditedAt']);
       final rt = _when(remote['lastEditedAt']);
@@ -1967,9 +2053,10 @@ class MadrassaLocalStorage {
     dynamic local,
     Map<String, dynamic> remote, {
     List<String>? healedStudents,
+    String? logKey,
   }) {
     final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
-    final merged = _mergeRemoteLog(local, remote, toHeal: toHeal);
+    final merged = _mergeRemoteLog(local, remote, toHeal: toHeal, logKey: logKey);
     healedStudents?.addAll(toHeal.map((e) => e.key));
     return merged;
   }
@@ -2015,8 +2102,9 @@ class MadrassaLocalStorage {
     final normBranch = normalizeBranch(branchId);
     final key = _logKey(normBranch, dateKey);
     final box = await LocalStorageService.ensureBoxOpen(logsBox);
+    await _loadPendingFields();
     final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
-    final merged = _mergeRemoteLog(box.get(key), data, toHeal: toHeal);
+    final merged = _mergeRemoteLog(box.get(key), data, toHeal: toHeal, logKey: key);
     await box.put(key, _sanitize(merged));
     await box.flush();
     _healLeaveDecisions(normBranch, dateKey, toHeal);
@@ -2054,9 +2142,12 @@ class MadrassaLocalStorage {
 
     final key = _logKey(effectiveBranch, dateKey);
     final box = await LocalStorageService.ensureBoxOpen(logsBox);
+    await _loadPendingFields();
 
     // Get current cache log or start empty
-    final existing = box.get(key) ?? getLogCached(effectiveBranch, dateKey) ?? {};
+    final stored = box.get(key);
+    final wasPending = stored is Map && (stored['pendingSync'] == true || stored['syncStatus'] == 'pending');
+    final existing = stored ?? getLogCached(effectiveBranch, dateKey) ?? {};
     final updated = Map<String, dynamic>.from(existing);
 
     // Merge changes locally while building a field-level delta for LAN/cloud so an
@@ -2103,6 +2194,16 @@ class MadrassaLocalStorage {
     if (studentWrites.isNotEmpty) {
       await Future.wait(studentWrites);
     }
+
+    // Remember exactly which fields are unsent, so a copy arriving from another
+    // PC before the upload finishes only keeps these from this PC.
+    if (!wasPending) _pendingFields.remove(key);
+    final dayPending = _pendingFields.putIfAbsent(key, () => {});
+    studentDeltas.forEach((sId, d) {
+      dayPending.putIfAbsent(sId, () => <String>{}).addAll(
+          d.keys.where((f) => f != 'lastEditedBy' && f != 'lastEditedAt'));
+    });
+    await _savePendingFields(key);
 
     final sanitized = _sanitize(updated);
     sanitized['syncStatus'] = 'pending';
@@ -2215,11 +2316,27 @@ class MadrassaLocalStorage {
           }
 
           directUploaded = true;
-          sanitized['syncStatus'] = 'synced';
-          sanitized['pendingSync'] = false;
-          sanitized['synced'] = true;
-          sanitized['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
-          await box.put(key, sanitized);
+          final uploadedDay = _pendingFields[key];
+          if (uploadedDay != null) {
+            for (final sId in studentDeltas.keys) {
+              uploadedDay.remove(sId);
+            }
+            if (uploadedDay.isEmpty) _pendingFields.remove(key);
+            unawaited(_savePendingFields(key));
+          }
+          // Flip the flags on the day AS IT IS NOW. Writing back the copy taken before
+          // the upload undid anything merged in meanwhile (Firestore echoes the write
+          // at once, with other PCs' Sabak/Sabqi/Manzil in it), so those vanished here.
+          final current = box.get(key);
+          final marked = current is Map ? Map<String, dynamic>.from(current) : sanitized;
+          final newerLocalEdit = (_pendingFields[key]?.isNotEmpty ?? false);
+          if (!newerLocalEdit) {
+            marked['syncStatus'] = 'synced';
+            marked['pendingSync'] = false;
+            marked['synced'] = true;
+            marked['lastSyncedAt'] = DateTime.now().toUtc().toIso8601String();
+          }
+          await box.put(key, marked);
           await box.flush();
 
           // Remove the already-uploaded student deltas from syncBox so a stale pending
@@ -2262,17 +2379,65 @@ class MadrassaLocalStorage {
     }
   }
 
+  // ── Cloud read budget ──────────────────────────────────────────────────────
+  // When each read was last done, kept on this PC (app_flags) so an app restart
+  // does not read everything again. Only READS are skipped; every write still goes
+  // out at once, and live listeners keep the open day current, so nothing is lost.
+  // A manual sync passes `force` and always reads.
+  static String _fetchKey(String what) => 'madrassa_fetched|$what';
+
+  static DateTime? _lastFetched(String what) {
+    try {
+      if (!Hive.isBoxOpen('app_flags')) return null;
+      final raw = Hive.box('app_flags').get(_fetchKey(what));
+      return raw is String ? DateTime.tryParse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static void _markFetched(String what) {
+    try {
+      if (Hive.isBoxOpen('app_flags')) {
+        Hive.box('app_flags').put(_fetchKey(what), DateTime.now().toIso8601String());
+      }
+    } catch (_) {}
+  }
+
+  static bool _fetchDue(String what, Duration every) {
+    final last = _lastFetched(what);
+    return last == null || DateTime.now().difference(last) >= every;
+  }
+
+  /// A month's day logs can change until the end of the NEXT month (teachers may
+  /// edit the previous month). Once read after that, it never changes again.
+  static bool _monthLogsDue(String normBranch, int year, int month) {
+    final what = 'logs|$normBranch|$year-$month';
+    final last = _lastFetched(what);
+    if (last == null) return true;
+    final settled = DateTime(year, month + 2, 1);
+    if (!last.isBefore(settled)) return false; // read after it could last change
+    return DateTime.now().difference(last) >= const Duration(minutes: 30);
+  }
+
   static final Map<String, Future<void>> _inFlightLogDownloads = {};
 
-  static Future<void> downloadLogsForMonth(String branchId, int year, int month) async {
+  static Future<void> downloadLogsForMonth(String branchId, int year, int month, {bool force = false}) async {
     final normBranch = normalizeBranch(branchId);
     if (normBranch.isEmpty || normBranch == 'unknown') return;
+    if (!force &&
+        normBranch != 'all' &&
+        normBranch != 'global' &&
+        !_monthLogsDue(normBranch, year, month) &&
+        getLogsForMonthCached(normBranch, year, month).isNotEmpty) {
+      return; // read recently enough (or the month is closed) — use the copy here
+    }
 
     final inflightKey = '$normBranch|$year|$month';
     final existing = _inFlightLogDownloads[inflightKey];
     if (existing != null) return existing;
 
-    final future = _doDownloadLogsForMonth(normBranch, year, month);
+    final future = _doDownloadLogsForMonth(normBranch, year, month, force: force);
     _inFlightLogDownloads[inflightKey] = future;
     try {
       await future;
@@ -2283,11 +2448,11 @@ class MadrassaLocalStorage {
     }
   }
 
-  static Future<void> _doDownloadLogsForMonth(String normBranch, int year, int month) async {
+  static Future<void> _doDownloadLogsForMonth(String normBranch, int year, int month, {bool force = false}) async {
     try {
       if (normBranch == 'all' || normBranch == 'global') {
         final branches = _getAllBranchIds().map(normalizeBranch).where((b) => b != 'all').toSet();
-        await Future.wait(branches.map((b) => downloadLogsForMonth(b, year, month)));
+        await Future.wait(branches.map((b) => downloadLogsForMonth(b, year, month, force: force)));
         return;
       }
 
@@ -2306,6 +2471,7 @@ class MadrassaLocalStorage {
           .timeout(const Duration(seconds: 15), onTimeout: () => throw TimeoutException('downloadLogsForMonth timeout'));
 
       final box = await LocalStorageService.ensureBoxOpen(logsBox);
+      await _loadPendingFields();
       final Map<String, dynamic> logUpdates = {};
       final Map<String, List<MapEntry<String, Map<String, dynamic>>>> pendingHeals = {};
       for (final doc in snap.docs) {
@@ -2314,13 +2480,14 @@ class MadrassaLocalStorage {
         // Merge cloud fields preserving local updates if local is newer (LWW conflict resolution)
         final existing = box.get(key) ?? logUpdates[key];
         final toHeal = <MapEntry<String, Map<String, dynamic>>>[];
-        logUpdates[key] = _sanitize(_mergeRemoteLog(existing, doc.data(), toHeal: toHeal));
+        logUpdates[key] = _sanitize(_mergeRemoteLog(existing, doc.data(), toHeal: toHeal, logKey: key));
         if (toHeal.isNotEmpty) pendingHeals[doc.id] = toHeal;
       }
       if (logUpdates.isNotEmpty) {
         await box.putAll(logUpdates);
       }
       await box.flush();
+      _markFetched('logs|$normBranch|$year-$month');
       pendingHeals.forEach((dateKey, items) => _healLeaveDecisions(normBranch, dateKey, items));
       debugPrint('[MadrassaLocalStorage] Downloaded ${snap.docs.length} daily log documents for $normBranch ($year-$month).');
     } catch (e) {
@@ -2502,7 +2669,13 @@ class MadrassaLocalStorage {
     }
   }
 
-  static Future<void> downloadHolidays(String branchId) async {
+  static Future<void> downloadHolidays(String branchId, {bool force = false}) async {
+    // Read budget: holidays change rarely (and LAN peers send new ones at once).
+    if (!force &&
+        !_fetchDue('holidays|${branchId.toLowerCase().trim()}', const Duration(hours: 6)) &&
+        getHolidaysCached(branchId).isNotEmpty) {
+      return;
+    }
     try {
       final snap = await FirebaseFirestore.instance
           .collection('branches')
@@ -2526,6 +2699,7 @@ class MadrassaLocalStorage {
         await box.putAll(holidayUpdates);
       }
       await box.flush();
+      _markFetched('holidays|${branchId.toLowerCase().trim()}');
       debugPrint('[MadrassaLocalStorage] Downloaded and cached ${snap.docs.length} holidays.');
     } catch (e) {
       debugPrint('[MadrassaLocalStorage] Error downloading holidays: $e');
@@ -3274,9 +3448,9 @@ class MadrassaLocalStorage {
       await Future.wait([
         downloadStudents(cleanBranch, force: force),
         downloadTeachers(cleanBranch, force: force),
-        downloadHolidays(cleanBranch),
+        downloadHolidays(cleanBranch, force: force),
         downloadConfig(cleanBranch),
-        downloadLogsForMonth(cleanBranch, now.year, now.month),
+        downloadLogsForMonth(cleanBranch, now.year, now.month, force: force),
         downloadFeePaymentsForMonth(cleanBranch, now.year, now.month),
         downloadTeacherAttendance(cleanBranch, todayKey),
       ]);
@@ -3286,7 +3460,7 @@ class MadrassaLocalStorage {
         final prevMonth = now.month == 1 ? 12 : now.month - 1;
         final prevYear = now.month == 1 ? now.year - 1 : now.year;
         await Future.wait([
-          downloadLogsForMonth(cleanBranch, prevYear, prevMonth),
+          downloadLogsForMonth(cleanBranch, prevYear, prevMonth, force: force),
           downloadFeePaymentsForMonth(cleanBranch, prevYear, prevMonth),
         ]);
       }

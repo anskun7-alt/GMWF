@@ -101,6 +101,12 @@ class MadrassaLocale {
   final String uniformCredits = 'Uniform Credits';
   final String responseCredits = 'Response Credits';
   final String ptmCredits = 'PTM Credits';
+  final String actions = 'Actions';
+  final String totalSavings = 'Total Savings';
+  final String attSavingsShort = 'Att. Savings';
+  final String uniSavingsShort = 'Uni. Savings';
+  final String workingDays = 'Working Days';
+  final String msgShort = 'Msg';
   final String feeInfoNote = 'Discounts applied for discipline.';
 
   final String memorizationProgress = 'Memorization Progress';
@@ -438,6 +444,18 @@ class MadrassaLocaleUr extends MadrassaLocale {
   final String responseCredits = 'جوابی رعایت';
   @override
   final String ptmCredits = 'پی ٹی ایم رعایت';
+  @override
+  final String actions = 'اقدامات';
+  @override
+  final String totalSavings = 'کل رعایت';
+  @override
+  final String attSavingsShort = 'حاضری رعایت';
+  @override
+  final String uniSavingsShort = 'یونیفارم رعایت';
+  @override
+  final String workingDays = 'تعلیمی دن';
+  @override
+  final String msgShort = 'پیغام';
   @override
   final String feeInfoNote = 'نظم و ضبط کی بنیاد پر رعایت لاگو کی گئی ہے۔';
 
@@ -966,6 +984,110 @@ extension MadrassaTranslationExtension on BuildContext {
       'Quran Majeed & Attendance': 'قرآن مجید اور حاضری',
       'Cleanliness': 'صفائی',
       'Absent': 'غائب',
+      // Parents' view labels that had no Urdu yet (2026-11-21).
+      'Account & Guardian Profile': 'اکاؤنٹ اور سرپرست کی معلومات',
+      'Amount Due': 'واجب الادا رقم',
+      'Approval Status: ': 'منظوری کی حالت: ',
+      'Attendance Calendar': 'حاضری کیلنڈر',
+      'Attendance Reward': 'حاضری کی رعایت',
+      'Back to Family Summary': 'خاندان کے خلاصے پر واپس',
+      'B-Form / Birth Certificate': 'ب فارم / پیدائشی سرٹیفکیٹ',
+      'Branch': 'شاخ',
+      'Change Branch': 'شاخ بدلیں',
+      'Change Password': 'پاس ورڈ بدلیں',
+      'Claim Pending': 'دعویٰ زیر غور',
+      'Claim PTM Join': 'پی ٹی ایم میں شرکت کا دعویٰ',
+      'Confirm': 'تصدیق کریں',
+      'Confirm Password': 'پاس ورڈ کی تصدیق',
+      'Confirm password is required': 'پاس ورڈ کی تصدیق ضروری ہے',
+      'Current Password (Required)': 'موجودہ پاس ورڈ (ضروری)',
+      'Current password is required to save changes': 'تبدیلیاں محفوظ کرنے کے لیے موجودہ پاس ورڈ ضروری ہے',
+      'Daily Details': 'روزانہ کی تفصیل',
+      'Daily Status Overview': 'آج کا خلاصہ',
+      'Data updated successfully': 'معلومات کامیابی سے محفوظ ہو گئیں',
+      'Edit Account Details': 'اکاؤنٹ کی تفصیل بدلیں',
+      'Email / Username': 'ای میل / صارف نام',
+      'Enter your reply here...': 'اپنا جواب یہاں لکھیں...',
+      'Est. Completion': 'متوقع تکمیل',
+      'Failed to change password': 'پاس ورڈ نہیں بدل سکا',
+      'Family Portal': 'خاندانی پورٹل',
+      'Fee Statement & Breakdown': 'فیس کی تفصیل',
+      'Guardian CNIC Document': 'سرپرست کا شناختی کارڈ',
+      'Guardian Name': 'سرپرست کا نام',
+      'Incorrect current password': 'موجودہ پاس ورڈ غلط ہے',
+      'Incorrect old password': 'پرانا پاس ورڈ غلط ہے',
+      'Joined': 'شریک ہوئے',
+      'Leave': 'رخصت',
+      'Leave Pending Approval': 'رخصت منظوری کی منتظر',
+      'Leave Reason:': 'رخصت کی وجہ:',
+      'Leave Requested': 'رخصت کی درخواست بھیجی گئی',
+      'Lesson Progress': 'سبق کی پیش رفت',
+      'Madrassa is closed on Sundays.': 'اتوار کو مدرسہ بند ہوتا ہے۔',
+      'Missed': 'شریک نہیں ہوئے',
+      'New Password': 'نیا پاس ورڈ',
+      'New Password (Optional)': 'نیا پاس ورڈ (اختیاری)',
+      'New password is required': 'نیا پاس ورڈ ضروری ہے',
+      'No active login session found': 'کوئی فعال لاگ اِن نہیں ملا',
+      'No branches available.': 'کوئی شاخ موجود نہیں۔',
+      'No lines recorded': 'کوئی لائن درج نہیں',
+      'No records found for this active day.': 'اس دن کا کوئی ریکارڈ نہیں ملا۔',
+      'No test today': 'آج کوئی امتحان نہیں',
+      'Not Provided': 'درج نہیں',
+      'Old Password': 'پرانا پاس ورڈ',
+      'Old password is required': 'پرانا پاس ورڈ ضروری ہے',
+      'On Leave': 'رخصت پر',
+      'Parent Teacher Meeting date has been updated.': 'والدین اساتذہ میٹنگ کی تاریخ بدل دی گئی ہے۔',
+      'Password changed successfully!': 'پاس ورڈ کامیابی سے بدل گیا!',
+      'Password must be at least 6 characters': 'پاس ورڈ کم از کم 6 حروف کا ہو',
+      'Passwords do not match': 'پاس ورڈ ایک جیسے نہیں',
+      'Pending': 'زیر غور',
+      'Personal Information': 'ذاتی معلومات',
+      'Phone': 'فون',
+      'Phone Number / Username': 'فون نمبر / صارف نام',
+      'Please enter your reply/comments for the teacher.': 'براہ کرم استاد کے لیے اپنا جواب یا رائے لکھیں۔',
+      'Please select a branch to preview the Guardian Portal.': 'سرپرست پورٹل دیکھنے کے لیے شاخ منتخب کریں۔',
+      'Please select a student to preview their report card.': 'رپورٹ کارڈ دیکھنے کے لیے طالب علم منتخب کریں۔',
+      'Present': 'حاضر',
+      'Prev Hifz Lines': 'پہلے حفظ شدہ لائنیں',
+      'Prev Madrassa': 'پچھلا مدرسہ',
+      'PTM Claim Pending': 'پی ٹی ایم دعویٰ زیر غور',
+      'PTM Joined': 'پی ٹی ایم میں شریک',
+      'PTM Meeting Reward': 'پی ٹی ایم کی رعایت',
+      'PTM Missed': 'پی ٹی ایم میں غیر حاضر',
+      'Quick Actions': 'فوری کام',
+      'Quran Majeed Hifz Progress': 'قرآن مجید حفظ کی پیش رفت',
+      'Quran Majeed Hifz Progress & Gift Goal': 'قرآن مجید حفظ کی پیش رفت اور انعامی ہدف',
+      'Recent Notices': 'حالیہ اعلانات',
+      'Reminders & Announcements': 'یاد دہانیاں اور اعلانات',
+      'Reply': 'جواب',
+      'Reply to Teacher': 'استاد کو جواب دیں',
+      'Reply: Pending': 'جواب: باقی',
+      'Reply: Sent': 'جواب: بھیج دیا',
+      'Request Unarchive': 'دوبارہ فعال کرنے کی درخواست',
+      'Roll No': 'رول نمبر',
+      'Scheduled': 'طے شدہ',
+      'Search branches...': 'شاخ تلاش کریں...',
+      'Select Branch': 'شاخ منتخب کریں',
+      'Select Student': 'طالب علم منتخب کریں',
+      'Sent': 'بھیج دیا',
+      'Showing up-to-date data from local storage': 'تازہ ترین معلومات دکھائی جا رہی ہیں',
+      'Standard Monthly Base Fee': 'معیاری ماہانہ فیس',
+      'Student & Guardian Documents': 'طالب علم اور سرپرست کے کاغذات',
+      'Student was not enrolled in the Madrassa yet.': 'اس دن تک طالب علم مدرسہ میں داخل نہیں تھا۔',
+      'Summary of children progress': 'بچوں کی پیش رفت کا خلاصہ',
+      'Teacher Message': 'استاد کا پیغام',
+      'Teacher Reply Response Reward': 'استاد کو جواب کی رعایت',
+      'This is a future date.': 'یہ آنے والی تاریخ ہے۔',
+      'Total Discounts & Savings': 'کل رعایت اور بچت',
+      'Unarchive Request Pending': 'دوبارہ فعال کرنے کی درخواست زیر غور',
+      'Uniform Cleanliness Reward': 'صاف یونیفارم کی رعایت',
+      'Uniform: Clean': 'یونیفارم: صاف',
+      'Uniform: Unclean': 'یونیفارم: صاف نہیں',
+      'Update your account password for security.': 'حفاظت کے لیے اپنا پاس ورڈ بدلیں۔',
+      'Update your account, contact, and security details below:': 'اپنے اکاؤنٹ، رابطہ اور حفاظتی تفصیلات نیچے بدلیں:',
+      'User email is not set': 'صارف کی ای میل درج نہیں',
+      'View Details': 'تفصیل دیکھیں',
+      'Weekly Pace': 'ہفتہ وار رفتار',
     };
     return map[text] ?? text;
   }

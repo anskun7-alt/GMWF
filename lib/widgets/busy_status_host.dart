@@ -18,6 +18,18 @@ import '../services/busy_status.dart';
 class BusyStatusHost extends StatefulWidget {
   const BusyStatusHost({super.key});
 
+  /// Same phone rule as AppToastHost (below 600 px toasts come from the top).
+  static bool isPhone(BuildContext context) => MediaQuery.sizeOf(context).width < 600;
+
+  /// How far bottom-right notifications move up while the sync pill shows, so the
+  /// pill stays the bottom-most item in that corner. 0 on phones and when idle.
+  static double pillLift(BuildContext context) {
+    final t = BusyStatus.current;
+    if (t == null || t.blocking || isPhone(context)) return 0;
+    final tall = !t.background && (t.detail != null || DateTime.now().difference(t.startedAt).inSeconds >= 10);
+    return tall ? 62 : 46;
+  }
+
   @override
   State<BusyStatusHost> createState() => _BusyStatusHostState();
 }
@@ -65,6 +77,7 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
     final task = BusyStatus.current;
     final notice = BusyStatus.notice.value;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final phone = BusyStatusHost.isPhone(context);
 
     return Stack(
       fit: StackFit.expand,
@@ -80,12 +93,35 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
           ),
         ),
 
-        // Non-blocking pill — bottom centre, staying clear of top headers,
-        // left sidebars, and bottom-right AppToast notifications.
+        // Phone: no floating pill (it covered the bottom navigation and buttons).
+        // Non-blocking work is a thin progress line along the top edge instead.
+        if (phone && task != null && !task.blocking)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Semantics(
+                label: task.message,
+                child: SizedBox(
+                  height: 2.5,
+                  child: LinearProgressIndicator(
+                    minHeight: 2.5,
+                    backgroundColor: Colors.transparent,
+                    color: task.background ? SoftPalette.vividBlue : SoftPalette.teal500,
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+        // Non-blocking pill. Desktop: bottom-right, in the notifications corner,
+        // always the bottom-most item (AppToastHost lifts its cards above it, see
+        // [BusyStatusHost.pillLift]). Phone: bottom centre (toasts come from the top there).
         Positioned(
-          left: 16,
-          right: 16,
-          bottom: 14,
+          left: phone ? 16 : null,
+          right: phone ? 16 : 20,
+          bottom: phone ? 14 : MediaQuery.paddingOf(context).bottom + 20,
           child: IgnorePointer(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 220),
@@ -96,10 +132,12 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
                   child: child,
                 ),
               ),
-              child: (task != null && !task.blocking)
+              child: (task != null && !task.blocking && !phone)
                   ? Align(
                       key: ValueKey('busy_pill_${task.background}'),
-                      alignment: Alignment.bottomCenter,
+                      alignment: phone ? Alignment.bottomCenter : Alignment.bottomRight,
+                      widthFactor: phone ? null : 1,
+                      heightFactor: phone ? null : 1,
                       child: _StatusPill(task: task, isDark: isDark),
                     )
                   : const SizedBox.shrink(key: ValueKey('busy_pill_none')),
@@ -109,7 +147,7 @@ class _BusyStatusHostState extends State<BusyStatusHost> {
 
         // Post-freeze notice (above the pill when both show)
         Positioned(
-          bottom: (task != null && !task.blocking) ? 62 : 14,
+          bottom: (task != null && !task.blocking && !phone) ? 62 : 14,
           left: 16,
           right: 16,
           child: AnimatedSwitcher(

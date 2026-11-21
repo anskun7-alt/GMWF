@@ -19,9 +19,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'widgets/parent_report_card.dart';
+import 'widgets/madrassa_erp.dart';
+import 'theme/madrassa_theme_scope.dart';
 import 'madrassa_strings.dart';
 import 'utils/madrassa_local_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import '../../widgets/appearance_dialog.dart';
 import '../../services/firebase_session_guard.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/offline_auth_service.dart';
@@ -649,7 +652,13 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
     }
 
     // ── 3. Language is set → render normal content ──
-    return ChangeNotifierProvider(
+    // Theme (GMWF by default, the user's Settings choice) above the whole portal,
+    // so every page and card reads the same colours.
+    final uKey = (widget.userData['username'] ?? widget.userData['uid'] ?? widget.userData['id'] ?? widget.userData['email'])?.toString();
+    return MadrassaThemeScope(
+      userKey: uKey,
+      role: widget.userData['role']?.toString(),
+      child: ChangeNotifierProvider(
       create: (_) => MadrassaLanguageProvider(),
       child: Builder(
         builder: (context) {
@@ -827,7 +836,7 @@ class _MadrassaGuardianScreenState extends State<MadrassaGuardianScreen> {
           );
         }
       ),
-    );
+    ));
   }
 }
 
@@ -1051,598 +1060,271 @@ class _FamilySummaryViewState extends State<_FamilySummaryView> {
     super.dispose();
   }
 
+  // Reimagined 2026-11-21: same look as the teacher screens (theme colours,
+  // flat bordered rows). One row per child with today's status; tap to open.
   @override
   Widget build(BuildContext context) {
-    final branchId = widget.branchId;
-    final allDocs = widget.allDocs;
-    final onViewDetails = widget.onViewDetails;
-    final onLogout = widget.onLogout;
-    final langCode = widget.langCode;
-    final onSelectLanguage = widget.onSelectLanguage;
-    final userData = widget.userData;
+    final uKey = (widget.userData?['username'] ?? widget.userData?['uid'] ?? widget.userData?['id'] ?? widget.userData?['email'])?.toString();
+    return MadrassaThemeScope(
+      userKey: uKey,
+      role: widget.userData?['role']?.toString(),
+      child: Builder(builder: (context) {
+        final theme = Theme.of(context);
+        return Theme(
+          data: theme.copyWith(textTheme: theme.textTheme.apply(fontFamilyFallback: const ['Noori'])),
+          child: DefaultTextStyle.merge(
+            style: const TextStyle(fontFamilyFallback: ['Noori']),
+            child: _buildFamily(context),
+          ),
+        );
+      }),
+    );
+  }
 
-    final title = context.t('Family Portal');
-    final subtitle = context.t('Summary of children progress');
+  String _guardianLine(BuildContext context) {
+    final urdu = context.isUrdu;
+    for (final doc in widget.allDocs) {
+      final d = doc.data() as Map<String, dynamic>?;
+      final g = (d?['guardianName'] ?? d?['guardianFullName'] ?? d?['fatherName'])?.toString().trim();
+      if (g != null && g.isNotEmpty) return urdu ? 'سرپرست: $g' : 'Guardian: $g';
+    }
+    final uName = (widget.userData?['name'] ?? widget.userData?['username'] ?? '').toString();
+    if (uName.isNotEmpty) return urdu ? 'سرپرست: $uName' : 'Guardian: $uName';
+    return urdu ? 'سرپرست پورٹل' : 'Guardian Portal';
+  }
 
-    final filteredDocs = allDocs.where((doc) {
-      if (_searchQuery.isEmpty) return true;
-      final d = doc.data() as Map<String, dynamic>? ?? {};
-      final name = (d['name'] ?? '').toString().toLowerCase();
-      final roll = (d['rollNumber'] ?? d['rollNo'] ?? '').toString().toLowerCase();
-      final cls = (d['class'] ?? '').toString().toLowerCase();
-      final q = _searchQuery.toLowerCase();
-      return name.contains(q) || roll.contains(q) || cls.contains(q);
-    }).toList();
+  Future<void> _refresh() async {
+    final sIds = widget.allDocs.map((d) => d.id).toList();
+    await MadrassaLocalStorage.downloadStudentsForGuardian(widget.branchId, sIds);
+    final now = DateTime.now();
+    await MadrassaLocalStorage.downloadLogsForMonth(widget.branchId, now.year, now.month, force: true);
+    if (mounted) setState(() {});
+  }
 
-    return ValueListenableBuilder(
-      valueListenable: UserThemeService.listenable(),
-      builder: (context, Box box, _) {
-        final isDark = UserThemeService.isDarkMode();
-        final accentColor = Theme.of(context).colorScheme.primary;
-        final scaffoldBg = Theme.of(context).scaffoldBackgroundColor;
-        final cardBg = Theme.of(context).cardColor;
-        final appBarBg = isDark ? cardBg : accentColor;
-        final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
-        final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-        final dividerColor = Theme.of(context).dividerColor.withValues(alpha: isDark ? 0.5 : 0.7);
-        final progressTrack = isDark ? SoftPalette.slate700 : SoftPalette.slate100;
+  Widget _avatar(BuildContext context, Map<String, dynamic> d, double size) {
+    final c = context.comfort;
+    final name = (d['name'] ?? '').toString();
+    final raw = (d['photoBase64'] ?? d['photoUrl'] ?? d['studentPhotoBase64'] ?? d['photo'])?.toString().trim();
+    final bytes = ImageUploadService.decodeBase64ToBytes(raw);
+    final letter = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.brandSoft, shape: BoxShape.circle),
+      child: (name.isEmpty || RegExp(r'[\u0600-\u06FF]').hasMatch(name))
+          ? Icon(Icons.person_rounded, size: size * 0.55, color: c.brand)
+          : Text(name.characters.first, style: TextStyle(color: c.brand, fontWeight: FontWeight.w700, fontSize: size * 0.42)),
+    );
+    if (bytes != null) {
+      return ClipOval(child: Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, cacheWidth: (size * 3).round(), errorBuilder: (_, _, _) => letter));
+    }
+    if (raw != null && raw.startsWith('http')) {
+      return ClipOval(child: Image.network(raw, width: size, height: size, fit: BoxFit.cover, errorBuilder: (_, _, _) => letter));
+    }
+    return letter;
+  }
 
-        // Inside the executive shell its header already shows the title, sync
-        // and dark mode, so this bar would be a second header: leave it out.
-        final hosted = HomeModuleHost.isModuleRoot(context);
-        return Scaffold(
-          backgroundColor: scaffoldBg,
-          appBar: hosted ? null : AppBar(
-            backgroundColor: appBarBg,
-            elevation: 0,
-            titleSpacing: 12,
-            automaticallyImplyLeading: false,
-            title: Row(
-              children: [
+  Widget _buildFamily(BuildContext context) {
+    final c = context.comfort;
+    final urdu = context.isUrdu;
+    final hosted = HomeModuleHost.isModuleRoot(context);
+    final uKey = (widget.userData?['username'] ?? widget.userData?['uid'] ?? widget.userData?['id'] ?? widget.userData?['email'])?.toString();
+    final now = DateTime.now();
+    final todayKey = DateFormat('yyyy-MM-dd').format(now);
+
+    final q = _searchQuery.toLowerCase();
+    final docs = [
+      for (final (i, doc) in widget.allDocs.indexed)
+        if (q.isEmpty ||
+            '${(doc.data() as Map?)?['name'] ?? ''} ${(doc.data() as Map?)?['rollNumber'] ?? ''}'.toLowerCase().contains(q))
+          (i, doc),
+    ];
+
+    final menu = PopupMenuButton<String>(
+      tooltip: urdu ? 'مزید' : 'Menu',
+      icon: Icon(Icons.more_vert_rounded, color: c.textSecondary),
+      onSelected: (v) async {
+        if (v == 'refresh') {
+          await _refresh();
+        } else if (v.startsWith('lang:')) {
+          widget.onSelectLanguage(v.substring(5));
+        } else if (v == 'appearance') {
+          await AppearanceDialog.show(context, userKey: uKey);
+          if (mounted) setState(() {});
+        } else if (v == 'logout') {
+          widget.onLogout();
+        }
+      },
+      itemBuilder: (_) {
+        PopupMenuItem<String> item(String v, IconData icon, String t, {Color? color, bool checked = false}) => PopupMenuItem<String>(
+              value: v,
+              height: 42,
+              child: Row(children: [
+                Icon(icon, size: 18, color: color ?? c.brand),
+                const SizedBox(width: 10),
+                Expanded(child: Text(t, style: TextStyle(color: color, fontSize: 13.5))),
+                if (checked) Icon(Icons.check_rounded, size: 18, color: c.brand),
+              ]),
+            );
+        return [
+          item('refresh', Icons.sync_rounded, urdu ? 'تازہ معلومات لائیں' : 'Refresh data'),
+          const PopupMenuDivider(),
+          item('lang:ur', Icons.translate_rounded, 'اردو', checked: widget.langCode == 'ur'),
+          item('lang:en', Icons.translate_rounded, 'English', checked: widget.langCode != 'ur'),
+          item('appearance', Icons.palette_outlined, urdu ? 'تھیم اور ظاہری شکل' : 'Theme & Appearance'),
+          const PopupMenuDivider(),
+          item('logout', Icons.logout_rounded, urdu ? 'لاگ آؤٹ' : 'Sign out', color: c.danger),
+        ];
+      },
+    );
+
+    Widget statusChip(IconData icon, String text, Color color) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(12)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 4),
+            Text(text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+          ]),
+        );
+
+    Widget childRow(int index, DocumentSnapshot doc) {
+      final d = (doc.data() as Map<String, dynamic>?) ?? {};
+      final name = (d['name'] ?? '').toString();
+      final rawB = (d['branchId'] ?? widget.branchId).toString();
+      final b = MadrassaLocalStorage.normalizeBranch(rawB.isEmpty ? widget.branchId : rawB);
+      final todayLog = MadrassaLocalStorage.getDailyLogCached(b, todayKey)?[doc.id];
+      final log = todayLog is Map ? Map<String, dynamic>.from(todayLog) : <String, dynamic>{};
+      final att = (log['attendance'] ?? '').toString();
+      final late = log['isLate'] == true || log['timing'] == 'late';
+      final replied = log['parentReplied'] == true;
+      final nazra = d['isNazra'] == true || d['program']?.toString().toLowerCase() == 'nazra';
+      final roll = (d['rollNumber'] ?? d['rollNo'] ?? '').toString();
+
+      // This month's attendance
+      int present = 0, marked = 0;
+      for (final day in MadrassaLocalStorage.getLogsForMonthCached(b, now.year, now.month)) {
+        final e = day[doc.id];
+        if (e is! Map) continue;
+        final a = (e['attendance'] ?? '').toString();
+        if (a.isEmpty) continue;
+        marked++;
+        if (a == 'present' || a == 'leave') present++;
+      }
+      final pct = marked == 0 ? null : (present * 100 / marked).round();
+
+      final Widget status;
+      if (now.weekday == DateTime.sunday) {
+        status = statusChip(Icons.beach_access_rounded, urdu ? 'آج چھٹی' : 'Holiday today', c.info);
+      } else if (att == 'present') {
+        status = statusChip(Icons.check_circle_rounded, late ? (urdu ? 'حاضر، دیر سے' : 'Present, late') : (urdu ? 'آج حاضر' : 'Present today'),
+            late ? c.warning : c.success);
+      } else if (att == 'absent') {
+        status = statusChip(Icons.cancel_rounded, urdu ? 'آج غیر حاضر' : 'Absent today', c.danger);
+      } else if (att == 'leave') {
+        status = statusChip(Icons.event_available_rounded, urdu ? 'رخصت پر' : 'On leave', c.info);
+      } else if (att == 'leave_requested') {
+        status = statusChip(Icons.hourglass_top_rounded, urdu ? 'رخصت زیر غور' : 'Leave requested', c.warning);
+      } else {
+        status = statusChip(Icons.schedule_rounded, urdu ? 'حاضری باقی' : 'Not marked yet', c.textMuted);
+      }
+
+      return InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => widget.onViewDetails(index),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: c.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: c.border)),
+          child: Row(children: [
+            _avatar(context, d, 52),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    strutStyle: const StrutStyle(fontSize: 16, height: 1.4, forceStrutHeight: true),
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.textPrimary)),
+                Text(
+                  [
+                    nazra ? (urdu ? 'ناظرہ' : 'Nazra') : (urdu ? 'حفظ' : 'Hifz'),
+                    if (roll.isNotEmpty) '${urdu ? 'رول' : 'Roll'} $roll',
+                    if (pct != null) urdu ? 'اس مہینے حاضری $pct٪' : 'Attendance this month $pct%',
+                  ].join('  ·  '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: c.textMuted),
+                ),
+                const SizedBox(height: 6),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  status,
+                  if ((att == 'present' || att == 'absent') && !replied)
+                    statusChip(Icons.chat_rounded, urdu ? 'استاد کو جواب باقی' : 'Reply to teacher', c.brand),
+                ]),
+              ]),
+            ),
+            Icon(Icons.chevron_right_rounded, color: c.textMuted),
+          ]),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: c.background,
+      appBar: hosted
+          ? null
+          : AppBar(
+              backgroundColor: c.surface,
+              surfaceTintColor: Colors.transparent,
+              elevation: 0,
+              titleSpacing: 12,
+              automaticallyImplyLeading: false,
+              shape: Border(bottom: BorderSide(color: c.border)),
+              title: Row(children: [
                 Image.asset('assets/logo/gmwf-1.webp', height: 32),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          'Gulzar Madina Madrassa',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                            color: SoftPalette.gray50,
-                            fontFamily: context.isUrdu ? 'Noori' : null,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 1),
-                      Text(
-                        () {
-                          for (final doc in allDocs) {
-                            final d = doc.data() as Map<String, dynamic>?;
-                            if (d != null) {
-                              final g = (d['guardianName'] ?? d['guardianFullName'] ?? d['fatherName'])?.toString().trim();
-                              if (g != null && g.isNotEmpty) {
-                                return context.isUrdu ? 'سرپرست: $g' : 'Guardian: $g';
-                              }
-                            }
-                          }
-                          final uName = userData?['name'] ?? userData?['username'] ?? '';
-                          if (uName.toString().isNotEmpty) {
-                            return context.isUrdu ? 'سرپرست: $uName' : 'Guardian: $uName';
-                          }
-                          return context.isUrdu ? 'پورٹل سرپرست' : 'Guardian Portal';
-                        }(),
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: SoftPalette.gray50A70,
-                          fontWeight: FontWeight.w500,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                    Text(urdu ? 'گلزار مدینہ مدرسہ' : 'Gulzar Madina Madrassa',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: c.textPrimary)),
+                    Text(_guardianLine(context), overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: c.textMuted)),
+                  ]),
                 ),
-              ],
+              ]),
+              actions: [menu, const SizedBox(width: 4)],
             ),
-            actions: [
-              // Refresh / Sync button
-              IconButton(
-                icon: const Icon(Icons.sync_rounded, color: SoftPalette.gray50, size: 20),
-                tooltip: context.isUrdu ? 'تازہ ترین معلومات حاصل کریں' : 'Download Latest Updates',
-                onPressed: () async {
-                  final sIds = allDocs.map((d) => d.id).toList();
-                  await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, sIds);
-                  final now = DateTime.now();
-                  await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
-                  if (mounted) setState(() {});
-                },
-              ),
-              // Dark Mode Toggle
-              IconButton(
-                icon: Icon(
-                  isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                  color: isDark ? SoftPalette.yellow150 : SoftPalette.gray50,
-                  size: 20,
+      body: RefreshIndicator(
+        onRefresh: _refresh,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(12, 14, 12, 24),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
+                  child: Text(urdu ? 'آپ کے بچے' : 'Your children',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: c.textPrimary)),
                 ),
-                tooltip: isDark ? (context.isUrdu ? 'لائٹ موڈ' : 'Light Mode') : (context.isUrdu ? 'ڈارک موڈ' : 'Dark Mode'),
-                onPressed: () async {
-                  await UserThemeService.toggleDarkMode();
-                },
-              ),
-              // Language selector
-              TextButton(
-                onPressed: () => onSelectLanguage(langCode == 'ur' ? 'en' : 'ur'),
-                child: Text(
-                  langCode == 'ur' ? 'English' : 'اردو',
-                  style: TextStyle(
-                    color: SoftPalette.gray50,
-                    fontWeight: FontWeight.bold,
-                    fontFamily: langCode != 'ur' ? 'Noori' : null,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          body: Stack(
-            fit: StackFit.expand,
-            children: [
-              // ── Islamic Pattern Background ──
-              Positioned.fill(
-                child: Opacity(
-                  opacity: isDark ? 0.085 : 0.11,
-                  child: GDecorativeImage.asset(
-                    'assets/images/islamic_pattern.webp',
-                    fit: BoxFit.cover,
-                    repeat: ImageRepeat.repeat,
-                    color: SoftPalette.yellow300,
-                    colorBlendMode: BlendMode.srcIn,
-                  ),
-                ),
-              ),
-              Center(
-                child: Container(
-                  constraints: const BoxConstraints(maxWidth: 800),
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 8),
-                        child: Text(
-                          subtitle,
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: textMuted,
-                            fontFamily: context.isUrdu ? 'Noori' : null,
-                          ),
-                        ),
-                      ),
-                      if (allDocs.length > 1) ...[
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 12, left: 8, right: 8),
-                          decoration: BoxDecoration(
-                            color: cardBg,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: dividerColor),
-                          ),
-                          child: TextField(
-                            controller: _searchCtrl,
-                            onChanged: (val) => setState(() => _searchQuery = val.trim()),
-                            style: TextStyle(color: textPrimary, fontSize: 13),
-                            decoration: InputDecoration(
-                              hintText: context.isUrdu ? 'بچے کا نام یا رول نمبر تلاش کریں...' : 'Search student by name or roll number...',
-                              hintStyle: TextStyle(color: textMuted, fontSize: 13, fontFamily: context.isUrdu ? 'Noori' : null),
-                              prefixIcon: Icon(Icons.search_rounded, color: textMuted, size: 20),
-                              suffixIcon: _searchQuery.isNotEmpty
-                                  ? IconButton(
-                                      icon: const Icon(Icons.clear_rounded, size: 18),
-                                      onPressed: () {
-                                        _searchCtrl.clear();
-                                        setState(() => _searchQuery = '');
-                                      },
-                                    )
-                                  : null,
-                              border: InputBorder.none,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                            ),
-                          ),
-                        ),
-                      ],
-                      Expanded(
-                    child: ValueListenableBuilder(
-                      valueListenable: Hive.box(MadrassaLocalStorage.logsBox).listenable(),
-                      builder: (context, Box box, _) {
-                        final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-                        final Map<String, dynamic> todayLogData = MadrassaLocalStorage.getDailyLogCached(branchId, todayStr) ?? {};
-                        final normBranch = MadrassaLocalStorage.normalizeBranch(branchId);
-                        final branchPrefix = '${normBranch}_';
-
-                        // Pre-collect only the student IDs visible in this guardian view
-                        // so we aggregate Hive logs in a single O(branchDays) pass instead
-                        // of O(students * allHiveLogs) Map allocations on the UI thread.
-                        final Set<String> targetIds = {};
-                        for (final dynamic doc in filteredDocs) {
-                          final sid = (doc is Map ? (doc['id'] ?? doc['studentId']) : doc.id)?.toString() ?? '';
-                          if (sid.isNotEmpty) targetIds.add(sid);
-                        }
-                        final Map<String, int> maxLogLinesByStudent = {};
-                        final Map<String, int> sumSabakByStudent = {};
-                        final Map<String, int> prevCumulativeByStudent = {};
-
-                        for (final key in box.keys) {
-                          final keyStr = key.toString();
-                          if (normBranch.isNotEmpty &&
-                              normBranch != 'all' &&
-                              !keyStr.startsWith(branchPrefix)) {
-                            continue;
-                          }
-                          final val = box.get(key);
-                          if (val is! Map) continue;
-                          final isTodayKey = keyStr == todayStr || keyStr.endsWith('_$todayStr');
-                          for (final sid in targetIds) {
-                            final sLog = val[sid];
-                            if (sLog is! Map) continue;
-                            final sL = (sLog['sabakLines'] as num?)?.toInt() ??
-                                int.tryParse(sLog['sabakLines']?.toString() ?? '');
-                            if (sL != null && sL > 0) {
-                              sumSabakByStudent[sid] = (sumSabakByStudent[sid] ?? 0) + sL;
-                            }
-                            final cL = (sLog['currentLines'] as num?)?.toInt() ??
-                                int.tryParse(sLog['currentLines']?.toString() ?? '');
-                            if (cL != null) {
-                              final prevMax = maxLogLinesByStudent[sid] ?? 0;
-                              if (cL > prevMax) maxLogLinesByStudent[sid] = cL;
-                              if (!isTodayKey && !prevCumulativeByStudent.containsKey(sid)) {
-                                prevCumulativeByStudent[sid] = cL;
-                              }
-                            }
-                          }
-                        }
-
-                        return RefreshIndicator(
-                          onRefresh: () async {
-                            final sIds = allDocs.map((dynamic d) => (d is Map ? (d['id'] ?? d['studentId']) : d.id).toString()).toList();
-                            await MadrassaLocalStorage.downloadStudentsForGuardian(branchId, sIds);
-                            final now = DateTime.now();
-                            await MadrassaLocalStorage.downloadLogsForMonth(branchId, now.year, now.month);
-                            if (mounted) setState(() {});
-                          },
-                          child: ListView.separated(
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            itemCount: filteredDocs.length,
-                            separatorBuilder: (_, __) => const SizedBox(height: 16),
-                            itemBuilder: (ctx, index) {
-                              final dynamic doc = filteredDocs[index];
-                              final d = doc is Map ? Map<String, dynamic>.from(doc) : (doc.data() as Map<String, dynamic>? ?? {});
-                              final studentId = (doc is Map ? (doc['id'] ?? doc['studentId']) : doc.id)?.toString() ?? '';
-                              final name = d['name'] ?? 'Student';
-                              final rollNumber = d['rollNumber'] ?? '?';
-                              final className = d['class'] ?? 'Hifz';
-                              final photoUrl = (d['photoBase64'] ??
-                                      d['photoUrl'] ??
-                                      d['photo'] ??
-                                      d['image'] ??
-                                      d['studentPhotoBase64'])
-                                  ?.toString();
-
-                              final int maxLogLines = maxLogLinesByStudent[studentId] ?? 0;
-                              final int sumSabakLogs = sumSabakByStudent[studentId] ?? 0;
-                              final currentLinesProfile = int.tryParse(d['currentLines']?.toString() ?? '0') ?? 0;
-                              final currentLines = [currentLinesProfile, maxLogLines, sumSabakLogs].reduce(math.max);
-                              final prevLines = int.tryParse(d['prevHifzLines']?.toString() ?? '0') ?? 0;
-                              final totalMemorized = (currentLines + prevLines).clamp(0, 8640);
-                              const total = 8640;
-                              final pct = totalMemorized / total;
-
-                              final isNazraStudent = (d['isNazra'] == true) ||
-                                  (d['program']?.toString().toLowerCase() == 'nazra') ||
-                                  (d['class']?.toString().toLowerCase() == 'nazra') ||
-                                  LocalStorageService.isMadrassaNazraOnly(branchId);
-
-                              final todayStudentLog = todayLogData[studentId] is Map ? Map<String, dynamic>.from(todayLogData[studentId] as Map) : null;
-
-                              int sabakDelta = 0;
-                              bool hasSabak = false;
-                              if (todayStudentLog != null) {
-                                hasSabak = true;
-                                if (todayStudentLog.containsKey('sabakLines') && todayStudentLog['sabakLines'] != null) {
-                                  sabakDelta = (todayStudentLog['sabakLines'] as num?)?.toInt() ?? 0;
-                                } else if (todayStudentLog.containsKey('currentLines')) {
-                                  final todayCumulativeLines = todayStudentLog['currentLines'] as int? ?? currentLines;
-                                  final prevCumulativeLines = prevCumulativeByStudent[studentId] ?? prevLines;
-                                  sabakDelta = (todayCumulativeLines - prevCumulativeLines).clamp(0, 8640);
-                                }
-                              }
-
-                              final hasTodayLog = todayStudentLog != null;
-                              final attendance = todayStudentLog?['attendance']?.toString() ?? 'unknown';
-                              final uniformOk = todayStudentLog?['uniform'] == true;
-                              final replied = todayStudentLog?['parentReplied'] == true;
-                              final sabkiPara = todayStudentLog?['sabkiPara'] as int? ?? 0;
-                              final sabkiRatio = todayStudentLog?['sabkiRatio']?.toString() ?? '-';
-                              final manzilPara = todayStudentLog?['manzilPara'] as int? ?? 0;
-                              final manzilRatio = todayStudentLog?['manzilRatio']?.toString() ?? '-';
-
-                              String formatRatio(String? ratio) {
-                                if (ratio == '1/4') return context.t('Pao (1/4)');
-                                if (ratio == '1/2') return context.t('Nisf (1/2)');
-                                if (ratio == '3/4') return context.t('Salasa (3/4)');
-                                if (ratio == '1') return context.t('Para (1)');
-                                if (ratio == 'nahi_sunaya') return context.isUrdu ? 'نہیں سنایا' : 'Nahi Sunaya';
-                                return ratio ?? '';
-                              }
-
-                              Widget buildStatusChip({
-                                required IconData icon,
-                                required String label,
-                                required Color color,
-                                required Color textColor,
-                              }) {
-                                return Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: color.withValues(alpha: isDark ? 0.2 : 0.1),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: color.withValues(alpha: isDark ? 0.4 : 0.2)),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(icon, size: 14, color: color),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        label,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.bold,
-                                          color: isDark ? SoftPalette.gray50 : textColor,
-                                          fontFamily: context.isUrdu ? 'Noori' : null,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              }
-
-                              return Container(
-                                padding: const EdgeInsets.all(16),
-                                decoration: BoxDecoration(
-                                  color: cardBg,
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(color: dividerColor),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      crossAxisAlignment: CrossAxisAlignment.center,
-                                      children: [
-                                        CircleAvatar(
-                                          radius: 24,
-                                          backgroundColor: accentColor.withValues(alpha: 0.12),
-                                          backgroundImage: (photoUrl != null && photoUrl.isNotEmpty) ? NetworkImage(photoUrl) : null,
-                                          child: (photoUrl == null || photoUrl.isEmpty)
-                                              ? Text(name.isNotEmpty ? name[0] : 'S', style: TextStyle(color: accentColor, fontWeight: FontWeight.bold, fontSize: 18))
-                                              : null,
-                                        ),
-                                        const SizedBox(width: 16),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                name,
-                                                style: TextStyle(
-                                                  fontSize: 16,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: textPrimary,
-                                                  fontFamily: context.isUrdu ? 'Noori' : null,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                '${context.t('Roll No')}: $rollNumber  •  ${isNazraStudent ? (context.isUrdu ? 'ناظرہ' : 'Nazra') : className}',
-                                                style: TextStyle(fontSize: 12, color: textMuted),
-                                              ),
-                                              const SizedBox(height: 8),
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: ClipRRect(
-                                                      borderRadius: BorderRadius.circular(4),
-                                                      child: LinearProgressIndicator(
-                                                        value: pct.clamp(0.0, 1.0),
-                                                        backgroundColor: progressTrack,
-                                                        color: accentColor,
-                                                        minHeight: 8,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 12),
-                                                  Text(
-                                                    '${(pct * 100).toStringAsFixed(1)}%',
-                                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
-                                                  ),
-                                                ],
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                context.isUrdu 
-                                                    ? (isNazraStudent
-                                                        ? 'کل $total میں سے $totalMemorized لائنیں ناظرہ مکمل'
-                                                        : 'کل $total میں سے لائن $totalMemorized مکمل')
-                                                    : (isNazraStudent
-                                                        ? 'Line $totalMemorized of $total Nazra completed'
-                                                        : 'Line $totalMemorized of $total completed'),
-                                                style: TextStyle(color: textMuted, fontSize: 12, fontFamily: context.isUrdu ? 'Noori' : null),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 16),
-                                        ElevatedButton(
-                                          onPressed: () {
-                                            final origIndex = allDocs.indexOf(doc);
-                                            onViewDetails(origIndex >= 0 ? origIndex : index);
-                                          },
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: accentColor,
-                                            foregroundColor: SoftPalette.gray50,
-                                            elevation: 0,
-                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                          ),
-                                          child: Text(context.t('View Details')),
-                                        ),
-                                      ],
-                                    ),
-                                  
-                                  Divider(height: 24, color: dividerColor),
-                                  Text(
-                                    context.t("Today's Progress"),
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                      color: isDark ? SoftPalette.slate200 : SoftPalette.slate600,
-                                      fontFamily: context.isUrdu ? 'Noori' : null,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  if (!hasTodayLog)
-                                    Container(
-                                      width: double.infinity,
-                                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                                      decoration: BoxDecoration(
-                                        color: isDark ? SoftPalette.slate700.withValues(alpha: 0.5) : SoftPalette.gray50,
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(color: isDark ? SoftPalette.slate600 : SoftPalette.gray100),
-                                      ),
-                                      child: Text(
-                                        context.isUrdu 
-                                            ? 'آج کی کارکردگی ابھی اپ ڈیٹ نہیں ہوئی'
-                                            : 'Today\'s details not updated yet by teacher',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: textMuted,
-                                          fontStyle: FontStyle.italic,
-                                          fontFamily: context.isUrdu ? 'Noori' : null,
-                                        ),
-                                      ),
-                                    )
-                                  else ...[
-                                    Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        if (attendance == 'present')
-                                          buildStatusChip(
-                                            icon: Icons.check_circle_outline,
-                                            label: context.t('Present'),
-                                            color: ctx.adapt(SoftPalette.emerald350),
-                                            textColor: ctx.adapt(SoftPalette.emerald600),
-                                          )
-                                        else if (attendance == 'leave')
-                                          buildStatusChip(
-                                            icon: Icons.mail_outline,
-                                            label: context.t('On Leave'),
-                                            color: ctx.adapt(SoftPalette.amber300),
-                                            textColor: ctx.adapt(SoftPalette.orange400),
-                                          )
-                                        else if (attendance == 'leave_requested')
-                                          buildStatusChip(
-                                            icon: Icons.mail_outline,
-                                            label: context.t('Leave Requested'),
-                                            color: ctx.adapt(SoftPalette.amber300),
-                                            textColor: ctx.adapt(SoftPalette.orange350),
-                                          )
-                                        else
-                                          buildStatusChip(
-                                            icon: Icons.cancel_outlined,
-                                            label: context.t('Absent'),
-                                            color: ctx.adapt(SoftPalette.red400),
-                                            textColor: ctx.adapt(SoftPalette.red600),
-                                          ),
-                                        
-                                        if (attendance == 'present') ...[
-                                          buildStatusChip(
-                                            icon: Icons.menu_book,
-                                            label: hasSabak && sabakDelta > 0
-                                                ? (context.isUrdu 
-                                                    ? (isNazraStudent ? 'سبق (ناظرہ): +$sabakDelta لائنیں' : 'سبق: +$sabakDelta لائنیں')
-                                                    : (isNazraStudent ? 'Sabak (Nazra): +$sabakDelta lines' : 'Sabak: +$sabakDelta lines'))
-                                                : context.t('No lines recorded'),
-                                            color: ctx.adapt(SoftPalette.teal600),
-                                            textColor: ctx.adapt(SoftPalette.indigo700),
-                                          ),
-                                          
-                                          if (!isNazraStudent) ...[
-                                            buildStatusChip(
-                                              icon: Icons.repeat,
-                                              label: sabkiPara > 0 && sabkiRatio != '-' && sabkiRatio != 'nahi_sunaya'
-                                                  ? (context.isUrdu ? 'سبقی: پارہ $sabkiPara (${formatRatio(sabkiRatio)})' : 'Sabki: Para $sabkiPara (${formatRatio(sabkiRatio)})')
-                                                  : (sabkiRatio == 'nahi_sunaya'
-                                                      ? (context.isUrdu ? 'سبقی: نہیں سنایا' : 'Sabki: Nahi Sunaya')
-                                                      : (context.isUrdu ? 'سبقی: کوئی سبق نہیں' : 'Sabki: None')),
-                                              color: ctx.adapt(SoftPalette.orange400),
-                                              textColor: ctx.adapt(SoftPalette.orange700),
-                                            ),
-                                            
-                                            buildStatusChip(
-                                              icon: Icons.track_changes,
-                                              label: manzilPara > 0 && manzilRatio != '-' && manzilRatio != 'nahi_sunaya'
-                                                  ? (context.isUrdu ? 'منزل: پارہ $manzilPara (${formatRatio(manzilRatio)})' : 'Manzil: Para $manzilPara (${formatRatio(manzilRatio)})')
-                                                  : (manzilRatio == 'nahi_sunaya'
-                                                      ? (context.isUrdu ? 'منزل: نہیں سنایا' : 'Manzil: Nahi Sunaya')
-                                                      : (context.isUrdu ? 'منزل: کوئی منزل نہیں' : 'Manzil: None')),
-                                              color: ctx.adapt(SoftPalette.purple550),
-                                              textColor: ctx.adapt(SoftPalette.purple750),
-                                            ),
-                                            
-                                            buildStatusChip(
-                                              icon: Icons.checkroom,
-                                              label: uniformOk 
-                                                  ? context.t('Uniform: Clean') 
-                                                  : context.t('Uniform: Unclean'),
-                                              color: uniformOk ? ctx.adapt(SoftPalette.blue400) : ctx.adapt(SoftPalette.red400),
-                                              textColor: uniformOk ? ctx.adapt(SoftPalette.blue600) : ctx.adapt(SoftPalette.red600),
-                                            ),
-                                          ],
-                                          
-                                          buildStatusChip(
-                                            icon: Icons.reply,
-                                            label: replied 
-                                                ? context.t('Reply: Sent') 
-                                                : context.t('Reply: Pending'),
-                                            color: replied ? ctx.adapt(SoftPalette.green400) : ctx.adapt(SoftPalette.orange350),
-                                            textColor: replied ? ctx.adapt(SoftPalette.green600) : ctx.adapt(SoftPalette.orange350),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      );
-                    },
+                if (widget.allDocs.length > 4) ...[
+                  TextField(
+                    controller: _searchCtrl,
+                    onChanged: (v) => setState(() => _searchQuery = v),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                      hintText: urdu ? 'نام یا رول نمبر تلاش کریں' : 'Search name or roll no.',
                     ),
                   ),
+                  const SizedBox(height: 10),
                 ],
-              ),
+                for (final (i, doc) in docs) ...[childRow(i, doc), const SizedBox(height: 10)],
+              ],
             ),
           ),
-        ],
+        ),
       ),
-    );
-      },
     );
   }
 }
@@ -1782,65 +1464,57 @@ class _AdminSelectionPlaceholder extends StatelessWidget {
     return ValueListenableBuilder(
       valueListenable: appSettingsBox.listenable(keys: ['is_dark_mode']),
       builder: (context, Box box, _) {
-        final isDark = box.get('is_dark_mode', defaultValue: false) == true;
-        final bg = isDark ? SoftPalette.slate900 : SoftPalette.gray50;
-        final cardBg = isDark ? SoftPalette.slate800 : SoftPalette.gray50;
-        final textPrimary = isDark ? SoftPalette.gray50 : SoftPalette.slate800;
-        final textMuted = isDark ? SoftPalette.slate350 : SoftPalette.slate550;
-        final border = isDark ? SoftPalette.slate700 : SoftPalette.slate150;
+        final c = context.comfort;
 
         return Scaffold(
-          backgroundColor: bg,
+          backgroundColor: c.surfaceSunken,
           body: Center(
             child: Container(
               constraints: const BoxConstraints(maxWidth: 420),
               margin: const EdgeInsets.all(32),
-              padding: const EdgeInsets.all(40),
+              padding: const EdgeInsets.all(32),
               decoration: BoxDecoration(
-                color: cardBg,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(color: SoftPalette.gray900.withValues(alpha: isDark ? 0.3 : 0.08), blurRadius: 32, offset: const Offset(0, 8)),
-                ],
-                border: Border.all(color: border),
+                color: c.surface,
+                borderRadius: MadrassaErp.cardRadius,
+                border: Border.all(color: c.border),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    width: 72,
-                    height: 72,
+                    width: 64,
+                    height: 64,
                     decoration: BoxDecoration(
-                      color: context.adapt(SoftPalette.teal600).withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+                      color: c.brandSoft,
+                      borderRadius: MadrassaErp.radius,
                     ),
-                    child: Icon(Icons.family_restroom_rounded, color: context.adapt(SoftPalette.teal600), size: 36),
+                    child: Icon(Icons.family_restroom_rounded, color: c.brand, size: 32),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
                   Text(
                     title,
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: textPrimary),
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: c.textPrimary),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   Text(
                     subtitle,
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 14, color: textMuted, height: 1.5),
+                    style: TextStyle(fontSize: 14, color: c.textMuted, height: 1.5),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 28),
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
                       onPressed: onButtonPressed,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: SoftPalette.teal600,
-                        foregroundColor: SoftPalette.gray50,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        backgroundColor: c.brand,
+                        foregroundColor: c.onBrand,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                         elevation: 0,
                       ),
-                      child: Text(buttonText, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                      child: Text(buttonText, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
                     ),
                   ),
                   if (onChangeBranch != null) ...[
@@ -1850,27 +1524,27 @@ class _AdminSelectionPlaceholder extends StatelessWidget {
                       child: OutlinedButton(
                         onPressed: onChangeBranch,
                         style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          side: BorderSide(color: border),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          side: BorderSide(color: c.border),
+                          shape: const RoundedRectangleBorder(borderRadius: MadrassaErp.radius),
                         ),
                         child: Text(
                           changeBranchText ?? 'Change Branch',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: textPrimary),
+                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: c.textPrimary),
                         ),
                       ),
                     ),
                   ],
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 8),
                   SizedBox(
                     width: double.infinity,
                     child: TextButton(
                       onPressed: onLogout,
                       style: TextButton.styleFrom(
-                        foregroundColor: context.adapt(SoftPalette.red400),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        foregroundColor: c.danger,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      child: Text(context.t('Logout'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                      child: Text(context.t('Logout'), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
                     ),
                   ),
                 ],
